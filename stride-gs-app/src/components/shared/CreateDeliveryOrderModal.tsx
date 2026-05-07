@@ -1227,39 +1227,36 @@ export function CreateDeliveryOrderModal({
 
   const isPickupCallForQuote = mode === 'pickup_and_delivery' && pickupZip.length === 5 && pickupZone && pickupZone.baseRate == null;
 
-  // Build dt_order_items rows for a P+D pair. Inventory selections go
-  // on the delivery leg only (matches the create-new-submit
-  // convention). Ad-hoc free-text lines from pickupFreeItems go on
-  // BOTH legs — clean text on the delivery leg, "PU: " prefix on the
-  // pickup leg so DT distinguishes them in its UI. Used by every P+D
-  // save path (save-draft INSERT/UPDATE, submit/promote) so they all
-  // refresh both legs symmetrically. The pre-fix paths only touched
-  // the delivery leg, which silently stranded pickup-leg items on any
-  // re-edit (the 2026-05-07 MRS-00046-P / MRS-00048-P incident).
+  // Build dt_order_items rows for a P+D pair. P+D supports BOTH
+  // sources in the same order — warehouse inventory items (delivery
+  // leg only, since they're already at our facility) AND ad-hoc
+  // pickup items typed by the operator (both legs, "PU: " prefix on
+  // pickup so DT distinguishes them). The itemsSource toggle is
+  // irrelevant for P+D; selectedInvItems is empty when none picked.
+  // Used by every P+D save path so all three refresh both legs
+  // symmetrically.
   const buildPDItemRows = (pickupId: string, deliveryId: string): Array<Record<string, unknown>> => {
     const rows: Array<Record<string, unknown>> = [];
-    if (itemsSource === 'warehouse') {
-      for (const i of selectedInvItems) {
-        rows.push({
-          dt_order_id: deliveryId,
-          inventory_id: i.inventoryRowId ?? null,
-          dt_item_code: i.itemId,
-          description: i.description || '',
-          quantity: i.qty || 1,
+    for (const i of selectedInvItems) {
+      rows.push({
+        dt_order_id: deliveryId,
+        inventory_id: i.inventoryRowId ?? null,
+        dt_item_code: i.itemId,
+        description: i.description || '',
+        quantity: i.qty || 1,
+        vendor: i.vendor || null,
+        class_name: i.itemClass || null,
+        cubic_feet: classToCuFt(i.itemClass) ?? null,
+        room: i.room || null,
+        extras: {
           vendor: i.vendor || null,
-          class_name: i.itemClass || null,
-          cubic_feet: classToCuFt(i.itemClass) ?? null,
+          sidemark: i.sidemark || null,
+          location: i.location || null,
           room: i.room || null,
-          extras: {
-            vendor: i.vendor || null,
-            sidemark: i.sidemark || null,
-            location: i.location || null,
-            room: i.room || null,
-            className: i.itemClass || null,
-            source: 'inventory',
-          },
-        });
-      }
+          className: i.itemClass || null,
+          source: 'inventory',
+        },
+      });
     }
     for (const i of pickupFreeItems) {
       const desc = i.description.trim();
@@ -1294,14 +1291,21 @@ export function CreateDeliveryOrderModal({
   // MRS-00047 incident: 7 rows / 8 pieces).
   const itemCount = useMemo(() => {
     if (mode === 'service_only') return 0;
+    const invQty = selectedInvItems.reduce((s, i) => s + Math.max(1, Number(i.qty) || 1), 0);
     if (mode === 'delivery' && itemsSource === 'warehouse') {
-      const invQty = selectedInvItems.reduce((s, i) => s + Math.max(1, Number(i.qty) || 1), 0);
       const adhoc = deliveryFreeItems
         .filter(i => i.description.trim())
         .reduce((sum, i) => sum + Math.max(1, Number(i.quantity) || 1), 0);
       return invQty + adhoc;
     }
-    return pickupFreeItems.filter(i => i.description.trim()).reduce((sum, i) => sum + Math.max(1, Number(i.quantity) || 1), 0);
+    const pickupQty = pickupFreeItems
+      .filter(i => i.description.trim())
+      .reduce((sum, i) => sum + Math.max(1, Number(i.quantity) || 1), 0);
+    // P+D supports both warehouse + pickup-leg ad-hoc items in the
+    // same order; pickup-only mode has no warehouse items so invQty
+    // is 0 there anyway.
+    if (mode === 'pickup_and_delivery') return invQty + pickupQty;
+    return pickupQty;
   }, [mode, itemsSource, selectedInvItems, pickupFreeItems, deliveryFreeItems]);
 
   const extraItemsCount = Math.max(0, itemCount - includedItems);
@@ -1358,21 +1362,24 @@ export function CreateDeliveryOrderModal({
   // Auto-calc service time: sum item class minutes + accessorial service minutes
   const calculatedServiceTime = useMemo(() => {
     let total = 0;
-    // Item class minutes
-    if (mode === 'delivery' && itemsSource === 'warehouse') {
+    // Item class minutes for warehouse selections (delivery + P+D both
+    // pull from inventory). Ad-hoc lines have no class — fall back to
+    // Medium per piece.
+    if ((mode === 'delivery' && itemsSource === 'warehouse') || mode === 'pickup_and_delivery') {
       for (const item of selectedInvItems) {
         const cls = item.itemClass?.toUpperCase() || '';
         const qty = Number(item.qty) || 1;
         total += (classMinutesMap[cls] || 0) * qty;
       }
-      // Ad-hoc delivery items have no class — fall back to Medium per piece.
+    }
+    if (mode === 'delivery' && itemsSource === 'warehouse') {
       for (const item of deliveryFreeItems) {
         if (!item.description.trim()) continue;
         const qty = Math.max(1, Number(item.quantity) || 1);
         total += (classMinutesMap['M'] || 10) * qty;
       }
-    } else if (mode !== 'service_only') {
-      // Pickup / free-text items — use Medium (10 min) as fallback per item
+    }
+    if (mode === 'pickup' || mode === 'pickup_and_delivery') {
       for (const item of pickupFreeItems) {
         if (!item.description.trim()) continue;
         const qty = Math.max(1, Number(item.quantity) || 1);
@@ -1394,22 +1401,27 @@ export function CreateDeliveryOrderModal({
   // Total volume (cubic feet) — sums warehouse inventory volume plus any
   // operator-supplied cubicFeet on ad-hoc lines (skipped if blank).
   const totalVolume = useMemo(() => {
-    if (mode === 'delivery' && itemsSource === 'warehouse') {
-      const invVol = selectedInvItems.reduce((sum, i) => {
+    let total = 0;
+    // Warehouse inventory volume: included for delivery+warehouse and
+    // for P+D (which can mix warehouse + pickup-leg ad-hoc items).
+    if ((mode === 'delivery' && itemsSource === 'warehouse') || mode === 'pickup_and_delivery') {
+      total += selectedInvItems.reduce((sum, i) => {
         const cuFt = classToCuFt(i.itemClass);
         const qty = Number(i.qty) || 1;
         return sum + (cuFt != null ? cuFt * qty : 0);
       }, 0);
-      const adhocVol = deliveryFreeItems.reduce((sum, i) => {
+    }
+    // Ad-hoc delivery lines carry an optional cubicFeet field.
+    if (mode === 'delivery' && itemsSource === 'warehouse') {
+      total += deliveryFreeItems.reduce((sum, i) => {
         if (!i.description.trim()) return sum;
         const cuFt = Number(i.cubicFeet);
         if (!Number.isFinite(cuFt) || cuFt <= 0) return sum;
         const qty = Math.max(1, Number(i.quantity) || 1);
         return sum + cuFt * qty;
       }, 0);
-      return invVol + adhocVol;
     }
-    return 0;
+    return total;
   }, [mode, itemsSource, selectedInvItems, deliveryFreeItems]);
 
   // ── Validation ─────────────────────────────────────────────────────────
@@ -1426,7 +1438,12 @@ export function CreateDeliveryOrderModal({
     if (needsPickup) {
       if (!pickupContactName.trim() || !pickupAddress.trim() || !pickupCity.trim() || !pickupZip.trim()) return false;
       const hasPickupItems = pickupFreeItems.some(i => i.description.trim());
-      if (!hasPickupItems) return false;
+      // Pickup-only requires a pickup line. P+D is satisfied as long
+      // as the order has SOMETHING to move — pickup items, warehouse
+      // items, or both. (Customer might just want us to deliver from
+      // storage and grab one thing along the way, or vice versa.)
+      if (mode === 'pickup' && !hasPickupItems) return false;
+      if (mode === 'pickup_and_delivery' && !hasPickupItems && selectedInvItems.length === 0) return false;
     }
     if (needsDelivery) {
       if (!deliveryContactName.trim() || !deliveryAddress.trim() || !deliveryCity.trim() || !deliveryZip.trim()) return false;
@@ -1475,7 +1492,11 @@ export function CreateDeliveryOrderModal({
       if (!pickupAddress.trim())     out.push('pickup address');
       if (!pickupCity.trim())        out.push('pickup city');
       if (!pickupZip.trim())         out.push('pickup ZIP');
-      if (!pickupFreeItems.some(i => i.description.trim())) out.push('at least one pickup item');
+      const hasPickupItems = pickupFreeItems.some(i => i.description.trim());
+      if (mode === 'pickup' && !hasPickupItems) out.push('at least one pickup item');
+      if (mode === 'pickup_and_delivery' && !hasPickupItems && selectedInvItems.length === 0) {
+        out.push('at least one item (pickup or from warehouse)');
+      }
     }
     if (needsDelivery) {
       if (!deliveryContactName.trim()) out.push('recipient name');
@@ -1984,8 +2005,27 @@ export function CreateDeliveryOrderModal({
       };
 
       // Build the combined items list (inventory + ad-hoc) once so the
-      // INSERT and UPDATE branches stay in sync.
+      // INSERT and UPDATE branches stay in sync. Handles both
+      // delivery+warehouse (selectedInvItems + deliveryFreeItems) and
+      // pickup-only (pickupFreeItems). service_only and the P+D
+      // branches use buildPDItemRows or skip items entirely.
       const buildDeliveryDraftItems = (orderId: string) => {
+        if (mode === 'service_only') return [] as Array<Record<string, unknown>>;
+        if (mode === 'pickup') {
+          return pickupFreeItems
+            .filter(i => i.description.trim())
+            .map(i => {
+              const qty = Math.max(1, Number(i.quantity) || 1);
+              return {
+                dt_order_id: orderId,
+                dt_item_code: null,
+                description: i.description.trim(),
+                quantity: qty,
+                original_quantity: qty,
+                extras: { source: 'pickup_free_text' },
+              };
+            });
+        }
         if (mode !== 'delivery' || itemsSource !== 'warehouse') return [] as Array<Record<string, unknown>>;
         const invRows = selectedInvItems.map(i => ({
           dt_order_id: orderId,
@@ -2339,6 +2379,27 @@ export function CreateDeliveryOrderModal({
           if (itemRows.length > 0) {
             await supabase.from('dt_order_items').insert(itemRows);
           }
+        } else if (mode === 'pickup') {
+          // Pickup-only edit/promote was missing this branch — items
+          // were deleted but never reinserted, so any pickup-only
+          // order saved through this path lost its lines silently.
+          const freeRows = pickupFreeItems
+            .filter(i => i.description.trim())
+            .map(i => {
+              const qty = Math.max(1, Number(i.quantity) || 1);
+              return {
+                dt_order_id: editingDraftRowIdRef.current,
+                dt_item_code: null,
+                description: i.description.trim(),
+                quantity: qty,
+                original_quantity: qty,
+                extras: { source: 'pickup_free_text' },
+              };
+            });
+          if (freeRows.length > 0) {
+            const { error: iErr } = await supabase.from('dt_order_items').insert(freeRows);
+            if (iErr) throw new Error(`Pickup items insert failed: ${iErr.message}`);
+          }
         }
         const savedRow = saved as { id: string; dt_identifier: string; review_status: string };
         // Audit: single-leg edit-save / draft-promote. Best-effort.
@@ -2527,31 +2588,13 @@ export function CreateDeliveryOrderModal({
         //    The previous negative-quantity convention broke item-count
         //    aggregations and made dt_order_items.quantity violate its
         //    natural non-negative invariant.
-        const pickupItemRows = pickupFreeItems
-          .filter(i => i.description.trim())
-          .flatMap(i => {
-            const qty = Math.max(1, Number(i.quantity) || 1);
-            return [
-              {
-                dt_order_id: pickupRow.id,
-                dt_item_code: null,
-                description: `PU: ${i.description.trim()}`,
-                quantity: qty,
-                original_quantity: qty,
-                extras: { source: 'pickup_free_text' },
-              },
-              {
-                dt_order_id: deliveryRow.id,
-                dt_item_code: null,
-                description: i.description.trim(),
-                quantity: qty,
-                original_quantity: qty,
-                extras: { source: 'pickup_free_text', linked_to_pickup: pickupRow.id },
-              },
-            ];
-          });
-        if (pickupItemRows.length > 0) {
-          const { error: iErr } = await supabase.from('dt_order_items').insert(pickupItemRows);
+        // Items: ad-hoc pickup lines on BOTH legs (with "PU: " prefix
+        // on pickup) + any warehouse inventory items on the delivery
+        // leg. buildPDItemRows already encodes both halves so all P+D
+        // save paths stay symmetric.
+        const pdItemRows = buildPDItemRows(pickupRow.id, deliveryRow.id);
+        if (pdItemRows.length > 0) {
+          const { error: iErr } = await supabase.from('dt_order_items').insert(pdItemRows);
           if (iErr) throw new Error(`Items insert failed: ${iErr.message}`);
         }
 
@@ -3336,8 +3379,11 @@ export function CreateDeliveryOrderModal({
                 } : null}
               />
 
-              {/* Items sub-section for delivery mode */}
-              {mode === 'delivery' && itemsSource === 'warehouse' && (
+              {/* Inventory picker — delivery+warehouse and P+D both
+                  support pulling items from the client's stored
+                  inventory. P+D can mix warehouse items (delivered
+                  alongside) with the ad-hoc pickup list below. */}
+              {((mode === 'delivery' && itemsSource === 'warehouse') || mode === 'pickup_and_delivery') && (
                 <div style={{ marginTop: 14 }}>
                   {/* Header with collapse toggle */}
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
