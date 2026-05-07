@@ -226,7 +226,17 @@ export function Orders() {
     const target = orders.find(o => o.dtIdentifier === dtId);
     if (target) {
       pendingOpenDtIdRef.current = null;
-      navigate(`/orders/${target.id}`, { replace: true });
+      // Drafts open the Create / Edit modal directly (matches the
+      // row-click behavior below). Real orders route to the OrderPage
+      // detail view. This lets the "Convert quote → delivery order"
+      // deep link land in the modal so the operator can finish
+      // service date / pickup / items.
+      if (target.reviewStatus === 'draft') {
+        setEditOrderId(target.id);
+        setShowCreateModal(true);
+      } else {
+        navigate(`/orders/${target.id}`, { replace: true });
+      }
     }
   }, [loading, orders, navigate]);
 

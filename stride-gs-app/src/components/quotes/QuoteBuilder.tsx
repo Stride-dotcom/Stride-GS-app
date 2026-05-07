@@ -1,7 +1,11 @@
 import { useState, useCallback, useMemo, useEffect } from 'react';
 import { ArrowLeft } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import { theme } from '../../styles/theme';
 import { useIsMobile } from '../../hooks/useIsMobile';
+import { useAuth } from '../../contexts/AuthContext';
+import { supabase } from '../../lib/supabase';
+import { convertQuoteToDraftOrder } from '../../lib/quoteToOrder';
 import { QuoteClientCard } from './QuoteClientCard';
 import { QuotePricingMatrix } from './QuotePricingMatrix';
 import { QuoteStorageSection } from './QuoteStorageSection';
@@ -24,6 +28,8 @@ interface Props {
 
 export function QuoteBuilder({ store, quoteId, onBack }: Props) {
   const { isMobile } = useIsMobile();
+  const navigate = useNavigate();
+  const { user } = useAuth();
   const [toast, setToast] = useState<string | null>(null);
   // Session 77 — track whether there are unsaved edits since the last
   // save. When `dirty=false`, the SAVE QUOTE button flips to a green
@@ -74,6 +80,28 @@ export function QuoteBuilder({ store, quoteId, onBack }: Props) {
     if (!quoteId || !confirm('Delete this quote permanently?')) return;
     deleteQuoteFn(quoteId); onBack();
   }, [quoteId, deleteQuoteFn, onBack]);
+  const handleConvertToOrder = useCallback(async () => {
+    if (!quote) return;
+    try {
+      const { data: authData } = await supabase.auth.getUser();
+      const authUid = authData?.user?.id || null;
+      const { dtIdentifier } = await convertQuoteToDraftOrder(
+        quote,
+        store.catalog,
+        authUid,
+        user?.role || 'staff',
+      );
+      // Hand off to the Orders page via the existing ?open=<dt_identifier>
+      // deep link. Orders.tsx resolves the identifier and (after the
+      // draft-aware deep-link branch added in this turn) opens the
+      // Create Delivery Order modal in edit-draft mode with all the
+      // pre-filled fields ready for the operator to finish.
+      navigate(`/orders?open=${encodeURIComponent(dtIdentifier)}&client=${encodeURIComponent(quote.clientSheetId)}`);
+    } catch (e) {
+      alert(`Could not convert quote: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [quote, store.catalog, user?.role, navigate]);
+
   const handleDownloadPdf = useCallback(() => {
     if (!quote) return;
     // generateQuotePdf is now async (it fetches the DOC_QUOTE template
@@ -150,7 +178,9 @@ export function QuoteBuilder({ store, quoteId, onBack }: Props) {
         <QuoteTotalsPanel quote={quote} catalog={store.catalog} onUpdate={handleChange}
           onSave={handleSave} dirty={dirty}
           onDuplicate={handleDuplicate} onDownloadPdf={handleDownloadPdf}
-          onVoid={handleVoid} onDelete={handleDelete} />
+          onVoid={handleVoid} onDelete={handleDelete}
+          onConvertToOrder={handleConvertToOrder}
+          convertDisabled={!quote.clientSheetId} />
       </div>
     </div>
   );

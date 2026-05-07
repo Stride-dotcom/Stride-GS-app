@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { Save, Copy, FileDown, Trash2, Ban, CheckCircle2 } from 'lucide-react';
+import { Save, Copy, FileDown, Trash2, Ban, CheckCircle2, Truck } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { calcQuote } from '../../lib/quoteCalc';
 import type { Quote, QuoteCatalog, CalcResult } from '../../lib/quoteTypes';
@@ -20,13 +20,20 @@ interface Props {
   onDownloadPdf: () => void;
   onVoid: () => void;
   onDelete: () => void;
+  /** Convert this quote into a draft Delivery Order. Pre-fills client +
+   *  address + a pricing-breakdown dump in the order's notes; user
+   *  finishes service date / pickup / items / accessorials in the
+   *  Edit Draft modal that the navigation lands them in. Disabled when
+   *  the quote isn't linked to a client (no tenant_id to write). */
+  onConvertToOrder: () => void;
+  convertDisabled?: boolean;
 }
 
 function fmt(n: number): string {
   return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-export function QuoteTotalsPanel({ quote, catalog, onUpdate, onSave, dirty, onDuplicate, onDownloadPdf, onVoid, onDelete }: Props) {
+export function QuoteTotalsPanel({ quote, catalog, onUpdate, onSave, dirty, onDuplicate, onDownloadPdf, onVoid, onDelete, onConvertToOrder, convertDisabled }: Props) {
   const result: CalcResult = useMemo(
     () => calcQuote(quote, catalog.services, catalog.classes, catalog.coverageOptions),
     [quote, catalog]
@@ -211,6 +218,12 @@ export function QuoteTotalsPanel({ quote, catalog, onUpdate, onSave, dirty, onDu
             <CheckCircle2 size={14} /> QUOTE SAVED
           </button>
         )}
+        <button
+          onClick={onConvertToOrder}
+          aria-disabled={convertDisabled ? 'true' : undefined}
+          title={convertDisabled ? 'Link this quote to a client first' : 'Open the Create Delivery Order modal pre-filled from this quote'}
+          style={{ ...btnGhost, opacity: convertDisabled ? 0.5 : 1, cursor: convertDisabled ? 'not-allowed' : 'pointer' }}
+        ><Truck size={14} /> CONVERT TO DELIVERY ORDER</button>
         <button onClick={onDownloadPdf} style={btnGhost}><FileDown size={14} /> DOWNLOAD PDF</button>
         <button onClick={onDuplicate} style={btnGhost}><Copy size={14} /> DUPLICATE</button>
         {quote.status !== 'void' && <button onClick={onVoid} style={btnDanger}><Ban size={14} /> VOID QUOTE</button>}
