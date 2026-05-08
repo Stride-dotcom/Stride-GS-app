@@ -1655,7 +1655,56 @@ export function CreateDeliveryOrderModal({
         setSubmitError(`Could not load order: ${error?.message || 'not found'}`);
         return;
       }
-      const r = row as Record<string, unknown>;
+      let r = row as Record<string, unknown>;
+      // Pickup-leg-of-P+D detection. When the user opens a pickup row
+      // that's half of a P+D pair (order_type='pickup' AND
+      // linked_order_id points at a delivery leg), the modal needs
+      // to behave exactly like opening the delivery leg — same
+      // unified P+D form, same pricing on the delivery row only.
+      // We swap r to the delivery row but stash the originally-
+      // opened pickup contacts first so they don't get clobbered by
+      // the delivery-side branch below. Without this swap the
+      // operator was getting a single-leg pickup view (with its own
+      // standalone pricing) which was the 2026-05-07 double-bill
+      // bug — saving from that view stamped a real fee onto the
+      // pickup leg even though P+D billing is supposed to live
+      // entirely on the delivery leg.
+      const initialOrderType = String(r.order_type || '');
+      if (initialOrderType === 'pickup' && r.linked_order_id) {
+        const pickupContacts = {
+          name: r.contact_name,
+          address: r.contact_address,
+          city: r.contact_city,
+          state: r.contact_state,
+          zip: r.contact_zip,
+          phone: r.contact_phone,
+          phone2: r.contact_phone2,
+          email: r.contact_email,
+        };
+        const pickupLegRowId = String(r.id || '');
+        const { data: deliveryRow } = await supabase
+          .from('dt_orders')
+          .select('*, dt_order_items(*)')
+          .is('dt_order_items.removed_at', null)
+          .eq('id', r.linked_order_id as string)
+          .maybeSingle();
+        if (cancelled) return;
+        if (deliveryRow) {
+          r = deliveryRow as Record<string, unknown>;
+          editingDraftRowIdRef.current = String(r.id || '');
+          editingPickupRowIdRef.current = pickupLegRowId;
+          // Pre-apply pickup contacts now; the delivery-side branch
+          // below will set delivery contacts independently.
+          if (pickupContacts.name)    setPickupContactName(pickupContacts.name as string);
+          if (pickupContacts.address) setPickupAddress(pickupContacts.address as string);
+          if (pickupContacts.city)    setPickupCity(pickupContacts.city as string);
+          if (pickupContacts.state)   setPickupState(pickupContacts.state as string);
+          if (pickupContacts.zip)     setPickupZip(pickupContacts.zip as string);
+          if (pickupContacts.phone)   setPickupPhone(pickupContacts.phone as string);
+          if (pickupContacts.phone2)  setPickupPhone2(pickupContacts.phone2 as string);
+          if (pickupContacts.email)   setPickupEmail(pickupContacts.email as string);
+        }
+      }
       // Capture the loaded row's review_status — drives whether
       // submit promotes (draft → real order) or just saves changes.
       originalReviewStatusRef.current = (r.review_status as string) || null;
@@ -1920,7 +1969,19 @@ export function CreateDeliveryOrderModal({
           contact_phone: pickupPhone.trim() || null,
           contact_phone2: pickupPhone2.trim() || null,
           contact_email: pickupEmail.trim() || null,
+          // Pickup leg of P+D NEVER bills standalone — every charge
+          // lives on the delivery leg. Explicitly null/zero each
+          // pricing column so an UPDATE here can't leave stale
+          // values behind from a prior single-leg-pickup save.
           base_delivery_fee: null,
+          extra_items_count: 0,
+          extra_items_fee: 0,
+          accessorials_json: null,
+          accessorials_total: null,
+          coverage_charge: null,
+          tax_amount: null,
+          tax_rate_pct: null,
+          customer_tax_exempt: null,
           order_total: null,
           pricing_override: true,
           pricing_notes: 'Pickup leg of linked pickup+delivery — pricing rolled into delivery order.',
@@ -2229,6 +2290,23 @@ export function CreateDeliveryOrderModal({
           contact_phone: pickupPhone.trim() || null,
           contact_phone2: pickupPhone2.trim() || null,
           contact_email: pickupEmail.trim() || null,
+          // Pickup leg of P+D NEVER bills standalone — wipe any
+          // pricing that might have been written by a prior single-
+          // leg-pickup save (the 2026-05-07 double-bill scenario).
+          base_delivery_fee: null,
+          extra_items_count: 0,
+          extra_items_fee: 0,
+          accessorials_json: null,
+          accessorials_total: null,
+          coverage_option_id: null,
+          declared_value: null,
+          coverage_charge: null,
+          tax_amount: null,
+          tax_rate_pct: null,
+          customer_tax_exempt: null,
+          order_total: null,
+          pricing_override: true,
+          pricing_notes: 'Pickup leg of linked pickup+delivery — pricing rolled into delivery order.',
         };
         const deliveryEdit: Record<string, unknown> = {
           ...commonEdit,
