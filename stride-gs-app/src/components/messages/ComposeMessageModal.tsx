@@ -12,7 +12,7 @@
  */
 import { useCallback, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { X, Search, Send, Loader2, Users, Shield, AlertTriangle, CheckCircle2 } from 'lucide-react';
+import { X, Search, Send, Loader2, Users, Shield, AlertTriangle, CheckCircle2, Megaphone } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { useProfiles } from '../../hooks/useProfiles';
 import { useAuth } from '../../contexts/AuthContext';
@@ -39,6 +39,7 @@ export function ComposeMessageModal({ onClose, onSend, currentUserId }: Props) {
   const { profiles, loading, error: profilesError } = useProfiles(true);
   const { user } = useAuth();
   const isClientRole = user?.role === 'client';
+  const isAdminRole = user?.role === 'admin';
   const myClientSheetId = user?.clientSheetId ?? null;
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<ComposeRecipient[]>([]);
@@ -47,6 +48,12 @@ export function ComposeMessageModal({ onClose, onSend, currentUserId }: Props) {
   const [entityId, setEntityId] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(profilesError);
+  // Broadcast mode (admin-only). When on, the message is delivered as
+  // an individual DM to every active user — each recipient sees a
+  // separate two-person thread with the admin (no group, no shared
+  // visibility into who else got the announcement). The admin's sent
+  // view will show one row per recipient. Hides the picker entirely.
+  const [broadcastMode, setBroadcastMode] = useState(false);
 
   // Map profiles → compose recipients, excluding the current user so they
   // can't message themselves.
@@ -115,25 +122,55 @@ export function ComposeMessageModal({ onClose, onSend, currentUserId }: Props) {
 
   const clearSelected = useCallback(() => setSelected([]), []);
 
-  const canSend = selected.length > 0 && body.trim().length > 0 && !sending;
+  // Broadcast targets every visible non-self user; the picker is
+  // hidden so we derive recipients straight from the user list.
+  const broadcastTargets = useMemo(
+    () => broadcastMode ? users : [],
+    [broadcastMode, users],
+  );
+
+  const canSend = !sending && body.trim().length > 0 && (
+    broadcastMode ? broadcastTargets.length > 0 : selected.length > 0
+  );
 
   const handleSend = useCallback(async () => {
     if (!canSend) return;
     setSending(true); setError(null);
     try {
-      await onSend({
-        body: body.trim(),
-        recipientIds: selected.map(s => s.id),
-        recipientNames: selected.map(s => s.name),
-        entityType: entityType.trim() || undefined,
-        entityId: entityId.trim() || undefined,
-      });
+      if (broadcastMode) {
+        // One DM per recipient — each gets a 2-person conversation
+        // with the admin via find_or_create_dm_conversation, so the
+        // recipient list never appears in any single thread. Sequential
+        // to keep RPC pressure low (a few hundred users at most); a
+        // single failure mid-loop surfaces the error without rolling
+        // back already-sent threads (acceptable for an announcement).
+        // Entity link is intentionally NOT propagated to broadcasts —
+        // find_or_create_entity_conversation keys by entity, so a
+        // shared entity could collapse multiple recipients into the
+        // same conversation and defeat the per-recipient privacy.
+        const trimmed = body.trim();
+        for (const u of broadcastTargets) {
+          await onSend({
+            body: trimmed,
+            recipientIds: [u.id],
+            recipientNames: [u.name],
+          });
+        }
+      } else {
+        await onSend({
+          body: body.trim(),
+          recipientIds: selected.map(s => s.id),
+          recipientNames: selected.map(s => s.name),
+          entityType: entityType.trim() || undefined,
+          entityId: entityId.trim() || undefined,
+        });
+      }
       onClose();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setSending(false);
     }
-  }, [canSend, body, selected, entityType, entityId, onSend, onClose]);
+  }, [canSend, broadcastMode, broadcastTargets, body, selected, entityType, entityId, onSend, onClose]);
 
   return createPortal(
     <div
@@ -174,6 +211,53 @@ export function ComposeMessageModal({ onClose, onSend, currentUserId }: Props) {
 
         {/* Body */}
         <div style={{ flex: 1, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 14 }}>
+          {/* Admin-only broadcast toggle. Off by default; turning it
+              on hides the picker and routes the send loop through
+              one-DM-per-recipient. Hidden for staff/client. */}
+          {isAdminRole && (
+            <div>
+              <label style={labelStyle}>Send Mode</label>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  onClick={() => setBroadcastMode(false)}
+                  style={modeBtn(!broadcastMode)}
+                  title="Pick specific recipients"
+                >
+                  <Users size={11} /> Direct Message
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setBroadcastMode(true)}
+                  style={modeBtn(broadcastMode)}
+                  title="Send privately to every active user — recipients can't see each other"
+                >
+                  <Megaphone size={11} /> Broadcast to All
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Broadcast badge replaces the picker when broadcast is on. */}
+          {broadcastMode ? (
+            <div style={{
+              padding: 12, borderRadius: v2.radius.input,
+              background: '#FEF3EE', border: '1px solid #FED7AA',
+              color: '#9A3412',
+            }}>
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12, fontWeight: 700, marginBottom: 4 }}>
+                <Megaphone size={12} /> Broadcast Mode
+              </div>
+              <div style={{ fontSize: 12, lineHeight: 1.5 }}>
+                This message will be delivered as a private DM to every active user
+                ({broadcastTargets.length} recipient{broadcastTargets.length === 1 ? '' : 's'}).
+                Each recipient sees only a one-on-one thread with you — they will not
+                see who else received the announcement. Your sent view will show one
+                thread per recipient.
+              </div>
+            </div>
+          ) : (
+          <>
           {/* To + quick buttons */}
           <div>
             <label style={labelStyle}>To</label>
@@ -274,8 +358,14 @@ export function ComposeMessageModal({ onClose, onSend, currentUserId }: Props) {
               )}
             </div>
           </div>
+          </>
+          )}
 
-          {/* Entity link */}
+          {/* Entity link — hidden in broadcast mode because the
+              entity-keyed conversation RPC would collapse recipients
+              into a shared thread (defeating the per-recipient
+              privacy of a broadcast). */}
+          {!broadcastMode && (
           <div>
             <label style={labelStyle}>Link to entity <span style={{ fontWeight: 400, color: v2.colors.textMuted, textTransform: 'none', letterSpacing: 0 }}>(optional)</span></label>
             <div style={{ display: 'flex', gap: 6 }}>
@@ -310,6 +400,7 @@ export function ComposeMessageModal({ onClose, onSend, currentUserId }: Props) {
               />
             </div>
           </div>
+          )}
 
           {/* Body */}
           <div>
@@ -347,7 +438,9 @@ export function ComposeMessageModal({ onClose, onSend, currentUserId }: Props) {
           background: v2.colors.bgCard, gap: 10,
         }}>
           <div style={{ fontSize: 11, color: v2.colors.textMuted }}>
-            {selected.length} recipient{selected.length === 1 ? '' : 's'} · {body.length} chars
+            {broadcastMode
+              ? `${broadcastTargets.length} broadcast recipient${broadcastTargets.length === 1 ? '' : 's'} · ${body.length} chars`
+              : `${selected.length} recipient${selected.length === 1 ? '' : 's'} · ${body.length} chars`}
           </div>
           <div style={{ display: 'flex', gap: 6 }}>
             <button onClick={onClose} style={cancelBtn}>Cancel</button>
@@ -411,6 +504,17 @@ const cancelBtn: React.CSSProperties = {
   background: '#fff', color: theme.v2.colors.textSecondary,
   cursor: 'pointer', fontFamily: 'inherit',
 };
+function modeBtn(active: boolean): React.CSSProperties {
+  return {
+    display: 'inline-flex', alignItems: 'center', gap: 5,
+    padding: '7px 13px', fontSize: 11, fontWeight: 700,
+    letterSpacing: '0.5px',
+    border: `1.5px solid ${active ? theme.v2.colors.accent : theme.v2.colors.border}`,
+    background: active ? theme.v2.colors.accent : '#fff',
+    color: active ? '#fff' : theme.v2.colors.textSecondary,
+    borderRadius: 100, cursor: 'pointer', fontFamily: 'inherit',
+  };
+}
 function sendBtn(enabled: boolean): React.CSSProperties {
   return {
     display: 'inline-flex', alignItems: 'center', gap: 6,

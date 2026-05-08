@@ -1364,10 +1364,21 @@ export function OrderPage() {
                     ? "We've added pricing for the services you requested. You can view the updated total on your order."
                     : '';
                   const appDeepLink = `https://www.mystridehub.com/#/orders/${encodeURIComponent(order.id)}`;
+                  // CC the approving user so they have a record of
+                  // exactly what the customer received and can reply
+                  // to follow-up questions without having to reproduce
+                  // the email. Skipped when the approver IS the
+                  // recipient (no point CC'ing yourself) or when no
+                  // user email is available (service-account paths).
+                  const approverCc =
+                    user?.email && user.email.toLowerCase() !== to.toLowerCase()
+                      ? [user.email]
+                      : undefined;
                   void supabase.functions.invoke('send-email', {
                     body: {
                       templateKey: 'DELIVERY_ORDER_APPROVED',
                       to,
+                      cc: approverCc,
                       tokens: {
                         ORDER_ID:      order.dtIdentifier || order.id,
                         CONTACT_NAME:  order.contactName || 'there',
