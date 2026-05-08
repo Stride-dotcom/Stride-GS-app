@@ -623,7 +623,16 @@ export function CreateDeliveryOrderModal({
 
   // If no liveItems were passed (modal opened from Orders page, not Inventory),
   // pull our own inventory. useInventory auto-scopes to accessible clients.
+  // Force a refetch on every modal open so room/vendor/etc edits made
+  // since the cached fetch flow into the order — Bundle B's "real-time
+  // updates even on pushed orders" contract relies on this. Without
+  // it, the operator could open a 5-minute-old cached inventory and
+  // not see the room they just changed two minutes ago.
   const invHookResult = useInventory(liveItemsProp.length === 0);
+  useEffect(() => {
+    if (liveItemsProp.length === 0) invHookResult.refetch();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const liveItems: LiveItem[] = useMemo(() => {
     if (liveItemsProp.length > 0) return liveItemsProp;
     return invHookResult.items.map(i => ({
@@ -1828,19 +1837,16 @@ export function CreateDeliveryOrderModal({
         .map(it => String(it.dt_item_code || '').trim())
         .filter(Boolean);
       if (itemIds.length > 0) setSelectedIds(new Set(itemIds));
-      // Hydrate per-line room overrides from saved dt_order_items.
-      // We always carry the saved room value forward so edits made on
-      // a prior save aren't lost when the modal reopens — the
-      // inventory row's room may have moved on since.
-      const savedRooms: Record<string, string> = {};
-      for (const it of items) {
-        const code = String(it.dt_item_code || '').trim();
-        if (!code) continue;
-        const ex = (it.extras && typeof it.extras === 'object' ? it.extras : {}) as Record<string, unknown>;
-        const room = String(it.room ?? ex.room ?? '').trim();
-        if (room) savedRooms[code] = room;
-      }
-      if (Object.keys(savedRooms).length > 0) setRoomOverrides(savedRooms);
+      // Per-line room values are intentionally NOT hydrated from saved
+      // dt_order_items here. The room (along with vendor/sidemark/etc)
+      // flows live from the current inventory row each time the modal
+      // opens — that's the explicit Bundle B contract: edit room in
+      // inventory, reopen any order containing that item, and the new
+      // room is what gets shown + persisted on the next save (and on
+      // the next Save & Resync to DT). If the operator wants a per-
+      // order override that survives across reopens, they edit the
+      // Room column on the line during this session — that creates a
+      // roomOverrides entry that the save path uses.
       if (ot === 'delivery') {
         const adhoc: FreeItem[] = items
           .filter(it => {

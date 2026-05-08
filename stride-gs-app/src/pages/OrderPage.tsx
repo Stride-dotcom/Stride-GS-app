@@ -218,6 +218,7 @@ function DetailsTab({
   onStartEdit,
   onCancelEdit,
   onSave,
+  onSaveAndResync,
 }: {
   order: DtOrderForUI;
   /** P+D pair partner. Populated on the parent so DetailsTab can show
@@ -232,6 +233,10 @@ function DetailsTab({
   onStartEdit: () => void;
   onCancelEdit: () => void;
   onSave: () => void;
+  /** Save + immediately re-push to DispatchTrack. Only visible when
+   *  the order has been pushed at least once. Undefined for the rare
+   *  caller that wants the bare Save behavior. */
+  onSaveAndResync?: () => void;
 }) {
   const addressLine = [order.contactAddress, order.contactCity, order.contactState, order.contactZip].filter(Boolean).join(', ');
   // Identify the P+D partner — when this row is the delivery leg of a
@@ -486,6 +491,14 @@ function DetailsTab({
               />
             )}
             {order.reviewNotes   && <Field label="Review Notes" value={order.reviewNotes} />}
+            {order.createdAt     && <Field label="Created At"   value={new Date(order.createdAt).toLocaleString()} />}
+            {/* Last Edited only when the row has been updated past creation
+                — Postgres bumps updated_at on every UPDATE so a row that's
+                never been edited has updated_at == created_at. Hide that
+                duplicate to avoid two identical timestamps stacked here. */}
+            {order.updatedAt && order.updatedAt !== order.createdAt && (
+              <Field label="Last Edited" value={new Date(order.updatedAt).toLocaleString()} />
+            )}
             {order.reviewedAt    && <Field label="Reviewed At"  value={new Date(order.reviewedAt).toLocaleString()} />}
             {order.pushedToDtAt  && <Field label="Pushed to DT" value={new Date(order.pushedToDtAt).toLocaleString()} />}
             {order.lastSyncedAt  && <Field label="Last Synced"  value={new Date(order.lastSyncedAt).toLocaleString()} />}
@@ -500,14 +513,23 @@ function DetailsTab({
             <div style={{ fontSize: 12, color: saveError ? '#DC2626' : EP.textMuted, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {saveError ?? 'Editing — save to persist changes.'}
             </div>
-            <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+            <div style={{ display: 'flex', gap: 8, flexShrink: 0, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
               <button onClick={onCancelEdit} disabled={saving} style={{ background: '#fff', color: EP.textPrimary, border: `1px solid ${theme.colors.border}`, cursor: saving ? 'not-allowed' : 'pointer', padding: '8px 16px', borderRadius: 8, fontSize: 13, fontWeight: 500, opacity: saving ? 0.6 : 1, fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 5 }}>
                 <X size={13} /> Cancel
               </button>
-              <button onClick={onSave} disabled={saving} style={{ background: EP.accent, color: '#fff', border: 'none', cursor: saving ? 'progress' : 'pointer', padding: '8px 16px', borderRadius: 8, fontSize: 13, fontWeight: 600, opacity: saving ? 0.85 : 1, fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                {saving && <BtnSpinner size={12} color="#fff" />}
-                {saving ? 'Saving…' : 'Save Changes'}
+              <button onClick={onSave} disabled={saving} style={{ background: order.pushedToDtAt ? '#fff' : EP.accent, color: order.pushedToDtAt ? EP.textPrimary : '#fff', border: order.pushedToDtAt ? `1px solid ${theme.colors.border}` : 'none', cursor: saving ? 'progress' : 'pointer', padding: '8px 16px', borderRadius: 8, fontSize: 13, fontWeight: 600, opacity: saving ? 0.85 : 1, fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                {saving && <BtnSpinner size={12} color={order.pushedToDtAt ? EP.textPrimary : '#fff'} />}
+                {saving ? 'Saving…' : (order.pushedToDtAt ? 'Save (no DT push)' : 'Save Changes')}
               </button>
+              {order.pushedToDtAt && onSaveAndResync && (
+                /* Order is already in DispatchTrack — give the operator
+                   a one-click "save + push" so DT stays in sync without
+                   needing the separate Republish button after a save. */
+                <button onClick={onSaveAndResync} disabled={saving} style={{ background: EP.accent, color: '#fff', border: 'none', cursor: saving ? 'progress' : 'pointer', padding: '8px 16px', borderRadius: 8, fontSize: 13, fontWeight: 600, opacity: saving ? 0.85 : 1, fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  {saving && <BtnSpinner size={12} color="#fff" />}
+                  {saving ? 'Saving…' : 'Save & Resync to DT'}
+                </button>
+              )}
             </div>
           </div>
         </EPCard>
@@ -973,6 +995,60 @@ export function OrderPage() {
 
   const handleCancelEdit = useCallback(() => { setEditing(false); setSaveError(null); }, []);
 
+  // DT push helper — reusable from the footer Republish button and the
+  // inline-edit "Save & Resync" button. Runs the same edge-function
+  // invocation, error-extraction, and audit-log logging the footer
+  // already does. Returns the parsed result on success, throws on
+  // any failure so callers can decide how to surface it.
+  const pushOrderToDt = useCallback(async (): Promise<{ dtIdentifier?: string; linkedIdentifier?: string }> => {
+    if (!order) throw new Error('No order loaded');
+    const { data, error: invokeErr } = await supabase.functions.invoke('dt-push-order', {
+      body: { orderId: order.id },
+    });
+    if (invokeErr) {
+      let detailed = invokeErr.message;
+      try {
+        const ctx = (invokeErr as { context?: { json?: () => Promise<unknown>; status?: number } }).context;
+        if (ctx?.json) {
+          const body = await ctx.json() as { error?: string; responseBody?: string } | null;
+          if (body?.error) {
+            detailed = body.error;
+            if (body.responseBody) detailed += ` (DT response: ${body.responseBody.slice(0, 200)})`;
+          }
+        }
+      } catch (_) { /* fall back to invokeErr.message */ }
+      throw new Error(detailed);
+    }
+    const res = data as { ok?: boolean; error?: string; dt_identifier?: string; linked_identifier?: string } | null;
+    if (!res?.ok) throw new Error(res?.error || 'DT push failed');
+    void logDtOrderAudit({
+      orderId: order.id,
+      tenantId: order.tenantId,
+      action: 'push_to_dt',
+      changes: {
+        dtIdentifier: res.dt_identifier ?? order.dtIdentifier,
+        ...(res.linked_identifier ? { linkedIdentifier: res.linked_identifier } : {}),
+        orderType: order.orderType,
+        itemCount: (order.items ?? []).reduce((s, it) => s + Math.max(1, Number(it.quantity) || 1), 0),
+      },
+      performedBy: user?.email ?? null,
+    });
+    if (res.linked_identifier && order.linkedOrderId) {
+      void logDtOrderAudit({
+        orderId: order.linkedOrderId,
+        tenantId: order.tenantId,
+        action: 'push_to_dt',
+        changes: {
+          dtIdentifier: res.linked_identifier,
+          linkedIdentifier: res.dt_identifier ?? order.dtIdentifier,
+          pushedAlongsideDelivery: true,
+        },
+        performedBy: user?.email ?? null,
+      });
+    }
+    return { dtIdentifier: res.dt_identifier, linkedIdentifier: res.linked_identifier };
+  }, [order, user?.email]);
+
   const handleSave = useCallback(async () => {
     if (!order) return;
     setSaving(true);
@@ -1133,6 +1209,33 @@ export function OrderPage() {
     }
   }, [order, edit, refetch, user?.email]);
 
+  // Save inline edits AND immediately resync to DispatchTrack. Only
+  // surfaced when the order has been pushed at least once — if it
+  // hasn't been pushed, the existing footer "Push to DT" button is
+  // the right place to first-push. handleSave handles its own
+  // success/failure via saveError; if it fails, dt_orders wasn't
+  // updated and the subsequent push pushes the same data DT already
+  // has (harmless no-op). Push failure surfaces a "saved locally but
+  // DT push failed" message so the operator knows the local edit
+  // landed and can retry the push from the footer.
+  const handleSaveAndResync = useCallback(async () => {
+    if (!order) return;
+    await handleSave();
+    try {
+      setSaving(true);
+      await pushOrderToDt();
+      const fresh = await fetchDtOrderByIdFromSupabase(order.id);
+      if (fresh) setLocalOrder(fresh);
+      refetch();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error('[OrderPage] Save & Resync push failed:', msg);
+      setSaveError(`Saved locally, but DT push failed: ${msg}. Use Republish to DT in the footer to retry.`);
+    } finally {
+      setSaving(false);
+    }
+  }, [order, handleSave, pushOrderToDt, refetch]);
+
   // ── Loading / error states ─────────────────────────────────────────────────
 
   if (status === 'loading') {
@@ -1194,6 +1297,7 @@ export function OrderPage() {
           onStartEdit={handleStartEdit}
           onCancelEdit={handleCancelEdit}
           onSave={handleSave}
+          onSaveAndResync={handleSaveAndResync}
         />
       ),
     },
@@ -1433,63 +1537,7 @@ export function OrderPage() {
             setPushingDt(true);
             setPushDtError(null);
             try {
-              const { data, error: invokeErr } = await supabase.functions.invoke('dt-push-order', {
-                body: { orderId: order.id },
-              });
-              // supabase.functions.invoke surfaces a generic
-              // "Edge Function returned a non-2xx status code" on any
-              // non-2xx, hiding the actual { error } body the
-              // function returned. Pull the response body off the
-              // FunctionsHttpError context so the toast carries the
-              // real reason (e.g. "Order has no items", "DT API
-              // error: <message>", "Linked pickup push failed: …").
-              if (invokeErr) {
-                let detailed = invokeErr.message;
-                try {
-                  const ctx = (invokeErr as { context?: { json?: () => Promise<unknown>; status?: number } }).context;
-                  if (ctx?.json) {
-                    const body = await ctx.json() as { error?: string; responseBody?: string } | null;
-                    if (body?.error) {
-                      detailed = body.error;
-                      if (body.responseBody) detailed += ` (DT response: ${body.responseBody.slice(0, 200)})`;
-                    }
-                  }
-                } catch (_) { /* fall back to invokeErr.message */ }
-                throw new Error(detailed);
-              }
-              const res = data as { ok?: boolean; error?: string; dt_identifier?: string; linked_identifier?: string } | null;
-              if (!res?.ok) throw new Error(res?.error || 'DT push failed');
-              // Audit: push_to_dt. Best-effort. Done client-side so the
-              // row is attributed to the authenticated user (the edge
-              // function runs under service role and doesn't see the
-              // caller's email). For P+D orders the edge function pushes
-              // both legs; we stamp an audit row on the linked pickup's
-              // dt_order_id too so its own Activity tab reflects the push.
-              void logDtOrderAudit({
-                orderId: order.id,
-                tenantId: order.tenantId,
-                action: 'push_to_dt',
-                changes: {
-                  dtIdentifier: res.dt_identifier ?? order.dtIdentifier,
-                  ...(res.linked_identifier ? { linkedIdentifier: res.linked_identifier } : {}),
-                  orderType: order.orderType,
-                  itemCount: order.items?.length ?? 0,
-                },
-                performedBy: user?.email ?? null,
-              });
-              if (res.linked_identifier && order.linkedOrderId) {
-                void logDtOrderAudit({
-                  orderId: order.linkedOrderId,
-                  tenantId: order.tenantId,
-                  action: 'push_to_dt',
-                  changes: {
-                    dtIdentifier: res.linked_identifier,
-                    linkedIdentifier: res.dt_identifier ?? order.dtIdentifier,
-                    pushedAlongsideDelivery: true,
-                  },
-                  performedBy: user?.email ?? null,
-                });
-              }
+              await pushOrderToDt();
               const fresh = await fetchDtOrderByIdFromSupabase(order.id);
               if (fresh) setLocalOrder(fresh);
               refetch();
