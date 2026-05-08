@@ -826,26 +826,25 @@ export function CreateDeliveryOrderModal({
   // when there are no selections yet (you need to see the list to pick),
   // collapsed once you've added items (you don't need the picker, you
   // need to see what you've added). Operator can flip either way.
-  const [inventoryExpanded, setInventoryExpanded] = useState(true);
-  // Track whether we've already auto-collapsed the inventory picker
-  // for this open of the modal. Without this, every Save Draft would
-  // re-collapse — including times when the operator just expanded it
-  // to add another item — which would feel like the UI is fighting
-  // the user. Reset whenever editOrderId changes (i.e. a different
-  // order opens).
+  // Inventory picker starts collapsed for any existing order, expanded
+  // for brand-new entries. Pickup-only and pickup_and_delivery orders
+  // typically don't carry warehouse inventory items at all, so the
+  // earlier "only collapse if selectedIds.size > 0" condition left
+  // the picker stretching the whole modal on those orders. Simpler
+  // rule: if you're editing something, you probably want to review
+  // it first; click the chevron to expand and add items.
+  const [inventoryExpanded, setInventoryExpanded] = useState(!editOrderId);
+  // If editOrderId arrives after mount (e.g. a new draft just saved
+  // and got an id), collapse so the modal stays compact for review.
+  // Ref guard prevents fighting subsequent manual expands.
   const autoCollapsedInvRef = useRef(false);
   useEffect(() => { autoCollapsedInvRef.current = false; }, [editOrderId]);
-  // When opening an existing saved order with items already selected,
-  // collapse the picker so the modal opens in a review-friendly
-  // state. Operator can expand to add more items if needed. Fires
-  // exactly once per editOrderId open (the ref above guards repeats).
   useEffect(() => {
     if (autoCollapsedInvRef.current) return;
     if (!editOrderId) return;
-    if (selectedIds.size === 0) return;
     setInventoryExpanded(false);
     autoCollapsedInvRef.current = true;
-  }, [editOrderId, selectedIds.size]);
+  }, [editOrderId]);
   // Auto-collapse the picker the first time selections appear so the
   // selected-items summary takes the focus. Doesn't fight subsequent
   // manual toggles.
@@ -3999,16 +3998,42 @@ export function CreateDeliveryOrderModal({
                   }}>
                     Items To Deliver <span style={{ color: theme.colors.textMuted, fontWeight: 600 }}>(copied from pickup)</span>
                   </div>
-                  <div style={{ padding: 12, background: '#F9FAFB', borderRadius: 8, fontSize: 12, color: theme.colors.textMuted }}>
-                    {pickupFreeItems.filter(i => i.description.trim()).length === 0
-                      ? 'Add items on the Pickup section above — they\'ll appear here automatically.'
-                      : pickupFreeItems.filter(i => i.description.trim()).map((i, idx) => (
-                          <div key={i.id} style={{ paddingTop: idx > 0 ? 4 : 0 }}>
-                            • {i.description} (qty {i.quantity})
-                          </div>
-                        ))
-                    }
-                  </div>
+                  {/* Items list lifted out of muted gray — these are the
+                      confirmed items the operator + driver act on, so
+                      they should read at the same weight as a normal
+                      data table. The empty-state copy stays muted so
+                      it's clearly a hint, not a list entry. */}
+                  {pickupFreeItems.filter(i => i.description.trim()).length === 0 ? (
+                    <div style={{ padding: 12, background: '#F9FAFB', borderRadius: 8, fontSize: 12, color: theme.colors.textMuted, fontStyle: 'italic' }}>
+                      Add items on the Pickup section above — they&apos;ll appear here automatically.
+                    </div>
+                  ) : (
+                    <div style={{
+                      padding: 12, background: '#F9FAFB',
+                      border: `1px solid ${theme.colors.borderLight || '#e5e7eb'}`,
+                      borderRadius: 8,
+                      display: 'flex', flexDirection: 'column', gap: 6,
+                    }}>
+                      {pickupFreeItems.filter(i => i.description.trim()).map(i => (
+                        <div key={i.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, fontSize: 13, color: theme.colors.text }}>
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 }}>
+                            <span style={{ width: 4, height: 4, borderRadius: '50%', background: theme.colors.primary, flexShrink: 0 }} />
+                            <span style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {i.description}
+                            </span>
+                          </span>
+                          <span style={{
+                            fontSize: 11, fontWeight: 600,
+                            padding: '2px 8px', borderRadius: 100,
+                            background: '#FFEDD5', color: '#9A3412',
+                            flexShrink: 0,
+                          }}>
+                            qty {i.quantity}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
 
