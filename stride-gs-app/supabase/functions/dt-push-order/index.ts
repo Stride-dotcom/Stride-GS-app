@@ -522,7 +522,7 @@ Deno.serve(async (req: Request) => {
   // a republish. A republish should reflect Stride's current state.
   const { data: items, error: itemsErr } = await supabase
     .from('dt_order_items')
-    .select('id, dt_item_code, description, quantity, vendor, class_name, cubic_feet, extras')
+    .select('id, dt_item_code, description, quantity, vendor, class_name, cubic_feet, room, extras')
     .eq('dt_order_id', orderId)
     .is('removed_at', null);
 
