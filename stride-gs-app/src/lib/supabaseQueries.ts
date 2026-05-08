@@ -2204,6 +2204,8 @@ export async function fetchDtOrderByIdFromSupabase(
       sidemark: row.sidemark ?? '',
       clientReference: row.client_reference ?? '',
       details: row.details ?? '',
+      driverNotes: row.driver_notes ?? '',
+      internalNotes: row.internal_notes ?? '',
       latestNotePreview: row.latest_note_preview ?? '',
       source: row.source ?? '',
       lastSyncedAt: row.last_synced_at ?? '',
