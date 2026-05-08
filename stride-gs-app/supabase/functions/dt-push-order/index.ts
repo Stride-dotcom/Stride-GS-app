@@ -1,5 +1,26 @@
 /**
- * dt-push-order — Supabase Edge Function (Phase 2c) — v17 2026-04-27 PST
+ * dt-push-order — Supabase Edge Function (Phase 2c) — v18 2026-05-03 PST
+ * v18: Two DT-side display bugs fixed.
+ *      1. Ad-hoc / free-text items were rendering with the
+ *         dt_order_items UUID PK as their SKU on the driver app
+ *         (e.g. "12017456-c353-48b8-9c0c-417c0dd60fcf") because the
+ *         buildOrderXml fallback was `it.dt_item_code || it.id`.
+ *         New rule: rows where BOTH inventory_id and dt_item_code are
+ *         null (the only signature for genuinely ad-hoc lines) emit
+ *         empty <item_id/>; inventory-sourced rows still fall back
+ *         to it.id so DT keeps a stable identifier on re-push.
+ *      2. Pickup legs of pickup_and_delivery pairs were rendering
+ *         "-" in DT for delivery_date / time window because the
+ *         linked pickup row's local_service_date was sometimes left
+ *         null by the create path. The push function now copies
+ *         local_service_date / window_start_local / window_end_local
+ *         from the delivery leg → pickup leg when the pickup is
+ *         missing them. Belt-and-suspenders so DT always shows a
+ *         date on both halves of a P+D pair.
+ *      Both SELECTs against dt_order_items grew an `inventory_id`
+ *      column to support fix #1.
+ *
+ * v17 2026-04-27 PST:
  * v17: Items now include a <location> tag pulled from extras.location
  *      (warehouse bin/shelf the inventory item is stored at). Lets
  *      drivers/dispatchers see where the piece came from on the DT
@@ -106,6 +127,9 @@ interface DtOrderRow {
 
 interface DtOrderItemRow {
   id: string;
+  /** FK to public.inventory.id when the line came from an inventory pick;
+   *  null for ad-hoc / free-text items typed straight into the modal. */
+  inventory_id: string | null;
   dt_item_code: string | null;
   description: string | null;
   quantity: number | null;
@@ -268,7 +292,19 @@ function buildOrderXml(
     const extras = (it.extras || {}) as Record<string, unknown>;
     const locationRaw = (extras.location ?? '') as string;
     const locationVal = locationRaw ? `\n      <location>${xmlEscape(locationRaw)}</location>` : '';
-    return `    <item>\n      <item_id>${xmlEscape(it.dt_item_code || it.id)}</item_id>\n      <description>${xmlEscape(desc)}</description>\n      <quantity>${qty}</quantity>${cubeVal}${locationVal}\n    </item>`;
+    // SKU resolution:
+    //   • Use dt_item_code when set (inventory pick AND ad-hoc rows can both
+    //     carry one once the inventory-link sync has run).
+    //   • Inventory-sourced rows that haven't been backfilled fall back to
+    //     it.id so DT still sees something stable across re-pushes.
+    //   • Ad-hoc rows (no inventory_id AND no dt_item_code) emit empty —
+    //     previously these were getting the random dt_order_items UUID
+    //     which DT then displayed as the SKU on the driver app
+    //     ("12017456-c353-48b8-9c0c-417c0dd60fcf"). Empty <item_id/> is
+    //     valid and lets DT just show the description.
+    const isAdHoc = !it.inventory_id && !it.dt_item_code;
+    const sku = isAdHoc ? '' : (it.dt_item_code || it.id);
+    return `    <item>\n      <item_id>${xmlEscape(sku)}</item_id>\n      <description>${xmlEscape(desc)}</description>\n      <quantity>${qty}</quantity>${cubeVal}${locationVal}\n    </item>`;
   }).join('\n');
 
   const desc = buildOrderDescription(order, accountName, crossRefIdent, linkedDeliveryInfo);
@@ -538,7 +574,7 @@ Deno.serve(async (req: Request) => {
   // a republish. A republish should reflect Stride's current state.
   const { data: items, error: itemsErr } = await supabase
     .from('dt_order_items')
-    .select('id, dt_item_code, description, quantity, vendor, class_name, cubic_feet, room, extras')
+    .select('id, inventory_id, dt_item_code, description, quantity, vendor, class_name, cubic_feet, room, extras')
     .eq('dt_order_id', orderId)
     .is('removed_at', null);
 
@@ -588,6 +624,22 @@ Deno.serve(async (req: Request) => {
 
     if (!linkedErr && linkedOrder) {
       const linkedTyped = linkedOrder as DtOrderRow;
+      // v18 fix: pickup leg shows "-" for service date in DT when the
+      // linked pickup row's `local_service_date` is null (the React
+      // create-order path didn't always stamp it on the pickup leg).
+      // For a pickup_and_delivery pair the two legs share the same
+      // calendar day, so fall back to the delivery leg's date here
+      // before building the pickup XML. Same fallback for the time
+      // window since DT's pickup card renders both side-by-side.
+      if (!linkedTyped.local_service_date && orderTyped.local_service_date) {
+        linkedTyped.local_service_date = orderTyped.local_service_date;
+      }
+      if (!linkedTyped.window_start_local && orderTyped.window_start_local) {
+        linkedTyped.window_start_local = orderTyped.window_start_local;
+      }
+      if (!linkedTyped.window_end_local && orderTyped.window_end_local) {
+        linkedTyped.window_end_local = orderTyped.window_end_local;
+      }
       // v2026-05-04: Lifted the "skip if already pushed" guard. DT's
       // add_order is upsert-by-identifier (Ashok confirmed): re-posting
       // the same order_number with an updated payload replaces the
@@ -598,7 +650,7 @@ Deno.serve(async (req: Request) => {
       await pruneDuplicateOrderItems(supabase, linkedTyped.id);
       const { data: linkedItems } = await supabase
         .from('dt_order_items')
-        .select('id, dt_item_code, description, quantity, vendor, class_name, cubic_feet, room, extras')
+        .select('id, inventory_id, dt_item_code, description, quantity, vendor, class_name, cubic_feet, room, extras')
         .eq('dt_order_id', linkedTyped.id)
         .is('removed_at', null);
       const linkedItemsTyped = (linkedItems || []) as DtOrderItemRow[];
