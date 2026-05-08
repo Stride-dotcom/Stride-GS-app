@@ -239,6 +239,7 @@ function DetailsTab({
   onSave,
   onSaveAndResync,
   isStaff,
+  accessorialNames,
 }: {
   order: DtOrderForUI;
   /** P+D pair partner. Populated on the parent so DetailsTab can show
