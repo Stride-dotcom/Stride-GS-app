@@ -510,7 +510,8 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
         <div style={{ color: '#DC2626', fontSize: 12, padding: '12px 0' }}>Failed to load items</div>
       ) : items.length > 0 ? (
         <div style={{ border: `1px solid ${theme.colors.border}`, borderRadius: 10, overflow: 'hidden' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+          <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
+          <table style={{ width: '100%', minWidth: 720, borderCollapse: 'collapse', fontSize: 12 }}>
             <thead><tr style={{ background: theme.colors.bgSubtle }}>
               <th style={{ padding: '6px 6px', textAlign: 'center', width: 28 }}>
                 <input type="checkbox" checked={selectedItemIds.size === items.length && items.length > 0} onChange={toggleAll}
@@ -580,6 +581,7 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
               </tr>
             ))}</tbody>
           </table>
+          </div>
         </div>
       ) : (
         <div style={{ color: theme.colors.textMuted, fontSize: 12, padding: '12px 0' }}>No items recorded</div>

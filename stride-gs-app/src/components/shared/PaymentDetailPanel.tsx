@@ -143,7 +143,8 @@ export function PaymentDetailPanel({ invoice, onClose, charges, paymentMethod, o
             <div style={{ marginBottom: 16 }}>
               <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8 }}>Line Items</div>
               <div style={{ border: `1px solid ${theme.colors.border}`, borderRadius: 10, overflow: 'hidden' }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
+                <table style={{ width: '100%', minWidth: 480, borderCollapse: 'collapse' }}>
                   <thead>
                     <tr>
                       <th style={th}>Description</th>
@@ -171,6 +172,7 @@ export function PaymentDetailPanel({ invoice, onClose, charges, paymentMethod, o
                     </tr>
                   </tbody>
                 </table>
+                </div>
               </div>
             </div>
           )}
