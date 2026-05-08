@@ -16,7 +16,7 @@ import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
 
 export type EntityType =
-  | 'inventory' | 'task' | 'repair' | 'will_call' | 'shipment' | 'claim';
+  | 'inventory' | 'task' | 'repair' | 'will_call' | 'shipment' | 'claim' | 'dt_order';
 
 export type PhotoType = 'general' | 'inspection' | 'repair' | 'receiving' | 'damage';
 

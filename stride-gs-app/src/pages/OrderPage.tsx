@@ -25,7 +25,6 @@ import {
 } from '../lib/supabaseQueries';
 import type {
   DtOrderForUI,
-  DtOrderItemForUI,
   DtOrderHistoryEvent,
   DtSideNote,
   DtOrderPhoto,
@@ -34,6 +33,7 @@ import {
   EntityPage, EPCard, EPLabel, EPFooterButton, EntityPageTokens as EP,
 } from '../components/shared/EntityPage';
 import { EntityHistory } from '../components/shared/EntityHistory';
+import { PhotosPanel, DocumentsPanel } from '../components/shared/EntityAttachments';
 import { supabase } from '../lib/supabase';
 import { CreateDeliveryOrderModal } from '../components/shared/CreateDeliveryOrderModal';
 import { ReleaseItemsModal } from '../components/shared/ReleaseItemsModal';
@@ -208,6 +208,20 @@ function PageState({ icon: Icon, color, title, body, actions }: {
     </div>
   );
 }
+
+// Compact inline-items table styles. The full-fidelity per-item card
+// view used to live in the (now-removed) Items tab; the Details tab
+// renders this denser table instead so everything about the order is
+// visible without tab-switching.
+const inlineItemTh: React.CSSProperties = {
+  fontSize: 10, fontWeight: 700, letterSpacing: '0.05em',
+  textTransform: 'uppercase', color: theme.colors.textMuted,
+  padding: '6px 10px',
+  borderBottom: `1px solid ${theme.colors.border}`,
+};
+const inlineItemTd: React.CSSProperties = {
+  padding: '6px 10px', verticalAlign: 'top',
+};
 
 // ── Details tab content ───────────────────────────────────────────────────────
 
@@ -466,6 +480,82 @@ function DetailsTab({
         )}
       </EPCard>
 
+      {/* Items — moved inline from the old 'Items' tab. Compact table
+          covering description / vendor / room / qty / class / location.
+          Driver notes + return codes render as sub-rows when present so
+          we don't lose the post-DT-sync information. The full-fidelity
+          'Items' tab is gone; the freed slot now hosts Photos & Docs. */}
+      {(order.items?.length ?? 0) > 0 && (
+        <EPCard>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+            <SectionTitle>Items</SectionTitle>
+            <span style={{ fontSize: 11, color: EP.textMuted }}>
+              {(order.items ?? []).reduce((s, it) => s + Math.max(1, Number(it.quantity) || 1), 0)} pieces ·
+              {' '}{order.items?.length ?? 0} line{order.items?.length === 1 ? '' : 's'}
+            </span>
+          </div>
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+              <thead>
+                <tr style={{ background: '#FFFBEB', textAlign: 'left' }}>
+                  <th style={inlineItemTh}>Description</th>
+                  <th style={inlineItemTh}>Vendor</th>
+                  <th style={inlineItemTh}>Room</th>
+                  <th style={{ ...inlineItemTh, textAlign: 'right' }}>Qty</th>
+                  <th style={{ ...inlineItemTh, textAlign: 'right' }}>Delivered</th>
+                  <th style={inlineItemTh}>Class</th>
+                  <th style={inlineItemTh}>Location</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(order.items ?? []).map((item, idx) => {
+                  const orderedQty = item.quantity ?? 0;
+                  const delQty = item.deliveredQuantity ?? null;
+                  const qtyShort = delQty != null && orderedQty > 0 && delQty < orderedQty;
+                  const fullyDelivered = item.delivered === true || (delQty != null && orderedQty > 0 && delQty >= orderedQty);
+                  return (
+                    <React.Fragment key={item.id || idx}>
+                      <tr style={{ borderBottom: `1px solid ${theme.colors.borderLight || '#f0f0f0'}`, background: idx % 2 === 0 ? '#fff' : '#FAFAF9' }}>
+                        <td style={inlineItemTd}>
+                          <div style={{ fontWeight: 500 }}>{item.description || '—'}</div>
+                          {item.dtItemCode && (
+                            <div style={{ fontSize: 10, color: EP.textMuted, fontFamily: 'monospace' }}>{item.dtItemCode}</div>
+                          )}
+                        </td>
+                        <td style={inlineItemTd}>{item.vendor || '—'}</td>
+                        <td style={inlineItemTd}>{item.room || '—'}</td>
+                        <td style={{ ...inlineItemTd, textAlign: 'right', fontWeight: 600 }}>{orderedQty || '—'}</td>
+                        <td style={{ ...inlineItemTd, textAlign: 'right', color: qtyShort ? '#B45309' : fullyDelivered ? '#15803D' : EP.textMuted }}>
+                          {delQty != null ? delQty : '—'}
+                        </td>
+                        <td style={inlineItemTd}>{item.className || '—'}</td>
+                        <td style={inlineItemTd}>{item.dtLocation || item.location || '—'}</td>
+                      </tr>
+                      {(item.itemNote || (item.returnCodes && item.returnCodes.length > 0)) && (
+                        <tr>
+                          <td colSpan={7} style={{ padding: '0 10px 8px', background: idx % 2 === 0 ? '#fff' : '#FAFAF9' }}>
+                            {item.itemNote && (
+                              <div style={{ fontSize: 11, color: '#92400E', padding: '4px 8px', background: '#FFFBEB', borderRadius: 6, borderLeft: '3px solid #F59E0B', marginBottom: 4 }}>
+                                <span style={{ fontWeight: 600 }}>Driver note:</span> {item.itemNote}
+                              </div>
+                            )}
+                            {item.returnCodes && item.returnCodes.length > 0 && (
+                              <div style={{ fontSize: 11, color: '#991B1B', fontWeight: 500 }}>
+                                Return codes: {item.returnCodes.join(', ')}
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </EPCard>
+      )}
+
       {/* Pricing */}
       {(hasPricing || editing) && (
         <EPCard>
@@ -608,92 +698,6 @@ function DetailsTab({
         </EPCard>
       )}
     </div>
-  );
-}
-
-// ── Items tab content ─────────────────────────────────────────────────────────
-
-function ItemsTab({ items }: { items: DtOrderItemForUI[] }) {
-  if (items.length === 0) {
-    return (
-      <EPCard>
-        <div style={{ textAlign: 'center', color: EP.textMuted, fontSize: 13, padding: '24px 0' }}>No items on this order.</div>
-      </EPCard>
-    );
-  }
-  return (
-    <EPCard>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-        {items.map((item, idx) => {
-          // Treat short-delivery as a flag worth highlighting. delivered=false
-          // explicitly OR a delivered_quantity below ordered quantity counts.
-          const orderedQty = item.quantity ?? 0;
-          const delQty = item.deliveredQuantity ?? null;
-          const explicitlyShort = item.delivered === false;
-          const qtyShort = delQty != null && orderedQty > 0 && delQty < orderedQty;
-          const fullyDelivered = item.delivered === true || (delQty != null && orderedQty > 0 && delQty >= orderedQty);
-          return (
-            <div key={item.id || idx} style={{ padding: '12px 14px', borderRadius: 10, background: idx % 2 === 0 ? '#FAFAF9' : '#fff', border: `1px solid ${theme.colors.border}` }}>
-              <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 6 }}>
-                <div style={{ fontSize: 13, fontWeight: 600, color: EP.textPrimary, flex: 1, minWidth: 0 }}>
-                  {item.description || 'No description'}
-                </div>
-                {fullyDelivered && (
-                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, fontWeight: 600, background: '#F0FDF4', color: '#15803D', padding: '2px 8px', borderRadius: 10, flexShrink: 0 }}>
-                    <CheckCircle2 size={11} /> Delivered
-                  </span>
-                )}
-                {(explicitlyShort || qtyShort) && !fullyDelivered && (
-                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, fontWeight: 600, background: '#FEF3C7', color: '#B45309', padding: '2px 8px', borderRadius: 10, flexShrink: 0 }}>
-                    <AlertCircle size={11} /> Short
-                  </span>
-                )}
-              </div>
-              <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 12, color: EP.textSecondary }}>
-                {item.dtItemCode        && <span><span style={{ fontWeight: 600 }}>SKU:</span> {item.dtItemCode}</span>}
-                {item.quantity != null  && <span><span style={{ fontWeight: 600 }}>Qty:</span> {item.quantity}</span>}
-                {item.deliveredQuantity != null && (
-                  <span>
-                    <span style={{ fontWeight: 600 }}>Delivered:</span>{' '}
-                    <span style={{ color: qtyShort ? '#B45309' : '#15803D' }}>
-                      {item.deliveredQuantity}
-                    </span>
-                  </span>
-                )}
-                {item.checkedQuantity != null && item.checkedQuantity !== item.deliveredQuantity && (
-                  <span><span style={{ fontWeight: 600 }}>Checked:</span> {item.checkedQuantity}</span>
-                )}
-                {item.dtLocation && (
-                  <span><span style={{ fontWeight: 600 }}>Location:</span> {item.dtLocation}</span>
-                )}
-                {item.room && (
-                  <span><span style={{ fontWeight: 600 }}>Room:</span> {item.room}</span>
-                )}
-                {item.unitPrice != null && item.unitPrice > 0 && (
-                  <span><span style={{ fontWeight: 600 }}>Amount:</span> ${item.unitPrice.toFixed(2)}</span>
-                )}
-              </div>
-              {item.itemNote && (
-                <div style={{ fontSize: 12, color: '#92400E', marginTop: 6, padding: '6px 8px', background: '#FFFBEB', borderRadius: 6, borderLeft: '3px solid #F59E0B' }}>
-                  <span style={{ fontWeight: 600 }}>Driver note:</span> {item.itemNote}
-                </div>
-              )}
-              {item.returnCodes && item.returnCodes.length > 0 && (
-                <div style={{ fontSize: 11, color: '#991B1B', marginTop: 6, fontWeight: 500 }}>
-                  Return codes: {item.returnCodes.join(', ')}
-                </div>
-              )}
-              {item.notes && (
-                <div style={{ fontSize: 11, color: EP.textMuted, marginTop: 6, fontStyle: 'italic' }}>{item.notes}</div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-      <div style={{ fontSize: 11, color: EP.textMuted, marginTop: 12, fontStyle: 'italic' }}>
-        Items can't be edited here — cancel and recreate the order to change items.
-      </div>
-    </EPCard>
   );
 }
 
@@ -1382,14 +1386,31 @@ export function OrderPage() {
       ),
     },
     {
-      id: 'items',
-      label: 'Items',
-      // Sum of per-line quantities, not row count — a line "fat stools
-      // qty 2" is two pieces. Matches the pricing convention used in
-      // CreateDeliveryOrderModal.itemCount. Fixes the MRS-00047
-      // mismatch (7 rows / 8 pieces showed 7 in the badge).
-      badgeCount: (order.items ?? []).reduce((s, it) => s + Math.max(1, Number(it.quantity) || 1), 0),
-      render: () => <ItemsTab items={order.items ?? []} />,
+      id: 'photos-docs',
+      label: 'Photos & Docs',
+      // Pre-delivery reference attachments — parking maps, item photos,
+      // BOLs, vendor packing slips. NOT proof of delivery (DT drivers
+      // upload that on completion). Stays in our app only; no DT push.
+      render: () => (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <EPCard>
+            <SectionTitle>Photos</SectionTitle>
+            <PhotosPanel
+              entityType="dt_order"
+              entityId={order.id}
+              tenantId={order.tenantId ?? undefined}
+            />
+          </EPCard>
+          <EPCard>
+            <SectionTitle>Documents</SectionTitle>
+            <DocumentsPanel
+              contextType="dt_order"
+              contextId={order.id}
+              tenantId={order.tenantId ?? undefined}
+            />
+          </EPCard>
+        </div>
+      ),
     },
     {
       id: 'completion',

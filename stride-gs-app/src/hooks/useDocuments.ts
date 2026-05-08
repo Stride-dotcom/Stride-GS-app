@@ -17,7 +17,7 @@ import { useAuth } from '../contexts/AuthContext';
 // Session-77 added 'client' — per-client docs (intake packets, COI renewals,
 // tax-exemption updates) ride the same module as entity docs.
 export type DocumentContextType =
-  | 'shipment' | 'item' | 'task' | 'repair' | 'willcall' | 'claim' | 'client';
+  | 'shipment' | 'item' | 'task' | 'repair' | 'willcall' | 'claim' | 'client' | 'dt_order';
 
 export interface DocumentRow {
   id: string;
