@@ -209,6 +209,7 @@ function PageState({ icon: Icon, color, title, body, actions }: {
 
 function DetailsTab({
   order,
+  linkedOrder,
   editing,
   edit,
   setField,
@@ -219,6 +220,10 @@ function DetailsTab({
   onSave,
 }: {
   order: DtOrderForUI;
+  /** P+D pair partner. Populated on the parent so DetailsTab can show
+   *  pickup + delivery contacts side-by-side and a deep link to the
+   *  partner row. Null for non-P+D orders. */
+  linkedOrder: DtOrderForUI | null;
   editing: boolean;
   edit: OrderEdit;
   setField: <K extends keyof OrderEdit>(k: K, v: OrderEdit[K]) => void;
@@ -229,6 +234,19 @@ function DetailsTab({
   onSave: () => void;
 }) {
   const addressLine = [order.contactAddress, order.contactCity, order.contactState, order.contactZip].filter(Boolean).join(', ');
+  // Identify the P+D partner — when this row is the delivery leg of a
+  // pair, the partner is the pickup leg (and vice versa). Drives the
+  // side-by-side contact cards + the linked order # deep link.
+  const isPD = order.orderType === 'pickup_and_delivery' || (order.linkedOrderId && linkedOrder);
+  const thisIsPickupLeg = order.isPickup === true || order.orderType === 'pickup';
+  const pickupLeg = thisIsPickupLeg ? order : (linkedOrder?.isPickup ? linkedOrder : null);
+  const deliveryLeg = !thisIsPickupLeg ? order : linkedOrder;
+  const pickupAddrLine = pickupLeg
+    ? [pickupLeg.contactAddress, pickupLeg.contactCity, pickupLeg.contactState, pickupLeg.contactZip].filter(Boolean).join(', ')
+    : '';
+  const deliveryAddrLine = deliveryLeg
+    ? [deliveryLeg.contactAddress, deliveryLeg.contactCity, deliveryLeg.contactState, deliveryLeg.contactZip].filter(Boolean).join(', ')
+    : '';
   const hasPricing = order.baseDeliveryFee != null || order.orderTotal != null || (order.accessorials?.length ?? 0) > 0;
 
   return (
@@ -260,30 +278,92 @@ function DetailsTab({
         )}
       </EPCard>
 
-      {/* Contact */}
-      <EPCard>
-        <SectionTitle>Contact</SectionTitle>
-        {editing ? (
-          <>
-            <EditField label="Name"    value={edit.contactName}    onChange={v => setField('contactName', v)} />
-            <EditField label="Address" value={edit.contactAddress} onChange={v => setField('contactAddress', v)} icon={<MapPin size={11} />} />
-            <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', gap: 10 }}>
-              <EditField label="City"  value={edit.contactCity}  onChange={v => setField('contactCity', v)} />
-              <EditField label="State" value={edit.contactState} onChange={v => setField('contactState', v)} />
-              <EditField label="Zip"   value={edit.contactZip}   onChange={v => setField('contactZip', v)} />
+      {/* Contact — for P+D pairs render pickup + delivery side-by-side
+          and surface the linked-leg order # as a clickable deep link.
+          Falls back to the single-leg contact card for non-P+D orders.
+          The Edit form still targets the current row's contact fields
+          only (the linked leg has its own Edit Full Order modal). */}
+      {(isPD && pickupLeg && deliveryLeg && pickupLeg.id !== deliveryLeg.id) ? (
+        <EPCard>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+            <SectionTitle>Pickup &amp; Delivery</SectionTitle>
+            {linkedOrder && (
+              <a
+                href={`#/orders/${linkedOrder.id}`}
+                style={{
+                  fontSize: 11, fontWeight: 600,
+                  color: theme.colors.primary, textDecoration: 'none',
+                  border: `1px solid ${theme.colors.primary}`,
+                  padding: '3px 9px', borderRadius: 6,
+                }}
+                title={`Open the linked ${thisIsPickupLeg ? 'delivery' : 'pickup'} leg`}
+              >
+                Linked: {linkedOrder.dtIdentifier} →
+              </a>
+            )}
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+            <div style={{ background: '#FEF3C7', borderRadius: 8, padding: 12 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: '#92400E', marginBottom: 6 }}>
+                Pickup{pickupLeg.id === order.id ? ' (this order)' : ''}
+              </div>
+              <Field label="Name"    value={pickupLeg.contactName} />
+              <Field label="Address" value={pickupAddrLine || null} icon={<MapPin size={11} />} />
+              <Field label="Phone"   value={pickupLeg.contactPhone} icon={<Phone size={11} />} />
+              <Field label="Email"   value={pickupLeg.contactEmail} icon={<Mail size={11} />} />
             </div>
-            <EditField label="Phone" value={edit.contactPhone} onChange={v => setField('contactPhone', v)} type="tel"   icon={<Phone size={11} />} />
-            <EditField label="Email" value={edit.contactEmail} onChange={v => setField('contactEmail', v)} type="email" icon={<Mail size={11} />} />
-          </>
-        ) : (
-          <>
-            <Field label="Name"    value={order.contactName} />
-            <Field label="Address" value={addressLine || null} icon={<MapPin size={11} />} />
-            <Field label="Phone"   value={order.contactPhone} icon={<Phone size={11} />} />
-            <Field label="Email"   value={order.contactEmail} icon={<Mail size={11} />} />
-          </>
-        )}
-      </EPCard>
+            <div style={{ background: '#DBEAFE', borderRadius: 8, padding: 12 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: '#1E40AF', marginBottom: 6 }}>
+                Delivery{deliveryLeg.id === order.id ? ' (this order)' : ''}
+              </div>
+              <Field label="Name"    value={deliveryLeg.contactName} />
+              <Field label="Address" value={deliveryAddrLine || null} icon={<MapPin size={11} />} />
+              <Field label="Phone"   value={deliveryLeg.contactPhone} icon={<Phone size={11} />} />
+              <Field label="Email"   value={deliveryLeg.contactEmail} icon={<Mail size={11} />} />
+            </div>
+          </div>
+          {editing && (
+            <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${theme.colors.borderLight || '#f0f0f0'}` }}>
+              <div style={{ fontSize: 11, color: theme.colors.textMuted, marginBottom: 8, fontStyle: 'italic' }}>
+                Editing this leg's contact fields below. Open the linked order to edit its leg.
+              </div>
+              <EditField label="Name"    value={edit.contactName}    onChange={v => setField('contactName', v)} />
+              <EditField label="Address" value={edit.contactAddress} onChange={v => setField('contactAddress', v)} icon={<MapPin size={11} />} />
+              <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', gap: 10 }}>
+                <EditField label="City"  value={edit.contactCity}  onChange={v => setField('contactCity', v)} />
+                <EditField label="State" value={edit.contactState} onChange={v => setField('contactState', v)} />
+                <EditField label="Zip"   value={edit.contactZip}   onChange={v => setField('contactZip', v)} />
+              </div>
+              <EditField label="Phone" value={edit.contactPhone} onChange={v => setField('contactPhone', v)} type="tel"   icon={<Phone size={11} />} />
+              <EditField label="Email" value={edit.contactEmail} onChange={v => setField('contactEmail', v)} type="email" icon={<Mail size={11} />} />
+            </div>
+          )}
+        </EPCard>
+      ) : (
+        <EPCard>
+          <SectionTitle>Contact</SectionTitle>
+          {editing ? (
+            <>
+              <EditField label="Name"    value={edit.contactName}    onChange={v => setField('contactName', v)} />
+              <EditField label="Address" value={edit.contactAddress} onChange={v => setField('contactAddress', v)} icon={<MapPin size={11} />} />
+              <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', gap: 10 }}>
+                <EditField label="City"  value={edit.contactCity}  onChange={v => setField('contactCity', v)} />
+                <EditField label="State" value={edit.contactState} onChange={v => setField('contactState', v)} />
+                <EditField label="Zip"   value={edit.contactZip}   onChange={v => setField('contactZip', v)} />
+              </div>
+              <EditField label="Phone" value={edit.contactPhone} onChange={v => setField('contactPhone', v)} type="tel"   icon={<Phone size={11} />} />
+              <EditField label="Email" value={edit.contactEmail} onChange={v => setField('contactEmail', v)} type="email" icon={<Mail size={11} />} />
+            </>
+          ) : (
+            <>
+              <Field label="Name"    value={order.contactName} />
+              <Field label="Address" value={addressLine || null} icon={<MapPin size={11} />} />
+              <Field label="Phone"   value={order.contactPhone} icon={<Phone size={11} />} />
+              <Field label="Email"   value={order.contactEmail} icon={<Mail size={11} />} />
+            </>
+          )}
+        </EPCard>
+      )}
 
       {/* Order Details */}
       <EPCard>
@@ -385,7 +465,26 @@ function DetailsTab({
                 {REVIEW_CFG[order.reviewStatus].label}
               </div>
             )}
-            {order.createdByRole && <Field label="Created By"   value={order.createdByRole} />}
+            {(order.createdByName || order.createdByEmail || order.createdByRole) && (
+              <Field
+                label="Created By"
+                value={
+                  // Prefer the actual person's name + email so staff can
+                  // follow up with the submitter directly. Fall back to
+                  // role only when neither is recorded (older rows or
+                  // service-account submissions).
+                  (() => {
+                    const who = order.createdByName || order.createdByEmail;
+                    const role = order.createdByRole ? ` · ${order.createdByRole}` : '';
+                    if (who && order.createdByEmail && order.createdByName) {
+                      return `${order.createdByName} (${order.createdByEmail})${role}`;
+                    }
+                    if (who) return `${who}${role}`;
+                    return order.createdByRole || '';
+                  })()
+                }
+              />
+            )}
             {order.reviewNotes   && <Field label="Review Notes" value={order.reviewNotes} />}
             {order.reviewedAt    && <Field label="Reviewed At"  value={new Date(order.reviewedAt).toLocaleString()} />}
             {order.pushedToDtAt  && <Field label="Pushed to DT" value={new Date(order.pushedToDtAt).toLocaleString()} />}
@@ -471,6 +570,9 @@ function ItemsTab({ items }: { items: DtOrderItemForUI[] }) {
                 )}
                 {item.dtLocation && (
                   <span><span style={{ fontWeight: 600 }}>Location:</span> {item.dtLocation}</span>
+                )}
+                {item.room && (
+                  <span><span style={{ fontWeight: 600 }}>Room:</span> {item.room}</span>
                 )}
                 {item.unitPrice != null && item.unitPrice > 0 && (
                   <span><span style={{ fontWeight: 600 }}>Amount:</span> ${item.unitPrice.toFixed(2)}</span>
@@ -698,6 +800,21 @@ export function OrderPage() {
   useEffect(() => { if (fetchedOrder) setLocalOrder(fetchedOrder); }, [fetchedOrder]);
 
   const order = localOrder ?? fetchedOrder;
+
+  // For P+D orders we also load the linked leg so the detail page
+  // can show pickup + delivery contacts side-by-side and surface the
+  // linked order # as a clickable deep link. Best-effort — null when
+  // the linked id is missing or RLS blocks it; the side-by-side card
+  // just doesn't render.
+  const [linkedOrder, setLinkedOrder] = useState<DtOrderForUI | null>(null);
+  useEffect(() => {
+    if (!order?.linkedOrderId) { setLinkedOrder(null); return; }
+    let cancelled = false;
+    void fetchDtOrderByIdFromSupabase(order.linkedOrderId).then(r => {
+      if (!cancelled) setLinkedOrder(r);
+    }).catch(() => { /* tolerate */ });
+    return () => { cancelled = true; };
+  }, [order?.linkedOrderId]);
 
   // Edit state
   const [editing, setEditing] = useState(false);
@@ -1068,6 +1185,7 @@ export function OrderPage() {
       render: () => (
         <DetailsTab
           order={order}
+          linkedOrder={linkedOrder}
           editing={editing}
           edit={edit}
           setField={setField}

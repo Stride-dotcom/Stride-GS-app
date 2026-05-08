@@ -795,6 +795,24 @@ export function CreateDeliveryOrderModal({
 
   // ── Inventory item selection (delivery + warehouse-source only) ────────
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set(preSelectedItemIds));
+  // Per-order room overrides for inventory items. Keyed by dt_item_code.
+  // The inventory row carries a default room that flows in when an item
+  // is selected — but the operator can override it on a per-order basis
+  // (e.g. inventory says "Bedroom" but this delivery is to the new
+  // primary suite). The override is what gets written to dt_order_items
+  // and into the DT description ("Vendor desc — Room"); inventory is
+  // not modified. Hydrated from saved dt_order_items.room on edit-load.
+  const [roomOverrides, setRoomOverrides] = useState<Record<string, string>>({});
+  const setRoomOverride = (itemId: string, room: string) => {
+    setRoomOverrides(prev => ({ ...prev, [itemId]: room }));
+  };
+  // Effective room used by the save paths and the line UI: override
+  // wins, otherwise the inventory row's room.
+  const effectiveRoom = (itemId: string, fallback?: string | null): string => {
+    const override = roomOverrides[itemId];
+    if (override !== undefined) return override;
+    return fallback ?? '';
+  };
   // Collapse-toggle for the inventory list section. Defaults to expanded
   // when there are no selections yet (you need to see the list to pick),
   // collapsed once you've added items (you don't need the picker, you
@@ -1248,6 +1266,7 @@ export function CreateDeliveryOrderModal({
   const buildPDItemRows = (pickupId: string, deliveryId: string): Array<Record<string, unknown>> => {
     const rows: Array<Record<string, unknown>> = [];
     for (const i of selectedInvItems) {
+      const room = effectiveRoom(i.itemId, i.room);
       rows.push({
         dt_order_id: deliveryId,
         inventory_id: i.inventoryRowId ?? null,
@@ -1257,12 +1276,12 @@ export function CreateDeliveryOrderModal({
         vendor: i.vendor || null,
         class_name: i.itemClass || null,
         cubic_feet: classToCuFt(i.itemClass) ?? null,
-        room: i.room || null,
+        room: room || null,
         extras: {
           vendor: i.vendor || null,
           sidemark: i.sidemark || null,
           location: i.location || null,
-          room: i.room || null,
+          room: room || null,
           className: i.itemClass || null,
           source: 'inventory',
         },
@@ -1809,6 +1828,19 @@ export function CreateDeliveryOrderModal({
         .map(it => String(it.dt_item_code || '').trim())
         .filter(Boolean);
       if (itemIds.length > 0) setSelectedIds(new Set(itemIds));
+      // Hydrate per-line room overrides from saved dt_order_items.
+      // We always carry the saved room value forward so edits made on
+      // a prior save aren't lost when the modal reopens — the
+      // inventory row's room may have moved on since.
+      const savedRooms: Record<string, string> = {};
+      for (const it of items) {
+        const code = String(it.dt_item_code || '').trim();
+        if (!code) continue;
+        const ex = (it.extras && typeof it.extras === 'object' ? it.extras : {}) as Record<string, unknown>;
+        const room = String(it.room ?? ex.room ?? '').trim();
+        if (room) savedRooms[code] = room;
+      }
+      if (Object.keys(savedRooms).length > 0) setRoomOverrides(savedRooms);
       if (ot === 'delivery') {
         const adhoc: FreeItem[] = items
           .filter(it => {
@@ -2139,25 +2171,28 @@ export function CreateDeliveryOrderModal({
             });
         }
         if (mode !== 'delivery' || itemsSource !== 'warehouse') return [] as Array<Record<string, unknown>>;
-        const invRows = selectedInvItems.map(i => ({
-          dt_order_id: orderId,
-          inventory_id: i.inventoryRowId ?? null,
-          dt_item_code: i.itemId,
-          description: i.description || '',
-          quantity: i.qty || 1,
-          vendor: i.vendor || null,
-          class_name: i.itemClass || null,
-          cubic_feet: classToCuFt(i.itemClass) ?? null,
-          room: i.room || null,
-          extras: {
+        const invRows = selectedInvItems.map(i => {
+          const room = effectiveRoom(i.itemId, i.room);
+          return {
+            dt_order_id: orderId,
+            inventory_id: i.inventoryRowId ?? null,
+            dt_item_code: i.itemId,
+            description: i.description || '',
+            quantity: i.qty || 1,
             vendor: i.vendor || null,
-            sidemark: i.sidemark || null,
-            location: i.location || null,
-            room: i.room || null,
-            className: i.itemClass || null,
-            source: 'inventory',
-          },
-        }));
+            class_name: i.itemClass || null,
+            cubic_feet: classToCuFt(i.itemClass) ?? null,
+            room: room || null,
+            extras: {
+              vendor: i.vendor || null,
+              sidemark: i.sidemark || null,
+              location: i.location || null,
+              room: room || null,
+              className: i.itemClass || null,
+              source: 'inventory',
+            },
+          };
+        });
         const adhocRows = deliveryFreeItems
           .filter(i => i.description.trim())
           .map(i => {
@@ -2472,25 +2507,28 @@ export function CreateDeliveryOrderModal({
           if (delErr) throw new Error(`Single-leg edit items delete failed: ${delErr.message}`);
         }
         if (mode === 'delivery' && itemsSource === 'warehouse') {
-          const invRows = selectedInvItems.map(i => ({
-            dt_order_id: editingDraftRowIdRef.current,
-            inventory_id: i.inventoryRowId ?? null,
-            dt_item_code: i.itemId,
-            description: i.description || '',
-            quantity: i.qty || 1,
-            vendor: i.vendor || null,
-            class_name: i.itemClass || null,
-            cubic_feet: classToCuFt(i.itemClass) ?? null,
-            room: i.room || null,
-            extras: {
+          const invRows = selectedInvItems.map(i => {
+            const room = effectiveRoom(i.itemId, i.room);
+            return {
+              dt_order_id: editingDraftRowIdRef.current,
+              inventory_id: i.inventoryRowId ?? null,
+              dt_item_code: i.itemId,
+              description: i.description || '',
+              quantity: i.qty || 1,
               vendor: i.vendor || null,
-              sidemark: i.sidemark || null,
-              location: i.location || null,
-              room: i.room || null,
-              className: i.itemClass || null,
-              source: 'inventory',
-            },
-          }));
+              class_name: i.itemClass || null,
+              cubic_feet: classToCuFt(i.itemClass) ?? null,
+              room: room || null,
+              extras: {
+                vendor: i.vendor || null,
+                sidemark: i.sidemark || null,
+                location: i.location || null,
+                room: room || null,
+                className: i.itemClass || null,
+                source: 'inventory',
+              },
+            };
+          });
           const adhocRows = deliveryFreeItems
             .filter(i => i.description.trim())
             .map(i => {
@@ -2854,25 +2892,26 @@ export function CreateDeliveryOrderModal({
           const invRows = selectedInvItems.map(i => {
             const cuFt = classToCuFt(i.itemClass);
             const qty = Number(i.qty) || 1;
+            const room = effectiveRoom(i.itemId, i.room);
             return {
               dt_order_id: orderRow.id,
               inventory_id: i.inventoryRowId ?? null,
               dt_item_code: i.itemId,
               description: buildItemDescription({
                 description: i.description, vendor: i.vendor,
-                sidemark: i.sidemark, room: i.room, itemId: i.itemId,
+                sidemark: i.sidemark, room: room, itemId: i.itemId,
               }),
               quantity: qty,
               original_quantity: qty,
               cubic_feet: cuFt != null ? cuFt * qty : null,
               class_name: i.itemClass || null,
               vendor: i.vendor || null,
-              room: i.room || null,
+              room: room || null,
               extras: {
                 vendor: i.vendor || null,
                 sidemark: i.sidemark || null,
                 location: i.location || null,
-                room: i.room || null,
+                room: room || null,
                 className: i.itemClass || null,
                 source: 'inventory',
               },
@@ -3573,6 +3612,7 @@ export function CreateDeliveryOrderModal({
                               <th style={summaryTh}>Description</th>
                               <th style={{ ...summaryTh, width: 110 }}>Sidemark</th>
                               <th style={{ ...summaryTh, width: 110 }}>Reference</th>
+                              <th style={{ ...summaryTh, width: 130 }}>Room</th>
                               <th style={{ ...summaryTh, width: 32 }}></th>
                             </tr>
                           </thead>
@@ -3602,6 +3642,28 @@ export function CreateDeliveryOrderModal({
                                 </td>
                                 <td style={{ ...summaryTd, color: theme.colors.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 110 }} title={(it as { reference?: string }).reference || ''}>
                                   {(it as { reference?: string }).reference || '—'}
+                                </td>
+                                <td style={{ ...summaryTd, padding: '4px 6px' }}>
+                                  {/* Per-order room override. Default flows in
+                                      from the inventory row; any edit here
+                                      gets persisted to dt_order_items.room
+                                      (and extras.room) on save and is
+                                      appended to the DT description as
+                                      "Vendor desc — Room". The inventory row
+                                      itself is NOT modified. */}
+                                  <input
+                                    type="text"
+                                    value={effectiveRoom(it.itemId, it.room)}
+                                    onChange={e => setRoomOverride(it.itemId, e.target.value)}
+                                    placeholder="—"
+                                    style={{
+                                      width: '100%', boxSizing: 'border-box',
+                                      padding: '3px 6px', fontSize: 12,
+                                      border: `1px solid ${theme.colors.border}`,
+                                      borderRadius: 4, background: '#fff',
+                                      fontFamily: 'inherit',
+                                    }}
+                                  />
                                 </td>
                                 <td style={{ ...summaryTd, textAlign: 'center' }}>
                                   <button

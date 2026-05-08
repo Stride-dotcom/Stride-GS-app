@@ -110,6 +110,7 @@ interface DtOrderItemRow {
   vendor: string | null;
   class_name: string | null;
   cubic_feet: number | null;
+  room: string | null;
   extras: Record<string, unknown> | null;
 }
 
@@ -126,8 +127,13 @@ function cdataEscape(val: string): string {
   return val.replace(/]]>/g, ']]]]><![CDATA[>');
 }
 
-// Build a rich item description: "Vendor | Description | SM: Sidemark | Ref: Reference"
-// For pickup legs, prefix with "PICK UP: "
+// Build a rich item description: "Vendor | Description | SM: Sidemark | Ref: Reference - Room"
+// Room is read from the item row's `room` column with `extras.room` as
+// a fallback (older rows persisted there before the column existed).
+// Appended at the tail with a hyphen separator so the operator can
+// scan the room without parsing pipes — matches the manual format
+// "Vendor description - Room" the dispatcher uses on paper sheets.
+// For pickup legs, prefix with "PICK UP: ".
 function buildItemDesc(it: DtOrderItemRow, isPickupLeg: boolean, sidemark?: string, reference?: string): string {
   const parts: string[] = [];
   if (it.vendor) parts.push(it.vendor);
@@ -135,7 +141,10 @@ function buildItemDesc(it: DtOrderItemRow, isPickupLeg: boolean, sidemark?: stri
   if (sidemark) parts.push(`SM: ${sidemark}`);
   if (reference) parts.push(`Ref: ${reference}`);
   const base = parts.join(' | ') || it.description || '';
-  return isPickupLeg ? `PICK UP: ${base}` : base;
+  const extrasRoom = (it.extras && typeof it.extras === 'object' ? (it.extras as Record<string, unknown>).room : null);
+  const room = (it.room || extrasRoom || '').toString().trim();
+  const withRoom = room ? `${base} - ${room}` : base;
+  return isPickupLeg ? `PICK UP: ${withRoom}` : withRoom;
 }
 
 // Build the DT order description with billing info
@@ -573,7 +582,7 @@ Deno.serve(async (req: Request) => {
       await pruneDuplicateOrderItems(supabase, linkedTyped.id);
       const { data: linkedItems } = await supabase
         .from('dt_order_items')
-        .select('id, dt_item_code, description, quantity, vendor, class_name, cubic_feet, extras')
+        .select('id, dt_item_code, description, quantity, vendor, class_name, cubic_feet, room, extras')
         .eq('dt_order_id', linkedTyped.id)
         .is('removed_at', null);
       const linkedItemsTyped = (linkedItems || []) as DtOrderItemRow[];
