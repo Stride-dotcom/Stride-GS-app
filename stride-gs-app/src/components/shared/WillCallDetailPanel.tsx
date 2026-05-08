@@ -926,7 +926,8 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}><Package size={14} color={theme.colors.orange} /><span style={{ fontSize: 12, fontWeight: 600 }}>Items ({resolvedItemCount})</span></div>
             {wc.items && wc.items.length > 0 ? (
               <div style={{ border: `1px solid ${theme.colors.border}`, borderRadius: 10, overflow: 'hidden' }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch' }}>
+                <table style={{ width: '100%', minWidth: 720, borderCollapse: 'collapse', fontSize: 12 }}>
                   <thead><tr style={{ background: theme.colors.bgSubtle }}>
                     {removeMode && <th style={{ padding: '6px 6px', width: 28 }} />}
                     <th style={{ padding: '6px 10px', textAlign: 'left', fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Item</th>
@@ -978,6 +979,7 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
                     );
                   })}</tbody>
                 </table>
+                </div>
               </div>
             ) : (
               enrichLoading ? (
