@@ -11,7 +11,7 @@ import {
   AlertCircle, Loader2, SearchX, Pencil, X,
   CheckCircle2, Clock3, DollarSign, MapPin, Phone,
   Mail, Calendar, Clock, Package, FileText, Truck,
-  User, PenLine, MessageSquare,
+  User, PenLine, MessageSquare, Lock,
 } from 'lucide-react';
 import { theme } from '../styles/theme';
 import { BtnSpinner } from '../components/ui/BtnSpinner';
@@ -34,6 +34,7 @@ import {
 } from '../components/shared/EntityPage';
 import { EntityHistory } from '../components/shared/EntityHistory';
 import { PhotosPanel, DocumentsPanel } from '../components/shared/EntityAttachments';
+import { useServiceCatalog } from '../hooks/useServiceCatalog';
 import { supabase } from '../lib/supabase';
 import { CreateDeliveryOrderModal } from '../components/shared/CreateDeliveryOrderModal';
 import { ReleaseItemsModal } from '../components/shared/ReleaseItemsModal';
@@ -258,6 +259,9 @@ function DetailsTab({
   onSaveAndResync?: () => void;
   /** Drives visibility of staff-only fields like Internal Notes. */
   isStaff: boolean;
+  /** Code → human name map for accessorials. Caller (OrderPage) holds
+   *  the useServiceCatalog hook so the fetch runs once at parent level. */
+  accessorialNames: Record<string, string>;
 }) {
   const addressLine = [order.contactAddress, order.contactCity, order.contactState, order.contactZip].filter(Boolean).join(', ');
   // Identify the P+D partner — when this row is the delivery leg of a
@@ -278,10 +282,15 @@ function DetailsTab({
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
 
-      {/* Schedule */}
+      {/* Card 1 — Schedule & Order Details. Combines the schedule
+          fields, the order-level reference numbers, and the
+          customer-facing "what this order involves" notes into one
+          card so the operator can read the whole job at a glance.
+          The Edit button on this header opens inline-edit mode for
+          ALL editable fields across every card below. */}
       <EPCard>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
-          <SectionTitle>Schedule</SectionTitle>
+          <SectionTitle>Schedule &amp; Order Details</SectionTitle>
           {!editing && (
             <button onClick={onStartEdit} style={{ background: 'none', border: `1px solid ${theme.colors.border}`, borderRadius: 8, padding: '5px 12px', cursor: 'pointer', fontFamily: 'inherit', fontSize: 12, fontWeight: 600, color: EP.textSecondary, display: 'inline-flex', alignItems: 'center', gap: 5 }}>
               <Pencil size={12} /> Edit
@@ -295,11 +304,43 @@ function DetailsTab({
               <EditField label="Window Start" value={edit.windowStartLocal} onChange={v => setField('windowStartLocal', v)} type="time" icon={<Clock size={11} />} />
               <EditField label="Window End"   value={edit.windowEndLocal}   onChange={v => setField('windowEndLocal', v)}   type="time" />
             </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+              <EditField label="PO Number"        value={edit.poNumber}        onChange={v => setField('poNumber', v)}        icon={<FileText size={11} />} />
+              <EditField label="Sidemark"         value={edit.sidemark}        onChange={v => setField('sidemark', v)}        icon={<Package size={11} />} />
+            </div>
+            <EditField label="Client Reference" value={edit.clientReference} onChange={v => setField('clientReference', v)} />
+            <EditField
+              label="Order Details"
+              value={edit.details}
+              onChange={v => setField('details', v)}
+              type="textarea"
+              rows={3}
+            />
+            <div style={{ fontSize: 11, color: EP.textMuted, marginTop: -8, marginBottom: 4, lineHeight: 1.5 }}>
+              Describe what this order involves — services needed, special handling instructions, or anything our team should know about the job.
+            </div>
           </>
         ) : (
           <>
             <Field label="Service Date" value={fmtDate(order.localServiceDate)} icon={<Calendar size={11} />} />
             <Field label="Time Window"  value={fmtWindow(order.windowStartLocal, order.windowEndLocal, order.timezone)} icon={<Clock size={11} />} />
+            {order.serviceTimeMinutes != null && order.serviceTimeMinutes > 0 && (
+              <Field label="Service Time" value={`${order.serviceTimeMinutes} min`} icon={<Clock size={11} />} />
+            )}
+            <Field label="Order Type" value={order.orderType ? order.orderType.replace(/_/g, ' ') : null} icon={<Truck size={11} />} />
+            {order.poNumber        && <Field label="PO Number"        value={order.poNumber}        icon={<FileText size={11} />} />}
+            {order.sidemark        && <Field label="Sidemark"         value={order.sidemark}        icon={<Package size={11} />} />}
+            {order.clientReference && <Field label="Client Reference" value={order.clientReference} />}
+            {order.source          && <Field label="Source"           value={order.source} />}
+            {order.dtDispatchId != null && <Field label="Dispatch ID" value={String(order.dtDispatchId)} />}
+            {order.details && (
+              <div style={{ marginTop: 8, paddingTop: 10, borderTop: `1px solid ${theme.colors.borderLight || '#f0f0f0'}` }}>
+                <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: EP.textMuted, marginBottom: 4 }}>
+                  Order Details
+                </div>
+                <div style={{ fontSize: 13, color: EP.textPrimary, whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>{order.details}</div>
+              </div>
+            )}
           </>
         )}
       </EPCard>
@@ -391,94 +432,6 @@ function DetailsTab({
         </EPCard>
       )}
 
-      {/* Order info — references and order-shape metadata. Notes
-          live in a separate card below so the three notes fields
-          (Order Details / Driver Notes / Internal Notes) read as a
-          coherent unit and the staff-only Internal Notes is harder
-          to mistake for a customer-visible field. */}
-      <EPCard>
-        <SectionTitle>Order Info</SectionTitle>
-        {editing ? (
-          <>
-            <EditField label="PO Number"        value={edit.poNumber}        onChange={v => setField('poNumber', v)}        icon={<FileText size={11} />} />
-            <EditField label="Sidemark"         value={edit.sidemark}        onChange={v => setField('sidemark', v)}        icon={<Package size={11} />} />
-            <EditField label="Client Reference" value={edit.clientReference} onChange={v => setField('clientReference', v)} />
-          </>
-        ) : (
-          <>
-            <Field label="Order Type"       value={order.orderType ? order.orderType.replace(/_/g, ' ') : null} icon={<Truck size={11} />} />
-            <Field label="PO Number"        value={order.poNumber}        icon={<FileText size={11} />} />
-            <Field label="Sidemark"         value={order.sidemark}        icon={<Package size={11} />} />
-            <Field label="Client Reference" value={order.clientReference} />
-            <Field label="Source"           value={order.source} />
-            {order.dtDispatchId != null && <Field label="Dispatch ID" value={String(order.dtDispatchId)} />}
-          </>
-        )}
-      </EPCard>
-
-      {/* Notes — three fields (Phase 1):
-            • Order Details (everyone) — what the order involves
-            • Driver Notes (everyone) — on-site instructions, push to DT
-            • Internal Notes (staff/admin only) — never shared
-          Read view skips empty notes for clients but always shows a
-          slot for staff so they know the field exists. */}
-      <EPCard>
-        <SectionTitle>Notes</SectionTitle>
-        {editing ? (
-          <>
-            <EditField
-              label="Order Details"
-              value={edit.details}
-              onChange={v => setField('details', v)}
-              type="textarea"
-              rows={3}
-            />
-            <div style={{ fontSize: 11, color: EP.textMuted, marginTop: -8, marginBottom: 10, lineHeight: 1.5 }}>
-              Describe what this order involves — services needed, special handling instructions, or anything our team should know about the job.
-            </div>
-            <EditField
-              label="Driver Notes"
-              value={edit.driverNotes}
-              onChange={v => setField('driverNotes', v)}
-              type="textarea"
-              rows={3}
-            />
-            <div style={{ fontSize: 11, color: EP.textMuted, marginTop: -8, marginBottom: 10, lineHeight: 1.5 }}>
-              Notes for the delivery crew — parking instructions, gate codes, building access, or anything they'll need on-site.
-            </div>
-            {isStaff && (
-              <>
-                <EditField
-                  label="Internal Notes"
-                  value={edit.internalNotes}
-                  onChange={v => setField('internalNotes', v)}
-                  type="textarea"
-                  rows={3}
-                />
-                <div style={{ fontSize: 11, color: '#92400E', marginTop: -8, marginBottom: 4, lineHeight: 1.5, fontStyle: 'italic' }}>
-                  Only visible to Stride staff. Clients and drivers will not see these notes — not shared in the customer portal or DispatchTrack.
-                </div>
-              </>
-            )}
-          </>
-        ) : (
-          <>
-            {order.details && <Field label="Order Details" value={order.details} />}
-            {order.driverNotes && <Field label="Driver Notes" value={order.driverNotes} />}
-            {isStaff && order.internalNotes && (
-              <div style={{ background: '#FEF3C7', border: '1px solid #FCD34D', borderRadius: 8, padding: 10, marginTop: 8 }}>
-                <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: '#92400E', marginBottom: 4 }}>
-                  Internal Notes (staff only)
-                </div>
-                <div style={{ fontSize: 13, color: EP.textPrimary, whiteSpace: 'pre-wrap' }}>{order.internalNotes}</div>
-              </div>
-            )}
-            {!order.details && !order.driverNotes && !(isStaff && order.internalNotes) && (
-              <div style={{ fontSize: 12, color: EP.textMuted, fontStyle: 'italic' }}>No notes on this order yet.</div>
-            )}
-          </>
-        )}
-      </EPCard>
 
       {/* Items — moved inline from the old 'Items' tab. Compact table
           covering description / vendor / room / qty / class / location.
@@ -556,10 +509,18 @@ function DetailsTab({
         </EPCard>
       )}
 
-      {/* Pricing */}
-      {(hasPricing || editing) && (
+      {/* Card 4 — Services & Pricing.
+          Top half: per-line accessorials with human names from the
+          service catalog (falls back to code if not yet hydrated).
+          Quote-pending lines show "Quote pending" instead of $0 so
+          clients see something concrete and staff know there's a
+          pricing pass owed. Bottom half: full pricing breakdown
+          including base fee, extra items, accessorials roll-up,
+          coverage, tax, and grand total. The MANUAL chip flags
+          orders where an admin overrode the auto-computed total. */}
+      {(hasPricing || (order.accessorials?.length ?? 0) > 0 || editing) && (
         <EPCard>
-          <SectionTitle>Pricing</SectionTitle>
+          <SectionTitle>Services &amp; Pricing</SectionTitle>
           {editing ? (
             <>
               <EditField label="Base Fee"    value={edit.baseDeliveryFee} onChange={v => setField('baseDeliveryFee', v)} type="number" />
@@ -570,6 +531,57 @@ function DetailsTab({
             </>
           ) : (
             <>
+              {/* Add-on services list (header'd table). Hidden when
+                  the order has no accessorials. */}
+              {(order.accessorials?.length ?? 0) > 0 && (
+                <div style={{ marginBottom: 14 }}>
+                  <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: EP.textMuted, marginBottom: 6 }}>
+                    Add-On Services
+                  </div>
+                  <div style={{ overflowX: 'auto' }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                      <thead>
+                        <tr style={{ background: '#FFF7ED', textAlign: 'left' }}>
+                          <th style={inlineItemTh}>Service</th>
+                          <th style={{ ...inlineItemTh, textAlign: 'right' }}>Qty</th>
+                          <th style={{ ...inlineItemTh, textAlign: 'right' }}>Rate</th>
+                          <th style={{ ...inlineItemTh, textAlign: 'right' }}>Subtotal</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(order.accessorials ?? []).map((acc, i) => {
+                          const name = accessorialNames[acc.code] || acc.code;
+                          const isQuotePending = !!acc.quotePending;
+                          return (
+                            <tr key={i} style={{ borderBottom: `1px solid ${theme.colors.borderLight || '#f0f0f0'}` }}>
+                              <td style={inlineItemTd}>
+                                <div style={{ fontWeight: 500 }}>{name}</div>
+                                {acc.code !== name && (
+                                  <div style={{ fontSize: 10, color: EP.textMuted, fontFamily: 'monospace' }}>{acc.code}</div>
+                                )}
+                                {acc.clientNotes && (
+                                  <div style={{ fontSize: 11, color: EP.textMuted, marginTop: 2, fontStyle: 'italic' }}>
+                                    "{acc.clientNotes}"
+                                  </div>
+                                )}
+                              </td>
+                              <td style={{ ...inlineItemTd, textAlign: 'right' }}>{acc.quantity}</td>
+                              <td style={{ ...inlineItemTd, textAlign: 'right', color: EP.textMuted }}>
+                                {isQuotePending ? '—' : fmtCurrency(acc.rate)}
+                              </td>
+                              <td style={{ ...inlineItemTd, textAlign: 'right', fontWeight: 600, color: isQuotePending ? '#B45309' : EP.textPrimary, fontStyle: isQuotePending ? 'italic' : 'normal' }}>
+                                {isQuotePending ? 'Quote pending' : fmtCurrency(acc.subtotal)}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* Pricing breakdown */}
               {order.baseDeliveryFee != null && (
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 8 }}>
                   <span style={{ color: EP.textSecondary }}>{order.isPickup ? 'Base Pickup Fee' : 'Base Delivery Fee'}</span>
@@ -578,20 +590,34 @@ function DetailsTab({
               )}
               {order.extraItemsCount > 0 && (
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 8 }}>
-                  <span style={{ color: EP.textSecondary }}>Extra Items ({order.extraItemsCount} × $25)</span>
+                  <span style={{ color: EP.textSecondary }}>Extra Items × {order.extraItemsCount}</span>
                   <span style={{ fontWeight: 600 }}>{fmtCurrency(order.extraItemsFee)}</span>
                 </div>
               )}
-              {order.accessorials?.map((acc, i) => (
-                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 8 }}>
-                  <span style={{ color: EP.textSecondary }}>{acc.code}{acc.quantity > 1 ? ` × ${acc.quantity}` : ''}</span>
-                  <span style={{ fontWeight: 600 }}>{fmtCurrency(acc.subtotal)}</span>
+              {order.accessorialsTotal > 0 && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 8 }}>
+                  <span style={{ color: EP.textSecondary }}>Add-on Services Total</span>
+                  <span style={{ fontWeight: 600 }}>{fmtCurrency(order.accessorialsTotal)}</span>
                 </div>
-              ))}
+              )}
               {order.fabricProtectionTotal > 0 && (
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 8 }}>
                   <span style={{ color: EP.textSecondary }}>Fabric Protection</span>
                   <span style={{ fontWeight: 600 }}>{fmtCurrency(order.fabricProtectionTotal)}</span>
+                </div>
+              )}
+              {order.coverageCharge != null && order.coverageCharge > 0 && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 8 }}>
+                  <span style={{ color: EP.textSecondary }}>Coverage</span>
+                  <span style={{ fontWeight: 600 }}>{fmtCurrency(order.coverageCharge)}</span>
+                </div>
+              )}
+              {order.taxAmount != null && order.taxAmount > 0 && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 8 }}>
+                  <span style={{ color: EP.textSecondary }}>
+                    Sales Tax{order.taxRatePct != null && order.taxRatePct > 0 ? ` (${order.taxRatePct.toFixed(3)}%)` : ''}
+                  </span>
+                  <span style={{ fontWeight: 600 }}>{fmtCurrency(order.taxAmount)}</span>
                 </div>
               )}
               {order.orderTotal != null && (
@@ -609,65 +635,86 @@ function DetailsTab({
               {order.pricingNotes && (
                 <div style={{ fontSize: 11, color: EP.textMuted, marginTop: 8, fontStyle: 'italic' }}>{order.pricingNotes}</div>
               )}
-              <div style={{ fontSize: 11, color: EP.textMuted, marginTop: 10, fontStyle: 'italic', lineHeight: 1.45 }}>
-                Pricing is estimated based on the information provided. If additional assembly, labor, or special handling services are required at the time of delivery, rates may be adjusted accordingly.
-              </div>
             </>
           )}
         </EPCard>
       )}
 
-      {/* Review */}
+      {/* Card 5 — Notes (Driver + Internal). Order Details lives in
+          Card 1 with the rest of the order overview. Driver Notes is
+          visible to all (icon: truck — pushed to DT as a Public note);
+          Internal Notes is staff/admin only (icon: lock — pushed as
+          DT Private, never surfaced to clients or the driver app). */}
       <EPCard>
-        <SectionTitle>Review</SectionTitle>
+        <SectionTitle>Notes</SectionTitle>
         {editing ? (
           <>
-            <EditField label="Review Status" value={edit.reviewStatus} onChange={v => setField('reviewStatus', v)} type="select" options={REVIEW_STATUS_OPTIONS} />
-            <EditField label="Review Notes"  value={edit.reviewNotes}  onChange={v => setField('reviewNotes', v)}  type="textarea" rows={3} />
+            <EditField
+              label="Driver Notes"
+              icon={<Truck size={11} />}
+              value={edit.driverNotes}
+              onChange={v => setField('driverNotes', v)}
+              type="textarea"
+              rows={3}
+            />
+            <div style={{ fontSize: 11, color: EP.textMuted, marginTop: -8, marginBottom: 10, lineHeight: 1.5 }}>
+              Notes for the delivery crew — parking instructions, gate codes, building access, or anything they'll need on-site.
+            </div>
+            {isStaff && (
+              <>
+                <EditField
+                  label="Internal Notes"
+                  icon={<Lock size={11} />}
+                  value={edit.internalNotes}
+                  onChange={v => setField('internalNotes', v)}
+                  type="textarea"
+                  rows={3}
+                />
+                <div style={{ fontSize: 11, color: '#92400E', marginTop: -8, marginBottom: 4, lineHeight: 1.5, fontStyle: 'italic' }}>
+                  Only visible to Stride staff. Clients and drivers will not see these notes — not shared in the customer portal or DispatchTrack.
+                </div>
+              </>
+            )}
           </>
         ) : (
           <>
-            {order.reviewStatus && order.reviewStatus !== 'not_required' && REVIEW_CFG[order.reviewStatus] && (
-              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '4px 12px', borderRadius: 12, fontSize: 12, fontWeight: 600, background: REVIEW_CFG[order.reviewStatus].bg, color: REVIEW_CFG[order.reviewStatus].color, marginBottom: 12 }}>
-                {REVIEW_CFG[order.reviewStatus].icon}
-                {REVIEW_CFG[order.reviewStatus].label}
+            {order.driverNotes && (
+              <div style={{ marginBottom: 10 }}>
+                <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: EP.textMuted, marginBottom: 4, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                  <Truck size={11} /> Driver Notes
+                </div>
+                <div style={{ fontSize: 13, color: EP.textPrimary, whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>{order.driverNotes}</div>
               </div>
             )}
-            {(order.createdByName || order.createdByEmail || order.createdByRole) && (
-              <Field
-                label="Created By"
-                value={
-                  // Prefer the actual person's name + email so staff can
-                  // follow up with the submitter directly. Fall back to
-                  // role only when neither is recorded (older rows or
-                  // service-account submissions).
-                  (() => {
-                    const who = order.createdByName || order.createdByEmail;
-                    const role = order.createdByRole ? ` · ${order.createdByRole}` : '';
-                    if (who && order.createdByEmail && order.createdByName) {
-                      return `${order.createdByName} (${order.createdByEmail})${role}`;
-                    }
-                    if (who) return `${who}${role}`;
-                    return order.createdByRole || '';
-                  })()
-                }
-              />
+            {isStaff && order.internalNotes && (
+              <div style={{ background: '#FEF3C7', border: '1px solid #FCD34D', borderRadius: 8, padding: 10 }}>
+                <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: '#92400E', marginBottom: 4, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                  <Lock size={11} /> Internal Notes (staff only)
+                </div>
+                <div style={{ fontSize: 13, color: EP.textPrimary, whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>{order.internalNotes}</div>
+              </div>
             )}
-            {order.reviewNotes   && <Field label="Review Notes" value={order.reviewNotes} />}
-            {order.createdAt     && <Field label="Created At"   value={new Date(order.createdAt).toLocaleString()} />}
-            {/* Last Edited only when the row has been updated past creation
-                — Postgres bumps updated_at on every UPDATE so a row that's
-                never been edited has updated_at == created_at. Hide that
-                duplicate to avoid two identical timestamps stacked here. */}
-            {order.updatedAt && order.updatedAt !== order.createdAt && (
-              <Field label="Last Edited" value={new Date(order.updatedAt).toLocaleString()} />
+            {!order.driverNotes && !(isStaff && order.internalNotes) && (
+              <div style={{ fontSize: 12, color: EP.textMuted, fontStyle: 'italic' }}>
+                No driver{isStaff ? ' or internal' : ''} notes on this order yet.
+              </div>
             )}
-            {order.reviewedAt    && <Field label="Reviewed At"  value={new Date(order.reviewedAt).toLocaleString()} />}
-            {order.pushedToDtAt  && <Field label="Pushed to DT" value={new Date(order.pushedToDtAt).toLocaleString()} />}
-            {order.lastSyncedAt  && <Field label="Last Synced"  value={new Date(order.lastSyncedAt).toLocaleString()} />}
           </>
         )}
       </EPCard>
+
+      {/* Edit-only: Review Status / Review Notes (the read-only view of
+          these fields lives on the Activity tab now — see render() of
+          tab id 'activity'). Only staff can change review status from
+          here, but the inline form keeps existing behavior intact for
+          admins who do the bulk of approve/reject/revision flow. */}
+      {editing && (
+        <EPCard style={{ background: '#FEF7ED' }}>
+          <SectionTitle>Review</SectionTitle>
+          <EditField label="Review Status" value={edit.reviewStatus} onChange={v => setField('reviewStatus', v)} type="select" options={REVIEW_STATUS_OPTIONS} />
+          <EditField label="Review Notes"  value={edit.reviewNotes}  onChange={v => setField('reviewNotes', v)}  type="textarea" rows={3} />
+        </EPCard>
+      )}
 
       {/* Edit action bar */}
       {editing && (
@@ -914,6 +961,16 @@ export function OrderPage() {
     }).catch(() => { /* tolerate */ });
     return () => { cancelled = true; };
   }, [order?.linkedOrderId]);
+
+  // Service catalog → accessorial-code-to-human-name map. Used by the
+  // Services & Pricing card to render "Assembly" instead of bare
+  // codes like ASSEMBLY. One fetch per page mount; the hook caches.
+  const { services: catalogServices } = useServiceCatalog();
+  const accessorialNames = React.useMemo<Record<string, string>>(() => {
+    const out: Record<string, string> = {};
+    for (const s of catalogServices) out[s.code] = s.name;
+    return out;
+  }, [catalogServices]);
 
   // Edit state
   const [editing, setEditing] = useState(false);
@@ -1382,6 +1439,7 @@ export function OrderPage() {
           onSave={handleSave}
           onSaveAndResync={handleSaveAndResync}
           isStaff={canReview}
+          accessorialNames={accessorialNames}
         />
       ),
     },
@@ -1434,9 +1492,53 @@ export function OrderPage() {
       id: 'activity',
       label: 'Activity',
       render: () => (
-        <EPCard>
-          <EntityHistory entityType="dt_order" entityId={order.id} tenantId={order.tenantId ?? undefined} />
-        </EPCard>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {/* Status & Audit Summary — moved off the Details tab so the
+              Details surface stays focused on the job and the Activity
+              surface is the single source of truth for who-did-what
+              and when. Mirrors the data the old Review card showed
+              (review status badge, created by, timestamps) plus DT
+              push/sync state. The dt_order_audit timeline below
+              renders the same events in chronological order. */}
+          <EPCard>
+            <SectionTitle>Status &amp; Audit Summary</SectionTitle>
+            {order.reviewStatus && order.reviewStatus !== 'not_required' && REVIEW_CFG[order.reviewStatus] && (
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '4px 12px', borderRadius: 12, fontSize: 12, fontWeight: 600, background: REVIEW_CFG[order.reviewStatus].bg, color: REVIEW_CFG[order.reviewStatus].color, marginBottom: 12 }}>
+                {REVIEW_CFG[order.reviewStatus].icon}
+                {REVIEW_CFG[order.reviewStatus].label}
+              </div>
+            )}
+            {(order.createdByName || order.createdByEmail || order.createdByRole) && (
+              <Field
+                label="Created By"
+                value={(() => {
+                  const role = order.createdByRole ? ` · ${order.createdByRole}` : '';
+                  if (order.createdByEmail && order.createdByName) {
+                    return `${order.createdByName} (${order.createdByEmail})${role}`;
+                  }
+                  const who = order.createdByName || order.createdByEmail;
+                  if (who) return `${who}${role}`;
+                  return order.createdByRole || '';
+                })()}
+              />
+            )}
+            {order.reviewNotes  && <Field label="Review Notes" value={order.reviewNotes} />}
+            {order.createdAt    && <Field label="Created At"   value={new Date(order.createdAt).toLocaleString()} />}
+            {/* Last Edited only when updated_at differs from created_at —
+                Postgres bumps updated_at on every UPDATE so a brand-new
+                row would otherwise show two identical timestamps. */}
+            {order.updatedAt && order.updatedAt !== order.createdAt && (
+              <Field label="Last Edited" value={new Date(order.updatedAt).toLocaleString()} />
+            )}
+            {order.reviewedAt   && <Field label="Reviewed At"  value={new Date(order.reviewedAt).toLocaleString()} />}
+            {order.pushedToDtAt && <Field label="Pushed to DT" value={new Date(order.pushedToDtAt).toLocaleString()} />}
+            {order.lastSyncedAt && <Field label="Last Synced"  value={new Date(order.lastSyncedAt).toLocaleString()} />}
+          </EPCard>
+          <EPCard>
+            <SectionTitle>Activity Timeline</SectionTitle>
+            <EntityHistory entityType="dt_order" entityId={order.id} tenantId={order.tenantId ?? undefined} />
+          </EPCard>
+        </div>
       ),
     },
   ];

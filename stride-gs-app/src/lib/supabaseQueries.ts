@@ -1733,6 +1733,9 @@ export interface SupabaseDtOrderRow {
   order_total: number | null;
   pricing_override: boolean | null;
   pricing_notes: string | null;
+  coverage_charge: number | null;
+  tax_amount: number | null;
+  tax_rate_pct: number | null;
   // Review workflow
   review_status: string | null;
   review_notes: string | null;
@@ -1828,12 +1831,17 @@ export interface DtOrderForUI {
   baseDeliveryFee: number | null;
   extraItemsCount: number;
   extraItemsFee: number;
-  accessorials: Array<{ code: string; quantity: number; rate: number; subtotal: number }>;
+  accessorials: Array<{ code: string; quantity: number; rate: number; subtotal: number; clientNotes?: string | null; quotePending?: boolean }>;
   accessorialsTotal: number;
   fabricProtectionTotal: number;
   orderTotal: number | null;
   pricingOverride: boolean;
   pricingNotes: string;
+  // Service time + ancillary pricing fields surfaced on the detail page.
+  serviceTimeMinutes: number | null;
+  coverageCharge: number | null;
+  taxAmount: number | null;
+  taxRatePct: number | null;
   // Review workflow
   reviewStatus: string;
   reviewNotes: string;
@@ -2057,6 +2065,10 @@ export async function fetchDtOrdersFromSupabase(
         details: row.details ?? '',
         driverNotes: row.driver_notes ?? '',
         internalNotes: row.internal_notes ?? '',
+        serviceTimeMinutes: row.service_time_minutes != null ? Number(row.service_time_minutes) : null,
+        coverageCharge: row.coverage_charge != null ? Number(row.coverage_charge) : null,
+        taxAmount: row.tax_amount != null ? Number(row.tax_amount) : null,
+        taxRatePct: row.tax_rate_pct != null ? Number(row.tax_rate_pct) : null,
         latestNotePreview: row.latest_note_preview ?? '',
         source: row.source ?? '',
         lastSyncedAt: row.last_synced_at ?? '',
@@ -2206,6 +2218,10 @@ export async function fetchDtOrderByIdFromSupabase(
       details: row.details ?? '',
       driverNotes: row.driver_notes ?? '',
       internalNotes: row.internal_notes ?? '',
+      serviceTimeMinutes: row.service_time_minutes != null ? Number(row.service_time_minutes) : null,
+      coverageCharge: row.coverage_charge != null ? Number(row.coverage_charge) : null,
+      taxAmount: row.tax_amount != null ? Number(row.tax_amount) : null,
+      taxRatePct: row.tax_rate_pct != null ? Number(row.tax_rate_pct) : null,
       latestNotePreview: row.latest_note_preview ?? '',
       source: row.source ?? '',
       lastSyncedAt: row.last_synced_at ?? '',
