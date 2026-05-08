@@ -827,6 +827,25 @@ export function CreateDeliveryOrderModal({
   // collapsed once you've added items (you don't need the picker, you
   // need to see what you've added). Operator can flip either way.
   const [inventoryExpanded, setInventoryExpanded] = useState(true);
+  // Track whether we've already auto-collapsed the inventory picker
+  // for this open of the modal. Without this, every Save Draft would
+  // re-collapse — including times when the operator just expanded it
+  // to add another item — which would feel like the UI is fighting
+  // the user. Reset whenever editOrderId changes (i.e. a different
+  // order opens).
+  const autoCollapsedInvRef = useRef(false);
+  useEffect(() => { autoCollapsedInvRef.current = false; }, [editOrderId]);
+  // When opening an existing saved order with items already selected,
+  // collapse the picker so the modal opens in a review-friendly
+  // state. Operator can expand to add more items if needed. Fires
+  // exactly once per editOrderId open (the ref above guards repeats).
+  useEffect(() => {
+    if (autoCollapsedInvRef.current) return;
+    if (!editOrderId) return;
+    if (selectedIds.size === 0) return;
+    setInventoryExpanded(false);
+    autoCollapsedInvRef.current = true;
+  }, [editOrderId, selectedIds.size]);
   // Auto-collapse the picker the first time selections appear so the
   // selected-items summary takes the focus. Doesn't fight subsequent
   // manual toggles.
@@ -3500,14 +3519,26 @@ export function CreateDeliveryOrderModal({
                 } : null}
               />
               <div style={{ marginTop: 14 }}>
-                <div style={{ ...label, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <span>Items to Pick Up</span>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8, flexWrap: 'wrap', gap: 8 }}>
+                  <span style={{
+                    fontSize: 13, fontWeight: 700, color: theme.colors.text,
+                    textTransform: 'uppercase', letterSpacing: '0.06em',
+                  }}>
+                    Items to Pick Up
+                  </span>
                   <button
                     type="button"
                     onClick={() => setPickupFreeItems(prev => [...prev, { id: genUid(), description: '', quantity: 1 }])}
-                    style={{ background: 'none', border: 'none', color: theme.colors.primary, cursor: 'pointer', fontSize: 11, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4 }}
+                    style={{
+                      background: theme.colors.primary, border: 'none',
+                      color: '#fff', cursor: 'pointer',
+                      fontSize: 12, fontWeight: 700,
+                      padding: '6px 12px', borderRadius: 6,
+                      display: 'inline-flex', alignItems: 'center', gap: 5,
+                      fontFamily: 'inherit',
+                    }}
                   >
-                    <Plus size={11} /> Add Item
+                    <Plus size={13} /> Add Item
                   </button>
                 </div>
                 <div style={{ display: 'grid', gap: 6 }}>
@@ -3593,8 +3624,15 @@ export function CreateDeliveryOrderModal({
                       }}
                       title={inventoryExpanded ? 'Hide the inventory picker' : 'Show the inventory picker'}
                     >
-                      {inventoryExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                      <span style={label}>Items (from inventory, {selectedInvItems.length} selected{totalSelectedCuFt > 0 ? ` · ${totalSelectedCuFt} cuFt` : ''})</span>
+                      {inventoryExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                      <span style={{
+                        fontSize: 13, fontWeight: 700, color: theme.colors.text,
+                        textTransform: 'uppercase', letterSpacing: '0.06em',
+                      }}>
+                        Items <span style={{ color: theme.colors.textMuted, fontWeight: 600 }}>
+                          (from inventory, {selectedInvItems.length} selected{totalSelectedCuFt > 0 ? ` · ${totalSelectedCuFt} cuFt` : ''})
+                        </span>
+                      </span>
                     </button>
                     {invLoading && inventoryExpanded && (
                       <span style={{ fontSize: 11, color: theme.colors.textMuted, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
@@ -3829,13 +3867,18 @@ export function CreateDeliveryOrderModal({
                   {/* Ad-hoc (free-text) items — operator can mix non-inventory
                       lines onto a delivery order. Counts toward the same
                       "extra items" pricing tier as warehouse items. */}
-                  <div style={{ marginTop: 14 }}>
-                    <div style={{ ...label, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 6 }}>
-                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                        Ad-hoc items
+                  <div style={{ marginTop: 18 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                        <span style={{
+                          fontSize: 13, fontWeight: 700, color: theme.colors.text,
+                          textTransform: 'uppercase', letterSpacing: '0.06em',
+                        }}>
+                          Ad-Hoc Items
+                        </span>
                         <span style={{
                           fontSize: 9, fontWeight: 700, letterSpacing: '0.5px',
-                          padding: '1px 6px', borderRadius: 4,
+                          padding: '2px 7px', borderRadius: 4,
                           background: '#FEF3C7', color: '#92400E',
                           textTransform: 'uppercase',
                         }}>
@@ -3845,9 +3888,16 @@ export function CreateDeliveryOrderModal({
                       <button
                         type="button"
                         onClick={() => setDeliveryFreeItems(prev => [...prev, { id: genUid(), description: '', quantity: 1, weight: null, cubicFeet: null }])}
-                        style={{ background: 'none', border: 'none', color: theme.colors.primary, cursor: 'pointer', fontSize: 11, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4 }}
+                        style={{
+                          background: theme.colors.primary, border: 'none',
+                          color: '#fff', cursor: 'pointer',
+                          fontSize: 12, fontWeight: 700,
+                          padding: '6px 12px', borderRadius: 6,
+                          display: 'inline-flex', alignItems: 'center', gap: 5,
+                          fontFamily: 'inherit',
+                        }}
                       >
-                        <Plus size={11} /> Add ad-hoc item
+                        <Plus size={13} /> Add Ad-Hoc Item
                       </button>
                     </div>
                     {deliveryFreeItems.length === 0 ? (
@@ -3941,8 +3991,14 @@ export function CreateDeliveryOrderModal({
 
               {/* Auto-copied items display for pickup_and_delivery */}
               {mode === 'pickup_and_delivery' && (
-                <div style={{ marginTop: 14 }}>
-                  <div style={label}>Items to deliver (copied from pickup)</div>
+                <div style={{ marginTop: 18 }}>
+                  <div style={{
+                    fontSize: 13, fontWeight: 700, color: theme.colors.text,
+                    textTransform: 'uppercase', letterSpacing: '0.06em',
+                    marginBottom: 8,
+                  }}>
+                    Items To Deliver <span style={{ color: theme.colors.textMuted, fontWeight: 600 }}>(copied from pickup)</span>
+                  </div>
                   <div style={{ padding: 12, background: '#F9FAFB', borderRadius: 8, fontSize: 12, color: theme.colors.textMuted }}>
                     {pickupFreeItems.filter(i => i.description.trim()).length === 0
                       ? 'Add items on the Pickup section above — they\'ll appear here automatically.'
