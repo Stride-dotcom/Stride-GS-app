@@ -196,6 +196,7 @@ function humanEntityLabel(t: EntityType): string {
     case 'will_call': return 'Will call';
     case 'shipment': return 'Shipment';
     case 'claim': return 'Claim';
+    case 'dt_order': return 'Delivery order';
   }
 }
 
