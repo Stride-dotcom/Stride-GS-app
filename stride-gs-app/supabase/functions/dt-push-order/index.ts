@@ -1,5 +1,17 @@
 /**
- * dt-push-order — Supabase Edge Function (Phase 2c) — v18 2026-05-03 PST
+ * dt-push-order — Supabase Edge Function (Phase 2c) — v19 2026-05-08 PST
+ * v19: Pickup-leg item descriptions get a contextual prefix instead of
+ *      the flat "PICK UP: " label so dispatch/staff can tell at a
+ *      glance what each piece is for. Two cases:
+ *        • P+D linked pickup → "PICK UP for Del <delivery DT id>: …"
+ *          (the delivery identifier is already threaded into the
+ *          buildOrderXml call site as `linkedDeliveryInfo`; we now
+ *          pass it through to buildItemDesc too).
+ *        • Standalone pickup → "PU for return to whse: …" since
+ *          there's no linked delivery and the destination is the
+ *          warehouse.
+ *
+ * v18 2026-05-03 PST:
  * v18: Two DT-side display bugs fixed.
  *      1. Ad-hoc / free-text items were rendering with the
  *         dt_order_items UUID PK as their SKU on the driver app
@@ -159,8 +171,19 @@ function cdataEscape(val: string): string {
 // Appended at the tail with a hyphen separator so the operator can
 // scan the room without parsing pipes — matches the manual format
 // "Vendor description - Room" the dispatcher uses on paper sheets.
-// For pickup legs, prefix with "PICK UP: ".
-function buildItemDesc(it: DtOrderItemRow, isPickupLeg: boolean, sidemark?: string, reference?: string): string {
+//
+// Pickup legs get a contextual prefix so dispatch/staff can tell at a
+// glance what each piece is for (Justin: "this will help the staff
+// better understand what the pu items belong to"):
+//   • Linked to a delivery (P+D pair): "PICK UP for Del <DT identifier>: …"
+//   • Standalone pickup back to the warehouse: "PU for return to whse: …"
+function buildItemDesc(
+  it: DtOrderItemRow,
+  isPickupLeg: boolean,
+  sidemark?: string,
+  reference?: string,
+  linkedDeliveryIdentifier?: string,
+): string {
   const parts: string[] = [];
   if (it.vendor) parts.push(it.vendor);
   if (it.description) parts.push(it.description);
@@ -170,7 +193,11 @@ function buildItemDesc(it: DtOrderItemRow, isPickupLeg: boolean, sidemark?: stri
   const extrasRoom = (it.extras && typeof it.extras === 'object' ? (it.extras as Record<string, unknown>).room : null);
   const room = (it.room || extrasRoom || '').toString().trim();
   const withRoom = room ? `${base} - ${room}` : base;
-  return isPickupLeg ? `PICK UP: ${withRoom}` : withRoom;
+  if (!isPickupLeg) return withRoom;
+  const prefix = linkedDeliveryIdentifier
+    ? `PICK UP for Del ${linkedDeliveryIdentifier}: `
+    : 'PU for return to whse: ';
+  return `${prefix}${withRoom}`;
 }
 
 // Build the DT order description with billing info
@@ -282,7 +309,16 @@ function buildOrderXml(
 
   const itemsXml = items.map((it) => {
     const qty = Math.abs(Number(it.quantity) || 1);
-    const desc = buildItemDesc(it, isPickupLeg, order.sidemark || undefined, order.client_reference || undefined);
+    // Linked-delivery identifier on pickup legs makes the per-item
+    // prefix render "PICK UP for Del <id>: …" instead of the generic
+    // "PU for return to whse: " fallback used for standalone pickups.
+    const desc = buildItemDesc(
+      it,
+      isPickupLeg,
+      order.sidemark || undefined,
+      order.client_reference || undefined,
+      isPickupLeg ? linkedDeliveryInfo?.identifier : undefined,
+    );
     const cubeVal = it.cubic_feet != null ? `\n      <cube>${it.cubic_feet}</cube>` : '';
     // Warehouse location for the piece — drives where dispatch/
     // drivers find it before loading. Stored on extras.location by
