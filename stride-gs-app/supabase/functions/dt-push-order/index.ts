@@ -78,6 +78,8 @@ interface DtOrderRow {
   client_reference: string | null;
   details: string | null;
   order_notes: string | null;
+  driver_notes: string | null;
+  internal_notes: string | null;
   service_time_minutes: number | null;
   review_status: string | null;
   pushed_to_dt_at: string | null;
@@ -271,18 +273,32 @@ function buildOrderXml(
 
   const desc = buildOrderDescription(order, accountName, crossRefIdent, linkedDeliveryInfo);
 
-  // Build notes XML. dt_orders has two free-text columns; both surface to DT:
-  //   • details      → operator-facing detail text. Mirrored into the
-  //                    <description> CDATA block so it shows on DT's
-  //                    primary dispatcher view.
-  //   • order_notes  → driver-facing public notes. Pushed as <notes>/<note>
-  //                    with note_type="Public" so they render in the DT
-  //                    driver app's notes pane.
-  // The order modal currently only writes to `details`. To make sure the
-  // driver still sees those instructions, we fall back to `details` when
-  // `order_notes` is empty — same text ends up in both views.
-  const driverNotes = order.order_notes || order.details || '';
-  const notesXml = driverNotes ? `\n    <notes count="1">\n      <note created_at="${new Date().toISOString()}" author="StrideApp" note_type="Public">\n        <![CDATA[${cdataEscape(driverNotes)}]]>\n      </note>\n    </notes>` : '';
+  // Build notes XML. Phase 1 introduces three free-text columns:
+  //   • details        → "Order Details" — operator/customer-facing
+  //                      summary, mirrored into the <description> CDATA
+  //                      block (DT dispatcher view).
+  //   • driver_notes   → on-site instructions. Pushed as a Public
+  //                      <note> so the driver app renders them in the
+  //                      notes pane. Falls back to legacy order_notes
+  //                      column for older rows that pre-date the split.
+  //                      Falls back further to `details` so any pre-
+  //                      Phase-1 row still gets driver-visible notes.
+  //   • internal_notes → staff-only. Pushed as a Private <note> so
+  //                      DT-side staff can see the context but it does
+  //                      NOT render on the driver-app side. Empty if
+  //                      the operator left it blank.
+  const driverFacingNotes = order.driver_notes || order.order_notes || order.details || '';
+  const internalFacingNotes = order.internal_notes || '';
+  const noteEntries: string[] = [];
+  if (driverFacingNotes) {
+    noteEntries.push(`      <note created_at="${new Date().toISOString()}" author="StrideApp" note_type="Public">\n        <![CDATA[${cdataEscape(driverFacingNotes)}]]>\n      </note>`);
+  }
+  if (internalFacingNotes) {
+    noteEntries.push(`      <note created_at="${new Date().toISOString()}" author="StrideApp" note_type="Private">\n        <![CDATA[${cdataEscape(internalFacingNotes)}]]>\n      </note>`);
+  }
+  const notesXml = noteEntries.length > 0
+    ? `\n    <notes count="${noteEntries.length}">\n${noteEntries.join('\n')}\n    </notes>`
+    : '';
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <service_orders>
@@ -480,7 +496,7 @@ Deno.serve(async (req: Request) => {
   // ── 1. Fetch primary order ────────────────────────────────────────────
   const { data: order, error: orderErr } = await supabase
     .from('dt_orders')
-    .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_phone2, contact_email, local_service_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, order_notes, service_time_minutes, review_status, pushed_to_dt_at, billing_method, order_total, base_delivery_fee, extra_items_count, extra_items_fee, accessorials_json, accessorials_total, coverage_option_id, coverage_charge, declared_value, billing_review_status, paid_at, paid_amount, paid_method')
+    .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_phone2, contact_email, local_service_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, order_notes, driver_notes, internal_notes, service_time_minutes, review_status, pushed_to_dt_at, billing_method, order_total, base_delivery_fee, extra_items_count, extra_items_fee, accessorials_json, accessorials_total, coverage_option_id, coverage_charge, declared_value, billing_review_status, paid_at, paid_amount, paid_method')
     .eq('id', orderId)
     .maybeSingle();
 
@@ -566,7 +582,7 @@ Deno.serve(async (req: Request) => {
     // Fetch the linked pickup order
     const { data: linkedOrder, error: linkedErr } = await supabase
       .from('dt_orders')
-      .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_phone2, contact_email, local_service_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, order_notes, service_time_minutes, review_status, pushed_to_dt_at, billing_method, order_total, base_delivery_fee, extra_items_count, extra_items_fee, accessorials_json, accessorials_total, billing_review_status, paid_at, paid_amount, paid_method')
+      .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_phone2, contact_email, local_service_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, order_notes, driver_notes, internal_notes, service_time_minutes, review_status, pushed_to_dt_at, billing_method, order_total, base_delivery_fee, extra_items_count, extra_items_fee, accessorials_json, accessorials_total, billing_review_status, paid_at, paid_amount, paid_method')
       .eq('id', orderTyped.linked_order_id)
       .maybeSingle();
 

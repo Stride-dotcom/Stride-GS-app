@@ -82,6 +82,8 @@ interface OrderEdit {
   sidemark: string;
   clientReference: string;
   details: string;
+  driverNotes: string;
+  internalNotes: string;
   orderTotal: string;
   baseDeliveryFee: string;
   reviewStatus: string;
@@ -104,6 +106,8 @@ function orderToEdit(o: DtOrderForUI): OrderEdit {
     sidemark:         o.sidemark ?? '',
     clientReference:  o.clientReference ?? '',
     details:          o.details ?? '',
+    driverNotes:      o.driverNotes ?? '',
+    internalNotes:    o.internalNotes ?? '',
     orderTotal:       o.orderTotal != null ? String(o.orderTotal) : '',
     baseDeliveryFee:  o.baseDeliveryFee != null ? String(o.baseDeliveryFee) : '',
     reviewStatus:     o.reviewStatus ?? 'pending_review',
@@ -219,6 +223,7 @@ function DetailsTab({
   onCancelEdit,
   onSave,
   onSaveAndResync,
+  isStaff,
 }: {
   order: DtOrderForUI;
   /** P+D pair partner. Populated on the parent so DetailsTab can show
@@ -237,6 +242,8 @@ function DetailsTab({
    *  the order has been pushed at least once. Undefined for the rare
    *  caller that wants the bare Save behavior. */
   onSaveAndResync?: () => void;
+  /** Drives visibility of staff-only fields like Internal Notes. */
+  isStaff: boolean;
 }) {
   const addressLine = [order.contactAddress, order.contactCity, order.contactState, order.contactZip].filter(Boolean).join(', ');
   // Identify the P+D partner — when this row is the delivery leg of a
@@ -370,15 +377,18 @@ function DetailsTab({
         </EPCard>
       )}
 
-      {/* Order Details */}
+      {/* Order info — references and order-shape metadata. Notes
+          live in a separate card below so the three notes fields
+          (Order Details / Driver Notes / Internal Notes) read as a
+          coherent unit and the staff-only Internal Notes is harder
+          to mistake for a customer-visible field. */}
       <EPCard>
-        <SectionTitle>Order Details</SectionTitle>
+        <SectionTitle>Order Info</SectionTitle>
         {editing ? (
           <>
             <EditField label="PO Number"        value={edit.poNumber}        onChange={v => setField('poNumber', v)}        icon={<FileText size={11} />} />
             <EditField label="Sidemark"         value={edit.sidemark}        onChange={v => setField('sidemark', v)}        icon={<Package size={11} />} />
             <EditField label="Client Reference" value={edit.clientReference} onChange={v => setField('clientReference', v)} />
-            <EditField label="Details / Notes"  value={edit.details}         onChange={v => setField('details', v)}         type="textarea" rows={3} />
           </>
         ) : (
           <>
@@ -388,7 +398,70 @@ function DetailsTab({
             <Field label="Client Reference" value={order.clientReference} />
             <Field label="Source"           value={order.source} />
             {order.dtDispatchId != null && <Field label="Dispatch ID" value={String(order.dtDispatchId)} />}
-            {order.details && <Field label="Details / Notes" value={order.details} />}
+          </>
+        )}
+      </EPCard>
+
+      {/* Notes — three fields (Phase 1):
+            • Order Details (everyone) — what the order involves
+            • Driver Notes (everyone) — on-site instructions, push to DT
+            • Internal Notes (staff/admin only) — never shared
+          Read view skips empty notes for clients but always shows a
+          slot for staff so they know the field exists. */}
+      <EPCard>
+        <SectionTitle>Notes</SectionTitle>
+        {editing ? (
+          <>
+            <EditField
+              label="Order Details"
+              value={edit.details}
+              onChange={v => setField('details', v)}
+              type="textarea"
+              rows={3}
+            />
+            <div style={{ fontSize: 11, color: EP.textMuted, marginTop: -8, marginBottom: 10, lineHeight: 1.5 }}>
+              Describe what this order involves — services needed, special handling instructions, or anything our team should know about the job.
+            </div>
+            <EditField
+              label="Driver Notes"
+              value={edit.driverNotes}
+              onChange={v => setField('driverNotes', v)}
+              type="textarea"
+              rows={3}
+            />
+            <div style={{ fontSize: 11, color: EP.textMuted, marginTop: -8, marginBottom: 10, lineHeight: 1.5 }}>
+              Notes for the delivery crew — parking instructions, gate codes, building access, or anything they'll need on-site.
+            </div>
+            {isStaff && (
+              <>
+                <EditField
+                  label="Internal Notes"
+                  value={edit.internalNotes}
+                  onChange={v => setField('internalNotes', v)}
+                  type="textarea"
+                  rows={3}
+                />
+                <div style={{ fontSize: 11, color: '#92400E', marginTop: -8, marginBottom: 4, lineHeight: 1.5, fontStyle: 'italic' }}>
+                  Only visible to Stride staff. Clients and drivers will not see these notes — not shared in the customer portal or DispatchTrack.
+                </div>
+              </>
+            )}
+          </>
+        ) : (
+          <>
+            {order.details && <Field label="Order Details" value={order.details} />}
+            {order.driverNotes && <Field label="Driver Notes" value={order.driverNotes} />}
+            {isStaff && order.internalNotes && (
+              <div style={{ background: '#FEF3C7', border: '1px solid #FCD34D', borderRadius: 8, padding: 10, marginTop: 8 }}>
+                <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: '#92400E', marginBottom: 4 }}>
+                  Internal Notes (staff only)
+                </div>
+                <div style={{ fontSize: 13, color: EP.textPrimary, whiteSpace: 'pre-wrap' }}>{order.internalNotes}</div>
+              </div>
+            )}
+            {!order.details && !order.driverNotes && !(isStaff && order.internalNotes) && (
+              <div style={{ fontSize: 12, color: EP.textMuted, fontStyle: 'italic' }}>No notes on this order yet.</div>
+            )}
           </>
         )}
       </EPCard>
@@ -1074,6 +1147,8 @@ export function OrderPage() {
       sidemark:          edit.sidemark.trim(),
       clientReference:   edit.clientReference.trim(),
       details:           edit.details.trim(),
+      driverNotes:       edit.driverNotes.trim(),
+      internalNotes:     edit.internalNotes.trim(),
       reviewStatus:      edit.reviewStatus,
       reviewNotes:       edit.reviewNotes.trim(),
     };
@@ -1097,6 +1172,8 @@ export function OrderPage() {
         sidemark:           edit.sidemark.trim()        || null,
         client_reference:   edit.clientReference.trim() || null,
         details:            edit.details.trim()         || null,
+        driver_notes:       edit.driverNotes.trim()     || null,
+        internal_notes:     edit.internalNotes.trim()   || null,
         review_status:      edit.reviewStatus,
         review_notes:       edit.reviewNotes.trim()     || null,
         reviewed_by:        reviewerUid,
@@ -1139,6 +1216,8 @@ export function OrderPage() {
       if (edit.sidemark        !== (order.sidemark        ?? '')) changedFields.push('sidemark');
       if (edit.clientReference !== (order.clientReference ?? '')) changedFields.push('clientReference');
       if (edit.details         !== (order.details         ?? '')) changedFields.push('details');
+      if (edit.driverNotes     !== (order.driverNotes     ?? '')) changedFields.push('driverNotes');
+      if (edit.internalNotes   !== (order.internalNotes   ?? '')) changedFields.push('internalNotes');
       if (edit.reviewStatus    !== order.reviewStatus)             changedFields.push('reviewStatus');
       if (edit.reviewNotes     !== (order.reviewNotes     ?? '')) changedFields.push('reviewNotes');
       if (pricingChanged)                                          changedFields.push('pricing');
@@ -1298,6 +1377,7 @@ export function OrderPage() {
           onCancelEdit={handleCancelEdit}
           onSave={handleSave}
           onSaveAndResync={handleSaveAndResync}
+          isStaff={canReview}
         />
       ),
     },

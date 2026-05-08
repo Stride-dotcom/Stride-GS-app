@@ -1715,6 +1715,8 @@ export interface SupabaseDtOrderRow {
   sidemark: string | null;
   client_reference: string | null;
   details: string | null;
+  driver_notes: string | null;
+  internal_notes: string | null;
   latest_note_preview: string | null;
   linked_order_id: string | null;
   source: string | null;
@@ -1815,6 +1817,8 @@ export interface DtOrderForUI {
   sidemark: string;
   clientReference: string;
   details: string;
+  driverNotes: string;
+  internalNotes: string;
   latestNotePreview: string;
   source: string;
   lastSyncedAt: string;
@@ -2051,6 +2055,8 @@ export async function fetchDtOrdersFromSupabase(
         sidemark: row.sidemark ?? '',
         clientReference: row.client_reference ?? '',
         details: row.details ?? '',
+        driverNotes: row.driver_notes ?? '',
+        internalNotes: row.internal_notes ?? '',
         latestNotePreview: row.latest_note_preview ?? '',
         source: row.source ?? '',
         lastSyncedAt: row.last_synced_at ?? '',

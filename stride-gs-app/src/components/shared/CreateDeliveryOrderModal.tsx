@@ -922,6 +922,15 @@ export function CreateDeliveryOrderModal({
   const [poNumber, setPoNumber] = useState('');
   const [sidemark, setSidemark] = useState('');
   const [details, setDetails] = useState('');
+  // Phase 1: three-notes split. `details` (column dt_orders.details)
+  // continues to carry the customer-facing "Order Details" text — what
+  // this order involves, why it exists, what it includes. The new
+  // `driverNotes` (dt_orders.driver_notes) is the public driver-facing
+  // crew-on-site note (parking, gate codes, building access). The new
+  // `internalNotes` (dt_orders.internal_notes) is staff-only and
+  // hidden entirely from clients.
+  const [driverNotes, setDriverNotes] = useState('');
+  const [internalNotes, setInternalNotes] = useState('');
 
   // ── Pricing inputs ─────────────────────────────────────────────────────
   // deliveryZone: zone for the DELIVERY zip (delivery / P+D / service_only)
@@ -1772,6 +1781,8 @@ export function CreateDeliveryOrderModal({
       if (r.po_number)              setPoNumber(r.po_number as string);
       if (r.sidemark)               setSidemark(r.sidemark as string);
       if (r.details)                setDetails(r.details as string);
+      if (r.driver_notes)           setDriverNotes(r.driver_notes as string);
+      if (r.internal_notes)         setInternalNotes(r.internal_notes as string);
       if (r.local_service_date)     setServiceDate(r.local_service_date as string);
       // Postgres `time` columns serialize as 'HH:MM:SS' but the dropdown
       // options use 'HH:MM' — slicing the seconds off lets the <select>
@@ -1985,6 +1996,8 @@ export function CreateDeliveryOrderModal({
           po_number: poNumber.trim() || null,
           sidemark: sidemark.trim() || null,
           details: details.trim() || null,
+          driver_notes: driverNotes.trim() || null,
+          internal_notes: internalNotes.trim() || null,
           source: 'app',
           review_status: 'draft',
           created_by_user: authUid,
@@ -2312,6 +2325,8 @@ export function CreateDeliveryOrderModal({
           po_number: poNumber.trim() || null,
           sidemark: sidemark.trim() || null,
           details: details.trim() || null,
+          driver_notes: driverNotes.trim() || null,
+          internal_notes: internalNotes.trim() || null,
           billing_method: billingMethod,
           service_time_minutes: effectiveServiceTime || null,
           coverage_option_id: selectedCoverage?.id ?? null,
@@ -2643,12 +2658,15 @@ export function CreateDeliveryOrderModal({
       window_end_local: windowEnd || null,
       po_number: poNumber.trim() || null,
       sidemark: sidemark.trim() || null,
-      // dt_orders has a single `details` column for free-text notes. The legacy
-      // `order_notes` write was a duplicate of `details` from the same form
-      // field — there is no separate UI input — so we don't write a second
-      // copy. (The dt_order_notes table holds threaded staff/client notes
-      // and is unrelated to this column.)
+      // Three free-text notes columns (Phase 1):
+      //   • details         → "Order Details" (everyone)
+      //   • driver_notes    → on-site instructions (everyone, pushed to DT)
+      //   • internal_notes  → staff-only, hidden from clients
+      // (The dt_order_notes table holds threaded staff/client notes and
+      // is unrelated to these columns.)
       details: details.trim() || null,
+      driver_notes: driverNotes.trim() || null,
+      internal_notes: internalNotes.trim() || null,
       source: 'app',
       review_status: (user?.role === 'admin' || user?.role === 'staff') ? 'approved' : 'pending_review',
       created_by_user: authUid,
@@ -4254,22 +4272,52 @@ export function CreateDeliveryOrderModal({
                   <input style={input} value={sidemark} onChange={e => setSidemark(e.target.value)} />
                 </div>
               </div>
-              <label style={label}>
-                Notes / Special Instructions
-                {mode === 'pickup_and_delivery' && (
-                  <span style={{ fontWeight: 400, textTransform: 'none', color: theme.colors.textMuted, marginLeft: 6, fontSize: 10 }}>
-                    (appear on both pickup and delivery orders)
-                  </span>
-                )}
-              </label>
+              {/* Three notes fields (Phase 1):
+                    - Order Details (everyone): what this order involves
+                    - Driver Notes (everyone): on-site instructions
+                    - Internal Notes (staff/admin only): private staff context */}
+              <label style={label}>Order Details</label>
+              <div style={{ fontSize: 11, color: theme.colors.textMuted, marginBottom: 6, lineHeight: 1.5 }}>
+                Describe what this order involves — services needed, special handling instructions, or anything our team should know about the job.
+              </div>
               <textarea
                 style={{ ...input, minHeight: 60, resize: 'vertical' }}
                 value={details}
                 onChange={e => setDetails(e.target.value)}
-                placeholder={mode === 'pickup_and_delivery'
-                  ? 'Instructions that apply to both the pickup and delivery (gate codes, elevator, fragile items, etc.)'
-                  : 'Delivery instructions, gate codes, elevator notes, etc.'}
+                placeholder="Order overview"
               />
+
+              <label style={{ ...label, marginTop: 14 }}>Driver Notes</label>
+              <div style={{ fontSize: 11, color: theme.colors.textMuted, marginBottom: 6, lineHeight: 1.5 }}>
+                Notes for the delivery crew — parking instructions, gate codes, building access, or anything they'll need on-site.
+              </div>
+              <textarea
+                style={{ ...input, minHeight: 60, resize: 'vertical' }}
+                value={driverNotes}
+                onChange={e => setDriverNotes(e.target.value)}
+                placeholder="Parking, gate codes, building access…"
+              />
+
+              {/* Internal Notes — staff/admin only. Clients never see
+                  this label or textarea, so they can't accidentally
+                  mistake it for a customer-visible field. */}
+              {isStaff && (
+                <>
+                  <label style={{ ...label, marginTop: 14 }}>Internal Notes</label>
+                  <div style={{ fontSize: 11, color: theme.colors.textMuted, marginBottom: 6, lineHeight: 1.5 }}>
+                    Internal notes — only visible to Stride staff. Not shared with clients or drivers.
+                  </div>
+                  <textarea
+                    style={{ ...input, minHeight: 60, resize: 'vertical', background: '#FEF3C7', borderColor: '#FCD34D' }}
+                    value={internalNotes}
+                    onChange={e => setInternalNotes(e.target.value)}
+                    placeholder="Anything the rest of the team should know about this order, behind the scenes."
+                  />
+                  <div style={{ fontSize: 10.5, color: theme.colors.textMuted, marginTop: 4, lineHeight: 1.5, fontStyle: 'italic' }}>
+                    Only visible to Stride staff. Clients and drivers will not see these notes — not shared in the customer portal or DispatchTrack.
+                  </div>
+                </>
+              )}
             </div>
           )}
 
