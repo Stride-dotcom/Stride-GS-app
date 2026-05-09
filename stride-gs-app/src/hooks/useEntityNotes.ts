@@ -234,12 +234,14 @@ export function useEntityNotes(
     const note = rowToNote(data as NoteRow);
     setNotes(prev => [note, ...prev]);
 
-    // v2026-05-08 — office alert when a client posts a note on a task or a
-    // repair (acceptance event OR free-form comment). Fire-and-forget; the
-    // edge function double-checks role + entity_type server-side and is
-    // idempotent on note id, so spurious calls are harmless. Mirrors the
-    // notify-public-request invocation pattern used by PublicServiceRequest.
-    if ((entityType === 'task' || entityType === 'repair') && user?.role === 'client') {
+    // v2026-05-09 — office alert on EVERY client-authored note, regardless
+    // of entity type. The edge function owns ENTITY_ROUTES and short-circuits
+    // with skippedReason='entity_type=…' for any type not in the map, so
+    // expanding coverage to a new entity type only requires touching the
+    // server. Fire-and-forget; idempotent on note id (one email per note),
+    // so a redundant call is a no-op. The function name keeps the legacy
+    // 'task' suffix for URL stability — internally it's entity-agnostic.
+    if (user?.role === 'client') {
       void supabase.functions
         .invoke('notify-task-client-note', { body: { noteId: note.id } })
         .catch(invokeErr => console.warn('[useEntityNotes] notify-task-client-note failed:', invokeErr));
