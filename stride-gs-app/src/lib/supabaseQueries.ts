@@ -1847,6 +1847,13 @@ export interface DtOrderForUI {
   reviewNotes: string;
   reviewedBy: string | null;
   reviewedAt: string | null;
+  // v2026-05-09 — client-resubmit diff snapshot. Set when a client
+  // saves changes to a non-draft order; cleared when staff Approves.
+  // Drives the "Updated by [client]" banner on OrderPage and the
+  // {{CHANGES_LIST}} body in the office email.
+  lastResubmitDiff: Record<string, { old: unknown; new: unknown }> | null;
+  lastResubmitAt: string | null;
+  lastResubmitBy: string | null;
   createdByRole: string;
   createdByUser: string | null;
   createdByName: string;
@@ -2116,6 +2123,9 @@ export async function fetchDtOrdersFromSupabase(
         reviewNotes: row.review_notes ?? '',
         reviewedBy: row.reviewed_by,
         reviewedAt: row.reviewed_at,
+        lastResubmitDiff: (row as { last_resubmit_diff?: Record<string, { old: unknown; new: unknown }> | null }).last_resubmit_diff ?? null,
+        lastResubmitAt:   (row as { last_resubmit_at?:   string | null }).last_resubmit_at   ?? null,
+        lastResubmitBy:   (row as { last_resubmit_by?:   string | null }).last_resubmit_by   ?? null,
         createdByRole: row.created_by_role ?? '',
         createdByUser: row.created_by_user,
         createdByName: (row.created_by_user ? profileMap.get(row.created_by_user)?.displayName : '') ?? '',
@@ -2267,6 +2277,9 @@ export async function fetchDtOrderByIdFromSupabase(
       reviewNotes: row.review_notes ?? '',
       reviewedBy: row.reviewed_by,
       reviewedAt: row.reviewed_at,
+      lastResubmitDiff: (row as { last_resubmit_diff?: Record<string, { old: unknown; new: unknown }> | null }).last_resubmit_diff ?? null,
+      lastResubmitAt:   (row as { last_resubmit_at?:   string | null }).last_resubmit_at   ?? null,
+      lastResubmitBy:   (row as { last_resubmit_by?:   string | null }).last_resubmit_by   ?? null,
       createdByRole: row.created_by_role ?? '',
       createdByUser: row.created_by_user,
       createdByName: '',
