@@ -1,6 +1,6 @@
 # Stride GS App — Build Status
 
-> Last updated: 2026-05-09 ([MIGRATION-P1.2] GAS-side input capture shipped, StrideAPI v38.199.0; replay corpus clock starts on deploy).
+> Last updated: 2026-05-09 ([MIGRATION-P1.2] deployed as Web App v494; smoke-check deferred to organic Monday-morning traffic — Friday-evening-PST window had zero post-deploy `doPost` calls).
 
 ---
 
@@ -26,11 +26,25 @@
 
 **Files touched:**
 - `AppScripts/stride-api/StrideAPI.gs` (v38.198.0 → v38.199.0)
-- `stride-gs-app/MIGRATION_STATUS.md` (P1.2 → done)
+- `stride-gs-app/MIGRATION_STATUS.md` (P1.2 → done, verify deferred)
+
+**Deploy:** `npm run push-api && npm run deploy-api` ran 2026-05-09 ~05:01–05:02 UTC. Web App now at version 494.
+
+**Smoke check (2026-05-09, ~05:07 UTC, ~5 min post-deploy):**
+- `gas_call_log` total rows: **0**.
+- `entity_audit_log` rows since deploy: **8** — all are `source='backfill:v1'` with future `performed_at` timestamps (Oct–Dec 2026); not real-time `doPost` traffic. `correlation_id IS NULL` on all 8, which is correct (backfill rows never go through `doPost`).
+- **Conclusion:** zero post-deploy `doPost` traffic in the verification window (Friday evening PST, warehouse not actively writing). Code path can't be exercised without organic traffic. Deploy is live (Web App v494 confirmed); first real `doPost` call will populate `gas_call_log`.
 
 **Pending user action:**
-- [ ] Deploy GAS: `npm run push-api && npm run deploy-api` from `AppScripts/stride-client-inventory/` after merge. (Builder will run this directly; noted here for the activity log.)
-- [ ] After deploy: smoke-check by inspecting `public.gas_call_log` 1-2 minutes after a normal user click (e.g. start a task) — expect a row with `action='startTask'`, `correlation_id` non-null, `tenant_id` populated, `input_redacted` containing only whitelisted fields.
+- [ ] **Monday-morning re-check.** Run this query after the warehouse has been active for ~10 minutes:
+  ```sql
+  SELECT
+    (SELECT COUNT(*) FROM public.gas_call_log) AS total_calls_captured,
+    (SELECT COUNT(*) FROM public.entity_audit_log WHERE correlation_id IS NOT NULL) AS audit_rows_with_correlation,
+    (SELECT COUNT(*) FROM public.gas_call_log gcl INNER JOIN public.entity_audit_log eal ON eal.correlation_id = gcl.correlation_id) AS joined_pairs;
+  ```
+  Expected: all three non-zero. If `joined_pairs > 0` we have working (input → output) pairs and the replay corpus is live.
+- [ ] If verification fails (zero rows even after organic traffic), check Apps Script execution logs at https://script.google.com/home/projects/134--evzE23rsA3CV_vEFQvZIQ86LE9boeSPBpGMYJ3pLbcW_Te6uqZ1M/executions for `api_logCallInput_` errors.
 
 ---
 
