@@ -102,11 +102,18 @@ function rowToNote(r: NoteRow): EntityNote {
   };
 }
 
+export interface AddNoteOptions {
+  /** v2026-05-08 — flag the row as a system-generated event (acknowledgements,
+   *  status-change markers). NotesSection renders these in the de-emphasized
+   *  audit row instead of a chat bubble. Defaults to false. */
+  isSystem?: boolean;
+}
+
 export interface UseEntityNotesResult {
   notes: EntityNote[];
   loading: boolean;
   error: string | null;
-  addNote: (body: string, visibility?: NoteVisibility, mentions?: string[]) => Promise<EntityNote | null>;
+  addNote: (body: string, visibility?: NoteVisibility, mentions?: string[], options?: AddNoteOptions) => Promise<EntityNote | null>;
   deleteNote: (noteId: string) => Promise<boolean>;
   refetch: () => Promise<void>;
 }
@@ -175,6 +182,7 @@ export function useEntityNotes(
     body: string,
     visibility: NoteVisibility = 'public',
     mentions: string[] = [],
+    options: AddNoteOptions = {},
   ): Promise<EntityNote | null> => {
     const trimmed = body.trim();
     if (!trimmed) return null;
@@ -212,7 +220,7 @@ export function useEntityNotes(
         body: trimmed,
         visibility,
         mentions,
-        is_system: false,
+        is_system: !!options.isSystem,
         author_id: authUserId,
         author_name: user?.displayName ?? user?.email ?? 'Unknown',
         author_role: user?.role ?? null,
