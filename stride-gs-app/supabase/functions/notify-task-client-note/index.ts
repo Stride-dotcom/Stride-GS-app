@@ -2,20 +2,25 @@
  * notify-task-client-note — Supabase Edge Function
  *
  * Fires from React (useEntityNotes.addNote) fire-and-forget after a
- * successful entity_notes INSERT when entityType='task' and the author's
- * role is 'client'. Server-side this function:
- *   1. Loads the note from entity_notes (rejecting non-task or non-client
- *      writes the React caller couldn't have known about — RLS + role
- *      double-check).
- *   2. Hydrates task / item / client context.
+ * successful entity_notes INSERT when entity_type ∈ {'task', 'repair'}
+ * and the author's role is 'client'. Server-side this function:
+ *   1. Loads the note from entity_notes (rejecting non-task/repair or
+ *      non-client writes the React caller couldn't have known about —
+ *      RLS + role double-check).
+ *   2. Hydrates the parent entity (task OR repair) + item + client.
  *   3. Builds tokens for TASK_CLIENT_NOTE and delegates to send-email
  *      (Resend), which expands NOTIFICATION_EMAILS to the office list.
+ *
+ * The function name keeps the legacy "task" suffix for the URL — it was
+ * deployed before repairs were in scope. Internally it's entity-agnostic
+ * and the same template covers both. Renaming the function would break
+ * the React invoke call without buying anything.
  *
  * Pattern mirror: notify-public-request — both compose `send-email` with
  * an idempotency key per source row.
  *
  * Request:  POST { noteId: string }
- * Response: { ok: boolean, sent?: boolean, deduped?: boolean, skippedReason?: string, error?: string }
+ * Response: { ok, sent?, deduped?, skippedReason?, error? }
  *
  * Required Edge Function secrets:
  *   SUPABASE_URL                  (auto-provided)
@@ -33,6 +38,44 @@ const corsHeaders = {
 
 const APP_BASE = 'https://www.mystridehub.com';
 const ACCEPTANCE_PREFIX = '✓ Accepted as-is';
+
+// Per-entity routing for hydration + deep links. Keep the keys in sync with
+// the React-side gate in useEntityNotes.addNote.
+const ENTITY_ROUTES: Record<string, {
+  table: string;
+  idColumn: string;
+  typeColumn?: string;       // optional sub-classifier (tasks have type=INSP/ASM/...)
+  resultColumn?: string;     // optional pass/fail field
+  defaultTypeLabel: string;  // shown in the email when typeColumn is empty/missing
+  routePath: string;         // /#/tasks or /#/repairs
+}> = {
+  task: {
+    table: 'tasks',
+    idColumn: 'task_id',
+    typeColumn: 'type',
+    resultColumn: 'result',
+    defaultTypeLabel: 'Task',
+    routePath: '/#/tasks',
+  },
+  repair: {
+    table: 'repairs',
+    idColumn: 'repair_id',
+    // repairs has repair_result; status itself encodes Failed/Complete so we
+    // surface status in the result-suffix slot for repairs.
+    resultColumn: 'repair_result',
+    defaultTypeLabel: 'Repair',
+    routePath: '/#/repairs',
+  },
+};
+
+interface ParentRow {
+  tenant_id?: string | null;
+  item_id?: string | null;
+  type?: string | null;
+  status?: string | null;
+  result?: string | null;
+  repair_result?: string | null;
+}
 
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
@@ -55,7 +98,6 @@ Deno.serve(async (req: Request) => {
 
     const supabase = createClient(supabaseUrl, serviceKey);
 
-    // 1. Load the note. RLS bypassed via service role.
     const { data: note, error: noteErr } = await supabase
       .from('entity_notes')
       .select('id, entity_type, entity_id, item_id, body, is_system, author_name, author_role, tenant_id, created_at')
@@ -65,32 +107,38 @@ Deno.serve(async (req: Request) => {
       return json({ ok: false, error: `Note not found: ${noteErr?.message ?? 'unknown'}` }, 404);
     }
 
-    // Server-side gate: only task notes from client-role authors trigger an
-    // alert. Anything else is a no-op success — the React caller fired
-    // optimistically; we don't want to flap on edge cases (admin/staff
-    // posting on a client task with the wrong cached role, etc.).
-    if (note.entity_type !== 'task') {
+    // Server-side gate: only client-role authors on a routable entity_type
+    // trigger an alert. The React caller fired optimistically; we don't
+    // want to flap on edge cases (admin posting on a client task with a
+    // stale cached role, future entity types we haven't routed yet, etc.).
+    const route = ENTITY_ROUTES[note.entity_type];
+    if (!route) {
       return json({ ok: true, sent: false, skippedReason: `entity_type=${note.entity_type}` });
     }
     if (note.author_role !== 'client') {
       return json({ ok: true, sent: false, skippedReason: `author_role=${note.author_role}` });
     }
 
-    // 2. Hydrate task.
-    const { data: task, error: taskErr } = await supabase
-      .from('tasks')
-      .select('task_id, tenant_id, item_id, type, status, result')
-      .eq('tenant_id', note.tenant_id)
-      .eq('task_id', note.entity_id)
-      .maybeSingle();
-    if (taskErr) {
-      console.warn('[notify-task-client-note] task fetch failed (continuing with note-only context):', taskErr.message);
+    // Hydrate the parent entity. Select * because the column shapes differ
+    // between tasks and repairs and we read each through the ParentRow
+    // optional view below.
+    let parent: ParentRow | null = null;
+    if (note.tenant_id) {
+      const { data, error: parentErr } = await supabase
+        .from(route.table)
+        .select('*')
+        .eq('tenant_id', note.tenant_id)
+        .eq(route.idColumn, note.entity_id)
+        .maybeSingle();
+      if (parentErr) {
+        console.warn(`[notify-task-client-note] ${route.table} fetch failed:`, parentErr.message);
+      }
+      parent = (data as ParentRow | null) ?? null;
     }
 
-    const itemId = note.item_id ?? task?.item_id ?? '';
-    const tenantId = note.tenant_id ?? task?.tenant_id ?? '';
+    const itemId   = note.item_id ?? parent?.item_id ?? '';
+    const tenantId = note.tenant_id ?? parent?.tenant_id ?? '';
 
-    // 3. Hydrate item (best-effort; an item may not exist for some task types).
     let item: { description?: string | null; sidemark?: string | null; reference?: string | null } | null = null;
     if (tenantId && itemId) {
       const { data } = await supabase
@@ -102,7 +150,6 @@ Deno.serve(async (req: Request) => {
       item = data;
     }
 
-    // 4. Hydrate client (display name).
     let clientName = '(unknown client)';
     if (tenantId) {
       const { data } = await supabase
@@ -113,42 +160,50 @@ Deno.serve(async (req: Request) => {
       if (data?.name) clientName = data.name;
     }
 
-    // 5. Build tokens.
     const isAcceptance = !!note.is_system && (note.body ?? '').startsWith(ACCEPTANCE_PREFIX);
     const noteKind = isAcceptance ? 'Acceptance' : 'Comment';
-    const taskResult = (task?.result ?? '').toString().trim();
-    const taskResultSuffix = taskResult ? ` (${taskResult})` : '';
+
+    // Result-suffix logic differs by entity:
+    //   Tasks:   parent.result is 'Pass' | 'Fail' (or empty) — show literally
+    //   Repairs: parent.repair_result mirrors that, but the status field
+    //            ('Failed', 'Complete', etc.) is the source of truth shown
+    //            elsewhere. Either field, when present, lands here.
+    const rawResult = route.resultColumn === 'repair_result'
+      ? (parent?.repair_result ?? '').toString().trim()
+      : (parent?.result ?? '').toString().trim();
+    const resultSuffix = rawResult ? ` (${rawResult})` : '';
 
     // CLAUDE.md: deep links are query-param style with &client=. Route-style
     // (/#/tasks/<id>) gets stripped by Gmail past the # fragment. tenant_id
     // is the clientSheetId in this app — same value the GAS deep links use.
     const deepLink =
-      `${APP_BASE}/#/tasks?open=${encodeURIComponent(note.entity_id)}` +
+      `${APP_BASE}${route.routePath}?open=${encodeURIComponent(note.entity_id)}` +
       (tenantId ? `&client=${encodeURIComponent(tenantId)}` : '');
 
     const tokens: Record<string, string> = {
-      NOTE_KIND:         noteKind,
-      CLIENT_NAME:       clientName,
-      AUTHOR_NAME:       note.author_name ?? 'Client',
-      NOTE_BODY:         note.body ?? '',
-      NOTE_TIME:         formatPacificDate(note.created_at),
-      ITEM_ID:           itemId || '—',
-      ITEM_DESCRIPTION:  (item?.description ?? '').trim() || '—',
-      ITEM_SIDEMARK:     (item?.sidemark ?? '').trim() || '—',
-      ITEM_REFERENCE:    (item?.reference ?? '').trim() || '—',
-      TASK_ID:           task?.task_id ?? note.entity_id,
-      TASK_TYPE:         task?.type ?? '—',
-      TASK_STATUS:       task?.status ?? '—',
-      TASK_RESULT_SUFFIX: taskResultSuffix,
-      DEEP_LINK:         deepLink,
+      NOTE_KIND:          noteKind,
+      CLIENT_NAME:        clientName,
+      AUTHOR_NAME:        note.author_name ?? 'Client',
+      NOTE_BODY:          note.body ?? '',
+      NOTE_TIME:          formatPacificDate(note.created_at),
+      ITEM_ID:            itemId || '—',
+      ITEM_DESCRIPTION:   (item?.description ?? '').trim() || '—',
+      ITEM_SIDEMARK:      (item?.sidemark ?? '').trim() || '—',
+      ITEM_REFERENCE:     (item?.reference ?? '').trim() || '—',
+      // The template tokens are named TASK_* for legacy reasons; treat them
+      // as ENTITY_* and feed task or repair fields into the same slots.
+      TASK_ID:            note.entity_id,
+      TASK_TYPE:          parent?.type?.toString().trim() || route.defaultTypeLabel,
+      TASK_STATUS:        parent?.status?.toString().trim() || '—',
+      TASK_RESULT_SUFFIX: resultSuffix,
+      DEEP_LINK:          deepLink,
     };
 
-    // 6. Send. Idempotency keyed on note id so React retries don't double-send.
     const r = await invokeSendEmail(supabaseUrl, serviceKey, {
       templateKey: 'TASK_CLIENT_NOTE',
       tokens,
       idempotencyKey: `task-client-note:${note.id}`,
-      relatedEntityType: 'task',
+      relatedEntityType: note.entity_type,
       relatedEntityId: note.entity_id,
       tenantId: tenantId || undefined,
     });
