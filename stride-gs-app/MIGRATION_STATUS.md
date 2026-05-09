@@ -1,6 +1,6 @@
 # GAS → Supabase Migration — Living Status
 
-> Last updated: 2026-05-09 (P1.2 deployed as Web App v494 at 05:02:05Z. Smoke check deferred to organic Monday-morning traffic — Friday-evening-PST window had zero real `doPost` calls in the 5 minutes after deploy.).
+> Last updated: 2026-05-09 (P1.3 `parity_dryrun` schema applied — 14 column-shape mirrors of public.* write-target tables, `parity_dryrun.reset()` truncate helper, `parity_dryrun.row_counts` diagnostics view, service_role-only access).
 > This file is **authoritative for execution**. The v1.1 docx in `Dropbox\Apps\GS Inventory\` is a stakeholder snapshot.
 
 ---
@@ -47,13 +47,34 @@ If you only have time for one section: read **Architectural Decisions** in full.
 |---|---|---|---|
 | P1.1 | **done** | 2026-05-09 | Migrations: `feature_flags`, `parity_results`, `gas_call_log`, `correlation_id` column on `entity_audit_log`. 25 `feature_flags` rows seeded at `active_backend='gas'`. Migration file: `supabase/migrations/20260509000001_migration_parity_substrate.sql`. Applied via Supabase MCP. |
 | P1.2 | **done (verify deferred)** | 2026-05-09 | GAS-side input capture: `api_logCallInput_` in `doPost`, threads `correlation_id` via `__MIG_CORRELATION_ID__` script-level global into `api_auditLog_`. PII-conscious redaction (1KB cap, whitelist of structural fields). StrideAPI v38.199.0 deployed as Web App v494 at 2026-05-09T05:02:05Z. **Verify pending**: 5-min post-deploy window had zero organic `doPost` traffic (Friday evening PST). Re-check Monday morning: expect non-zero `gas_call_log` rows + non-null `correlation_id` on `entity_audit_log` rows from same requests. |
-| P1.3 | not_started | — | `parity_dryrun` Postgres schema mirroring the tables write-handlers touch. |
+| P1.3 | **done** | 2026-05-09 | `parity_dryrun` Postgres schema with 14 mirrors of public.* write-target tables (`inventory`, `tasks`, `repairs`, `shipments`, `will_calls`, `will_call_items`, `billing`, `addons`, `invoice_tracking`, `entity_notes`, `item_photos`, `clients`, `stax_invoices`, `stax_charges`). Built via `LIKE source INCLUDING DEFAULTS`. `parity_dryrun.reset()` truncate helper + `parity_dryrun.row_counts` diagnostics view. service_role-only access. Migration: `supabase/migrations/20260509000002_parity_dryrun_schema.sql`. **Schema-sync convention** (see below) is now load-bearing. |
 | P1.4 | not_started | — | Reverse writethrough harness: GAS Web App endpoint accepting row payloads, idempotent on row-id key. |
 | P1.5 | not_started | — | React `FeatureFlagProvider` + `useFeatureFlag(key)` hook with per-tenant scope resolution. |
 | P1.6 | not_started | — | Settings → Migration tab (admin only): per-function toggle, mismatch-rate widget, master-switch revert button. |
 | P1.7 | not_started | — | `replay-shadow` Edge Function (cron'd nightly per function). |
 
 P1 exit: P1.1–P1.7 all merged + one no-op handler wired through the framework end-to-end with parity logging proven.
+
+---
+
+## `parity_dryrun` schema-sync convention
+
+The `parity_dryrun.*` mirrors created in P1.3 must stay column-shape-identical to their `public.*` sources. Drift breaks the replay harness silently — a shadow `INSERT` may succeed but produce a state hash that doesn't match prod.
+
+**Rule:** every future migration that ALTERs a `public.*` table in the mirror set MUST also ALTER the corresponding `parity_dryrun.*` mirror in the same migration file.
+
+**Mirror set** (14 tables as of P1.3):
+`inventory`, `tasks`, `repairs`, `shipments`, `will_calls`, `will_call_items`, `billing`, `addons`, `invoice_tracking`, `entity_notes`, `item_photos`, `clients`, `stax_invoices`, `stax_charges`.
+
+**PR-review checklist:**
+- `ALTER TABLE public.X ADD COLUMN ...` → also `ALTER TABLE parity_dryrun.X ADD COLUMN ...`
+- `ALTER TABLE public.X DROP COLUMN ...` → also `ALTER TABLE parity_dryrun.X DROP COLUMN ...`
+- `ALTER TABLE public.X RENAME COLUMN ...` → also `ALTER TABLE parity_dryrun.X RENAME COLUMN ...`
+- `ALTER TABLE public.X ALTER COLUMN ... TYPE ...` → also `ALTER TABLE parity_dryrun.X ALTER COLUMN ... TYPE ...`
+- `DROP TABLE public.X` (mirror member) → also `DROP TABLE parity_dryrun.X` and remove from `parity_dryrun.reset()` and `parity_dryrun.row_counts`
+- `CREATE TABLE public.X` (new write-target for a migrating handler) → add `CREATE TABLE parity_dryrun.X (LIKE public.X INCLUDING DEFAULTS)` and update `parity_dryrun.reset()` and `parity_dryrun.row_counts`
+
+A drift-detection check ships in P1.7 alongside the replay harness — a query that fails CI when column counts diverge between `public.X` and `parity_dryrun.X`.
 
 ---
 

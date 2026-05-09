@@ -1,6 +1,36 @@
 # Stride GS App — Build Status
 
-> Last updated: 2026-05-09 ([MIGRATION-P1.2] deployed as Web App v494; smoke-check deferred to organic Monday-morning traffic — Friday-evening-PST window had zero post-deploy `doPost` calls).
+> Last updated: 2026-05-09 ([MIGRATION-P1.3] `parity_dryrun` schema applied — 14 column-shape mirrors of public.* write-target tables, `reset()` truncate helper, `row_counts` diagnostics view).
+
+---
+
+## Recent Changes (2026-05-09, [MIGRATION-P1.3] parity_dryrun schema)
+
+**Trigger:** Per **MIG-001** (dry-run-on-shadow inside prod SB) the replay harness needs a write target separate from `public.*`. P1.3 ships that target as a `parity_dryrun` Postgres schema with column-shape mirrors of every `public.*` table that any handler in the migration inventory writes.
+
+**What landed:** `supabase/migrations/20260509000002_parity_dryrun_schema.sql` (applied via MCP).
+
+- New `parity_dryrun` schema. service_role-only (REVOKE PUBLIC, GRANT USAGE service_role); not visible to `authenticated` or `anon` JWT roles, so it stays out of the React app's RLS surface.
+- 14 mirrored tables built via `LIKE public.X INCLUDING DEFAULTS`: `inventory`, `tasks`, `repairs`, `shipments`, `will_calls`, `will_call_items`, `billing`, `addons`, `invoice_tracking`, `entity_notes`, `item_photos`, `clients`, `stax_invoices`, `stax_charges`. Column shapes match public.* byte-for-byte (verified column-count parity at 17/26/45/15/34/10/20/37/13/11/20/28/9/22).
+- `INCLUDING DEFAULTS` carries expression defaults (e.g. `gen_random_uuid()`) but NOT constraints, indexes, identity sequences, or RLS — by design. The harness supplies all values explicitly; the mirror only needs the right SHAPE for state-hashing.
+- New `parity_dryrun.reset()` plpgsql function (SECURITY DEFINER, EXECUTE granted to service_role only) — TRUNCATEs all 14 mirrors with RESTART IDENTITY. The replay harness calls this at the start of each run to prevent prior-run state from leaking into the diff.
+- New `parity_dryrun.row_counts` view — diagnostic surface for the Settings → Migration tab (P1.6) to show "harness writing recently?" indicators.
+
+**Pins (do not regress):**
+- The mirror set is documented in `stride-gs-app/MIGRATION_STATUS.md` "`parity_dryrun` schema-sync convention." Every future `ALTER TABLE public.X ...` against a mirror member MUST be paired with a matching `ALTER TABLE parity_dryrun.X ...` in the same migration file. Drift breaks the replay harness silently.
+- The mirror set must NOT be added to the Realtime publication. Shadow writes are internal — they should never trigger a frontend listener.
+
+**What this PR does NOT do:**
+- No realtime publication on parity_dryrun (correct — see above).
+- No replay harness yet (P1.7).
+- No reverse writethrough (P1.4) — that comes alongside the first function flipping to `active_backend='supabase'` in P2.
+- Drift-detection check (column-count parity in CI) deferred to P1.7 alongside the replay harness.
+
+**Files touched:**
+- `stride-gs-app/supabase/migrations/20260509000002_parity_dryrun_schema.sql` (new)
+- `stride-gs-app/MIGRATION_STATUS.md` (P1.3 → done; new "parity_dryrun schema-sync convention" section)
+
+**Pending user action:** none for P1.3.
 
 ---
 
