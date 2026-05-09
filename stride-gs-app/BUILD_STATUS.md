@@ -1,6 +1,59 @@
 # Stride GS App — Build Status
 
-> Last updated: 2026-05-09 ([MIGRATION-P1.6] Settings → Migration tab shipped — admin-only UI for the 25 feature flags, master switch with MIG-003 refined semantics. All flags still at `gas`; no production routing change).
+> Last updated: 2026-05-09 ([MIGRATION-P1.4] Reverse writethrough endpoint shipped — `handleWriteThroughReverse_` + `_shared/reverse-writethrough.ts` helper. Framework only; per-table writers ship in P2/P3/P4 PRs. StrideAPI v38.200.0).
+
+---
+
+## Recent Changes (2026-05-09, [MIGRATION-P1.4] reverse SB→Sheets writethrough)
+
+**Trigger:** P1.4 from the Phase 1 sub-task list. Per **MIG-002** (synchronous SB→Sheets reverse writethrough) the rollback insurance for any function flipping to `active_backend='supabase'` is a per-tenant-sheet mirror that the SB-side handler keeps current. P1.4 ships that insurance as substrate; per-table writers fill in alongside each function migration in P2/P3/P4.
+
+**What landed (StrideAPI.gs v38.200.0):**
+
+- New `doPost` case `"writeThroughReverse"` → routes to `handleWriteThroughReverse_(payload, callerEmail)`.
+- New dispatcher `handleWriteThroughReverse_` validates the payload contract (`tenantId`, `table`, `op` ∈ {insert, update, delete}, `rowId` for update/delete), opens the per-tenant spreadsheet, dispatches to a per-table writer in `REVERSE_WRITETHROUGH_TABLES_`, and on failure logs to `gs_sync_events` with `action_type='writethrough_reverse'` (so failures surface in the React FailedOperationsDrawer just like GAS→SB writethrough failures).
+- New registry `REVERSE_WRITETHROUGH_TABLES_` with 14 table entries — every table from the parity_dryrun mirror set in P1.3. **Every entry is a stub** today (`__writeThroughReverseStub_` throws "not yet implemented (P1.4 framework only)"). Per-table writers ship in their corresponding function-migration PRs.
+- Auth model: existing API_TOKEN bearer at the top of `doPost` is the single auth surface. The Edge Function caller passes the same token. No per-action HMAC (future hardening).
+
+**What landed (SB-side TypeScript helper):**
+
+- New `supabase/functions/_shared/reverse-writethrough.ts` (~140 lines, first file in `_shared/`).
+- `reverseWritethrough(input)` — strict mode. Throws on missing env vars, network error, HTTP non-2xx, or GAS-side `success: false`. Caller decides whether to surface or swallow.
+- `reverseWritethroughBestEffort(input)` — catch wrapper. Logs to `console.error` and returns `{ success: false, error }`. Matches the existing GAS→SB `api_writeThrough_` semantics (best-effort, never blocks).
+- Reads `GAS_API_URL` + `GAS_API_TOKEN` from Edge Function secrets — see Pending User Action.
+
+**Idempotency by design:**
+
+The GAS-side per-table writers are required to be idempotent by row identifier — calling twice with the same row produces the same sheet state. That sidesteps an idempotency-key store: at-least-once delivery from the Edge Function is safe because the receiver squashes duplicates. This convention is documented in the dispatch comments and is load-bearing for every per-table writer that ships in P2+.
+
+**Code review (Opus subagent) flagged + fixed:**
+- **Tenant validation hardening.** Added `api_isKnownTenantId_(tenantId)` — checks `public.clients.spreadsheet_id` via PostgREST GET before `openById`. Fails closed on Supabase outage. Without this, a leaked API_TOKEN could write to non-Stride sheets the script account has access to (Master Price List, Consolidated Billing, etc.).
+- **Idempotency contract sharpened.** Dispatcher comment now explicitly says writers MUST derive sheet primary key from SB row contents, never from `lastDataRow + 1` or any counter that depends on order of arrivals. Re-delivery with such a counter would produce duplicate rows.
+- **Retry-cron interaction documented.** The new `action_type='writethrough_reverse'` intentionally does NOT match the existing `retryFailedSyncs_` LIKE pattern (which would call `resyncEntityToSupabase_` — wrong direction for our use case). Recovery is operator-driven via FailedOperationsDrawer; a future parallel retry cron may ship later.
+
+**Pins (do not regress):**
+- The registry `REVERSE_WRITETHROUGH_TABLES_` MUST stay aligned with the `parity_dryrun` mirror set in `MIGRATION_STATUS.md` "parity_dryrun schema-sync convention." Both sides cover the same table set; an entry missing from one likely means the other is wrong.
+- Per-table writers MUST be idempotent by row identifier. **Specifically: writers MUST derive their sheet primary key purely from SB row contents (Ledger Row ID, Task ID, Item ID, etc.). Writers MUST NOT use `lastDataRow + 1` or any counter whose value depends on the order of arrivals — that breaks idempotency silently.** This contract is documented at the top of the dispatcher's comment block.
+- The endpoint relies on `API_TOKEN`-based auth at `doPost` top — do not introduce a code path that bypasses that validation.
+- `tenantId` MUST be validated against `public.clients.spreadsheet_id` before `openById` (via `api_isKnownTenantId_`). Without this guard, a leaked API_TOKEN could be used to write to non-Stride sheets the script account happens to have access to. Helper fails CLOSED on Supabase outage — better to reject a legit reverse writethrough during a transient outage than to allow a writethrough to an unknown sheet.
+- `action_type='writethrough_reverse'` intentionally does NOT match the `*_write_through` LIKE pattern that `retryFailedSyncs_` picks up. That cron retries via `resyncEntityToSupabase_` which syncs in the GAS→SB direction — opposite of what a reverse-writethrough failure needs. Operator-driven recovery via FailedOperationsDrawer is the today path; a parallel retry cron may ship in a future PR.
+
+**What this PR does NOT do:**
+- No per-table writers — all stubs. Calling this endpoint with any `table` returns a clear "not yet implemented" error.
+- No P1.7 (replay harness).
+- Token signing / HMAC — future hardening; v1 trusts the bearer token.
+
+**Files touched:**
+- `AppScripts/stride-api/StrideAPI.gs` (v38.199.0 → v38.200.0; +~155 lines including comments)
+- `stride-gs-app/supabase/functions/_shared/reverse-writethrough.ts` (new)
+- `stride-gs-app/MIGRATION_STATUS.md` (P1.4 → done; new pending action for Edge Function secrets)
+
+**Pending user action:**
+- [ ] Deploy GAS: `npm run push-api && npm run deploy-api` from `AppScripts/stride-client-inventory/` after merge. (Builder will run this directly.)
+- [ ] **Set Edge Function secrets** before P2 starts (in Supabase dashboard → Project Settings → Edge Functions → Secrets):
+  - `GAS_API_URL` = StrideAPI Web App URL (same one the React app uses)
+  - `GAS_API_TOKEN` = value of `API_TOKEN` script property in the StrideAPI Apps Script project
+  Without these, any P2+ SB-primary handler calling `reverseWritethrough()` will fail at the env-var check with a clear error. No production handler is on `active_backend='supabase'` today, so there's no urgency — but blocks P2.
 
 ---
 

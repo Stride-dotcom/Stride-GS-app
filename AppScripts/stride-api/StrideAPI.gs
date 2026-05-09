@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.199.0 — 2026-05-09 PST — [MIGRATION-P1.2] GAS-side input capture for the GAS→Supabase replay corpus. New helper api_logCallInput_(action, payload, tenantId, userId) generates a UUID correlation_id, posts the redacted input payload to public.gas_call_log (one row per doPost call), and stashes the correlation_id in a script-level __MIG_CORRELATION_ID__ that api_auditLog_ now reads and stamps onto every entity_audit_log row written during the same request. doPost calls api_logCallInput_ once after token validation + JSON parse, before the routing switch — so spam/auth-fail requests don't pollute the corpus, but every successful routed call gets captured. Best-effort writes: a Supabase outage or REST 4xx logs and continues; never blocks the GAS handler. PII redaction uses a 1KB-cap whitelist of safe field names (action, ids, statuses, amounts, sidemarks) so card numbers, tokens, and free-text comments don't land in the corpus. Together with the v38.199-companion migration parity_substrate (PR #310 — public.gas_call_log + public.feature_flags + entity_audit_log.correlation_id column), this gives the replay harness its (input, output) join for every GAS call going forward. The harness itself ships in P1.7. Decision: MIG-006 (entity_audit_log + gas_call_log is the answer key) — see stride-gs-app/MIGRATION_STATUS.md.
+   StrideAPI.gs — v38.200.0 — 2026-05-09 PST — [MIGRATION-P1.4] Reverse SB→Sheets writethrough endpoint. New doPost case "writeThroughReverse" routes to handleWriteThroughReverse_(payload, callerEmail), which dispatches to a per-table writer registry (REVERSE_WRITETHROUGH_TABLES_). Every SB-primary handler that ships in P2+ will fire this endpoint after its `public.<table>` write commits, keeping the per-tenant Google Sheet current as a read-only mirror — the rollback insurance behind MIG-002 (synchronous SB→Sheets reverse writethrough). This PR ships the FRAMEWORK ONLY: every entry in the registry is a stub that throws "writeThroughReverse: <table> not yet implemented (P1.4 framework only)" so a stray call surfaces clearly. Per-table writers land in their corresponding P2/P3/P4 PRs alongside the function migration. Failures land in gs_sync_events with sync_status='sync_failed', action_type='writethrough_reverse', so the React FailedOperationsDrawer surfaces them just like GAS→SB writethrough failures. Authentication: the existing API_TOKEN bearer at the top of doPost is the auth surface — there is no per-action HMAC. The Edge Function caller passes the same token. Because no production handler is yet on active_backend='supabase', this endpoint is currently invoked by zero callers; it's pure substrate. Companion: stride-gs-app/supabase/functions/_shared/reverse-writethrough.ts (TypeScript helper for Edge Functions to invoke this endpoint). Decision: MIG-002 (synchronous reverse writethrough is the rollback foundation) — see stride-gs-app/MIGRATION_STATUS.md.
+   v38.199.0 — 2026-05-09 PST — [MIGRATION-P1.2] GAS-side input capture for the GAS→Supabase replay corpus. New helper api_logCallInput_(action, payload, tenantId, userId) generates a UUID correlation_id, posts the redacted input payload to public.gas_call_log (one row per doPost call), and stashes the correlation_id in a script-level __MIG_CORRELATION_ID__ that api_auditLog_ now reads and stamps onto every entity_audit_log row written during the same request. doPost calls api_logCallInput_ once after token validation + JSON parse, before the routing switch — so spam/auth-fail requests don't pollute the corpus, but every successful routed call gets captured. Best-effort writes: a Supabase outage or REST 4xx logs and continues; never blocks the GAS handler. PII redaction uses a 1KB-cap whitelist of safe field names (action, ids, statuses, amounts, sidemarks) so card numbers, tokens, and free-text comments don't land in the corpus. Together with the v38.199-companion migration parity_substrate (PR #310 — public.gas_call_log + public.feature_flags + entity_audit_log.correlation_id column), this gives the replay harness its (input, output) join for every GAS call going forward. The harness itself ships in P1.7. Decision: MIG-006 (entity_audit_log + gas_call_log is the answer key) — see stride-gs-app/MIGRATION_STATUS.md.
    v38.198.0 — 2026-05-06 PST — Root-cause fix for the duplicate-billing-row bug v38.197.1 worked around. New helper api_writeBillingRowIdempotent_(billSheet, billMap, ledgerRowId, fields) replaces every "build row + setValues at lastDataRow+1" append with a Ledger Row ID lookup followed by one of: in-place un-void (Status=Void match → refresh fields, flip Status to Unbilled, blank Invoice # / Date / URL), in-place idempotent update (Status=Unbilled match → refresh fields), skip with warning (Status=Invoiced/Billed match → caller surfaces "void the invoice first"), or append (no match). Used in handleCompleteTask_ (single-row), handleCompleteRepair_ (multi-line + legacy single-row paths), and handleProcessWcRelease_ (per-item WC fees) — every billing-row-creating completion handler that uses a deterministic Ledger Row ID. Pre-fix all three appended unconditionally, so a reopen + re-complete cycle (or a cancel + re-release for WC) produced two rows with the same Ledger Row ID: one Voided in place by api_voidBillingRowsWhere_, one Unbilled appended by the re-completion. Symptom: Justin's Vida Design - Merit invoice failed because INSP-TASK-INSP-62840-1 had row 24 (Void) + row 25 (Unbilled). v38.197.1 made the assertion tolerate the bad state by preferring the Unbilled match; this commit prevents the bad state from being created in the first place. Existing duplicates from past cycles are NOT auto-collapsed by this commit (they're correctly handled by the v38.197.1 assertion + the new helper's "prefer Unbilled, then Void" matching); a separate cleanup pass can collapse them later if desired.
    v38.197.1 — 2026-05-06 PST — api_markClientLedgerInvoiced_ assertion now handles duplicate Ledger Row IDs on the client sheet. The task completion flow can leave a Voided row from a prior completion AND append a fresh Unbilled row with the SAME Ledger Row ID after a reopen + re-completion. The v38.193.0 single-pass assertion iterated all matching rows and threw on the FIRST non-Unbilled match — even when a valid Unbilled row sat on the very next line. Symptom: Justin's Vida Design - Merit invoice (56 rows) failed because INSP-TASK-INSP-62840-1 had row 24 (Void) and row 25 (Unbilled); React picker correctly read Supabase last-write-wins (Unbilled) but the assertion saw the Void first. New shape: bucket all matching rows by Ledger Row ID, then for each picker ID prefer the FIRST Unbilled match. Only flag a violation if NO Unbilled row exists for that picker ID — the actual stale-Void condition the original v38.193 fix was meant to catch. The Void duplicates are left untouched (they're stale audit trail; cleanup is a separate follow-up to handleCompleteTask_ to un-void instead of append).
    v38.197.0 — 2026-05-06 PST — Persistent QBO push jobs (qbo_push_jobs table) so the operator can leave the Billing page or refresh the browser mid-push without losing the result UI. handleQboCreateInvoice_ now accepts an optional `jobId` param; when set, it PATCHes public.qbo_push_jobs throughout the loop — status='running' + total_count + invoice_nos at entry, every 5 invoices with running succeeded/failed/skipped counts + per-invoice results, and a terminal status='succeeded'/'partial'/'failed' + finished_at + final results at the end. The push itself is unchanged for callers that don't supply jobId (admin scripts, legacy tests). Companion Supabase migration `qbo_push_jobs` creates the table (id uuid PK, status enum CHECK, ledger_row_ids text[], invoice_nos text[], counts, jsonb results, force_re_push, initiated_by, source) with staff/admin RLS + service_role bypass + realtime publication so the React App-level QboPushJobsContext observes every PATCH live. New helper api_patchQboPushJob_(jobId, patch) wraps the PostgREST PATCH with Prefer=return=minimal; best-effort, never blocks the QBO push on a Supabase outage. Companion React PR mounts QboPushJobsContext at AppLayout, renders a bottom-right toast that survives navigation, queries `created_at >= NOW() - 30 minutes OR finished_at IS NULL` on App mount to rehydrate any in-flight or recently-finished jobs, and wires both the QBO Push toolbar button and the Create Invoices "Push to QuickBooks Online" checkbox to start jobs through the context.
@@ -2263,6 +2264,215 @@ function notifySupabaseFailed_(params) {
     });
   } catch (e) {
     Logger.log("notifySupabaseFailed_ error (non-fatal): " + e);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// [MIGRATION-P1.4] Reverse SB→Sheets writethrough endpoint.
+// Called by SB-side Edge Functions after a public.<table> write commits,
+// to keep the per-tenant Google Sheet current as a read-only mirror.
+// MIG-002 (synchronous reverse writethrough) — see MIGRATION_STATUS.md.
+//
+// This endpoint is the framework. Per-table writers are stubs today
+// (`__writeThroughReverseStub_`); each P2/P3/P4 PR that migrates a
+// function will register its real writer here, not in a separate place.
+// Centralizing the registry means a future builder grep'ing
+// `REVERSE_WRITETHROUGH_TABLES_` finds every table covered + every gap.
+//
+// ── Per-table-writer contract (load-bearing) ─────────────────────────
+// Every writer MUST be idempotent by row identifier. Calling twice
+// with the same row payload MUST produce the same sheet state. This
+// sidesteps an idempotency-key store: at-least-once delivery from the
+// Edge Function side is safe because the receiver squashes duplicates.
+//
+// Concretely, writers MUST derive their sheet primary key purely from
+// SB row contents (Ledger Row ID, Task ID, Item ID, etc.). Writers
+// MUST NOT use a `lastDataRow + 1` style append counter or any other
+// counter whose value depends on the order of arrivals — that breaks
+// idempotency silently (re-delivery produces a duplicate row at a new
+// offset). For inserts that don't have a natural SB-row primary key,
+// derive one (e.g. `${parentId}-${slug}-${seqFromRowContent}`); never
+// from sheet state.
+//
+// ── Failure handling ─────────────────────────────────────────────────
+// Failures land in gs_sync_events with action_type='writethrough_reverse'.
+// The React FailedOperationsDrawer (which filters on
+// sync_status='sync_failed' alone) surfaces these for manual retry by
+// an operator.
+//
+// IMPORTANT: this action_type intentionally does NOT match the
+// `*_write_through` LIKE pattern that the existing retryFailedSyncs_
+// cron picks up. That cron retries via `resyncEntityToSupabase_` which
+// syncs in the GAS→SB direction — the OPPOSITE of what a reverse-
+// writethrough failure needs. A future P-phase may add a parallel
+// retry cron that calls back into this endpoint to retry sheet writes;
+// until then, drawer-driven manual retry is the recovery path.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function __writeThroughReverseStub_(_ss, payload) {
+  throw new Error(
+    "writeThroughReverse: '" + (payload && payload.table) + "' not yet implemented (P1.4 framework only). " +
+    "The per-table writer ships in the P2/P3/P4 PR that migrates the corresponding function. " +
+    "If you're seeing this in production, no SB-primary handler should be calling this endpoint yet — " +
+    "check feature_flags for any function with active_backend='supabase'."
+  );
+}
+
+// Registry. Future per-table writers replace the stub. Keep this list
+// in sync with the parity_dryrun mirror set in
+// stride-gs-app/MIGRATION_STATUS.md "parity_dryrun schema-sync convention" —
+// every mirrored table corresponds to one entry here, since both sides
+// of the migration touch the same table set.
+var REVERSE_WRITETHROUGH_TABLES_ = {
+  "inventory":         __writeThroughReverseStub_,
+  "tasks":             __writeThroughReverseStub_,
+  "repairs":           __writeThroughReverseStub_,
+  "shipments":         __writeThroughReverseStub_,
+  "will_calls":        __writeThroughReverseStub_,
+  "will_call_items":   __writeThroughReverseStub_,
+  "billing":           __writeThroughReverseStub_,
+  "addons":            __writeThroughReverseStub_,
+  "invoice_tracking":  __writeThroughReverseStub_,
+  "entity_notes":      __writeThroughReverseStub_,
+  "item_photos":       __writeThroughReverseStub_,
+  "clients":           __writeThroughReverseStub_,
+  "stax_invoices":     __writeThroughReverseStub_,
+  "stax_charges":      __writeThroughReverseStub_
+};
+
+/**
+ * v38.200.0 — [MIGRATION-P1.4] Validate that a spreadsheet_id is one of
+ * Stride's known clients before allowing the reverse-writethrough
+ * endpoint to openById on it. Returns true on confirmed match, false on
+ * miss OR on any error (Supabase outage, etc.) so we fail closed —
+ * better to reject a legit reverse writethrough during a transient
+ * outage than to allow a writethrough to a non-Stride sheet.
+ */
+function api_isKnownTenantId_(tenantId) {
+  if (!tenantId) return false;
+  try {
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) return false;  // fail closed
+    var resp = UrlFetchApp.fetch(
+      url + "/rest/v1/clients?select=spreadsheet_id&spreadsheet_id=eq." + encodeURIComponent(tenantId) + "&limit=1",
+      {
+        method: "GET",
+        headers: { "Authorization": "Bearer " + key, "apikey": key },
+        muteHttpExceptions: true
+      }
+    );
+    if (resp.getResponseCode() < 200 || resp.getResponseCode() >= 300) return false;
+    var rows = JSON.parse(resp.getContentText());
+    return Array.isArray(rows) && rows.length > 0 && rows[0].spreadsheet_id === tenantId;
+  } catch (e) {
+    Logger.log("api_isKnownTenantId_ error (failing closed): " + e);
+    return false;
+  }
+}
+
+/**
+ * v38.200.0 — [MIGRATION-P1.4] Reverse writethrough handler. Called from
+ * doPost case "writeThroughReverse".
+ *
+ * Payload contract (sent by SB Edge Function):
+ *   {
+ *     tenantId:        string  — per-tenant spreadsheet ID
+ *     table:           string  — public.<table> name (must match registry)
+ *     op:              "insert" | "update" | "delete"
+ *     row:             object  — full SB row (insert/update); deletes can omit
+ *     rowId:           string  — primary identifier on the sheet (Ledger Row ID,
+ *                                Task ID, Item ID, etc.) — required for update/delete
+ *     correlationId?:  string  — optional, for cross-system tracing
+ *     requestId?:      string  — optional, surfaces in gs_sync_events
+ *   }
+ *
+ * Returns ContentService JSON: { success: true, table, op, ... } on success;
+ * errorResponse_ otherwise. Failures also land in gs_sync_events with
+ * sync_status='sync_failed' so the React FailedOperationsDrawer surfaces them.
+ *
+ * Auth: token validation already happened at doPost top. We trust the
+ * caller. Future hardening: require an additional HMAC over the payload.
+ */
+function handleWriteThroughReverse_(payload, callerEmail) {
+  var tenantId  = payload && payload.tenantId  ? String(payload.tenantId)  : "";
+  var table     = payload && payload.table     ? String(payload.table)     : "";
+  var op        = payload && payload.op        ? String(payload.op)        : "";
+  var rowId     = payload && payload.rowId     ? String(payload.rowId)     : "";
+  var requestId = payload && payload.requestId ? String(payload.requestId) : Utilities.getUuid();
+
+  // Basic validation. Caller-error responses don't log to gs_sync_events
+  // because they didn't come from a real SB-primary handler attempt.
+  if (!tenantId)              return errorResponse_("writeThroughReverse: tenantId required", "INVALID_PAYLOAD");
+  if (!table)                 return errorResponse_("writeThroughReverse: table required",    "INVALID_PAYLOAD");
+  if (!op)                    return errorResponse_("writeThroughReverse: op required",       "INVALID_PAYLOAD");
+  if (op !== "insert" && op !== "update" && op !== "delete") {
+    return errorResponse_("writeThroughReverse: op must be insert|update|delete", "INVALID_PAYLOAD");
+  }
+  if ((op === "update" || op === "delete") && !rowId) {
+    return errorResponse_("writeThroughReverse: rowId required for " + op, "INVALID_PAYLOAD");
+  }
+  var writer = REVERSE_WRITETHROUGH_TABLES_[table];
+  if (!writer) {
+    return errorResponse_("writeThroughReverse: unsupported table '" + table + "'", "INVALID_TABLE");
+  }
+
+  // Hardening: tenantId must be a known client spreadsheet_id. Without
+  // this check, an authorized caller (anyone with API_TOKEN) could pass
+  // any spreadsheet ID and openById would happily open it — including
+  // Master Price List, Consolidated Billing, internal admin sheets, or
+  // any unrelated sheet the script account has access to. Validate
+  // against public.clients before openById. One PostgREST GET; cached
+  // would be nicer but the simple uncached check is fine for now since
+  // this endpoint is called only by SB Edge Functions that already
+  // know their tenant_id.
+  if (!api_isKnownTenantId_(tenantId)) {
+    return errorResponse_("writeThroughReverse: tenantId '" + tenantId + "' is not a known client spreadsheet", "UNKNOWN_TENANT");
+  }
+
+  var ss;
+  try {
+    ss = SpreadsheetApp.openById(tenantId);
+  } catch (e) {
+    notifySupabaseFailed_({
+      tenant_id:    tenantId,
+      entity_type:  table,
+      entity_id:    rowId,
+      action_type:  "writethrough_reverse",
+      requested_by: callerEmail || "edge-function",
+      request_id:   requestId,
+      payload:      { op: op, error: "openById failed" },
+      error_message: "Cannot open per-tenant spreadsheet: " + String(e)
+    });
+    return errorResponse_("writeThroughReverse: cannot open spreadsheet for tenant " + tenantId, "TENANT_OPEN_FAILED");
+  }
+
+  // Dispatch to the per-table writer. Wrap in try/catch so any failure
+  // (stub or real) lands in gs_sync_events for FailedOperationsDrawer
+  // pickup, then propagates back to the caller.
+  try {
+    var result = writer(ss, payload) || {};
+    return jsonResponse_({
+      success:     true,
+      table:       table,
+      op:          op,
+      rowId:       rowId,
+      requestId:   requestId,
+      tenantId:    tenantId,
+      result:      result
+    });
+  } catch (e) {
+    notifySupabaseFailed_({
+      tenant_id:    tenantId,
+      entity_type:  table,
+      entity_id:    rowId,
+      action_type:  "writethrough_reverse",
+      requested_by: callerEmail || "edge-function",
+      request_id:   requestId,
+      payload:      { op: op, table: table },
+      error_message: String(e)
+    });
+    return errorResponse_("writeThroughReverse failed for " + table + " " + op + ": " + String(e), "WRITETHROUGH_FAILED");
   }
 }
 
@@ -8141,6 +8351,13 @@ function doPost(e) {
         return handleImportPriceListToSupabase_(payload, callerEmail);
       case "syncSingleServiceToSheet":
         return handleSyncSingleServiceToSheet_(payload, callerEmail);
+
+      // [MIGRATION-P1.4] Reverse SB→Sheets writethrough. Called by SB-side
+      // Edge Functions after a public.<table> write commits, to keep the
+      // per-tenant Google Sheet current as a read-only mirror. Pure
+      // substrate — every per-table writer is a stub today.
+      case "writeThroughReverse":
+        return handleWriteThroughReverse_(payload, callerEmail);
 
       default:
         return errorResponse_("Unknown POST action: " + action, "INVALID_ACTION");
