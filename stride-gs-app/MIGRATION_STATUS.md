@@ -1,6 +1,6 @@
 # GAS → Supabase Migration — Living Status
 
-> Last updated: 2026-05-09 (P1.3 `parity_dryrun` schema applied — 14 column-shape mirrors of public.* write-target tables, `parity_dryrun.reset()` truncate helper, `parity_dryrun.row_counts` diagnostics view, service_role-only access).
+> Last updated: 2026-05-09 (P1.5 `FeatureFlagProvider` + `useFeatureFlag` hook shipped — React app now resolves backend per function with per-tenant scope semantics. All 25 flags still seeded at `gas` so no production routing change yet.).
 > This file is **authoritative for execution**. The v1.1 docx in `Dropbox\Apps\GS Inventory\` is a stakeholder snapshot.
 
 ---
@@ -49,7 +49,7 @@ If you only have time for one section: read **Architectural Decisions** in full.
 | P1.2 | **done (verify deferred)** | 2026-05-09 | GAS-side input capture: `api_logCallInput_` in `doPost`, threads `correlation_id` via `__MIG_CORRELATION_ID__` script-level global into `api_auditLog_`. PII-conscious redaction (1KB cap, whitelist of structural fields). StrideAPI v38.199.0 deployed as Web App v494 at 2026-05-09T05:02:05Z. **Verify pending**: 5-min post-deploy window had zero organic `doPost` traffic (Friday evening PST). Re-check Monday morning: expect non-zero `gas_call_log` rows + non-null `correlation_id` on `entity_audit_log` rows from same requests. |
 | P1.3 | **done** | 2026-05-09 | `parity_dryrun` Postgres schema with 14 mirrors of public.* write-target tables (`inventory`, `tasks`, `repairs`, `shipments`, `will_calls`, `will_call_items`, `billing`, `addons`, `invoice_tracking`, `entity_notes`, `item_photos`, `clients`, `stax_invoices`, `stax_charges`). Built via `LIKE source INCLUDING DEFAULTS`. `parity_dryrun.reset()` truncate helper + `parity_dryrun.row_counts` diagnostics view. service_role-only access. Migration: `supabase/migrations/20260509000002_parity_dryrun_schema.sql`. **Schema-sync convention** (see below) is now load-bearing. |
 | P1.4 | not_started | — | Reverse writethrough harness: GAS Web App endpoint accepting row payloads, idempotent on row-id key. |
-| P1.5 | not_started | — | React `FeatureFlagProvider` + `useFeatureFlag(key)` hook with per-tenant scope resolution. |
+| P1.5 | **done** | 2026-05-09 | `src/contexts/FeatureFlagContext.tsx` — `FeatureFlagProvider` fetches all flags on mount + realtime-subscribes for cross-tab sync. Hooks: `useFeatureFlag(key)` (returns `'gas' \| 'supabase'`), `useFeatureFlagRow(key)`, `useAllFeatureFlags()`, `useFeatureFlagLoading()`. Pure resolver `resolveFlagBackend(flag, tenantId)` exported for non-React callers. Per-tenant scope semantics documented inline + in **MIG-010** below. Wired into `main.tsx` between `AuthProvider` and `BatchDataProvider`. tsc + build clean. Bundle: `index-CyMA6om0.js`. |
 | P1.6 | not_started | — | Settings → Migration tab (admin only): per-function toggle, mismatch-rate widget, master-switch revert button. |
 | P1.7 | not_started | — | `replay-shadow` Edge Function (cron'd nightly per function). |
 
@@ -177,6 +177,26 @@ Append-only, numbered. Never edit historical entries. Reference by `MIG-NNN` in 
 **Decision:** This file (in repo) is the canonical state of the migration. Read at session start, updated at session end. The v1.1 docx in Dropbox is a stakeholder snapshot only. BUILD_STATUS.md remains the global change log; this file is the project-specific extension.
 
 **Rationale:** Multi-session, multi-month projects need a project-scoped living doc separate from the global change log. Keeping it in repo means PR diffs show exactly what each session changed.
+
+### MIG-010 — Per-tenant scope semantics for `feature_flags` (2026-05-09)
+
+**Decision:** `feature_flags.function_key` stays as the primary key (one row per function). The single row carries `active_backend` ('gas' | 'supabase') and `tenant_scope` (text[] | NULL). Resolution for `(flag, callerTenantId)`:
+
+- `tenant_scope IS NULL` → `active_backend` applies fleet-wide.
+- `tenant_scope` non-null and `callerTenantId` IN `tenant_scope` → `active_backend`.
+- `tenant_scope` non-null and `callerTenantId` NOT IN `tenant_scope` → the OPPOSITE backend.
+
+Workflow this enables:
+1. New function ships at `{active_backend:'gas', tenant_scope:null}` — fleet-wide gas.
+2. Canary one tenant: `{active_backend:'supabase', tenant_scope:[X]}` — X on SB, rest on GAS (opposite of supabase).
+3. Expand: `{active_backend:'supabase', tenant_scope:[X,Y,Z]}` — listed on SB, rest on GAS.
+4. Fleet-wide cutover: `{active_backend:'supabase', tenant_scope:null}` — all on SB.
+
+Master switch (MIG-003) emergency revert: every row to `{active_backend:'gas', tenant_scope:null}`.
+
+**Rationale:** v1.1 docx specified "non-listed tenants fall through to a fleet-wide row," which assumed multiple rows per `function_key`. The seeded P1.1 schema uses `function_key` as PK, so that's not possible. Reframing the single-row's meaning as "the canary's backend" + "opposite for non-canary" gives the same expressiveness without a schema change. Implementation: `resolveFlagBackend(flag, tenantId)` in `src/contexts/FeatureFlagContext.tsx`. Documented inline at the top of that file.
+
+**Edge case:** unauthenticated callers / cross-tenant impersonation default to `'gas'` even when scoped flags would otherwise apply. A function under canary should be exercised under the real user's primary tenant, not arbitrary tenants the admin happens to be looking at.
 
 ---
 

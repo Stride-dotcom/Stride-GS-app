@@ -1,6 +1,49 @@
 # Stride GS App — Build Status
 
-> Last updated: 2026-05-09 ([MIGRATION-P1.3] `parity_dryrun` schema applied — 14 column-shape mirrors of public.* write-target tables, `reset()` truncate helper, `row_counts` diagnostics view).
+> Last updated: 2026-05-09 ([MIGRATION-P1.5] `FeatureFlagProvider` + `useFeatureFlag` hook shipped — React app now resolves backend per function with per-tenant scope semantics. All flags still seeded at `gas`; no production routing change yet).
+
+---
+
+## Recent Changes (2026-05-09, [MIGRATION-P1.5] FeatureFlagProvider + hooks)
+
+**Trigger:** P1.5 from the Phase 1 sub-task list. Now that the substrate (P1.1), GAS-side input capture (P1.2), and `parity_dryrun` schema (P1.3) are in place, the React app needs a way to resolve which backend to call per migration function. Hook + context now exist; nothing CALLS them yet — that comes in P2 when the first handler flips.
+
+**What landed (React, Bundle: `index-CyMA6om0.js`):**
+
+- New `src/contexts/FeatureFlagContext.tsx`. `FeatureFlagProvider` fetches all rows from `public.feature_flags` on mount and subscribes to realtime so cross-tab flag flips propagate without a refresh. State: `flagsByKey` (Record<function_key, FeatureFlagRow>), `loading`, `error`. Falls back to `'gas'` (safe default) on Supabase outage so the App layout never crashes.
+- Hooks:
+  - `useFeatureFlag(key)` → `'gas' | 'supabase'`. The everyday hook for routing decisions in component code.
+  - `useFeatureFlagRow(key)` → full row, for the Settings UI (P1.6).
+  - `useAllFeatureFlags()` → sorted array of all rows.
+  - `useFeatureFlagLoading()` → for callers that need to render a spinner.
+- Pure resolver `resolveFlagBackend(flag, tenantId)` exported for non-React callers (replay tooling, admin scripts).
+- `main.tsx` wires `FeatureFlagProvider` between `AuthProvider` (consumed for primary tenant) and `BatchDataProvider` (so any other context can use feature flags if it ever needs to).
+
+**Per-tenant scope semantics (new — see MIG-010 in `MIGRATION_STATUS.md`):**
+
+`feature_flags.function_key` is the primary key, so one row per function. The single row carries `active_backend` and optional `tenant_scope` array. Resolution:
+- `tenant_scope IS NULL` → `active_backend` applies fleet-wide.
+- `tenant_scope` set, caller IN it → `active_backend`.
+- `tenant_scope` set, caller NOT in it → opposite of `active_backend`.
+
+This lets a single row express "canary tenant X on SB, everyone else still on GAS" by setting `{active_backend:'supabase', tenant_scope:['X']}`. Documented inline at the top of `FeatureFlagContext.tsx` plus full decision write-up under `MIG-010`.
+
+**Pins (do not regress):**
+- The hook MUST default to `'gas'` on any failure path — Supabase outage, missing flag row, missing user, anything. `'gas'` is the pre-migration backend; defaulting to it can never accidentally route through an SB handler that may not exist or be ready.
+- The hook resolves against `user.clientSheetId` (primary tenant), NOT `accessibleClientSheetIds` or any impersonated tenant. Canary should be exercised under the real user's tenant.
+
+**What this PR does NOT do:**
+- No call sites consume the hook yet. Every existing routing decision still calls GAS unconditionally. P2 wires in the first handler.
+- No Settings → Migration UI yet (P1.6). The hooks for that UI exist but the surface itself ships separately.
+- No `parity_enabled` shadow-execution path yet. That ships with P1.7 (replay harness) and the per-handler shadow Edge Functions in P2+.
+
+**Files touched:**
+- `stride-gs-app/src/contexts/FeatureFlagContext.tsx` (new, 270 lines)
+- `stride-gs-app/src/main.tsx` (provider wired in)
+- `stride-gs-app/MIGRATION_STATUS.md` (P1.5 → done, MIG-010 added)
+
+**Pending user action:**
+- [ ] Hard-refresh https://www.mystridehub.com (Cmd/Ctrl+Shift+R) after deploy to pick up `index-CyMA6om0.js`. No visible change — flags loaded silently in the background. Verify in DevTools Network → Supabase REST → `feature_flags?select=*` returns 25 rows.
 
 ---
 
