@@ -1,6 +1,6 @@
 # GAS → Supabase Migration — Living Status
 
-> Last updated: 2026-05-09 (P1.5 `FeatureFlagProvider` + `useFeatureFlag` hook shipped — React app now resolves backend per function with per-tenant scope semantics. All 25 flags still seeded at `gas` so no production routing change yet.).
+> Last updated: 2026-05-09 (P1.6 Settings → Migration tab shipped — admin-only UI for the 25 flags, master switch with the MIG-003 refined semantics. All flags still seeded at `gas`, no production routing change yet.).
 > This file is **authoritative for execution**. The v1.1 docx in `Dropbox\Apps\GS Inventory\` is a stakeholder snapshot.
 
 ---
@@ -50,7 +50,7 @@ If you only have time for one section: read **Architectural Decisions** in full.
 | P1.3 | **done** | 2026-05-09 | `parity_dryrun` Postgres schema with 14 mirrors of public.* write-target tables (`inventory`, `tasks`, `repairs`, `shipments`, `will_calls`, `will_call_items`, `billing`, `addons`, `invoice_tracking`, `entity_notes`, `item_photos`, `clients`, `stax_invoices`, `stax_charges`). Built via `LIKE source INCLUDING DEFAULTS`. `parity_dryrun.reset()` truncate helper + `parity_dryrun.row_counts` diagnostics view. service_role-only access. Migration: `supabase/migrations/20260509000002_parity_dryrun_schema.sql`. **Schema-sync convention** (see below) is now load-bearing. |
 | P1.4 | not_started | — | Reverse writethrough harness: GAS Web App endpoint accepting row payloads, idempotent on row-id key. |
 | P1.5 | **done** | 2026-05-09 | `src/contexts/FeatureFlagContext.tsx` — `FeatureFlagProvider` fetches all flags on mount + realtime-subscribes for cross-tab sync. Hooks: `useFeatureFlag(key)` (returns `'gas' \| 'supabase'`), `useFeatureFlagRow(key)`, `useAllFeatureFlags()`, `useFeatureFlagLoading()`. Pure resolver `resolveFlagBackend(flag, tenantId)` exported for non-React callers. Per-tenant scope semantics documented inline + in **MIG-010** below. Wired into `main.tsx` between `AuthProvider` and `BatchDataProvider`. tsc + build clean. Bundle: `index-CkUuWxyQ.js`. Code review (Opus 4.7 subagent) flagged + fixed: realtime channel name now per-mount-random (StrictMode-safe), `coerceBackend` whitelist replaces silent passthrough so a malformed DB value can't route to a non-existent backend. |
-| P1.6 | not_started | — | Settings → Migration tab (admin only): per-function toggle, mismatch-rate widget, master-switch revert button. |
+| P1.6 | **done** | 2026-05-09 | `src/components/shared/MigrationSettingsTab.tsx` — Settings → Migration tab (admin-only via `TABS` filter + per-tab guard). Per-flag controls: toggle `active_backend` (chip), toggle `parity_enabled` (auto-sets opposite `shadow_backend`), edit `tenant_scope` (textarea, dedup'd on save). Master switch (MIG-003 refined) — atomic UPDATE clearing `active_backend → gas` + `tenant_scope → NULL` in one statement; parity stays on. Phase-grouped (P2 / P3 / P4a / P5 / P6 — empty phases skipped). Mismatch counts read from `feature_flags.mismatch_count_7d` (populated by P1.7). Code review (Opus subagent) flagged + fixed: predicate switched from `.neq` to `.gte` (more robust), narrowed master switch to MIG-003 actual semantics, dedup on tenant_scope save, always-enabled emergency button. Bundle: `index-BNJREu5o.js`. tsc + build clean. |
 | P1.7 | not_started | — | `replay-shadow` Edge Function (cron'd nightly per function). |
 
 P1 exit: P1.1–P1.7 all merged + one no-op handler wired through the framework end-to-end with parity logging proven.
@@ -132,11 +132,21 @@ Append-only, numbered. Never edit historical entries. Reference by `MIG-NNN` in 
 
 **Rationale:** v1.0 specified an hourly sync, which loses up to 60 minutes on rollback. Synchronous writethrough mirrors today's `api_writeThrough_` pattern in reverse, makes per-tenant rollback lossless, and keeps the legacy sheet readable during the transition window.
 
-### MIG-003 — Master switch is emergency revert only (2026-05-08)
+### MIG-003 — Master switch is emergency revert only (2026-05-08, refined 2026-05-09)
 
-**Decision:** Forward cutover happens per-function and per-tenant via the `feature_flags.tenant_scope` mechanism. The master switch only flips every active_backend back to `"gas"` in one transaction. One-way, audit-logged, behind a confirmation dialog.
+**Decision:** Forward cutover happens per-function and per-tenant via the `feature_flags.tenant_scope` mechanism. The master switch only flips every `active_backend` back to `"gas"` in one atomic UPDATE. One-way, behind a confirmation dialog.
+
+**What the master switch sets** (per the P1.6 implementation in `src/components/shared/MigrationSettingsTab.tsx`):
+- `active_backend = 'gas'` — every row.
+- `tenant_scope = NULL` — every row. **REQUIRED by MIG-010 semantics**: leaving a non-null `tenant_scope` alongside `active_backend='gas'` would route non-listed tenants to the OPPOSITE backend (`supabase`), the exact thing the operator is trying to back out of. So the master switch must clear scope as part of the same statement.
+
+**What the master switch does NOT touch:**
+- `parity_enabled` — stays as-is. The whole reason an operator hits the emergency revert is usually a regression that parity surfaced; keep it on so post-revert data continues to land in `parity_results`.
+- `shadow_backend` — stays as-is, paired with `parity_enabled`.
 
 **Rationale:** v1.0 used the master switch as both forward cutover and revert, which defeats the per-function-flag rollout. Emergency-only semantics preserve the granular rollout while keeping a fleet-wide kill switch for cross-function regressions.
+
+**Future tightening:** the React-side implementation issues a single PostgREST PATCH (`UPDATE ... WHERE function_key >= ''`), which is one atomic SQL statement. A `revert_all_feature_flags()` SECURITY DEFINER RPC could replace the React call site for cleaner audit + a single named entry point. Tracked as a P1.6 follow-up; not blocking.
 
 ### MIG-004 — `completeTask` / `completeRepair` / `processWcRelease` cannot split phases (2026-05-08)
 

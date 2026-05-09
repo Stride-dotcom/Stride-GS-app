@@ -1,6 +1,62 @@
 # Stride GS App — Build Status
 
-> Last updated: 2026-05-09 ([MIGRATION-P1.5] `FeatureFlagProvider` + `useFeatureFlag` hook shipped — React app now resolves backend per function with per-tenant scope semantics. All flags still seeded at `gas`; no production routing change yet).
+> Last updated: 2026-05-09 ([MIGRATION-P1.6] Settings → Migration tab shipped — admin-only UI for the 25 feature flags, master switch with MIG-003 refined semantics. All flags still at `gas`; no production routing change).
+
+---
+
+## Recent Changes (2026-05-09, [MIGRATION-P1.6] Settings → Migration tab)
+
+**Trigger:** P1.6 from the Phase 1 sub-task list. With the substrate (P1.1), input capture (P1.2), `parity_dryrun` schema (P1.3), and the React resolution layer (P1.5) in place, the operator needed a visible surface to inspect and toggle flags. P1.6 ships that surface.
+
+**What landed (React, Bundle: `index-BNJREu5o.js`):**
+
+- New `src/components/shared/MigrationSettingsTab.tsx` (~340 lines). Reads via `useAllFeatureFlags()` (realtime-subscribed via `FeatureFlagContext`); writes via direct `supabase.from('feature_flags').update(...)` calls (RLS allows admin writes).
+- New `'migration'` tab on `Settings.tsx`:
+  - Added to `Tab` type, `TABS` array (with `adminOnly: true`), and `VALID_TABS`.
+  - Tab nav filtered to exclude admin-only tabs for non-admins.
+  - Render block: `{tab === 'migration' && isAdmin && <MigrationSettingsTab />}`. Non-admin direct URL hit shows an "admin-only" placeholder; URL state preserved.
+- Per-flag row controls:
+  - **Active backend** chip (gas/supabase) — click to flip.
+  - **Parity** checkbox — when enabled, auto-sets `shadow_backend` to the opposite of `active_backend`; when disabled, clears `shadow_backend`.
+  - **Tenant scope** textarea — comma-separated tenant IDs; saved values are deduped (`Array.from(new Set(...))`) and trimmed; empty → `NULL` (fleet-wide).
+  - **Mismatches (7d)** column read from `feature_flags.mismatch_count_7d` — stays at 0 until the replay harness (P1.7) ships and starts populating it.
+  - **Last check** column read from `last_parity_check`.
+- Master switch — `Emergency Revert (Master Switch)` button in the header card. Always enabled (so a frantic operator can re-click). Confirmation dialog (`ConfirmDialog`) with explicit "currently affected" copy + "what changes" breakdown.
+- Phase grouping (P2 / P3 / P4a / P5 / P6) with empty phases skipped. Phase mapping is in a `PHASE_FOR_KEY` table at the top of the file — keep in sync with `MIGRATION_STATUS.md` "Per-function migration table" if either drifts.
+
+**MIG-003 refined (this PR):**
+The master-switch implementation issues a single atomic PostgREST UPDATE:
+```ts
+.from('feature_flags')
+.update({ active_backend: 'gas', tenant_scope: null })
+.gte('function_key', '');  // every row
+```
+Per **MIG-010** semantics, clearing `tenant_scope` is REQUIRED alongside `active_backend='gas'` — leaving a non-null scope would route non-listed tenants to the opposite backend (supabase), which is the opposite of "emergency revert." `parity_enabled` and `shadow_backend` are intentionally NOT touched: post-revert, parity diagnostics keep flowing so the operator can confirm the regression is gone before re-attempting. `MIGRATION_STATUS.md` MIG-003 has the refined write-up.
+
+**Code review (Opus subagent) flagged + fixed:**
+- Predicate switched from `.neq('function_key', '')` (fragile against an empty-string seed row) to `.gte('function_key', '')` (matches every non-null PK).
+- Narrowed master switch to clear only the two fields MIG-003 authorizes.
+- Tenant-scope save dedups via `Array.from(new Set(...))`.
+- Always-enabled master button.
+- Removed unused `borderLight` fallback (the theme value exists).
+- Pulled duplicated `mismatch_count_7d > 0` check to a const.
+
+**Code review deferred:**
+- Optimistic-state flicker on parity toggle between `setSavingKey(null)` and the realtime UPDATE echo (~50-200ms). Cosmetic. Tracked as a follow-up.
+- Replacing the React-side master switch with a `revert_all_feature_flags()` SECURITY DEFINER RPC for cleaner audit + named entry point. Functionally equivalent today; tracked as a P1.6 follow-up.
+
+**Pins (do not regress):**
+- The Settings tab `'migration'` MUST stay admin-only. The TABS filter is the primary guard; the per-tab render guard is defense-in-depth for direct URL navigation.
+- The master switch MUST clear `tenant_scope` alongside `active_backend` (see MIG-003 refined).
+- `feature_flags` realtime publication is load-bearing — if removed, cross-tab flag flips would require manual refresh.
+
+**Files touched:**
+- `stride-gs-app/src/components/shared/MigrationSettingsTab.tsx` (new)
+- `stride-gs-app/src/pages/Settings.tsx` (Tab type, TABS array, VALID_TABS, nav filter, render block)
+- `stride-gs-app/MIGRATION_STATUS.md` (P1.6 → done, MIG-003 refined)
+
+**Pending user action:**
+- [ ] After deploy, hard-refresh https://www.mystridehub.com (Cmd/Ctrl+Shift+R) → Settings → Migration. Verify: 25 flags listed grouped by phase, all `gas`, no console errors. Try toggling one flag's `active_backend` — should flip + persist + propagate to a second open tab (realtime). Flip it back. Try the Emergency Revert button (with no flags actually flipped, this is a no-op but verify the dialog opens cleanly).
 
 ---
 

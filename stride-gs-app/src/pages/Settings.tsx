@@ -11,6 +11,7 @@ import { TemplateEditor } from '../components/shared/TemplateEditor';
 import { useEmailTemplates } from '../hooks/useEmailTemplates';
 import { useUrlState } from '../hooks/useUrlState';
 import { ConfirmDialog } from '../components/shared/ConfirmDialog';
+import { MigrationSettingsTab } from '../components/shared/MigrationSettingsTab';
 import { useAuth } from '../contexts/AuthContext';
 import { AutocompleteInput } from '../components/shared/AutocompleteInput';
 import type { ApiClient, OnboardClientResponse, UpdateClientResponse, SyncSettingsResponse, RefreshCachesResponse, RunOnClientsResponse, TestSendResult } from '../lib/api';
@@ -35,9 +36,9 @@ import { IntakeEmailModal } from '../components/shared/IntakeEmailModal';
 import { supabase } from '../lib/supabase';
 import { sendEmail } from '../lib/email';
 
-type Tab = 'general' | 'clients' | 'users' | 'pricing' | 'emails' | 'integrations' | 'notifications' | 'maintenance';
+type Tab = 'general' | 'clients' | 'users' | 'pricing' | 'emails' | 'integrations' | 'notifications' | 'maintenance' | 'migration';
 
-const TABS: { id: Tab; label: string; icon: any; desc: string }[] = [
+const TABS: { id: Tab; label: string; icon: any; desc: string; adminOnly?: boolean }[] = [
   { id: 'general', label: 'General', icon: SettingsIcon, desc: 'System settings and preferences' },
   { id: 'clients', label: 'Clients', icon: Users, desc: 'Client accounts and onboarding' },
   { id: 'users', label: 'Users', icon: Shield, desc: 'User access and role management' },
@@ -46,6 +47,7 @@ const TABS: { id: Tab; label: string; icon: any; desc: string }[] = [
   { id: 'integrations', label: 'Integrations', icon: Globe, desc: 'QuickBooks, Stax, and external services' },
   { id: 'notifications', label: 'Notifications', icon: Bell, desc: 'Alert preferences and triggers' },
   { id: 'maintenance', label: 'Maintenance', icon: Wrench, desc: 'Cache refresh, headers, and triggers' },
+  { id: 'migration', label: 'Migration', icon: Wrench, desc: 'GAS → Supabase migration feature flags (admin only)', adminOnly: true },
 ];
 
 const EMAIL_TEMPLATES = [
@@ -744,7 +746,7 @@ export function Settings() {
   // deep-link emails (?tab=clients&subtab=intakes&intake=<id>) work both on
   // initial arrival AND on subsequent navigation. The valid-tab guards
   // protect against stale or hand-rolled URLs.
-  const VALID_TABS: readonly Tab[] = ['general','clients','users','pricing','emails','integrations','notifications','maintenance'] as const;
+  const VALID_TABS: readonly Tab[] = ['general','clients','users','pricing','emails','integrations','notifications','maintenance','migration'] as const;
   const [tabRaw, setTabRaw] = useUrlState('tab', 'general');
   const tab: Tab = (VALID_TABS as readonly string[]).includes(tabRaw) ? (tabRaw as Tab) : 'general';
   const setTab = (next: Tab) => setTabRaw(next);
@@ -2383,7 +2385,7 @@ export function Settings() {
       <div style={{ display: 'grid', gridTemplateColumns: '220px 1fr', gap: 20 }}>
         {/* Tab Nav */}
         <div>
-          {TABS.map(t => {
+          {TABS.filter(t => !t.adminOnly || isAdmin).map(t => {
             const Icon = t.icon; const active = tab === t.id;
             return (
               <button key={t.id} onClick={() => setTab(t.id)} style={{
@@ -4397,6 +4399,13 @@ export function Settings() {
           })()}
 
           {tab === 'notifications' && <PublicFormSettings />}
+
+          {tab === 'migration' && isAdmin && <MigrationSettingsTab />}
+          {tab === 'migration' && !isAdmin && (
+            <div style={card}>
+              <div style={{ fontSize: 13, color: theme.colors.textMuted }}>The Migration tab is admin-only.</div>
+            </div>
+          )}
         </div>
       </div>
 
