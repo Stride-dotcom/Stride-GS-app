@@ -1,6 +1,6 @@
 # GAS → Supabase Migration — Living Status
 
-> Last updated: 2026-05-09 (P1.4 deployed as Web App v495. SB→GAS reverse-writethrough plumbing ready end-to-end. **`parity_dryrun.check_drift()` drift-detection function shipped** (catches schema-sync-convention violations automatically). **First 2 incident fixtures authored**: `001-dup-invoice-race` + `002-stale-void-row-rebill` as worked examples for P1.7 + P4a. Phase 1: 6/7 sub-tasks done; P1.7 deferred until Monday's traffic populates `gas_call_log`.).
+> Last updated: 2026-05-09 (Documented the **transitional sync layers** added by PR #322 — three sheet ↔ Supabase mirrors with explicit P4a/P4b/P7 sunset triggers. Added the direct-sheet-edit → Supabase gap as a P2.1 design decision in Open questions. PR #322 itself shipped the column-presence-guarded fan-out for Sidemark/Reference + the onClientEdit handler — see BUILD_STATUS for that work; this commit is the institutional-memory note so future P4/P7 builders don't preserve the layers as permanent infrastructure or delete them prematurely.).
 > This file is **authoritative for execution**. The v1.1 docx in `Dropbox\Apps\GS Inventory\` is a stakeholder snapshot.
 
 ---
@@ -75,6 +75,22 @@ The `parity_dryrun.*` mirrors created in P1.3 must stay column-shape-identical t
 - `CREATE TABLE public.X` (new write-target for a migrating handler) → add `CREATE TABLE parity_dryrun.X (LIKE public.X INCLUDING DEFAULTS)` and update `parity_dryrun.reset()` and `parity_dryrun.row_counts`
 
 **Drift-detection function** — `parity_dryrun.check_drift(p_table text DEFAULT NULL)` (shipped 2026-05-09, migration `20260509000003_parity_dryrun_drift_check.sql`). Returns one row per drift; empty result = no drift. Categories: `missing_in_dryrun`, `missing_in_public`, `type_mismatch`. Mirror set is hardcoded inside the function — keep in sync with the list above when adding new mirror tables. Run manually before any replay run; P1.7 will invoke it automatically. To call: `SELECT * FROM parity_dryrun.check_drift();` (all tables) or `SELECT * FROM parity_dryrun.check_drift('billing');` (single table). service_role-only EXECUTE.
+
+---
+
+## Transitional sync layers (sunset during migration)
+
+During the migration window, multiple sheet ↔ Supabase sync layers exist in parallel — some pre-existing, some added recently to close gaps that surface as the React UI moves toward Supabase-authoritative reads ahead of the actual P4a handler migration. **Each layer has a known sunset trigger.** Future builders should NOT preserve these as permanent infrastructure, AND should NOT delete them prematurely:
+
+| Layer | What it keeps fresh | Read by | Sunset trigger |
+|---|---|---|---|
+| `propagate_sidemark_to_billing` Postgres trigger | `public.billing.sidemark` on inventory updates | React UI billing list | **P4a** — when the SB-side `createInvoice` / `voidInvoice` / `completeTask` handlers write `public.billing` directly, the trigger becomes redundant (those writes will keep `public.billing.sidemark` current as a primary write, not a mirror update). The trigger is correct as a transitional mirror; remove during P4a's handler-by-handler migration. |
+| `api_propagateInvFieldsToBilling_` in StrideAPI (v38.201.1, PR #322) | Per-tenant `Billing_Ledger.Sidemark`/`Reference` (customized clients only — column-presence guarded) + Supabase resync | Invoice PDF generation, IIF export, QBO push, full-client billing sync | **P4b** — when CB Consolidated_Ledger is retired and the per-tenant `Billing_Ledger.Sidemark` cell is no longer read by invoice generation (which moves to reading `public.billing` directly), this fan-out becomes obsolete. Until then it's the authoritative path for keeping the customized-schema clients' invoice PDFs current. |
+| `onClientEdit` in Triggers.gs v4.8.0 | Same as above, but for direct sheet edits to `Inventory.Sidemark`/`Reference` | Same as above | **P7** — when per-client GAS scripts are frozen at v5.0.0 (write-handler stubs) and direct sheet edits stop being a supported path, this trigger becomes a no-op. Until then it's the only mechanism that catches admin-direct-edits to Inventory and propagates them to Tasks/Repairs/Billing. |
+
+**Why this section exists:** PR #322 added the second + third layer with explicit "this is a stop-gap" framing. Without this institutional-memory note, a future P4 builder might either preserve them out of caution (dead code in prod) or delete them prematurely (regression on the customized-schema clients during the migration window). The sunset triggers are load-bearing — read them before touching any of these layers.
+
+**General rule for transitional layers added between now and P7:** when adding any sheet ↔ Supabase sync mechanism that closes a gap surfaced by the migration's incremental rollout, capture it in this table with an explicit sunset trigger.
 
 ---
 
@@ -216,6 +232,7 @@ Master switch (MIG-003) emergency revert: every row to `{active_backend:'gas', t
 - [x] ~~`GAS_API_URL` + `GAS_API_TOKEN` Edge Function secrets~~ — **already set** in Supabase dashboard (confirmed by Justin, 2026-05-09). SB→GAS reverse-writethrough plumbing is ready end-to-end; any P2+ SB-primary handler can call `reverseWritethrough()` without env-var configuration.
 - [ ] **Canary tenant nomination** — needed before any function flips to `canary_active`. Justin to nominate a low-volume tenant (likely a recently-onboarded test tenant or an opt-in active tenant). Not blocking P1.
 - [ ] **PDF source migration** — `INSP_EMAIL` and `CLAIM_SETTLEMENT` are blocked on moving the PDF source off Drive (attachments path landed in PR #182). Not blocking P1–P3; will block portions of P4.
+- [ ] **Direct-sheet-edit → Supabase gap (P2 design decision)** — pre-existing limitation: when an admin edits a per-tenant sheet directly (Inventory, Tasks, Billing_Ledger), the change does NOT push to Supabase. Today's writethrough (`api_writeThrough_`) only fires from `doPost` handler call sites; sheet `onEdit` triggers in client scripts (Triggers.gs v4.8.0 as of PR #322) propagate WITHIN the sheet but do not call StrideAPI. Backstops: PR #322's `propagate_sidemark_to_billing` Postgres trigger catches inventory.sidemark via the React-edit path; full-client sync (`api_fullClientSync_`) catches everything on its next run. **Decision needed before P2.1 (`updateItem`)**: does P2's SB-primary `updateItem` need a sheet→SB writethrough mechanism for admin direct edits, or is "direct sheet edits are admin-only and rare; full-sync backstops them" acceptable for the migration window? If the former, scope a small `onEdit → POST writeThroughForward` endpoint as part of P2.1's design. If the latter, document explicitly so future incident postmortems don't relitigate it.
 
 ---
 
