@@ -168,13 +168,32 @@ npm run replay -- <functionKey> --last 90d --fixtures
 
 ## Initial fixture backlog
 
-These come from the open `BUILD_STATUS.md` hardening backlog and recent incidents. Authored as their owning function reaches `handler_drafted` state:
+These come from the open `BUILD_STATUS.md` hardening backlog and recent incidents. Authored as their owning function reaches `handler_drafted` state — except 001 + 002 which were authored ahead of P2 as worked examples (the design knowledge was fresh and these two are the most-load-bearing in the billing pipeline).
 
-- `001-dup-invoice-race` — v38.182 atomic counter fix (function: `createInvoice`).
-- `002-stale-void-row-rebill` — v38.193 B2 pre-commit assertion (function: `createInvoice`).
-- `003-cb-symmetry-on-void` — v38.193 B3+B4 (function: `voidInvoice`).
-- `004-cb-symmetry-on-reopen-task` — v38.193 B3+B4 cousin (function: `completeTask` reopen path / `voidInvoice`).
-- `005-sidemark-force-split-digs` — v38.191 / v38.193 C3 (function: `createInvoice`).
-- `006-transfer-orphans-aux-tables` — session 92 transfer overhaul (function: `transferItems`).
-- `007-multi-tenant-billing-charge` — recent fix for tenant-mismatch on billing rows (function: `completeTask`).
-- `008-storage-grace-period-honored` — Digs 7-day grace correctness (function: `commitStorageCharges`).
+- [x] `001-dup-invoice-race` — **authored 2026-05-09**. v38.182 atomic counter fix (function: `createInvoice`). Two cases: `single-call-uses-sequence` + `two-consecutive-calls-produce-distinct-numbers`.
+- [x] `002-stale-void-row-rebill` — **authored 2026-05-09**. v38.193 B2 pre-commit assertion (function: `createInvoice`). Two cases: `stale-void-row-included-in-pick` (negative) + `clean-pick-still-succeeds` (positive).
+- [ ] `003-cb-symmetry-on-void` — v38.193 B3+B4 (function: `voidInvoice`).
+- [ ] `004-cb-symmetry-on-reopen-task` — v38.193 B3+B4 cousin (function: `completeTask` reopen path / `voidInvoice`).
+- [ ] `005-sidemark-force-split-digs` — v38.191 / v38.193 C3 (function: `createInvoice`).
+- [ ] `006-transfer-orphans-aux-tables` — session 92 transfer overhaul (function: `transferItems`).
+- [ ] `007-multi-tenant-billing-charge` — recent fix for tenant-mismatch on billing rows (function: `completeTask`).
+- [ ] `008-storage-grace-period-honored` — Digs 7-day grace correctness (function: `commitStorageCharges`).
+
+### Schema extensions discovered while authoring 001 + 002
+
+While authoring the first two fixtures, two needs surfaced that the v1 schema doesn't yet formalize. The fixtures encode them in `harness_implementation_notes` blocks; P1.7 should consider folding them into the formal schema when the harness lands:
+
+1. **Cross-call cases.** Fixture 001 case `two-consecutive-calls-produce-distinct-numbers` needs `input_a` + `input_b` rather than a single `input` field. The harness invokes both calls in sequence and the assertion compares outputs across calls.
+2. **Sequence-state assertions.** `sequence_advanced_by`, `sequence_advanced_total`, and `invoice_no_uses_sequence` express "this call advanced `public.invoice_no_seq` by exactly N" — not naturally expressed in row-state terms. These are implemented by peeking the SEQUENCE before/after via `public.peek_invoice_no_seq()`.
+
+New assertion vocabulary introduced by these fixtures (will be added to the assertion table above when the harness ships):
+
+| Assertion | Meaning |
+|---|---|
+| `invoice_no_format` | Returned `invoice_no` matches the given regex. |
+| `invoice_no_uses_sequence` | The numeric portion of `invoice_no` equals the post-call value of `public.peek_invoice_no_seq()`. |
+| `sequence_advanced_by` / `sequence_advanced_total` | The delta of `public.peek_invoice_no_seq()` across the call(s) equals the given integer. |
+| `billing_rows_unchanged` | Listed rows MUST end in the listed state — used alongside `billing_rows_flipped` to assert specific rows STAY unchanged in a successful invocation. |
+| `email_send_attempted` (negative form `false`) | Inverse of the existing `email_send_attempted: true` — used to assert no email was attempted on an error path. |
+| `invoice_nos_distinct` / `invoice_nos_strictly_increasing` | Cross-call assertions on `invoice_no` outputs. |
+| `both_throws` | Cross-call shorthand for "both calls in this case threw the listed exception (or `null` for both succeeded)." |

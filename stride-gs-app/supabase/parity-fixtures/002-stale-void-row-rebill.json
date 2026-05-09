@@ -1,0 +1,126 @@
+{
+  "id": "002",
+  "name": "stale-void-row-rebill",
+  "incident_date": "2026-05-03",
+  "regression_for": "v38.193.0 (B2) — pre-commit Status assertion in api_markClientLedgerInvoiced_. Reads the Status column in the same getValues() as Ledger Row ID and refuses to flip rows whose Status drifted from 'Unbilled' between React picking the row (from Supabase mirror) and GAS writing it.",
+  "function": "createInvoice",
+  "deprecated": false,
+  "summary": "On 2026-05-01 task INSP-62630-1 was reopened, which Voided the corresponding billing row INSP-TASK-INSP-62630-1 (handleReopenTask_ → api_voidBillingRowsWhere_). On 2026-05-03 the React Billing → Report tab picked the same ledger_row_id (loaded from a stale Supabase read or stale browser tab) and submitted it on a Create Invoices batch. handleCreateInvoice_ blindly committed the Voided row onto INV-000135, billing the customer for a $35 inspection that should not have been re-charged. The fix (v38.193.0 B2) adds a pre-commit Status re-read with a PRE_COMMIT_STATUS_ASSERTION exception when the picker's expected status drifts from the current sheet state. This fixture asserts the SB-side createInvoice rewrite preserves the pre-commit assertion behavior — a stale-Void row submitted alongside fresh Unbilled rows MUST throw the assertion AND leave billing state unchanged AND not create any side effects (invoice row, CB row, invoice_tracking row, email).",
+  "preState": {
+    "billing": [
+      {
+        "ledger_row_id":   "INSP-TASK-INSP-62630-1",
+        "tenant_id":       "1FixtureTenant",
+        "client_name":     "Fixture Client",
+        "status":          "Void",
+        "voided_at":       "2026-05-01T17:14:00Z",
+        "voided_reason":   "Task reopened",
+        "svc_code":        "INSP",
+        "qty":             1,
+        "rate":            35.00,
+        "total":           35.00,
+        "sidemark":        "FIXTURE-002"
+      },
+      {
+        "ledger_row_id":   "INSP-TASK-INSP-62631-1",
+        "tenant_id":       "1FixtureTenant",
+        "client_name":     "Fixture Client",
+        "status":          "Unbilled",
+        "svc_code":        "INSP",
+        "qty":             1,
+        "rate":            35.00,
+        "total":           35.00,
+        "sidemark":        "FIXTURE-002"
+      },
+      {
+        "ledger_row_id":   "RCVG-FIXTURE-002-3",
+        "tenant_id":       "1FixtureTenant",
+        "client_name":     "Fixture Client",
+        "status":          "Unbilled",
+        "svc_code":        "RCVG",
+        "qty":             2,
+        "rate":            75.00,
+        "total":           150.00,
+        "sidemark":        "FIXTURE-002"
+      }
+    ],
+    "clients": [
+      {
+        "spreadsheet_id":         "1FixtureTenant",
+        "name":                   "Fixture Client",
+        "qb_customer_name":       "Fixture Client",
+        "auto_charge":            false,
+        "separate_by_sidemark":   false,
+        "active":                 true
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "stale-void-row-included-in-pick",
+      "description": "Picker submits the legitimately-Voided INSP-TASK-INSP-62630-1 alongside two fresh Unbilled rows. The pre-commit Status assertion MUST fire — caller sees the assertion error AND zero side effects: no invoice row written, no CB row, no invoice_tracking row, no email send attempt, no billing rows flipped to Invoiced.",
+      "input": {
+        "action":         "createInvoice",
+        "clientSheetId":  "1FixtureTenant",
+        "ledgerRowIds": [
+          "INSP-TASK-INSP-62630-1",
+          "INSP-TASK-INSP-62631-1",
+          "RCVG-FIXTURE-002-3"
+        ],
+        "sidemark":       "FIXTURE-002",
+        "skipEmail":      true,
+        "skipPdf":        true
+      },
+      "expectedOutcome": {
+        "throws":                          "PRE_COMMIT_STATUS_ASSERTION",
+        "billing_state_unchanged":         true,
+        "no_invoice_created":              true,
+        "no_cb_row_created":               true,
+        "no_invoice_tracking_row_created": true,
+        "email_send_attempted":            false,
+        "sequence_advanced_by":            0
+      }
+    },
+    {
+      "name": "clean-pick-still-succeeds",
+      "description": "Same preState; picker submits ONLY the two genuinely-Unbilled rows (INSP-62631 + RCVG-002-3). Happy path must still work — the assertion is targeted at stale picks, not at every batch. Verifies the fix didn't sledgehammer the regular flow into rejecting clean inputs.",
+      "input": {
+        "action":         "createInvoice",
+        "clientSheetId":  "1FixtureTenant",
+        "ledgerRowIds": [
+          "INSP-TASK-INSP-62631-1",
+          "RCVG-FIXTURE-002-3"
+        ],
+        "sidemark":       "FIXTURE-002",
+        "skipEmail":      true,
+        "skipPdf":        true
+      },
+      "expectedOutcome": {
+        "throws":                          null,
+        "invoice_no_format":               "^INV-\\d{6}$",
+        "billing_rows_flipped": [
+          { "ledger_row_id": "INSP-TASK-INSP-62631-1", "status": "Invoiced" },
+          { "ledger_row_id": "RCVG-FIXTURE-002-3",     "status": "Invoiced" }
+        ],
+        "billing_rows_unchanged": [
+          { "ledger_row_id": "INSP-TASK-INSP-62630-1", "status": "Void" }
+        ],
+        "invoice_tracking_row_created":    true,
+        "cb_row_created":                  true,
+        "sequence_advanced_by":            1
+      }
+    }
+  ],
+  "harness_implementation_notes": [
+    "Both cases share the same preState. Harness must reset preState (or use parity_dryrun.reset() + reseed) between cases so case 2 doesn't see case 1's flipped rows.",
+    "'billing_state_unchanged' is implemented as: snapshot every billing row's hash before the call, snapshot after, assert no row's hash changed.",
+    "'billing_rows_unchanged' lets the second case explicitly assert that the legitimately-Voided row stays Voided even when the call succeeds — defends against a regression where the assertion is removed and the Void row gets accidentally Un-voided.",
+    "The exception name PRE_COMMIT_STATUS_ASSERTION is the literal string that handleCreateInvoice_ throws (v38.193.0 onward). SB-side rewrite must throw the same exception for replay parity."
+  ],
+  "links": {
+    "build_status_section": "Recent Changes (2026-05-05, billing hardening pass — bugs #3-#9 closed) → 'B2 — pre-commit Status assertion'",
+    "incident_thread":      "Recent Changes (2026-05-05, dup-number race incident — triage, cleanup, hardening backlog)",
+    "related_pr":           "Companion to PR #289 (the original v38.193 hardening pass).",
+    "cousin_fixture":       "Fixture 003 (cb-symmetry-on-void) covers a related v38.193 fix (B3+B4) for the symmetric case where voiding an invoice fails to clean up CB."
+  }
+}

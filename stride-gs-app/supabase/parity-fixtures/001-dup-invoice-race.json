@@ -1,0 +1,108 @@
+{
+  "id": "001",
+  "name": "dup-invoice-race",
+  "incident_date": "2026-05-02",
+  "regression_for": "v38.182.0 — atomic Postgres SEQUENCE next_invoice_no() replaces the racy Master sheet RPC counter (`getNextInvoiceId`).",
+  "function": "createInvoice",
+  "deprecated": false,
+  "summary": "On 2026-05-02 17:57:41 + 17:57:42 UTC two concurrent createInvoice calls (Nip Tuck NORTON + Nip Tuck NIPTUCK, ~1.18s apart) both observed the Master Price List sheet's invoice counter at the same value, both incremented, both wrote the same number — INV-000131 — onto separate invoices. The customer received two PDFs containing 18 overlapping NIPTUCK line items totaling $450 that should have been on one invoice. Two cousin incidents bit other clients earlier (Digs INV-000115, Mary Kenngott INV-000129). The 2026-05-04 fix (v38.182) replaced the racy Master sheet RPC counter with a Postgres atomic SEQUENCE `public.invoice_no_seq` accessed via `next_invoice_no()`. This fixture asserts that the SB-side createInvoice rewrite continues to use the SEQUENCE and produces strictly-monotonic, unique invoice numbers — never reaching back to the racy counter that's still in place for non-invoice numbering (e.g., shipment numbers).",
+  "preState": {
+    "billing": [
+      {
+        "ledger_row_id": "RCVG-FIXTURE-001-1",
+        "tenant_id":     "1FixtureTenant",
+        "client_name":   "Fixture Client",
+        "status":        "Unbilled",
+        "svc_code":      "RCVG",
+        "qty":           1,
+        "rate":          75.00,
+        "total":         75.00,
+        "sidemark":      "FIXTURE-001"
+      },
+      {
+        "ledger_row_id": "RCVG-FIXTURE-001-2",
+        "tenant_id":     "1FixtureTenant",
+        "client_name":   "Fixture Client",
+        "status":        "Unbilled",
+        "svc_code":      "RCVG",
+        "qty":           1,
+        "rate":          75.00,
+        "total":         75.00,
+        "sidemark":      "FIXTURE-001"
+      }
+    ],
+    "clients": [
+      {
+        "spreadsheet_id":         "1FixtureTenant",
+        "name":                   "Fixture Client",
+        "qb_customer_name":       "Fixture Client",
+        "auto_charge":            false,
+        "separate_by_sidemark":   false,
+        "active":                 true
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "single-call-uses-sequence",
+      "description": "A single createInvoice call must allocate its invoice number by advancing public.invoice_no_seq exactly once via next_invoice_no(). The returned invoice_no must equal the new sequence value. This proves the handler does not reach back to the legacy Master sheet RPC counter (`getNextInvoiceId`) — that call site MUST stay only for non-invoice counters per CLAUDE.md 'never regress the v38.182 atomic invoice-number counter' rule.",
+      "input": {
+        "action":         "createInvoice",
+        "clientSheetId":  "1FixtureTenant",
+        "ledgerRowIds":   ["RCVG-FIXTURE-001-1", "RCVG-FIXTURE-001-2"],
+        "sidemark":       "FIXTURE-001",
+        "skipEmail":      true,
+        "skipPdf":        true
+      },
+      "expectedOutcome": {
+        "throws":                       null,
+        "invoice_no_format":            "^INV-\\d{6}$",
+        "invoice_no_uses_sequence":     true,
+        "sequence_advanced_by":         1,
+        "billing_rows_flipped": [
+          { "ledger_row_id": "RCVG-FIXTURE-001-1", "status": "Invoiced" },
+          { "ledger_row_id": "RCVG-FIXTURE-001-2", "status": "Invoiced" }
+        ],
+        "invoice_tracking_row_created": true,
+        "cb_row_created":               true
+      }
+    },
+    {
+      "name": "two-consecutive-calls-produce-distinct-numbers",
+      "description": "Two consecutive single-row invoice creates (each using a separate ledger row from preState — see test_isolation note below) MUST produce strictly-different invoice_no values. The atomic SEQUENCE guarantees this at the SQL level; the assertion is here so a future refactor that accidentally reaches back to a racy read-then-write counter regresses loudly. This is the regression catch for the original incident: the two real-world calls on 2026-05-02 both produced INV-000131.",
+      "test_isolation_note": "Harness must reset preState between consecutive cases OR allocate fresh ledger row IDs per call. Recommended: harness uses two distinct ledger rows from preState (RCVG-FIXTURE-001-1 for call A, RCVG-FIXTURE-001-2 for call B) so neither invocation sees an already-Invoiced row.",
+      "input_a": {
+        "action":         "createInvoice",
+        "clientSheetId":  "1FixtureTenant",
+        "ledgerRowIds":   ["RCVG-FIXTURE-001-1"],
+        "sidemark":       "FIXTURE-001",
+        "skipEmail":      true,
+        "skipPdf":        true
+      },
+      "input_b": {
+        "action":         "createInvoice",
+        "clientSheetId":  "1FixtureTenant",
+        "ledgerRowIds":   ["RCVG-FIXTURE-001-2"],
+        "sidemark":       "FIXTURE-001",
+        "skipEmail":      true,
+        "skipPdf":        true
+      },
+      "expectedOutcome": {
+        "both_throws":                  null,
+        "invoice_nos_distinct":         true,
+        "invoice_nos_strictly_increasing": true,
+        "sequence_advanced_total":      2
+      }
+    }
+  ],
+  "harness_implementation_notes": [
+    "Reading sequence position: SELECT public.peek_invoice_no_seq();",
+    "The 'invoice_no_uses_sequence' assertion is implemented as: peek before call → invoke handler → peek after call → assert (after - before) == sequence_advanced_by AND returned invoice_no's numeric portion == after.",
+    "case 'two-consecutive-calls-produce-distinct-numbers' uses input_a/input_b instead of a single 'input' field; the schema in supabase/parity-fixtures/README.md may need a small extension to formalize cross-call cases. P1.7 is the natural place for that extension."
+  ],
+  "links": {
+    "build_status_section": "Recent Changes (2026-05-04, atomic invoice counter); also 'Recent Changes (2026-05-05, dup-number race incident — triage, cleanup, hardening backlog)'",
+    "migration_decision":   "MIG-005 references the atomic counter as a do-not-regress pin",
+    "claude_md_rule":       "Never regress the v38.182 atomic invoice-number counter. next_invoice_no() Postgres SEQUENCE is the only thing standing between the system and the dup-number race repeating."
+  }
+}

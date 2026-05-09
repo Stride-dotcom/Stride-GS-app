@@ -1,6 +1,6 @@
 # GAS → Supabase Migration — Living Status
 
-> Last updated: 2026-05-09 (P1.4 deployed as Web App v495. `GAS_API_URL` + `GAS_API_TOKEN` Edge Function secrets confirmed already set in Supabase dashboard, so SB→GAS reverse-writethrough plumbing is ready end-to-end. Phase 1: 6/7 sub-tasks done; P1.7 (replay harness) is the only remaining piece and is best deferred until Monday's traffic populates the `gas_call_log` corpus.).
+> Last updated: 2026-05-09 (P1.4 deployed as Web App v495. SB→GAS reverse-writethrough plumbing ready end-to-end. **`parity_dryrun.check_drift()` drift-detection function shipped** (catches schema-sync-convention violations automatically). **First 2 incident fixtures authored**: `001-dup-invoice-race` + `002-stale-void-row-rebill` as worked examples for P1.7 + P4a. Phase 1: 6/7 sub-tasks done; P1.7 deferred until Monday's traffic populates `gas_call_log`.).
 > This file is **authoritative for execution**. The v1.1 docx in `Dropbox\Apps\GS Inventory\` is a stakeholder snapshot.
 
 ---
@@ -74,7 +74,7 @@ The `parity_dryrun.*` mirrors created in P1.3 must stay column-shape-identical t
 - `DROP TABLE public.X` (mirror member) → also `DROP TABLE parity_dryrun.X` and remove from `parity_dryrun.reset()` and `parity_dryrun.row_counts`
 - `CREATE TABLE public.X` (new write-target for a migrating handler) → add `CREATE TABLE parity_dryrun.X (LIKE public.X INCLUDING DEFAULTS)` and update `parity_dryrun.reset()` and `parity_dryrun.row_counts`
 
-A drift-detection check ships in P1.7 alongside the replay harness — a query that fails CI when column counts diverge between `public.X` and `parity_dryrun.X`.
+**Drift-detection function** — `parity_dryrun.check_drift(p_table text DEFAULT NULL)` (shipped 2026-05-09, migration `20260509000003_parity_dryrun_drift_check.sql`). Returns one row per drift; empty result = no drift. Categories: `missing_in_dryrun`, `missing_in_public`, `type_mismatch`. Mirror set is hardcoded inside the function — keep in sync with the list above when adding new mirror tables. Run manually before any replay run; P1.7 will invoke it automatically. To call: `SELECT * FROM parity_dryrun.check_drift();` (all tables) or `SELECT * FROM parity_dryrun.check_drift('billing');` (single table). service_role-only EXECUTE.
 
 ---
 
