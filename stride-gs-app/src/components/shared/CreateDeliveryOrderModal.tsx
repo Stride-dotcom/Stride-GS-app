@@ -1833,10 +1833,10 @@ export function CreateDeliveryOrderModal({
       // columns the modal can mutate are captured — order_total,
       // accessorials, etc. are derived/recomputed and would produce
       // noisy diffs that aren't useful to staff.
-      const items = Array.isArray((r as Record<string, unknown>).dt_order_items)
+      const loadedItems = Array.isArray((r as Record<string, unknown>).dt_order_items)
         ? ((r as { dt_order_items: Array<Record<string, unknown>> }).dt_order_items)
         : [];
-      const itemsSignature = items
+      const itemsSignature = loadedItems
         .map(it => `${String(it.dt_item_code ?? it.inventory_id ?? '')}|${String(it.quantity ?? '')}|${String(it.description ?? '')}`)
         .sort()
         .join('§');
@@ -1862,7 +1862,7 @@ export function CreateDeliveryOrderModal({
         coverage_option_id: r.coverage_option_id ?? null,
         declared_value:     r.declared_value ?? null,
         // synthetic keys (not real columns) — drive the items entry in the diff
-        _items_count:     items.length,
+        _items_count:     loadedItems.length,
         _items_signature: itemsSignature,
       };
       // Stash the saved base_delivery_fee for the override-hydration
@@ -2701,24 +2701,22 @@ export function CreateDeliveryOrderModal({
             // leg orders that's the upcoming dt_order_items payload —
             // use selectedInvItems for warehouse mode, ad-hoc lines
             // for delivery, or service-only's empty set.
-            const newItemsCount = mode === 'service_only'
-              ? 0
-              : (mode === 'delivery' && itemsSource === 'adhoc'
-                  ? adhocLines.length
-                  : selectedInvItems.length);
-            const newItemsSignature = (() => {
-              if (mode === 'service_only') return '';
-              if (mode === 'delivery' && itemsSource === 'adhoc') {
-                return adhocLines
-                  .map(a => `|${String(a.qty ?? '')}|${String(a.description ?? '')}`)
-                  .sort()
-                  .join('§');
-              }
-              return selectedInvItems
-                .map(i => `${String(i.itemId ?? '')}|${String(i.qty ?? '')}|${String(i.description ?? '')}`)
-                .sort()
-                .join('§');
-            })();
+            // Items signature combines warehouse-selected items
+            // (selectedInvItems) + ad-hoc lines (deliveryFreeItems for
+            // delivery mode, pickupFreeItems for pickup). Service-only
+            // has no items. The signature is sorted before joining so
+            // reorder-only changes don't false-positive.
+            const adhoc = mode === 'pickup' ? pickupFreeItems
+              : mode === 'delivery' ? deliveryFreeItems
+              : [];
+            const newItemsCount = mode === 'service_only' ? 0 : selectedInvItems.length + adhoc.length;
+            const invSig = selectedInvItems
+              .map(i => `${String(i.itemId ?? '')}|${String(i.qty ?? '')}|${String(i.description ?? '')}`);
+            const adhocSig = adhoc
+              .map(a => `|${String(a.quantity ?? '')}|${String(a.description ?? '')}`);
+            const newItemsSignature = mode === 'service_only'
+              ? ''
+              : [...invSig, ...adhocSig].sort().join('§');
             const diff = computeResubmitDiff(
               originalOrderSnapshotRef.current,
               editPayload,
