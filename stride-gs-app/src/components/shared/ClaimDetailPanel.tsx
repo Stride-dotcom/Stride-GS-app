@@ -10,6 +10,7 @@ import { DetailHeader } from './DetailHeader';
 import { WriteButton } from './WriteButton';
 import { getPanelContainerStyle, panelBackdropStyle } from './panelStyles';
 import { useIsMobile } from '../../hooks/useIsMobile';
+import { EntityNotesInline } from '../notes/EntityNotesInline';
 import { useResizablePanel } from '../../hooks/useResizablePanel';
 import { isApiConfigured } from '../../lib/api';
 import {
@@ -695,6 +696,15 @@ export function ClaimDetailPanel({ claim: initialClaim, onClose, onUpdated, appl
                 {claim.firstReviewedBy && <Field label="First Reviewed By" value={claim.firstReviewedBy} />}
                 {claim.firstReviewedAt && <Field label="First Reviewed At" value={fmt(claim.firstReviewedAt)} />}
               </div>
+
+              {/* Threaded Notes preview — entity_notes for this claim.
+                  Composer + full thread live in the Notes tab. */}
+              <EntityNotesInline
+                entityType="claim"
+                entityId={claim.claimId}
+                itemId={null}
+                tenantId={null}
+              />
 
               {/* Folder link */}
               {claim.claimFolderUrl && (
