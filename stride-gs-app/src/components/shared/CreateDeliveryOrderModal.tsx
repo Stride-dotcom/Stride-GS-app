@@ -579,6 +579,48 @@ function AddressFields({
 }
 
 // ── Main Component ──────────────────────────────────────────────────────
+// v2026-05-09 — diff helper for the client-resubmit flow.
+//
+// Compares a snapshot (taken at edit-modal load) against the editPayload
+// about to be UPDATE'd, and returns a JSONB-shaped diff:
+//   { "<column>": { "old": <prev>, "new": <curr> }, ... }
+// Plus a synthetic 'items' entry when the item set changed (count or
+// signature). Skips equal values, null-vs-empty-string, and synthetic
+// keys (those starting with _).
+//
+// Stored in dt_orders.last_resubmit_diff for the OrderPage banner +
+// notify-order-revision email body.
+function computeResubmitDiff(
+  snapshot: Record<string, unknown>,
+  editPayload: Record<string, unknown>,
+  newItemsSignature: string,
+  newItemsCount: number,
+): Record<string, { old: unknown; new: unknown }> | null {
+  const diff: Record<string, { old: unknown; new: unknown }> = {};
+  const norm = (v: unknown) => (v === null || v === undefined || v === '') ? null : v;
+  for (const key of Object.keys(snapshot)) {
+    if (key.startsWith('_')) continue; // synthetic keys handled below
+    if (!Object.prototype.hasOwnProperty.call(editPayload, key)) continue;
+    const prev = norm(snapshot[key]);
+    const curr = norm(editPayload[key]);
+    // Compare strings vs numbers via String() so '5' === 5 doesn't show
+    // up as a diff for service_time_minutes / fees / etc.
+    if (String(prev ?? '') !== String(curr ?? '')) {
+      diff[key] = { old: prev, new: curr };
+    }
+  }
+  // Items synthetic — flag when count or signature differs. Don't
+  // commit to per-item add/remove diffing in v1; staff can scan the
+  // current item list on the OrderPage. Surfacing "items changed" is
+  // the load-bearing signal.
+  const oldCount = Number(snapshot._items_count ?? 0);
+  const oldSig   = String(snapshot._items_signature ?? '');
+  if (oldCount !== newItemsCount || oldSig !== newItemsSignature) {
+    diff.items = { old: { count: oldCount }, new: { count: newItemsCount } };
+  }
+  return Object.keys(diff).length > 0 ? diff : null;
+}
+
 export function CreateDeliveryOrderModal({
   onClose,
   onSubmit,
@@ -1677,6 +1719,13 @@ export function CreateDeliveryOrderModal({
   // discarding any prior reviewer notes. Loaded in the same effect
   // that populates originalReviewStatusRef.
   const originalReviewNotesRef = useRef<string | null>(null);
+  // v2026-05-09 — snapshot of the loaded order row + items at edit-time.
+  // Used by the client-resubmit save path to compute a field-level diff
+  // (last_resubmit_diff). Includes scalar dt_orders columns the modal
+  // can edit, plus an items_signature string that captures the item set
+  // (concatenated dt_item_code|qty|description) so we can flag "items
+  // changed" without committing to per-item add/remove diffing for v1.
+  const originalOrderSnapshotRef = useRef<Record<string, unknown> | null>(null);
   // Captured during the edit-order load; consumed by the late-
   // resolve effect below once apiClients populates so the Client
   // field doesn't blank out when Edit Full Order opens before
@@ -1779,6 +1828,43 @@ export function CreateDeliveryOrderModal({
       // Capture review_notes for the client-resubmit audit-trail
       // append (preserves prior reviewer notes alongside the new stamp).
       originalReviewNotesRef.current  = (r.review_notes as string) || null;
+      // v2026-05-09 — snapshot the loaded order's editable scalar fields
+      // + a stable item signature for the client-resubmit diff. Only
+      // columns the modal can mutate are captured — order_total,
+      // accessorials, etc. are derived/recomputed and would produce
+      // noisy diffs that aren't useful to staff.
+      const loadedItems = Array.isArray((r as Record<string, unknown>).dt_order_items)
+        ? ((r as { dt_order_items: Array<Record<string, unknown>> }).dt_order_items)
+        : [];
+      const itemsSignature = loadedItems
+        .map(it => `${String(it.dt_item_code ?? it.inventory_id ?? '')}|${String(it.quantity ?? '')}|${String(it.description ?? '')}`)
+        .sort()
+        .join('§');
+      originalOrderSnapshotRef.current = {
+        local_service_date: r.local_service_date ?? null,
+        window_start_local: r.window_start_local ?? null,
+        window_end_local:   r.window_end_local ?? null,
+        po_number:          r.po_number ?? null,
+        sidemark:           r.sidemark ?? null,
+        details:            r.details ?? null,
+        driver_notes:       r.driver_notes ?? null,
+        contact_name:       r.contact_name ?? null,
+        contact_address:    r.contact_address ?? null,
+        contact_city:       r.contact_city ?? null,
+        contact_state:      r.contact_state ?? null,
+        contact_zip:        r.contact_zip ?? null,
+        contact_phone:      r.contact_phone ?? null,
+        contact_phone2:     r.contact_phone2 ?? null,
+        contact_email:      r.contact_email ?? null,
+        billing_method:     r.billing_method ?? null,
+        service_time_minutes: r.service_time_minutes ?? null,
+        order_type:         r.order_type ?? null,
+        coverage_option_id: r.coverage_option_id ?? null,
+        declared_value:     r.declared_value ?? null,
+        // synthetic keys (not real columns) — drive the items entry in the diff
+        _items_count:     loadedItems.length,
+        _items_signature: itemsSignature,
+      };
       // Stash the saved base_delivery_fee for the override-hydration
       // effect below — it can't run yet because the zone hasn't loaded.
       const savedBaseFee = r.base_delivery_fee != null ? Number(r.base_delivery_fee) : null;
@@ -2443,6 +2529,28 @@ export function CreateDeliveryOrderModal({
           const prevNotes = (originalReviewNotesRef.current || '').trim();
           const newNotes = prevNotes ? `${stamp}\n— prior notes —\n${prevNotes}` : stamp;
           deliveryEdit.review_notes = newNotes;
+          // v2026-05-09 — diff computation for the resubmit banner +
+          // email. Snapshot is keyed off the loaded delivery leg row,
+          // so the diff lands on deliveryEdit (the "primary" leg the
+          // OrderPage opens). Pickup leg's last_resubmit_* stay null.
+          if (originalOrderSnapshotRef.current) {
+            const newItemsCount = selectedInvItems.length;
+            const newItemsSignature = selectedInvItems
+              .map(i => `${String(i.itemId ?? '')}|${String(i.qty ?? '')}|${String(i.description ?? '')}`)
+              .sort()
+              .join('§');
+            const diff = computeResubmitDiff(
+              originalOrderSnapshotRef.current,
+              deliveryEdit,
+              newItemsSignature,
+              newItemsCount,
+            );
+            if (diff) {
+              deliveryEdit.last_resubmit_diff = diff;
+              deliveryEdit.last_resubmit_at = new Date().toISOString();
+              deliveryEdit.last_resubmit_by = actorName;
+            }
+          }
         }
         const upP = await supabase.from('dt_orders').update(pickupEdit).eq('id', editingPickupRowIdRef.current);
         if (upP.error) throw new Error(`Pickup leg ${wasDraftPD ? 'promote' : 'save'} failed: ${upP.error.message}`);
@@ -2583,6 +2691,44 @@ export function CreateDeliveryOrderModal({
           editPayload.review_notes = prevNotes
             ? `${stamp}\n— prior notes —\n${prevNotes}`
             : stamp;
+          // v2026-05-09 — compute the field-level diff + write the
+          // last_resubmit_* columns so the OrderPage banner + the
+          // notify-order-revision email can show staff exactly what
+          // changed without forcing them to compare-and-contrast.
+          if (originalOrderSnapshotRef.current) {
+            // Build the new items signature using the same shape the
+            // load-time snapshot used (sorted, §-joined). For single-
+            // leg orders that's the upcoming dt_order_items payload —
+            // use selectedInvItems for warehouse mode, ad-hoc lines
+            // for delivery, or service-only's empty set.
+            // Items signature combines warehouse-selected items
+            // (selectedInvItems) + ad-hoc lines (deliveryFreeItems for
+            // delivery mode, pickupFreeItems for pickup). Service-only
+            // has no items. The signature is sorted before joining so
+            // reorder-only changes don't false-positive.
+            const adhoc = mode === 'pickup' ? pickupFreeItems
+              : mode === 'delivery' ? deliveryFreeItems
+              : [];
+            const newItemsCount = mode === 'service_only' ? 0 : selectedInvItems.length + adhoc.length;
+            const invSig = selectedInvItems
+              .map(i => `${String(i.itemId ?? '')}|${String(i.qty ?? '')}|${String(i.description ?? '')}`);
+            const adhocSig = adhoc
+              .map(a => `|${String(a.quantity ?? '')}|${String(a.description ?? '')}`);
+            const newItemsSignature = mode === 'service_only'
+              ? ''
+              : [...invSig, ...adhocSig].sort().join('§');
+            const diff = computeResubmitDiff(
+              originalOrderSnapshotRef.current,
+              editPayload,
+              newItemsSignature,
+              newItemsCount,
+            );
+            if (diff) {
+              editPayload.last_resubmit_diff = diff;
+              editPayload.last_resubmit_at = new Date().toISOString();
+              editPayload.last_resubmit_by = actorName;
+            }
+          }
         }
         const { data: saved, error: saveErr } = await supabase
           .from('dt_orders')

@@ -83,6 +83,8 @@ Deno.serve(async (req: Request) => {
         'contact_name', 'contact_address', 'contact_city', 'contact_state', 'contact_zip',
         'local_service_date', 'order_total', 'pricing_override',
         'created_by_user', 'review_notes',
+        // v6 — client-resubmit diff snapshot powers {{CHANGES_LIST}}.
+        'last_resubmit_diff',
       ].join(', '))
       .eq('id', orderId)
       .single();
@@ -182,9 +184,66 @@ Deno.serve(async (req: Request) => {
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#39;');
 
+    // v6 — render last_resubmit_diff as an HTML <ul> for the
+    // {{CHANGES_LIST}} slot in the ORDER_UPDATED_BY_CLIENT template.
+    // Empty / missing → fallback "(no field-level changes recorded)"
+    // so the slot doesn't render as a literal {{CHANGES_LIST}}. Field
+    // labels mirror the OrderPage banner's RESUBMIT_FIELD_LABELS map.
+    const FIELD_LABELS: Record<string, string> = {
+      local_service_date:   'Service Date',
+      window_start_local:   'Window Start',
+      window_end_local:     'Window End',
+      po_number:            'PO Number',
+      sidemark:             'Sidemark',
+      details:              'Order Details',
+      driver_notes:         'Driver Notes',
+      contact_name:         'Contact Name',
+      contact_address:      'Contact Address',
+      contact_city:         'Contact City',
+      contact_state:        'Contact State',
+      contact_zip:          'Contact ZIP',
+      contact_phone:        'Contact Phone',
+      contact_phone2:       'Contact Phone 2',
+      contact_email:        'Contact Email',
+      billing_method:       'Billing Method',
+      service_time_minutes: 'Service Time (min)',
+      order_type:           'Order Type',
+      coverage_option_id:   'Coverage Option',
+      declared_value:       'Declared Value',
+      items:                'Items',
+    };
+    const formatVal = (v: unknown): string => {
+      if (v === null || v === undefined || v === '') return '—';
+      if (typeof v === 'object') {
+        const obj = v as Record<string, unknown>;
+        if ('count' in obj) return `${obj.count} item(s)`;
+        return JSON.stringify(obj);
+      }
+      return String(v);
+    };
+    const buildChangesHtml = (diff: unknown): string => {
+      if (!diff || typeof diff !== 'object') return '<em>(no field-level changes recorded)</em>';
+      const entries = Object.entries(diff as Record<string, { old?: unknown; new?: unknown }>);
+      if (entries.length === 0) return '<em>(no field-level changes recorded)</em>';
+      const rows = entries.map(([k, v]) => {
+        const label = FIELD_LABELS[k] ?? k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        return `<li style="margin: 4px 0; line-height: 1.5;">`
+          + `<strong>${htmlEscape(label)}</strong>: `
+          + `<span style="color:#991B1B; text-decoration:line-through;">${htmlEscape(formatVal(v.old))}</span> `
+          + `→ <span style="color:#166534; font-weight:600;">${htmlEscape(formatVal(v.new))}</span>`
+          + `</li>`;
+      }).join('');
+      return `<ul style="margin: 4px 0 0 0; padding-left: 18px; font-size: 13px;">${rows}</ul>`;
+    };
+    const changesList = action === 'updated_by_client'
+      ? buildChangesHtml((order as { last_resubmit_diff?: unknown }).last_resubmit_diff)
+      : '';
+
     // Token values are HTML-escaped here so send-email's plain-string
     // substitution can't inject markup from reviewer-supplied notes
-    // (or customer-supplied address/contact fields).
+    // (or customer-supplied address/contact fields). CHANGES_LIST is
+    // already HTML (we built it ourselves with htmlEscape on each
+    // user-supplied value), so it goes in raw.
     const tokens: Record<string, string> = {
       ORDER_NUMBER:    htmlEscape(String(order.dt_identifier) + linkedLine),
       ORDER_TYPE:      htmlEscape(orderTypeDisplay),
@@ -197,6 +256,7 @@ Deno.serve(async (req: Request) => {
       REVIEWER_NAME:   htmlEscape(reviewerName),
       REVIEW_NOTES:    htmlEscape(notesDisplay),
       ORDER_LINK:      htmlEscape(orderLink),
+      CHANGES_LIST:    changesList, // already HTML-safe
       APP_URL:         'https://www.mystridehub.com/#',
     };
 

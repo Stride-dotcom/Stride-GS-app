@@ -234,6 +234,109 @@ const inlineItemTd: React.CSSProperties = {
 
 // ── Details tab content ───────────────────────────────────────────────────────
 
+// v2026-05-09 — display-name map for the client-resubmit diff banner.
+// Keys are dt_orders column names (or synthetic 'items' from
+// computeResubmitDiff in CreateDeliveryOrderModal). Anything not in
+// the map renders with a humanized fallback (snake_case → Title Case).
+const RESUBMIT_FIELD_LABELS: Record<string, string> = {
+  local_service_date:   'Service Date',
+  window_start_local:   'Window Start',
+  window_end_local:     'Window End',
+  po_number:            'PO Number',
+  sidemark:             'Sidemark',
+  details:              'Order Details',
+  driver_notes:         'Driver Notes',
+  contact_name:         'Contact Name',
+  contact_address:      'Contact Address',
+  contact_city:         'Contact City',
+  contact_state:        'Contact State',
+  contact_zip:          'Contact ZIP',
+  contact_phone:        'Contact Phone',
+  contact_phone2:       'Contact Phone 2',
+  contact_email:        'Contact Email',
+  billing_method:       'Billing Method',
+  service_time_minutes: 'Service Time (min)',
+  order_type:           'Order Type',
+  coverage_option_id:   'Coverage Option',
+  declared_value:       'Declared Value',
+  items:                'Items',
+};
+
+function humanizeFieldKey(key: string): string {
+  if (RESUBMIT_FIELD_LABELS[key]) return RESUBMIT_FIELD_LABELS[key];
+  return key.replace(/^_+/, '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+function formatResubmitValue(v: unknown): string {
+  if (v === null || v === undefined || v === '') return '—';
+  if (typeof v === 'object') {
+    // Synthetic 'items' diff carries { count: N }
+    const obj = v as Record<string, unknown>;
+    if ('count' in obj) return `${obj.count} item(s)`;
+    return JSON.stringify(obj);
+  }
+  return String(v);
+}
+
+/**
+ * v2026-05-09 — resubmit banner. Renders at the top of the OrderPage
+ * Details tab whenever a client-resubmit diff is recorded on the
+ * order. Cleared by the staff Approve handler (sets lastResubmitAt
+ * back to null), so the banner survives until staff acknowledges by
+ * approving — which is the load-bearing UX guarantee here.
+ */
+function ResubmitBanner({ order }: { order: DtOrderForUI }) {
+  if (!order.lastResubmitAt || !order.lastResubmitDiff) return null;
+  const entries = Object.entries(order.lastResubmitDiff);
+  if (entries.length === 0) return null;
+  const when = new Date(order.lastResubmitAt).toLocaleString();
+  const who = order.lastResubmitBy || 'Client';
+  return (
+    <div style={{
+      borderRadius: 10,
+      border: '1px solid #BFDBFE',
+      background: '#EFF6FF',
+      padding: '14px 16px',
+      fontFamily: theme.typography.fontFamily,
+    }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8,
+        fontSize: 13, fontWeight: 700, color: '#1E40AF',
+      }}>
+        <PenLine size={14} />
+        <span>Updated by {who} on {when}</span>
+      </div>
+      <div style={{ fontSize: 12, color: '#1E3A8A', marginBottom: 8 }}>
+        Review the changes below — re-approving clears this banner.
+      </div>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+        <thead>
+          <tr>
+            <th style={{ textAlign: 'left', padding: '6px 8px', color: '#1E40AF', borderBottom: '1px solid #BFDBFE', fontWeight: 600, width: '30%' }}>Field</th>
+            <th style={{ textAlign: 'left', padding: '6px 8px', color: '#1E40AF', borderBottom: '1px solid #BFDBFE', fontWeight: 600, width: '35%' }}>Was</th>
+            <th style={{ textAlign: 'left', padding: '6px 8px', color: '#1E40AF', borderBottom: '1px solid #BFDBFE', fontWeight: 600, width: '35%' }}>Now</th>
+          </tr>
+        </thead>
+        <tbody>
+          {entries.map(([key, val]) => (
+            <tr key={key}>
+              <td style={{ padding: '6px 8px', color: theme.colors.text, fontWeight: 600, verticalAlign: 'top' }}>
+                {humanizeFieldKey(key)}
+              </td>
+              <td style={{ padding: '6px 8px', color: '#991B1B', textDecoration: 'line-through', verticalAlign: 'top', wordBreak: 'break-word' }}>
+                {formatResubmitValue(val.old)}
+              </td>
+              <td style={{ padding: '6px 8px', color: '#166534', fontWeight: 600, verticalAlign: 'top', wordBreak: 'break-word' }}>
+                {formatResubmitValue(val.new)}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function DetailsTab({
   order,
   linkedOrder,
@@ -290,6 +393,13 @@ function DetailsTab({
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+
+      {/* v2026-05-09 — client-resubmit diff banner. Renders only when
+          the order has a recorded last_resubmit_diff (set when a client
+          edits a non-draft order via CreateDeliveryOrderModal). Cleared
+          by the staff Approve handler so it survives until staff
+          acknowledges. Self-hides when there's nothing to show. */}
+      <ResubmitBanner order={order} />
 
       {/* Card 1 — Schedule & Order Details. Combines the schedule
           fields, the order-level reference numbers, and the
@@ -1633,7 +1743,18 @@ export function OrderPage() {
   // Approve — same logic as the inline EPFooterButton onClick below, but
   // pulled out so the FAB can call it identically on mobile.
   const handleApprove = async () => {
-    await supabase.from('dt_orders').update({ review_status: 'approved', reviewed_at: new Date().toISOString() }).eq('id', order.id);
+    // v2026-05-09 — Approve clears the client-resubmit diff snapshot so
+    // the ResubmitBanner disappears and the next client edit's banner
+    // starts fresh. last_resubmit_at = null is what hides the banner;
+    // the diff/by columns are nulled too so a stale snapshot can't leak
+    // back into a future render via the modal's load-time prefill.
+    await supabase.from('dt_orders').update({
+      review_status: 'approved',
+      reviewed_at: new Date().toISOString(),
+      last_resubmit_diff: null,
+      last_resubmit_at: null,
+      last_resubmit_by: null,
+    }).eq('id', order.id);
     void logDtOrderAudit({
       orderId: order.id,
       tenantId: order.tenantId,
