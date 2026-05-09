@@ -29,6 +29,7 @@ import { useAuth } from '../../contexts/AuthContext';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { FloatingActionMenu, type FABAction } from './FloatingActionMenu';
 import { ClientAcceptAsIsAction } from '../notes/ClientAcceptAsIsAction';
+import { EntityNotesInline } from '../notes/EntityNotesInline';
 
 import type { Repair } from '../../lib/types';
 interface Props {
@@ -960,6 +961,16 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
               <div style={{ fontSize: 13, color: repairNotes ? theme.colors.text : theme.colors.textMuted, lineHeight: 1.5 }}>{repairNotes || 'No notes'}</div>
             )}
           </div>
+
+          {/* Threaded Notes preview — entity_notes for this repair, surfaced
+              inline so clients see new notes without tab-switching. Composer
+              + full thread live in the Notes tab. */}
+          <EntityNotesInline
+            entityType="repair"
+            entityId={repair.repairId}
+            itemId={repair.itemId ? String(repair.itemId) : null}
+            tenantId={repair.clientSheetId ?? null}
+          />
 
         {/* Photos + Notes now live in dedicated tabs via builtInTabs below. */}
 

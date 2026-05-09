@@ -10,6 +10,7 @@ import { DriveFoldersList, type DriveFolderLink } from './DriveFoldersList';
 import { usePhotoGraphRollup, useNoteGraphRollup, type RollupContext } from '../../hooks/useGraphRollup';
 import { useDocuments } from '../../hooks/useDocuments';
 import { PhotosPanel as _PhotosPanel, DocumentsPanel as _DocumentsPanel, NotesPanel as _NotesPanel } from './EntityAttachments';
+import { EntityNotesInline } from '../notes/EntityNotesInline';
 import { EntityHistory } from './EntityHistory';
 import { ItemIdBadges } from './ItemIdBadges';
 import { useItemIndicators } from '../../hooks/useItemIndicators';
@@ -1019,6 +1020,15 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
             onAddAddon={async (input) => { await addWcAddon(input); }}
             onUpdateAddon={async (id, patch) => { await updateWcAddon(id, patch); }}
             onDeleteAddon={async (id) => { await deleteWcAddon(id); }}
+          />
+
+          {/* Threaded Notes preview — entity_notes for this will call.
+              Composer + full thread live in the Notes tab. */}
+          <EntityNotesInline
+            entityType="will_call"
+            entityId={wc.wcNumber}
+            itemId={null}
+            tenantId={clientSheetId ?? null}
           />
     </div>
   );

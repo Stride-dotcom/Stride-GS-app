@@ -6,6 +6,7 @@ import { Truck, Package, FileText, Mail, ClipboardList, LayoutList, Pencil, Save
 import { DeepLink } from './DeepLink';
 import { ItemIdBadges } from './ItemIdBadges';
 import { useItemIndicators } from '../../hooks/useItemIndicators';
+import { EntityNotesInline } from '../notes/EntityNotesInline';
 import { TabbedDetailPanel, type TabbedDetailPanelTab } from './TabbedDetailPanel';
 import { EntityPage } from './EntityPage';
 import { CreateTaskModal } from './CreateTaskModal';
@@ -445,6 +446,15 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
           </>
         )}
       </div>
+
+      {/* Threaded Notes preview — entity_notes for this shipment. Composer
+          + full thread live in the Notes tab. */}
+      <EntityNotesInline
+        entityType="shipment"
+        entityId={shipment.shipmentNo}
+        itemId={null}
+        tenantId={shipment.clientSheetId ?? null}
+      />
 
       {/* Folder + utility button row — suppressed in page mode. Drive folder
           moves to the Photos tab via DriveFoldersList; utility actions move

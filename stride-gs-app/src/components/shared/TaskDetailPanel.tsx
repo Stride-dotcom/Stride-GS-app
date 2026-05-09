@@ -30,6 +30,7 @@ import { ProcessingOverlay } from './ProcessingOverlay';
 import { useTaskAddons } from '../../hooks/useTaskAddons';
 import { BillingPreviewCard } from './BillingPreviewCard';
 import { ClientAcceptAsIsAction } from '../notes/ClientAcceptAsIsAction';
+import { EntityNotesInline } from '../notes/EntityNotesInline';
 
 import type { Task, Repair, InventoryItem } from '../../lib/types';
 interface Props {
@@ -858,6 +859,17 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
               </div>
             )}
           </div>
+
+          {/* Threaded Notes preview \u2014 latest entity_notes for this task
+              inline so clients see new notes without tab-switching. Self-
+              hides when there are no notes. Composer + full thread live
+              in the Notes tab. */}
+          <EntityNotesInline
+            entityType="task"
+            entityId={task.taskId}
+            itemId={task.itemId ? String(task.itemId) : null}
+            tenantId={clientSheetId ?? null}
+          />
 
           {/* Repair Quote Actions — In page mode the Request Repair Quote
               action lives in the sticky footer as a quick-action pill. The

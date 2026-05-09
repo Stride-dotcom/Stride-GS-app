@@ -21,6 +21,7 @@ import { useIsMobile } from '../../hooks/useIsMobile';
 import { useAutocomplete } from '../../hooks/useAutocomplete';
 import { FloatingActionMenu, type FABAction } from './FloatingActionMenu';
 import { usePhotoGraphRollup, useNoteGraphRollup, type RollupContext } from '../../hooks/useGraphRollup';
+import { EntityNotesInline } from '../notes/EntityNotesInline';
 import { useDocuments } from '../../hooks/useDocuments';
 
 export interface LinkedRecord {
@@ -1028,6 +1029,16 @@ export function ItemDetailPanel({
           />
         )}
       </Section>
+
+      {/* Threaded Notes preview — entity_notes for this item, surfaced
+          inline so clients see new notes without tab-switching. Composer
+          + full thread live in the Notes tab. */}
+      <EntityNotesInline
+        entityType="inventory"
+        entityId={item.itemId}
+        itemId={item.itemId}
+        tenantId={clientSheetId ?? null}
+      />
 
       {/* Add-on Services */}
       {catalogAddons.length > 0 && (
