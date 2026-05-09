@@ -1,6 +1,6 @@
 # GAS → Supabase Migration — Living Status
 
-> Last updated: 2026-05-09 (P1.1 substrate migration applied — `feature_flags` seeded with 25 rows at `active_backend='gas'`, `parity_results` and `gas_call_log` tables created, `correlation_id` column added to `entity_audit_log`).
+> Last updated: 2026-05-09 (P1.2 GAS-side input capture shipped — StrideAPI v38.199.0, `api_logCallInput_` populates `gas_call_log` and threads `correlation_id` through `api_auditLog_`. Replay corpus clock starts on next deploy.).
 > This file is **authoritative for execution**. The v1.1 docx in `Dropbox\Apps\GS Inventory\` is a stakeholder snapshot.
 
 ---
@@ -46,7 +46,7 @@ If you only have time for one section: read **Architectural Decisions** in full.
 | Sub | State | Owner-session | Deliverable |
 |---|---|---|---|
 | P1.1 | **done** | 2026-05-09 | Migrations: `feature_flags`, `parity_results`, `gas_call_log`, `correlation_id` column on `entity_audit_log`. 25 `feature_flags` rows seeded at `active_backend='gas'`. Migration file: `supabase/migrations/20260509000001_migration_parity_substrate.sql`. Applied via Supabase MCP. |
-| P1.2 | not_started | — | GAS-side input capture: `logCallInput_` in `doPost_`, thread `correlation_id` through `entity_audit_log` writes. |
+| P1.2 | **done** | 2026-05-09 | GAS-side input capture: `api_logCallInput_` in `doPost`, threads `correlation_id` via `__MIG_CORRELATION_ID__` script-level global into `api_auditLog_`. PII-conscious redaction (1KB cap, whitelist of structural fields). StrideAPI v38.199.0 (deploy pending). Replay corpus clock starts on next `npm run push-api && npm run deploy-api`. |
 | P1.3 | not_started | — | `parity_dryrun` Postgres schema mirroring the tables write-handlers touch. |
 | P1.4 | not_started | — | Reverse writethrough harness: GAS Web App endpoint accepting row payloads, idempotent on row-id key. |
 | P1.5 | not_started | — | React `FeatureFlagProvider` + `useFeatureFlag(key)` hook with per-tenant scope resolution. |
