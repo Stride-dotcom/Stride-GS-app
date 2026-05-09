@@ -180,23 +180,27 @@ Deno.serve(async (req: Request) => {
       `${APP_BASE}${route.routePath}?open=${encodeURIComponent(note.entity_id)}` +
       (tenantId ? `&client=${encodeURIComponent(tenantId)}` : '');
 
+    // v3 — entity-agnostic tokens. The template was rewritten to consume
+    // ENTITY_* names so a repair event no longer reads "Task RPR-12345
+    // (Repair)" with a "Task" row label. See migration
+    // 20260508140000_task_client_note_entity_tokens.sql.
     const tokens: Record<string, string> = {
-      NOTE_KIND:          noteKind,
-      CLIENT_NAME:        clientName,
-      AUTHOR_NAME:        note.author_name ?? 'Client',
-      NOTE_BODY:          note.body ?? '',
-      NOTE_TIME:          formatPacificDate(note.created_at),
-      ITEM_ID:            itemId || '—',
-      ITEM_DESCRIPTION:   (item?.description ?? '').trim() || '—',
-      ITEM_SIDEMARK:      (item?.sidemark ?? '').trim() || '—',
-      ITEM_REFERENCE:     (item?.reference ?? '').trim() || '—',
-      // The template tokens are named TASK_* for legacy reasons; treat them
-      // as ENTITY_* and feed task or repair fields into the same slots.
-      TASK_ID:            note.entity_id,
-      TASK_TYPE:          parent?.type?.toString().trim() || route.defaultTypeLabel,
-      TASK_STATUS:        parent?.status?.toString().trim() || '—',
-      TASK_RESULT_SUFFIX: resultSuffix,
-      DEEP_LINK:          deepLink,
+      NOTE_KIND:            noteKind,
+      CLIENT_NAME:          clientName,
+      AUTHOR_NAME:          note.author_name ?? 'Client',
+      NOTE_BODY:            note.body ?? '',
+      NOTE_TIME:            formatPacificDate(note.created_at),
+      ITEM_ID:              itemId || '—',
+      ITEM_DESCRIPTION:     (item?.description ?? '').trim() || '—',
+      ITEM_SIDEMARK:        (item?.sidemark ?? '').trim() || '—',
+      ITEM_REFERENCE:       (item?.reference ?? '').trim() || '—',
+      ENTITY_LABEL:         route.defaultTypeLabel,
+      ENTITY_LABEL_LOWER:   route.defaultTypeLabel.toLowerCase(),
+      ENTITY_ID:            note.entity_id,
+      ENTITY_TYPE_DETAIL:   parent?.type?.toString().trim() || route.defaultTypeLabel,
+      ENTITY_STATUS:        parent?.status?.toString().trim() || '—',
+      ENTITY_RESULT_SUFFIX: resultSuffix,
+      DEEP_LINK:            deepLink,
     };
 
     const r = await invokeSendEmail(supabaseUrl, serviceKey, {
