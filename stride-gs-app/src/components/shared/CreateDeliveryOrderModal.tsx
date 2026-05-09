@@ -86,6 +86,7 @@ import { useAuth } from '../../contexts/AuthContext';
 import { logDtOrderAudit } from '../../lib/dtOrderAudit';
 import { useClients } from '../../hooks/useClients';
 import { useInventory } from '../../hooks/useInventory';
+import { useIsMobile } from '../../hooks/useIsMobile';
 import {
   fetchDeliveryZone,
   fetchDeliveryServicesFromCatalog,
@@ -581,6 +582,7 @@ export function CreateDeliveryOrderModal({
   editOrderId = null,
 }: Props) {
   const { user } = useAuth();
+  const isMobile = useIsMobile();
   const isStaff = user?.role === 'staff' || user?.role === 'admin';
   // Admin-only privileges. Staff can review/approve and price client
   // accessorial lines, but only admin can hand-edit the auto-computed
@@ -3282,7 +3284,23 @@ export function CreateDeliveryOrderModal({
           half-built order with one stray click. Operator must use
           Cancel, Save Draft, or Submit for Review explicitly. */}
       <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.3)', zIndex: 1000 }} />
-      <div style={{
+      <div style={isMobile ? {
+        // v2026-05-09 — full-sheet on mobile so the Body's
+        // `flex: 1 + overflowY: auto` actually has a bounded parent and
+        // touch-scroll works through the entire form. Pre-fix the modal
+        // used `top: 50% + transform: translate(-50%,-50%) + maxHeight: 94vh`,
+        // which on iOS Safari clipped both the header AND the footer
+        // behind the dynamic URL bar — operator literally couldn't reach
+        // Submit / Save Draft on a tall draft. The full-sheet form pins
+        // header + footer to the viewport edges and lets the body fill
+        // (and scroll) the available space.
+        position: 'fixed', inset: 0,
+        background: '#fff', borderRadius: 0, zIndex: 1001,
+        display: 'flex', flexDirection: 'column', overflow: 'hidden',
+        // safe-area-inset-bottom keeps the footer above the iOS home
+        // indicator on devices with no physical home button.
+        paddingBottom: 'env(safe-area-inset-bottom, 0px)',
+      } : {
         position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
         width: 1100, maxWidth: '96vw', maxHeight: '94vh',
         background: '#fff', borderRadius: 16, zIndex: 1001,
@@ -3311,7 +3329,21 @@ export function CreateDeliveryOrderModal({
         </div>
 
         {/* Body */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: 20 }}>
+        <div style={{
+          flex: 1,
+          overflowY: 'auto',
+          // Tighter padding on mobile so the form isn't squeezed into
+          // a thin column inside the device's narrow viewport.
+          padding: isMobile ? '14px 14px' : 20,
+          // iOS legacy momentum scrolling. Modern Safari ignores this
+          // (touch scrolling is the default), but it's harmless and
+          // covers older WebView shells.
+          WebkitOverflowScrolling: 'touch',
+          // Stop the page underneath from scroll-bouncing when the
+          // body hits its top/bottom — keeps the modal interaction
+          // self-contained.
+          overscrollBehavior: 'contain',
+        }}>
 
           {/* Mode cards */}
           <div style={section}>
@@ -4636,8 +4668,17 @@ export function CreateDeliveryOrderModal({
 
         {/* Footer */}
         <div style={{
-          padding: '14px 20px', borderTop: `1px solid ${theme.colors.border}`,
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexShrink: 0,
+          padding: isMobile ? '10px 12px' : '14px 20px',
+          borderTop: `1px solid ${theme.colors.border}`,
+          display: 'flex',
+          // On mobile let the missing-fields hint wrap above the button
+          // group instead of compressing both onto one line; the four
+          // action buttons (Discard / Cancel / Save Draft / Submit) need
+          // the full row width on a phone.
+          flexWrap: isMobile ? 'wrap' : 'nowrap',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 10, flexShrink: 0,
           background: '#FAFAFA',
         }}>
           {/* "What's missing" hint — shown on the left, only when the
@@ -4658,7 +4699,14 @@ export function CreateDeliveryOrderModal({
               </div>
             )}
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 10,
+            // Mobile: allow the 3-4 buttons to wrap onto a second row
+            // so Submit isn't cut off the right edge of a narrow phone.
+            flexWrap: isMobile ? 'wrap' : 'nowrap',
+            flexShrink: 0,
+            justifyContent: isMobile ? 'flex-end' : 'flex-end',
+          }}>
             {/* Discard Draft — only when editing an existing draft
                 (NOT a real order). Hard-deletes the row + its items.
                 Available to anyone who can open the draft (clients see
