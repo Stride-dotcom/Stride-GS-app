@@ -29,7 +29,7 @@ import { SERVICE_CODES } from '../../lib/constants';
 import { ProcessingOverlay } from './ProcessingOverlay';
 import { useTaskAddons } from '../../hooks/useTaskAddons';
 import { BillingPreviewCard } from './BillingPreviewCard';
-import { InspectionAcceptAsIs } from '../notes/InspectionAcceptAsIs';
+import { ClientAcceptAsIsAction } from '../notes/ClientAcceptAsIsAction';
 
 import type { Task, Repair, InventoryItem } from '../../lib/types';
 interface Props {
@@ -956,30 +956,18 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
     </div>
   );
 
-  // Below-ID badge row: service type, status, result. v2026-05-08 — when an
-  // INSP task has been Completed/Fail, clients see an "Accept As-Is"
-  // acknowledgement strip stacked below the badges. Staff/admin don't see
-  // the strip (they have Reopen Task for corrections); clients can't reopen,
-  // so this gives them a way to close the loop without phoning the office.
+  // Below-ID badge row: service type, status, result. The Accept-As-Is action
+  // for clients lives in the footer pill bar (see ClientAcceptAsIsAction in
+  // mobileFooter / pageFooter), not inline here, so the header stays compact.
   const isFailedInspection =
     task.type === 'INSP'
     && (task.status === 'Completed' || completed)
     && (correctedResult || submitResult?.result || task.result) === 'Fail';
-  const showAcceptAsIs = isFailedInspection && user?.role === 'client';
   const belowIdContent = (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-      <div style={{ display: 'flex', gap: 6 }}>
-        <Badge t={SERVICE_CODES[task.type as keyof typeof SERVICE_CODES] || task.type} bg={tc.bg} color={tc.color} />
-        <Badge t={completed ? 'Completed' : task.status} bg={completed ? STATUS_CFG.Completed.bg : sc.bg} color={completed ? STATUS_CFG.Completed.color : sc.color} />
-        {task.result && <Badge t={task.result} bg={task.result === 'Pass' ? '#F0FDF4' : '#FEF2F2'} color={task.result === 'Pass' ? '#15803D' : '#DC2626'} />}
-      </div>
-      {showAcceptAsIs && (
-        <InspectionAcceptAsIs
-          taskId={task.taskId}
-          itemId={task.itemId ? String(task.itemId) : null}
-          tenantId={clientSheetId ?? null}
-        />
-      )}
+    <div style={{ display: 'flex', gap: 6 }}>
+      <Badge t={SERVICE_CODES[task.type as keyof typeof SERVICE_CODES] || task.type} bg={tc.bg} color={tc.color} />
+      <Badge t={completed ? 'Completed' : task.status} bg={completed ? STATUS_CFG.Completed.bg : sc.bg} color={completed ? STATUS_CFG.Completed.color : sc.color} />
+      {task.result && <Badge t={task.result} bg={task.result === 'Pass' ? '#F0FDF4' : '#FEF2F2'} color={task.result === 'Pass' ? '#15803D' : '#DC2626'} />}
     </div>
   );
 
@@ -1060,6 +1048,19 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
               {isPass ? '✓ Passed' : '✗ Failed'}
               {task.completedAt ? ` · Completed ${fmtDate(task.completedAt)}` : ''}
             </span>
+          </div>
+          {/* Client acknowledge action — renders only when caller is a
+              client AND the task is failed inspection AND no prior
+              acceptance exists. Hidden for staff/admin (they Reopen). */}
+          <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 4 }}>
+            <ClientAcceptAsIsAction
+              entityType="task"
+              entityId={task.taskId}
+              itemId={task.itemId ? String(task.itemId) : null}
+              tenantId={clientSheetId ?? null}
+              eligible={isFailedInspection}
+              pillStyle={{ width: '100%', maxWidth: 360, padding: '12px 18px', fontSize: 13 }}
+            />
           </div>
           {renderCorrectResultWidget()}
           {renderReopenLink()}
@@ -1464,6 +1465,17 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
 
   const pageFooter = isCompactViewport && !isEditingTask && !showPassFail ? null : (
     <>
+      {/* Client acknowledge — surfaces only for client-role users on failed
+          INSP tasks. The component hides itself otherwise (and after a
+          previous acceptance), so this line is a no-op for staff/admin. */}
+      <ClientAcceptAsIsAction
+        entityType="task"
+        entityId={task.taskId}
+        itemId={task.itemId ? String(task.itemId) : null}
+        tenantId={clientSheetId ?? null}
+        eligible={isFailedInspection}
+        pillStyle={pagePillBase}
+      />
       {/* Cancel Task — shown for open/in-progress */}
       {isOpen && !completed && (
         <button onClick={handleCancelTask} style={tkLight}>Cancel Task</button>
