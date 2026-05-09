@@ -12,6 +12,12 @@ import {
   CheckCircle2, Clock3, DollarSign, MapPin, Phone,
   Mail, Calendar, Clock, Package, FileText, Truck,
   User, PenLine, MessageSquare, Lock,
+  // v2026-05-09 — mobile FAB pattern (matches TaskDetailPanel /
+  // RepairDetailPanel / WillCallDetailPanel). Approve / Push to DT /
+  // Release Items stay inline as the chosen primary; Print PDF, Edit
+  // Full Order, Request Revision, Reject, and Discard Draft collapse
+  // into the FAB overflow on mobile.
+  Printer, Edit3, XCircle, Trash2,
 } from 'lucide-react';
 import { theme } from '../styles/theme';
 import { BtnSpinner } from '../components/ui/BtnSpinner';
@@ -38,6 +44,8 @@ import { useServiceCatalog } from '../hooks/useServiceCatalog';
 import { supabase } from '../lib/supabase';
 import { CreateDeliveryOrderModal } from '../components/shared/CreateDeliveryOrderModal';
 import { ReleaseItemsModal } from '../components/shared/ReleaseItemsModal';
+import { useIsMobile } from '../hooks/useIsMobile';
+import { FloatingActionMenu, type FABAction } from '../components/shared/FloatingActionMenu';
 import { generateOrderPdf } from '../lib/orderPdf';
 import { logDtOrderAudit } from '../lib/dtOrderAudit';
 
@@ -938,6 +946,7 @@ export function OrderPage() {
   const { orderId } = useParams<{ orderId: string }>();
   const navigate = useNavigate();
   const { user } = useAuth();
+  const isMobile = useIsMobile();
   const canReview = user?.role === 'admin' || user?.role === 'staff';
 
   const { order: fetchedOrder, status, error, refetch } = useOrderDetail(orderId);
@@ -1579,6 +1588,117 @@ export function OrderPage() {
     !!order.tenantId &&
     releasableItems.length > 0;
 
+  // ─── Action handlers ─────────────────────────────────────────────────
+  // Defined as plain async functions (or sync wrappers) so they can be
+  // wired into both the desktop EPFooterButton row AND the mobile
+  // FloatingActionMenu without duplicating logic.
+
+  const handlePrintPdf = () => { generateOrderPdf(order); };
+
+  const handleDiscardDraft = async () => {
+    if (!window.confirm("Discard this draft? This can't be undone.")) return;
+    try {
+      await supabase.from('dt_order_items').delete().eq('dt_order_id', order.id);
+      const { error } = await supabase.from('dt_orders').delete().eq('id', order.id);
+      if (error) throw new Error(error.message);
+      refetch();
+      navigate('/orders');
+    } catch (e) {
+      alert(`Discard failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const handleEditFullOrder = () => { setShowFullEditModal(true); };
+  const handleReleaseItems  = () => { setShowReleaseModal(true); };
+
+  // Approve — same logic as the inline EPFooterButton onClick below, but
+  // pulled out so the FAB can call it identically on mobile.
+  const handleApprove = async () => {
+    await supabase.from('dt_orders').update({ review_status: 'approved', reviewed_at: new Date().toISOString() }).eq('id', order.id);
+    void logDtOrderAudit({
+      orderId: order.id,
+      tenantId: order.tenantId,
+      action: 'approve',
+      changes: { reviewStatus: { old: order.reviewStatus, new: 'approved' } },
+      performedBy: user?.email ?? null,
+    });
+    try {
+      let to = (order.contactEmail || '').trim();
+      if (!to) to = (order.createdByEmail || '').trim();
+      if (!to && order.createdByUser) {
+        const { data: prof } = await supabase
+          .from('profiles')
+          .select('email')
+          .eq('id', order.createdByUser)
+          .maybeSingle();
+        to = String(prof?.email || '').trim();
+      }
+      if (to) {
+        const hasPricedExtras = Array.isArray(order.accessorials)
+          && (order.accessorials as Array<{ subtotal?: number; quotePending?: boolean }>)
+            .some(a => !a.quotePending && Number(a.subtotal) > 0);
+        const pricingNote = hasPricedExtras
+          ? "We've added pricing for the services you requested. You can view the updated total on your order."
+          : '';
+        const appDeepLink = `https://www.mystridehub.com/#/orders/${encodeURIComponent(order.id)}`;
+        const approverCc =
+          user?.email && user.email.toLowerCase() !== to.toLowerCase()
+            ? [user.email]
+            : undefined;
+        void supabase.functions.invoke('send-email', {
+          body: {
+            templateKey: 'DELIVERY_ORDER_APPROVED',
+            to,
+            cc: approverCc,
+            tokens: {
+              ORDER_ID:      order.dtIdentifier || order.id,
+              CONTACT_NAME:  order.contactName || 'there',
+              PRICING_NOTE:  pricingNote,
+              APP_DEEP_LINK: appDeepLink,
+            },
+            idempotencyKey: `delivery-order-approved:${order.id}`,
+          },
+        });
+      }
+    } catch (e) {
+      console.warn('[OrderPage] DELIVERY_ORDER_APPROVED send failed (non-fatal)', e);
+    }
+    const fresh = await fetchDtOrderByIdFromSupabase(order.id);
+    if (fresh) setLocalOrder(fresh);
+    refetch();
+  };
+
+  const handlePushToDt = async () => {
+    if (pushingDt) return;
+    setPushingDt(true);
+    setPushDtError(null);
+    try {
+      await pushOrderToDt();
+      const fresh = await fetchDtOrderByIdFromSupabase(order.id);
+      if (fresh) setLocalOrder(fresh);
+      refetch();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error('[OrderPage] DT push failed:', msg, e);
+      setPushDtError(msg);
+    } finally {
+      setPushingDt(false);
+    }
+  };
+
+  // ─── Visibility flags (shared by desktop pill row + mobile FAB) ──────
+  const showReviewActions = canReview && !editing
+    && (order.reviewStatus === 'pending_review' || order.reviewStatus === 'revision_requested');
+  const showDtPushAction = canReview && !editing && order.reviewStatus === 'approved' && (() => {
+    const everPushed = !!order.pushedToDtAt;
+    const stale = everPushed && !!order.updatedAt && new Date(order.updatedAt).getTime() > new Date(order.pushedToDtAt!).getTime();
+    return !everPushed || stale;
+  })();
+  const dtPushLabel = pushingDt
+    ? 'Pushing…'
+    : (order.pushedToDtAt ? 'Republish to DT' : 'Push to DT');
+  const showDiscardDraft = canReview && !editing && order.reviewStatus === 'draft';
+
   // Print PDF button — always available (admin / staff / client) so
   // anyone with permission to see the order can hand the customer a
   // printed copy or save one for their own records.
@@ -1587,34 +1707,85 @@ export function OrderPage() {
       key="print-pdf"
       label="Print PDF"
       variant="secondary"
-      onClick={() => generateOrderPdf(order)}
+      onClick={handlePrintPdf}
     />
   ) : null;
 
   // Discard Draft — only for draft rows. Real orders should be Voided
-  // through their normal flow, never deleted. Hard-deletes the order
-  // + its items, then routes back to the list.
-  const discardDraftButton = !editing && order.reviewStatus === 'draft' ? (
+  // through their normal flow, never deleted.
+  const discardDraftButton = showDiscardDraft ? (
     <EPFooterButton
       key="discard-draft"
       label="Discard Draft"
       variant="secondary"
-      onClick={async () => {
-        if (!window.confirm("Discard this draft? This can't be undone.")) return;
-        try {
-          await supabase.from('dt_order_items').delete().eq('dt_order_id', order.id);
-          const { error } = await supabase.from('dt_orders').delete().eq('id', order.id);
-          if (error) throw new Error(error.message);
-          refetch();
-          navigate('/orders');
-        } catch (e) {
-          alert(`Discard failed: ${e instanceof Error ? e.message : String(e)}`);
-        }
-      }}
+      onClick={handleDiscardDraft}
     />
   ) : null;
 
-  const footerContent = canReview && !editing ? (
+  // ─── Mobile FAB actions ──────────────────────────────────────────────
+  // Pattern matches TaskDetailPanel / RepairDetailPanel / WillCallDetailPanel:
+  // the most state-relevant action stays as a visible inline pill, every-
+  // thing else collapses behind the ⋯ FAB so the page content owns the
+  // viewport. Editing keeps the inline Cancel/Save row (no FAB) because
+  // those two pills are the central UX while editing.
+  //
+  // Primary action priority (only one inline on mobile):
+  //   1. Approve  — when pending_review / revision_requested
+  //   2. Push/Republish to DT — when approved + needs push
+  //   3. Release Items — when completed + has releasable items
+  // Anything below the chosen primary collapses into the FAB overflow.
+  const fabActions: FABAction[] = (canReview && !editing) ? [
+    { label: 'Print PDF', icon: <Printer size={16} />, onClick: handlePrintPdf },
+    { label: 'Edit Full Order', icon: <Edit3 size={16} />, onClick: handleEditFullOrder },
+    ...(showDiscardDraft ? [{ label: 'Discard Draft', icon: <Trash2 size={16} />, onClick: () => { void handleDiscardDraft(); }, color: '#B91C1C' }] : []),
+    ...(showReviewActions ? [
+      { label: 'Request Revision', icon: <PenLine size={16} />, onClick: () => handleReviewAction('revision_requested') },
+      { label: 'Reject',           icon: <XCircle size={16} />, onClick: () => handleReviewAction('rejected'), color: '#B91C1C' },
+    ] : []),
+  ] : !editing ? [
+    { label: 'Print PDF', icon: <Printer size={16} />, onClick: handlePrintPdf },
+    ...(showDiscardDraft ? [{ label: 'Discard Draft', icon: <Trash2 size={16} />, onClick: () => { void handleDiscardDraft(); }, color: '#B91C1C' }] : []),
+  ] : [];
+
+  // Pick the inline primary for mobile based on the current state.
+  // Returns null when there's no obvious primary — in that case the
+  // mobile footer is empty and the FAB is the only action surface.
+  const mobilePrimary = (() => {
+    if (!canReview || editing) return null;
+    if (showReviewActions) {
+      return (
+        <EPFooterButton
+          key="approve-mobile"
+          label="Approve"
+          variant="primary"
+          onClick={() => { void handleApprove(); }}
+        />
+      );
+    }
+    if (showDtPushAction) {
+      return (
+        <EPFooterButton
+          key="dt-push-mobile"
+          label={dtPushLabel}
+          variant="primary"
+          onClick={() => { void handlePushToDt(); }}
+        />
+      );
+    }
+    if (canReleaseItems) {
+      return (
+        <EPFooterButton
+          key="release-mobile"
+          label="Release Items"
+          variant="primary"
+          onClick={handleReleaseItems}
+        />
+      );
+    }
+    return null;
+  })();
+
+  const desktopFooterContent = canReview && !editing ? (
     <>
       {printButton}
       {discardDraftButton}
@@ -1626,84 +1797,21 @@ export function OrderPage() {
       <EPFooterButton
         label="Edit Full Order"
         variant="secondary"
-        onClick={() => setShowFullEditModal(true)}
+        onClick={handleEditFullOrder}
       />
       {canReleaseItems && (
         <EPFooterButton
           label="Release Items"
           variant="primary"
-          onClick={() => setShowReleaseModal(true)}
+          onClick={handleReleaseItems}
         />
       )}
-      {(order.reviewStatus === 'pending_review' || order.reviewStatus === 'revision_requested') && (
+      {showReviewActions && (
         <>
           <EPFooterButton
             label="Approve"
             variant="primary"
-            onClick={async () => {
-              await supabase.from('dt_orders').update({ review_status: 'approved', reviewed_at: new Date().toISOString() }).eq('id', order.id);
-              // Audit: approve. Best-effort.
-              void logDtOrderAudit({
-                orderId: order.id,
-                tenantId: order.tenantId,
-                action: 'approve',
-                changes: { reviewStatus: { old: order.reviewStatus, new: 'approved' } },
-                performedBy: user?.email ?? null,
-              });
-              // Notify the client. Best-effort — never block the approve.
-              // Recipient priority: order contact email → submitter's
-              // profile email. Skip silently if neither is available.
-              try {
-                let to = (order.contactEmail || '').trim();
-                if (!to) to = (order.createdByEmail || '').trim();
-                if (!to && order.createdByUser) {
-                  const { data: prof } = await supabase
-                    .from('profiles')
-                    .select('email')
-                    .eq('id', order.createdByUser)
-                    .maybeSingle();
-                  to = String(prof?.email || '').trim();
-                }
-                if (to) {
-                  const hasPricedExtras = Array.isArray(order.accessorials)
-                    && (order.accessorials as Array<{ subtotal?: number; quotePending?: boolean }>)
-                      .some(a => !a.quotePending && Number(a.subtotal) > 0);
-                  const pricingNote = hasPricedExtras
-                    ? "We've added pricing for the services you requested. You can view the updated total on your order."
-                    : '';
-                  const appDeepLink = `https://www.mystridehub.com/#/orders/${encodeURIComponent(order.id)}`;
-                  // CC the approving user so they have a record of
-                  // exactly what the customer received and can reply
-                  // to follow-up questions without having to reproduce
-                  // the email. Skipped when the approver IS the
-                  // recipient (no point CC'ing yourself) or when no
-                  // user email is available (service-account paths).
-                  const approverCc =
-                    user?.email && user.email.toLowerCase() !== to.toLowerCase()
-                      ? [user.email]
-                      : undefined;
-                  void supabase.functions.invoke('send-email', {
-                    body: {
-                      templateKey: 'DELIVERY_ORDER_APPROVED',
-                      to,
-                      cc: approverCc,
-                      tokens: {
-                        ORDER_ID:      order.dtIdentifier || order.id,
-                        CONTACT_NAME:  order.contactName || 'there',
-                        PRICING_NOTE:  pricingNote,
-                        APP_DEEP_LINK: appDeepLink,
-                      },
-                      idempotencyKey: `delivery-order-approved:${order.id}`,
-                    },
-                  });
-                }
-              } catch (e) {
-                console.warn('[OrderPage] DELIVERY_ORDER_APPROVED send failed (non-fatal)', e);
-              }
-              const fresh = await fetchDtOrderByIdFromSupabase(order.id);
-              if (fresh) setLocalOrder(fresh);
-              refetch();
-            }}
+            onClick={() => { void handleApprove(); }}
           />
           <EPFooterButton
             label="Request Revision"
@@ -1724,38 +1832,13 @@ export function OrderPage() {
           since the last push (updated_at > pushed_to_dt_at) — operators
           get a one-click way to propagate item add/remove + field edits.
           The same button does first-time push when pushedToDtAt is null. */}
-      {order.reviewStatus === 'approved' && (() => {
-        const everPushed = !!order.pushedToDtAt;
-        const stale = everPushed && !!order.updatedAt && new Date(order.updatedAt).getTime() > new Date(order.pushedToDtAt!).getTime();
-        if (everPushed && !stale) return null;
-        const label = pushingDt ? 'Pushing…' : (everPushed ? 'Republish to DT' : 'Push to DT');
-        return (
+      {showDtPushAction && (
         <EPFooterButton
-          label={label}
+          label={dtPushLabel}
           variant="primary"
-          onClick={async () => {
-            // Reviewers can push from the detail page now (was Review
-            // tab only). Calls the dt-push-order Edge Function which
-            // owns the XML build + DT API call + audit log.
-            if (pushingDt) return;
-            setPushingDt(true);
-            setPushDtError(null);
-            try {
-              await pushOrderToDt();
-              const fresh = await fetchDtOrderByIdFromSupabase(order.id);
-              if (fresh) setLocalOrder(fresh);
-              refetch();
-            } catch (e) {
-              const msg = e instanceof Error ? e.message : String(e);
-              console.error('[OrderPage] DT push failed:', msg, e);
-              setPushDtError(msg);
-            } finally {
-              setPushingDt(false);
-            }
-          }}
+          onClick={() => { void handlePushToDt(); }}
         />
-        );
-      })()}
+      )}
     </>
   ) : (
     <>
@@ -1764,7 +1847,13 @@ export function OrderPage() {
     </>
   );
 
-  const hasFooter = footerContent !== null && React.Children.count(footerContent) > 0;
+  // Mobile collapses to the chosen primary inline (or nothing) so the
+  // bottom of the page isn't a wall of stacked pills. The FAB picks up
+  // every secondary action including Print PDF / Edit / Reject / etc.
+  const footerContent = isMobile ? mobilePrimary : desktopFooterContent;
+  const hasFooter = footerContent !== null
+    && (React.isValidElement(footerContent) || React.Children.count(footerContent) > 0);
+  const showFab = isMobile && !editing && fabActions.length > 0;
 
   return (
     <>
@@ -1796,6 +1885,10 @@ export function OrderPage() {
         initialTabId="details"
         footer={hasFooter ? footerContent : undefined}
       />
+      {/* v2026-05-09 — mobile FAB. Renders only on small viewports and
+          only when there are actions to show. Editing mode keeps the
+          inline Cancel/Save row so the FAB stays hidden there. */}
+      <FloatingActionMenu show={showFab} actions={fabActions} />
       {showFullEditModal && (
         <CreateDeliveryOrderModal
           editOrderId={order.id}
