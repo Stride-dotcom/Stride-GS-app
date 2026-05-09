@@ -27,11 +27,17 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-type Action = 'revision_requested' | 'rejected';
+// v3 (2026-05-09) — added 'updated_by_client' to handle the client-edit
+// resubmit flow. The CreateDeliveryOrderModal save-changes path on a
+// non-draft order, when the actor is a client, flips review_status back
+// to pending_review and posts here with this action. Recipients differ
+// from the reviewer-side actions (office only — submitter IS the actor).
+type Action = 'revision_requested' | 'rejected' | 'updated_by_client';
 
 const TEMPLATE_KEY: Record<Action, string> = {
   revision_requested: 'ORDER_REVISION_REQUESTED',
   rejected:           'ORDER_REJECTED',
+  updated_by_client:  'ORDER_UPDATED_BY_CLIENT',
 };
 
 Deno.serve(async (req: Request) => {
@@ -43,10 +49,16 @@ Deno.serve(async (req: Request) => {
     const action: Action        = body.action;
     const reviewerName: string  = body.reviewerName ?? 'Stride Reviewer';
     const reviewNotes: string   = (body.reviewNotes ?? '').trim();
+    // v3 — for actions that can repeat (updated_by_client: a client may
+    // edit the same order multiple times), the caller passes a per-edit
+    // suffix so the idempotency key changes between edits. Reviewer-side
+    // actions (revision_requested / rejected) typically happen once per
+    // order — the suffix is optional and falls through to no-op.
+    const idempotencySuffix: string = String(body.idempotencySuffix ?? '').trim();
 
     if (!orderId)                     return json({ ok: false, error: 'orderId required' }, 400);
-    if (action !== 'revision_requested' && action !== 'rejected') {
-      return json({ ok: false, error: 'action must be revision_requested or rejected' }, 400);
+    if (action !== 'revision_requested' && action !== 'rejected' && action !== 'updated_by_client') {
+      return json({ ok: false, error: 'action must be revision_requested, rejected, or updated_by_client' }, 400);
     }
 
     const officeEmails  = Deno.env.get('NOTIFICATION_EMAILS') ?? '';
@@ -189,14 +201,19 @@ Deno.serve(async (req: Request) => {
     };
 
     // ── 7. Compose recipient list ─────────────────────────────────────────
-    // Office is always copied. Submitter is added when we resolved an
-    // email. Dedupe case-insensitively while preserving first-seen
-    // casing so display names / mixed-case addresses look right in the
-    // inbox.
+    // Reviewer-side actions (revision_requested / rejected) cc the
+    // submitter so the client knows their order needs attention. The
+    // client-side action (updated_by_client) goes office-only — the
+    // submitter IS the actor who just clicked Save Changes; no point
+    // emailing them their own edit.
     const officeList = officeEmails.split(',').map(s => s.trim()).filter(Boolean);
+    const includeSubmitter = action !== 'updated_by_client';
     const seen = new Set<string>();
     const recipients: string[] = [];
-    for (const addr of [...officeList, submitterEmail].filter(Boolean) as string[]) {
+    const sources: (string | null)[] = includeSubmitter
+      ? [...officeList, submitterEmail]
+      : [...officeList];
+    for (const addr of sources.filter(Boolean) as string[]) {
       const lower = addr.toLowerCase();
       if (seen.has(lower)) continue;
       seen.add(lower);
@@ -218,7 +235,9 @@ Deno.serve(async (req: Request) => {
         templateKey,
         to: recipients,
         tokens,
-        idempotencyKey: `${action}:${order.id}`,
+        idempotencyKey: idempotencySuffix
+          ? `${action}:${order.id}:${idempotencySuffix}`
+          : `${action}:${order.id}`,
         relatedEntityType: 'dt_order',
         relatedEntityId: order.id,
         tenantId: order.tenant_id ?? undefined,

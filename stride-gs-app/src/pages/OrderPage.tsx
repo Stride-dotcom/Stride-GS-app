@@ -1588,6 +1588,25 @@ export function OrderPage() {
     !!order.tenantId &&
     releasableItems.length > 0;
 
+  // v2026-05-09 — Edit Full Order is gated by STATUS, not role. Both
+  // staff and clients can edit any non-terminal order. The modal's
+  // save-changes handler detects the actor + the order's current state
+  // and decides what to do with review_status:
+  //   - Staff/admin editing: review_status preserved (their edits are
+  //     trusted; no re-review needed).
+  //   - Client editing a draft: review_status preserved at 'draft' until
+  //     they Submit for Review (existing behaviour).
+  //   - Client editing a non-draft (pending_review / approved /
+  //     scheduled): review_status flips back to 'pending_review' and
+  //     notify-order-revision fires with action='updated_by_client'.
+  // Terminal states are the hard floor — completed orders are immutable
+  // history, cancelled orders shouldn't be re-opened by editing (use a
+  // new order), rejected orders need staff intervention.
+  const isTerminalStatus = order.statusCategory === 'completed'
+    || order.statusCategory === 'cancelled'
+    || order.reviewStatus === 'rejected';
+  const isOrderEditable = !isTerminalStatus && !editing;
+
   // ─── Action handlers ─────────────────────────────────────────────────
   // Defined as plain async functions (or sync wrappers) so they can be
   // wired into both the desktop EPFooterButton row AND the mobile
@@ -1734,25 +1753,31 @@ export function OrderPage() {
   //   2. Push/Republish to DT — when approved + needs push
   //   3. Release Items — when completed + has releasable items
   // Anything below the chosen primary collapses into the FAB overflow.
-  const fabActions: FABAction[] = (canReview && !editing) ? [
+  // FAB actions visible to a given user depend on:
+  //   - Print PDF: anyone, any state, when not editing
+  //   - Edit Full Order: anyone, when isOrderEditable (covers staff +
+  //     clients, hides on completed / cancelled / rejected)
+  //   - Discard Draft: anyone with access on a draft
+  //   - Request Revision / Reject: reviewer-only (canReview)
+  const fabActions: FABAction[] = !editing ? [
     { label: 'Print PDF', icon: <Printer size={16} />, onClick: handlePrintPdf },
-    { label: 'Edit Full Order', icon: <Edit3 size={16} />, onClick: handleEditFullOrder },
+    ...(isOrderEditable ? [{ label: 'Edit Full Order', icon: <Edit3 size={16} />, onClick: handleEditFullOrder }] : []),
     ...(showDiscardDraft ? [{ label: 'Discard Draft', icon: <Trash2 size={16} />, onClick: () => { void handleDiscardDraft(); }, color: '#B91C1C' }] : []),
     ...(showReviewActions ? [
       { label: 'Request Revision', icon: <PenLine size={16} />, onClick: () => handleReviewAction('revision_requested') },
       { label: 'Reject',           icon: <XCircle size={16} />, onClick: () => handleReviewAction('rejected'), color: '#B91C1C' },
     ] : []),
-  ] : !editing ? [
-    { label: 'Print PDF', icon: <Printer size={16} />, onClick: handlePrintPdf },
-    ...(showDiscardDraft ? [{ label: 'Discard Draft', icon: <Trash2 size={16} />, onClick: () => { void handleDiscardDraft(); }, color: '#B91C1C' }] : []),
   ] : [];
 
   // Pick the inline primary for mobile based on the current state.
   // Returns null when there's no obvious primary — in that case the
   // mobile footer is empty and the FAB is the only action surface.
+  // All review-side primaries (Approve / Push to DT / Release Items)
+  // require canReview; clients just get the FAB with Edit Full Order
+  // + Print PDF.
   const mobilePrimary = (() => {
-    if (!canReview || editing) return null;
-    if (showReviewActions) {
+    if (editing) return null;
+    if (canReview && showReviewActions) {
       return (
         <EPFooterButton
           key="approve-mobile"
@@ -1762,7 +1787,7 @@ export function OrderPage() {
         />
       );
     }
-    if (showDtPushAction) {
+    if (canReview && showDtPushAction) {
       return (
         <EPFooterButton
           key="dt-push-mobile"
@@ -1772,7 +1797,7 @@ export function OrderPage() {
         />
       );
     }
-    if (canReleaseItems) {
+    if (canReview && canReleaseItems) {
       return (
         <EPFooterButton
           key="release-mobile"
@@ -1785,28 +1810,36 @@ export function OrderPage() {
     return null;
   })();
 
-  const desktopFooterContent = canReview && !editing ? (
+  // v2026-05-09 — desktop footer composes from independent gates.
+  // Print PDF + Edit Full Order are visible to anyone (including
+  // clients) when applicable; review / release / DT push remain
+  // reviewer-only. Pre-fix the whole row was nested under
+  // `canReview && !editing`, which made the entire footer disappear
+  // for client-role users.
+  const desktopFooterContent = !editing ? (
     <>
       {printButton}
       {discardDraftButton}
-      {/* Edit Full Order — opens the create-order modal in edit mode
-          so the operator can change anything that the inline Edit
-          buttons don't cover (mode, items, accessorials, coverage,
-          billing method, service time, etc.). Same form the create
-          flow uses; one source of truth. */}
-      <EPFooterButton
-        label="Edit Full Order"
-        variant="secondary"
-        onClick={handleEditFullOrder}
-      />
-      {canReleaseItems && (
+      {/* Edit Full Order — opens the create-order modal in edit mode.
+          Available to anyone with access to the order while it's
+          editable (any non-terminal status). The modal's save handler
+          decides what to do with review_status based on the actor's
+          role + the order's current state. */}
+      {isOrderEditable && (
+        <EPFooterButton
+          label="Edit Full Order"
+          variant="secondary"
+          onClick={handleEditFullOrder}
+        />
+      )}
+      {canReview && canReleaseItems && (
         <EPFooterButton
           label="Release Items"
           variant="primary"
           onClick={handleReleaseItems}
         />
       )}
-      {showReviewActions && (
+      {canReview && showReviewActions && (
         <>
           <EPFooterButton
             label="Approve"
@@ -1832,7 +1865,7 @@ export function OrderPage() {
           since the last push (updated_at > pushed_to_dt_at) — operators
           get a one-click way to propagate item add/remove + field edits.
           The same button does first-time push when pushedToDtAt is null. */}
-      {showDtPushAction && (
+      {canReview && showDtPushAction && (
         <EPFooterButton
           label={dtPushLabel}
           variant="primary"
@@ -1840,12 +1873,7 @@ export function OrderPage() {
         />
       )}
     </>
-  ) : (
-    <>
-      {printButton}
-      {discardDraftButton}
-    </>
-  );
+  ) : null;
 
   // Mobile collapses to the chosen primary inline (or nothing) so the
   // bottom of the page isn't a wall of stacked pills. The FAB picks up
@@ -1893,8 +1921,30 @@ export function OrderPage() {
         <CreateDeliveryOrderModal
           editOrderId={order.id}
           onClose={() => setShowFullEditModal(false)}
-          onSubmit={async () => {
+          onSubmit={async (data) => {
             setShowFullEditModal(false);
+            // v2026-05-09 — when a client edits a non-draft order, the
+            // modal flips review_status back to pending_review + sets
+            // review_notes audit stamp. Surface that to the office via
+            // notify-order-revision (action='updated_by_client'). Fire
+            // and forget; never block the UI on email.
+            //
+            // The idempotencySuffix carries a per-edit timestamp so a
+            // client editing the same order multiple times produces
+            // separate emails (rather than dedupe'ing on order id).
+            if (data?.clientResubmit) {
+              const actorName = user?.displayName || user?.email || 'Client';
+              const stamp = new Date().toLocaleString();
+              void supabase.functions.invoke('notify-order-revision', {
+                body: {
+                  orderId: data.dtOrderId,
+                  action: 'updated_by_client',
+                  reviewerName: actorName,
+                  reviewNotes: `Updated by ${actorName} on ${stamp}`,
+                  idempotencySuffix: String(Date.now()),
+                },
+              }).catch(e => console.warn('[OrderPage] notify-order-revision (updated_by_client) failed:', e));
+            }
             // Refetch the order so the page reflects whatever changed
             // in the modal (status flip, identifier replacement on
             // promote, fields, items, accessorials, coverage, etc.).
