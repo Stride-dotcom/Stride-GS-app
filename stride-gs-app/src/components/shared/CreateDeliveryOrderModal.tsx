@@ -3604,6 +3604,39 @@ export function CreateDeliveryOrderModal({
                 } : null}
               />
 
+              {/* PO / Reference / Sidemark / Order Details — relocated
+                  from the standalone "Reference" section below to right
+                  after the contact email so operators fill order
+                  metadata BEFORE picking items. Driver Notes + Internal
+                  Notes stay below the items picker (filled in last,
+                  after the operator has seen what's actually on the
+                  order). Gated on non-service_only since service-only
+                  orders don't carry a customer PO/sidemark workflow. */}
+              {mode !== 'service_only' && (
+                <div style={{ marginTop: 14 }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
+                    <div>
+                      <label style={label}>PO / Reference Number</label>
+                      <input style={input} value={poNumber} onChange={e => setPoNumber(e.target.value)} placeholder="Client reference (becomes part of order number)" />
+                    </div>
+                    <div>
+                      <label style={label}>Sidemark</label>
+                      <input style={input} value={sidemark} onChange={e => setSidemark(e.target.value)} />
+                    </div>
+                  </div>
+                  <label style={label}>Order Details</label>
+                  <div style={{ fontSize: 11, color: theme.colors.textMuted, marginBottom: 6, lineHeight: 1.5 }}>
+                    Describe what this order involves — services needed, special handling instructions, or anything our team should know about the job.
+                  </div>
+                  <textarea
+                    style={{ ...input, minHeight: 60, resize: 'vertical' }}
+                    value={details}
+                    onChange={e => setDetails(e.target.value)}
+                    placeholder="Order overview"
+                  />
+                </div>
+              )}
+
               {/* Inventory picker — delivery+warehouse and P+D both
                   support pulling items from the client's stored
                   inventory. P+D can mix warehouse items (delivered
@@ -4339,36 +4372,17 @@ export function CreateDeliveryOrderModal({
             </div>
           )}
 
-          {/* Reference (non-service_only) */}
+          {/* Notes (non-service_only). PO / Sidemark / Order Details
+              moved up next to the contact block so the operator fills
+              order metadata before picking items. Driver Notes + Internal
+              Notes live here because they're typically filled in LAST,
+              after the items roster is known and any on-site quirks are
+              fresh in the operator's head. */}
           {mode !== 'service_only' && (
             <div style={section}>
-              <div style={sectionTitle}>Reference</div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
-                <div>
-                  <label style={label}>PO / Reference Number</label>
-                  <input style={input} value={poNumber} onChange={e => setPoNumber(e.target.value)} placeholder="Client reference (becomes part of order number)" />
-                </div>
-                <div>
-                  <label style={label}>Sidemark</label>
-                  <input style={input} value={sidemark} onChange={e => setSidemark(e.target.value)} />
-                </div>
-              </div>
-              {/* Three notes fields (Phase 1):
-                    - Order Details (everyone): what this order involves
-                    - Driver Notes (everyone): on-site instructions
-                    - Internal Notes (staff/admin only): private staff context */}
-              <label style={label}>Order Details</label>
-              <div style={{ fontSize: 11, color: theme.colors.textMuted, marginBottom: 6, lineHeight: 1.5 }}>
-                Describe what this order involves — services needed, special handling instructions, or anything our team should know about the job.
-              </div>
-              <textarea
-                style={{ ...input, minHeight: 60, resize: 'vertical' }}
-                value={details}
-                onChange={e => setDetails(e.target.value)}
-                placeholder="Order overview"
-              />
+              <div style={sectionTitle}>Notes</div>
 
-              <label style={{ ...label, marginTop: 14 }}>Driver Notes</label>
+              <label style={label}>Driver Notes</label>
               <div style={{ fontSize: 11, color: theme.colors.textMuted, marginBottom: 6, lineHeight: 1.5 }}>
                 Notes for the delivery crew — parking instructions, gate codes, building access, or anything they'll need on-site.
               </div>
