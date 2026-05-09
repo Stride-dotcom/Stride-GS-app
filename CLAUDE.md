@@ -291,6 +291,7 @@ Supabase              →  read cache mirror + DT delivery + messaging + audit l
 
 | File | When to read |
 |---|---|
+| `stride-gs-app/MIGRATION_STATUS.md` | **First**, on any GAS→Supabase migration work. Authoritative living state for that project (decisions, per-function status, sub-phase progress). The v1.1 docx in Dropbox is a stakeholder snapshot, not authoritative. |
 | `stride-gs-app/CODE_MAP.md` | Feature → file location map. Read FIRST when debugging or building on existing features |
 | `stride-gs-app/BUILD_STATUS.md` | What's built, what changed recently, current versions |
 | `stride-gs-app/FEATURE_BACKLOG.md` | Features requested but not yet built |
