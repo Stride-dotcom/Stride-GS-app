@@ -33,9 +33,17 @@ Authored as worked examples while the design context is fresh; the remaining 6 i
 Both fixtures validated as JSON. Both surface schema-extension needs that the v1 schema in `parity-fixtures/README.md` doesn't yet formalize — `input_a`/`input_b` cross-call cases (used in 001) and SEQUENCE-state assertions (`sequence_advanced_by`, `invoice_no_uses_sequence`). The README "Schema extensions discovered while authoring 001 + 002" section captures these so P1.7's harness implementation knows the contract before writing the consumer.
 
 **Pins (do not regress):**
-- The `parity_dryrun.check_drift()` mirror set (hardcoded inside the function) MUST stay in sync with the `parity_dryrun` schema's actual mirror set + the `MIGRATION_STATUS.md` "schema-sync convention" list. All three list the same 14 tables; future additions update all three.
+- The `parity_dryrun.check_drift()` mirror set (hardcoded inside the function) MUST stay in sync with the `parity_dryrun` schema's actual mirror set + the `MIGRATION_STATUS.md` "schema-sync convention" list. All three list the same 14 tables; future additions update all three. (Triple-source duplication — TODO in the function comments to centralize via a `parity_dryrun.mirror_tables` reference table when P1.7 lands and would be the 4th consumer.)
 - Fixture files MUST validate as JSON. The harness will reject malformed fixtures.
 - Fixture file numbers are NEVER reused. A deprecated fixture sets `"deprecated": true` in place; the next new fixture takes the next number.
+
+**Code review (Opus subagent) flagged + fixed pre-merge:**
+- **Drift function only compared `data_type`** — would have missed `ALTER COLUMN ... TYPE numeric(12,2)` style changes. Expanded to a full per-column signature comparing `data_type`, `udt_name`, `character_maximum_length`, `numeric_precision`, `numeric_scale`, `is_nullable`, `column_default`, `is_generated`. Verified still 0 drift on current state.
+- **`SET search_path = pg_catalog`** added to the SECURITY DEFINER function — defense-in-depth against malicious search_path manipulation.
+- **Fixture clients rows missing `tenant_id`** — `public.clients` requires it (NOT NULL, no default). Would have failed harness seeding. Added to both fixtures.
+- **Fixture 002 had fictional `voided_at` / `voided_reason` columns** on `public.billing` — those columns don't exist (verified via `information_schema.columns`); the Void state is conveyed by `status='Void'` alone with operator-supplied context written to `item_notes`. Replaced with an `item_notes` value that explains the column model.
+- **Fixture 002 only exercised the assertion in mixed-batch input** — added a third case `standalone-void-row-exercises-assertion-on-minimum-input` (single Void row, simplest failing input) so a regression that silently narrows the assertion (e.g., `if (batch.length > 1)`) gets caught.
+- **Link-naming inconsistency** between fixtures (`pr` vs `related_pr`) — standardized on `pr`.
 
 **What this PR does NOT do:**
 - No P1.7 (replay harness — still gated on Monday traffic + first SB-side handler).

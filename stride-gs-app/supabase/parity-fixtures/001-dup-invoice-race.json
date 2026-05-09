@@ -33,6 +33,7 @@
     ],
     "clients": [
       {
+        "tenant_id":              "1FixtureTenant",
         "spreadsheet_id":         "1FixtureTenant",
         "name":                   "Fixture Client",
         "qb_customer_name":       "Fixture Client",
@@ -103,6 +104,7 @@
   "links": {
     "build_status_section": "Recent Changes (2026-05-04, atomic invoice counter); also 'Recent Changes (2026-05-05, dup-number race incident — triage, cleanup, hardening backlog)'",
     "migration_decision":   "MIG-005 references the atomic counter as a do-not-regress pin",
-    "claude_md_rule":       "Never regress the v38.182 atomic invoice-number counter. next_invoice_no() Postgres SEQUENCE is the only thing standing between the system and the dup-number race repeating."
+    "claude_md_rule":       "Never regress the v38.182 atomic invoice-number counter. next_invoice_no() Postgres SEQUENCE is the only thing standing between the system and the dup-number race repeating.",
+    "pr":                   null
   }
 }

@@ -13,8 +13,7 @@
         "tenant_id":       "1FixtureTenant",
         "client_name":     "Fixture Client",
         "status":          "Void",
-        "voided_at":       "2026-05-01T17:14:00Z",
-        "voided_reason":   "Task reopened",
+        "item_notes":      "Voided 2026-05-01: task reopened. (public.billing has no dedicated voided_at/voided_reason columns; voided state is conveyed by status='Void' alone, with operator-supplied context written to item_notes.)",
         "svc_code":        "INSP",
         "qty":             1,
         "rate":            35.00,
@@ -46,6 +45,7 @@
     ],
     "clients": [
       {
+        "tenant_id":              "1FixtureTenant",
         "spreadsheet_id":         "1FixtureTenant",
         "name":                   "Fixture Client",
         "qb_customer_name":       "Fixture Client",
@@ -109,6 +109,29 @@
         "cb_row_created":                  true,
         "sequence_advanced_by":            1
       }
+    },
+    {
+      "name": "standalone-void-row-exercises-assertion-on-minimum-input",
+      "description": "Picker submits the legitimately-Voided row alone — the simplest possible failing input. Catches a class of regression where the pre-commit Status assertion is silently narrowed (e.g., 'only assert when batch size > 1' or 'only assert if any row is Unbilled'). The assertion MUST fire on a single-row stale-Void pick, not just on mixed batches. Companion to `stale-void-row-included-in-pick`: that case proves mixed batches catch drift; this case proves the assertion isn't gated on batch composition.",
+      "input": {
+        "action":         "createInvoice",
+        "clientSheetId":  "1FixtureTenant",
+        "ledgerRowIds": [
+          "INSP-TASK-INSP-62630-1"
+        ],
+        "sidemark":       "FIXTURE-002",
+        "skipEmail":      true,
+        "skipPdf":        true
+      },
+      "expectedOutcome": {
+        "throws":                          "PRE_COMMIT_STATUS_ASSERTION",
+        "billing_state_unchanged":         true,
+        "no_invoice_created":              true,
+        "no_cb_row_created":               true,
+        "no_invoice_tracking_row_created": true,
+        "email_send_attempted":            false,
+        "sequence_advanced_by":            0
+      }
     }
   ],
   "harness_implementation_notes": [
@@ -120,7 +143,7 @@
   "links": {
     "build_status_section": "Recent Changes (2026-05-05, billing hardening pass — bugs #3-#9 closed) → 'B2 — pre-commit Status assertion'",
     "incident_thread":      "Recent Changes (2026-05-05, dup-number race incident — triage, cleanup, hardening backlog)",
-    "related_pr":           "Companion to PR #289 (the original v38.193 hardening pass).",
+    "pr":                   "Companion to PR #289 (the original v38.193 hardening pass).",
     "cousin_fixture":       "Fixture 003 (cb-symmetry-on-void) covers a related v38.193 fix (B3+B4) for the symmetric case where voiding an invoice fails to clean up CB."
   }
 }
