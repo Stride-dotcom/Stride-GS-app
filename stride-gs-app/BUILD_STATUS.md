@@ -1,6 +1,6 @@
 # Stride GS App — Build Status
 
-> Last updated: 2026-05-09 ([MIGRATION-P1.4] Reverse writethrough endpoint shipped — `handleWriteThroughReverse_` + `_shared/reverse-writethrough.ts` helper. Framework only; per-table writers ship in P2/P3/P4 PRs. StrideAPI v38.200.0).
+> Last updated: 2026-05-09 ([MIGRATION-P1.4] deployed as Web App v495. `GAS_API_URL` + `GAS_API_TOKEN` Edge Function secrets confirmed already set; SB→GAS reverse-writethrough plumbing is ready end-to-end. Phase 1 now 6/7 done — only P1.7 replay harness remains).
 
 ---
 
@@ -49,11 +49,8 @@ The GAS-side per-table writers are required to be idempotent by row identifier �
 - `stride-gs-app/MIGRATION_STATUS.md` (P1.4 → done; new pending action for Edge Function secrets)
 
 **Pending user action:**
-- [ ] Deploy GAS: `npm run push-api && npm run deploy-api` from `AppScripts/stride-client-inventory/` after merge. (Builder will run this directly.)
-- [ ] **Set Edge Function secrets** before P2 starts (in Supabase dashboard → Project Settings → Edge Functions → Secrets):
-  - `GAS_API_URL` = StrideAPI Web App URL (same one the React app uses)
-  - `GAS_API_TOKEN` = value of `API_TOKEN` script property in the StrideAPI Apps Script project
-  Without these, any P2+ SB-primary handler calling `reverseWritethrough()` will fail at the env-var check with a clear error. No production handler is on `active_backend='supabase'` today, so there's no urgency — but blocks P2.
+- [x] ~~Deploy GAS~~ — **done**: deployed as Web App v495 at 2026-05-09 ~05:18Z.
+- [x] ~~Set `GAS_API_URL` + `GAS_API_TOKEN` Edge Function secrets~~ — **already set** in Supabase dashboard (confirmed by Justin 2026-05-09). SB→GAS reverse-writethrough plumbing is ready end-to-end. P2 unblocked from this dependency.
 
 ---
 
