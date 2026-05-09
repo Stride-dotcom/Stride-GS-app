@@ -212,7 +212,12 @@ interface LiveItem {
 
 interface Props {
   onClose: () => void;
-  onSubmit?: (data: { dtOrderId: string; dtIdentifier: string; reviewStatus: string }) => void;
+  // v2026-05-09 — onSubmit's payload surfaces the client-resubmit flag
+  // so OrderPage knows when to fire notify-order-revision with action
+  // 'updated_by_client'. The flag is true ONLY when a client-role user
+  // saves changes to a non-draft order; staff edits + draft promotes
+  // never set it.
+  onSubmit?: (data: { dtOrderId: string; dtIdentifier: string; reviewStatus: string; clientResubmit?: boolean }) => void;
   preSelectedItemIds?: string[];
   liveItems?: LiveItem[];
   /** When set, the modal opens in edit-an-existing-order mode. Loads
@@ -1666,6 +1671,12 @@ export function CreateDeliveryOrderModal({
   // anything else → save-changes UPDATE preserving identifier + status)
   // and the Save Draft button enabled state.
   const originalReviewStatusRef = useRef<string | null>(null);
+  // v2026-05-09 — captured alongside the original review_status. When a
+  // client edits a non-draft order, the save-changes path appends a
+  // "Updated by [name] on [date]" stamp to review_notes WITHOUT
+  // discarding any prior reviewer notes. Loaded in the same effect
+  // that populates originalReviewStatusRef.
+  const originalReviewNotesRef = useRef<string | null>(null);
   // Captured during the edit-order load; consumed by the late-
   // resolve effect below once apiClients populates so the Client
   // field doesn't blank out when Edit Full Order opens before
@@ -1765,6 +1776,9 @@ export function CreateDeliveryOrderModal({
       // Capture the loaded row's review_status — drives whether
       // submit promotes (draft → real order) or just saves changes.
       originalReviewStatusRef.current = (r.review_status as string) || null;
+      // Capture review_notes for the client-resubmit audit-trail
+      // append (preserves prior reviewer notes alongside the new stamp).
+      originalReviewNotesRef.current  = (r.review_notes as string) || null;
       // Stash the saved base_delivery_fee for the override-hydration
       // effect below — it can't run yet because the zone hasn't loaded.
       const savedBaseFee = r.base_delivery_fee != null ? Number(r.base_delivery_fee) : null;
@@ -2413,6 +2427,23 @@ export function CreateDeliveryOrderModal({
           deliveryEdit.dt_identifier = pair.delivery;
           deliveryEdit.review_status = (user?.role === 'admin' || user?.role === 'staff') ? 'approved' : 'pending_review';
         }
+        // v2026-05-09 — client save-changes on a non-draft P+D order
+        // flips both legs back to 'pending_review' and stamps review_notes
+        // on the delivery leg (the "primary" leg in our P+D model — it's
+        // the one the OrderPage navigates to). Mirrors single-leg behaviour.
+        const isClientResubmittingPD = !wasDraftPD
+          && user?.role === 'client'
+          && !!originalReviewStatusRef.current
+          && originalReviewStatusRef.current !== 'draft';
+        if (isClientResubmittingPD) {
+          pickupEdit.review_status = 'pending_review';
+          deliveryEdit.review_status = 'pending_review';
+          const actorName = user?.displayName || user?.email || 'Client';
+          const stamp = `Updated by ${actorName} on ${new Date().toLocaleString()}`;
+          const prevNotes = (originalReviewNotesRef.current || '').trim();
+          const newNotes = prevNotes ? `${stamp}\n— prior notes —\n${prevNotes}` : stamp;
+          deliveryEdit.review_notes = newNotes;
+        }
         const upP = await supabase.from('dt_orders').update(pickupEdit).eq('id', editingPickupRowIdRef.current);
         if (upP.error) throw new Error(`Pickup leg ${wasDraftPD ? 'promote' : 'save'} failed: ${upP.error.message}`);
         const { data: savedD, error: saveDErr } = await supabase
@@ -2460,6 +2491,7 @@ export function CreateDeliveryOrderModal({
           dtOrderId: savedDelivery.id,
           dtIdentifier: savedDelivery.dt_identifier,
           reviewStatus: savedDelivery.review_status,
+          clientResubmit: isClientResubmittingPD,
         });
         onClose();
         return;
@@ -2530,6 +2562,27 @@ export function CreateDeliveryOrderModal({
         if (wasDraft) {
           editPayload.dt_identifier = await generateOrderNumber(mode === 'pickup' ? 'P' : undefined);
           editPayload.review_status = (user?.role === 'admin' || user?.role === 'staff') ? 'approved' : 'pending_review';
+        }
+        // v2026-05-09 — client save-changes on a non-draft order flips
+        // review_status BACK to 'pending_review' so staff sees a re-
+        // review queue entry. The audit trail is appended to
+        // review_notes (preserving any prior reviewer notes). Office
+        // gets pinged via notify-order-revision (action='updated_by_client')
+        // from the OrderPage onSubmit handler.
+        const isClientResubmittingSingle = !wasDraft
+          && user?.role === 'client'
+          && !!originalReviewStatusRef.current
+          && originalReviewStatusRef.current !== 'draft';
+        if (isClientResubmittingSingle) {
+          editPayload.review_status = 'pending_review';
+          // Stamp who/when in review_notes so the office sees the
+          // audit trail in the email + on the order page.
+          const actorName = user?.displayName || user?.email || 'Client';
+          const stamp = `Updated by ${actorName} on ${new Date().toLocaleString()}`;
+          const prevNotes = (originalReviewNotesRef.current || '').trim();
+          editPayload.review_notes = prevNotes
+            ? `${stamp}\n— prior notes —\n${prevNotes}`
+            : stamp;
         }
         const { data: saved, error: saveErr } = await supabase
           .from('dt_orders')
@@ -2631,6 +2684,7 @@ export function CreateDeliveryOrderModal({
           dtOrderId: savedRow.id,
           dtIdentifier: savedRow.dt_identifier,
           reviewStatus: savedRow.review_status,
+          clientResubmit: isClientResubmittingSingle,
         });
         onClose();
         return;
