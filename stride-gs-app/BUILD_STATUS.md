@@ -8,7 +8,7 @@
 
 **Trigger:** P1.5 from the Phase 1 sub-task list. Now that the substrate (P1.1), GAS-side input capture (P1.2), and `parity_dryrun` schema (P1.3) are in place, the React app needs a way to resolve which backend to call per migration function. Hook + context now exist; nothing CALLS them yet — that comes in P2 when the first handler flips.
 
-**What landed (React, Bundle: `index-CyMA6om0.js`):**
+**What landed (React, Bundle: `index-CkUuWxyQ.js`):**
 
 - New `src/contexts/FeatureFlagContext.tsx`. `FeatureFlagProvider` fetches all rows from `public.feature_flags` on mount and subscribes to realtime so cross-tab flag flips propagate without a refresh. State: `flagsByKey` (Record<function_key, FeatureFlagRow>), `loading`, `error`. Falls back to `'gas'` (safe default) on Supabase outage so the App layout never crashes.
 - Hooks:
@@ -43,7 +43,7 @@ This lets a single row express "canary tenant X on SB, everyone else still on GA
 - `stride-gs-app/MIGRATION_STATUS.md` (P1.5 → done, MIG-010 added)
 
 **Pending user action:**
-- [ ] Hard-refresh https://www.mystridehub.com (Cmd/Ctrl+Shift+R) after deploy to pick up `index-CyMA6om0.js`. No visible change — flags loaded silently in the background. Verify in DevTools Network → Supabase REST → `feature_flags?select=*` returns 25 rows.
+- [ ] Hard-refresh https://www.mystridehub.com (Cmd/Ctrl+Shift+R) after deploy to pick up `index-CkUuWxyQ.js`. No visible change — flags loaded silently in the background. Verify in DevTools Network → Supabase REST → `feature_flags?select=*` returns 25 rows.
 
 ---
 

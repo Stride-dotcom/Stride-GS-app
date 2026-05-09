@@ -79,11 +79,24 @@ interface FeatureFlagContextValue {
 
 // ─── Row mapping ─────────────────────────────────────────────────────────────
 
+// Whitelist coercion. A malformed DB value (e.g. "sb", "GAS", future 3rd
+// backend) must NOT silently pass through and route a caller to a
+// non-existent handler. Anything that isn't exactly 'supabase' resolves
+// to the safe pre-migration default 'gas'.
+function coerceBackend(v: unknown): Backend {
+  return v === 'supabase' ? 'supabase' : 'gas';
+}
+function coerceShadowBackend(v: unknown): Backend | null {
+  if (v === 'supabase') return 'supabase';
+  if (v === 'gas') return 'gas';
+  return null;
+}
+
 function rowToFlag(r: Record<string, unknown>): FeatureFlagRow {
   return {
     function_key:      String(r.function_key || ''),
-    active_backend:    (String(r.active_backend || 'gas') as Backend),
-    shadow_backend:    r.shadow_backend ? (String(r.shadow_backend) as Backend) : null,
+    active_backend:    coerceBackend(r.active_backend),
+    shadow_backend:    coerceShadowBackend(r.shadow_backend),
     parity_enabled:    Boolean(r.parity_enabled),
     tenant_scope:      Array.isArray(r.tenant_scope) ? (r.tenant_scope as string[]) : null,
     last_parity_check: r.last_parity_check ? String(r.last_parity_check) : null,
@@ -159,9 +172,14 @@ export function FeatureFlagProvider({ children }: { children: ReactNode }) {
   // all open tabs. Critical for the canary workflow — when the operator
   // flips a flag for tenant X in the Settings tab, every browser tab
   // (including theirs) routes the next call accordingly without a refresh.
+  // Channel name is per-mount-randomised so React 18 StrictMode's dev
+  // double-mount doesn't collide on a globally-named channel; in prod
+  // single-mount it doesn't matter, but the random suffix keeps dev
+  // behavior clean.
   useEffect(() => {
+    const channelName = `feature_flags_app_${Math.random().toString(36).slice(2)}`;
     const channel = supabase
-      .channel('feature_flags_app')
+      .channel(channelName)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'feature_flags' }, payload => {
         const evt = payload.eventType;
         if ((evt === 'INSERT' || evt === 'UPDATE') && payload.new) {
