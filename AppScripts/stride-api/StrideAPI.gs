@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.198.0 — 2026-05-06 PST — Root-cause fix for the duplicate-billing-row bug v38.197.1 worked around. New helper api_writeBillingRowIdempotent_(billSheet, billMap, ledgerRowId, fields) replaces every "build row + setValues at lastDataRow+1" append with a Ledger Row ID lookup followed by one of: in-place un-void (Status=Void match → refresh fields, flip Status to Unbilled, blank Invoice # / Date / URL), in-place idempotent update (Status=Unbilled match → refresh fields), skip with warning (Status=Invoiced/Billed match → caller surfaces "void the invoice first"), or append (no match). Used in handleCompleteTask_ (single-row), handleCompleteRepair_ (multi-line + legacy single-row paths), and handleProcessWcRelease_ (per-item WC fees) — every billing-row-creating completion handler that uses a deterministic Ledger Row ID. Pre-fix all three appended unconditionally, so a reopen + re-complete cycle (or a cancel + re-release for WC) produced two rows with the same Ledger Row ID: one Voided in place by api_voidBillingRowsWhere_, one Unbilled appended by the re-completion. Symptom: Justin's Vida Design - Merit invoice failed because INSP-TASK-INSP-62840-1 had row 24 (Void) + row 25 (Unbilled). v38.197.1 made the assertion tolerate the bad state by preferring the Unbilled match; this commit prevents the bad state from being created in the first place. Existing duplicates from past cycles are NOT auto-collapsed by this commit (they're correctly handled by the v38.197.1 assertion + the new helper's "prefer Unbilled, then Void" matching); a separate cleanup pass can collapse them later if desired.
+   StrideAPI.gs — v38.199.0 — 2026-05-09 PST — [MIGRATION-P1.2] GAS-side input capture for the GAS→Supabase replay corpus. New helper api_logCallInput_(action, payload, tenantId, userId) generates a UUID correlation_id, posts the redacted input payload to public.gas_call_log (one row per doPost call), and stashes the correlation_id in a script-level __MIG_CORRELATION_ID__ that api_auditLog_ now reads and stamps onto every entity_audit_log row written during the same request. doPost calls api_logCallInput_ once after token validation + JSON parse, before the routing switch — so spam/auth-fail requests don't pollute the corpus, but every successful routed call gets captured. Best-effort writes: a Supabase outage or REST 4xx logs and continues; never blocks the GAS handler. PII redaction uses a 1KB-cap whitelist of safe field names (action, ids, statuses, amounts, sidemarks) so card numbers, tokens, and free-text comments don't land in the corpus. Together with the v38.199-companion migration parity_substrate (PR #310 — public.gas_call_log + public.feature_flags + entity_audit_log.correlation_id column), this gives the replay harness its (input, output) join for every GAS call going forward. The harness itself ships in P1.7. Decision: MIG-006 (entity_audit_log + gas_call_log is the answer key) — see stride-gs-app/MIGRATION_STATUS.md.
+   v38.198.0 — 2026-05-06 PST — Root-cause fix for the duplicate-billing-row bug v38.197.1 worked around. New helper api_writeBillingRowIdempotent_(billSheet, billMap, ledgerRowId, fields) replaces every "build row + setValues at lastDataRow+1" append with a Ledger Row ID lookup followed by one of: in-place un-void (Status=Void match → refresh fields, flip Status to Unbilled, blank Invoice # / Date / URL), in-place idempotent update (Status=Unbilled match → refresh fields), skip with warning (Status=Invoiced/Billed match → caller surfaces "void the invoice first"), or append (no match). Used in handleCompleteTask_ (single-row), handleCompleteRepair_ (multi-line + legacy single-row paths), and handleProcessWcRelease_ (per-item WC fees) — every billing-row-creating completion handler that uses a deterministic Ledger Row ID. Pre-fix all three appended unconditionally, so a reopen + re-complete cycle (or a cancel + re-release for WC) produced two rows with the same Ledger Row ID: one Voided in place by api_voidBillingRowsWhere_, one Unbilled appended by the re-completion. Symptom: Justin's Vida Design - Merit invoice failed because INSP-TASK-INSP-62840-1 had row 24 (Void) + row 25 (Unbilled). v38.197.1 made the assertion tolerate the bad state by preferring the Unbilled match; this commit prevents the bad state from being created in the first place. Existing duplicates from past cycles are NOT auto-collapsed by this commit (they're correctly handled by the v38.197.1 assertion + the new helper's "prefer Unbilled, then Void" matching); a separate cleanup pass can collapse them later if desired.
    v38.197.1 — 2026-05-06 PST — api_markClientLedgerInvoiced_ assertion now handles duplicate Ledger Row IDs on the client sheet. The task completion flow can leave a Voided row from a prior completion AND append a fresh Unbilled row with the SAME Ledger Row ID after a reopen + re-completion. The v38.193.0 single-pass assertion iterated all matching rows and threw on the FIRST non-Unbilled match — even when a valid Unbilled row sat on the very next line. Symptom: Justin's Vida Design - Merit invoice (56 rows) failed because INSP-TASK-INSP-62840-1 had row 24 (Void) and row 25 (Unbilled); React picker correctly read Supabase last-write-wins (Unbilled) but the assertion saw the Void first. New shape: bucket all matching rows by Ledger Row ID, then for each picker ID prefer the FIRST Unbilled match. Only flag a violation if NO Unbilled row exists for that picker ID — the actual stale-Void condition the original v38.193 fix was meant to catch. The Void duplicates are left untouched (they're stale audit trail; cleanup is a separate follow-up to handleCompleteTask_ to un-void instead of append).
    v38.197.0 — 2026-05-06 PST — Persistent QBO push jobs (qbo_push_jobs table) so the operator can leave the Billing page or refresh the browser mid-push without losing the result UI. handleQboCreateInvoice_ now accepts an optional `jobId` param; when set, it PATCHes public.qbo_push_jobs throughout the loop — status='running' + total_count + invoice_nos at entry, every 5 invoices with running succeeded/failed/skipped counts + per-invoice results, and a terminal status='succeeded'/'partial'/'failed' + finished_at + final results at the end. The push itself is unchanged for callers that don't supply jobId (admin scripts, legacy tests). Companion Supabase migration `qbo_push_jobs` creates the table (id uuid PK, status enum CHECK, ledger_row_ids text[], invoice_nos text[], counts, jsonb results, force_re_push, initiated_by, source) with staff/admin RLS + service_role bypass + realtime publication so the React App-level QboPushJobsContext observes every PATCH live. New helper api_patchQboPushJob_(jobId, patch) wraps the PostgREST PATCH with Prefer=return=minimal; best-effort, never blocks the QBO push on a Supabase outage. Companion React PR mounts QboPushJobsContext at AppLayout, renders a bottom-right toast that survives navigation, queries `created_at >= NOW() - 30 minutes OR finished_at IS NULL` on App mount to rehydrate any in-flight or recently-finished jobs, and wires both the QBO Push toolbar button and the Create Invoices "Push to QuickBooks Online" checkbox to start jobs through the context.
    v38.196.0 — 2026-05-06 PST — QBO push: handle qb_customer_name in "Parent:Sub" format on cache-cold path. INV-001153 (Vida Design - Waymark, qb_customer_name="Vida Design:Waymark") failed with `QBO customer create failed: HTTP 400: Invalid String. The String may contain unsupported or illegal chars — Element contains invalid characters. Vida Design:Waymark`. Root cause: qbo_resolveCustomerAndSubJob_ passed clientName ("Vida Design:Waymark") straight to qbo_createCustomer_ as DisplayName when no cache row existed yet. QBO reserves the colon for parent:sub notation in DisplayName and rejects any literal colon. Pre-fix this only manifested on cache-cold pushes — Roche Bobois:PDX worked because its parent + sub IDs were already populated in the Stax Customers sheet from prior pushes (cache hit, no QBO create call). Vida Design:Waymark had never been pushed so it fell through to qbo_createCustomer_(fullName) → 400. Fix: new qbo_resolveQbParentSubName_ helper splits the qb_customer_name on the LAST colon, resolves the parent ("Vida Design") via qbo_searchCustomer_ + qbo_createCustomer_(name, parentId=null), then resolves the sub ("Waymark") via qbo_searchSubJob_ + qbo_createCustomer_(name, parentId=parent's QBO ID). Cache layout re-uses the existing parent-row shape: column H stores the parent QBO ID, column J stores the sub QBO ID, column I (sidemark) stays blank — so future calls hit a single row and return fast. The early-return path bypasses the row-level sidemark sub-job creation entirely: when qb_customer_name already encodes the destination sub-customer, stacking another sub-job from sidemark would produce parent:sub:sidemark (3 levels), not the operator's intent. For clients with a flat qb_customer_name (no colon), the existing logic path is unchanged.
@@ -3043,6 +3044,24 @@ function api_auditLog_(entityType, entityId, tenantId, action, changes, performe
     var url = prop_("SUPABASE_URL");
     var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
     if (!url || !key) return;
+    var body = {
+      entity_type: String(entityType || ""),
+      entity_id: String(entityId || ""),
+      tenant_id: tenantId ? String(tenantId) : null,
+      action: String(action || "update"),
+      changes: changes || {},
+      performed_by: String(performedBy || ""),
+      source: "gas"
+    };
+    // [MIGRATION-P1.2] Stamp the per-request correlation_id so the replay
+    // harness (P1.7) can join entity_audit_log → gas_call_log to recover
+    // the (input, output) pair for every state change. The global is set
+    // in doPost before the routing switch and cleared after; if it isn't
+    // populated (e.g., audit log called from a script trigger outside
+    // doPost), correlation_id stays null and that's fine.
+    if (typeof __MIG_CORRELATION_ID__ !== "undefined" && __MIG_CORRELATION_ID__) {
+      body.correlation_id = String(__MIG_CORRELATION_ID__);
+    }
     UrlFetchApp.fetch(url + "/rest/v1/entity_audit_log", {
       method: "POST",
       headers: {
@@ -3051,18 +3070,130 @@ function api_auditLog_(entityType, entityId, tenantId, action, changes, performe
         "Content-Type": "application/json",
         "Prefer": "return=minimal"
       },
-      payload: JSON.stringify({
-        entity_type: String(entityType || ""),
-        entity_id: String(entityId || ""),
-        tenant_id: tenantId ? String(tenantId) : null,
-        action: String(action || "update"),
-        changes: changes || {},
-        performed_by: String(performedBy || ""),
-        source: "gas"
-      }),
+      payload: JSON.stringify(body),
       muteHttpExceptions: true
     });
   } catch (_) { /* best-effort, never block */ }
+}
+
+/**
+ * v38.199.0 — [MIGRATION-P1.2] Per-request correlation_id for the
+ * GAS→Supabase replay corpus. Set by doPost after token validation,
+ * read by api_auditLog_ to stamp every state change with the call that
+ * produced it. GAS execution is single-threaded per request so a
+ * file-scope global is safe — each doPost invocation gets a fresh value.
+ *
+ * MIG-006 (entity_audit_log + gas_call_log is the answer key) — see
+ * stride-gs-app/MIGRATION_STATUS.md.
+ */
+var __MIG_CORRELATION_ID__ = null;
+
+/**
+ * v38.199.0 — [MIGRATION-P1.2] Capture the doPost input payload to
+ * public.gas_call_log. Generates a UUID, sets __MIG_CORRELATION_ID__,
+ * POSTs the redacted payload + metadata to Supabase, and returns the
+ * UUID for any caller that wants it (currently nobody). Best-effort:
+ * any failure logs and continues; never blocks the GAS handler.
+ *
+ * Redaction whitelists a fixed set of "structural" fields (action, ids,
+ * statuses, amounts, sidemarks). Free-text fields (notes, comments,
+ * descriptions) and any field name containing "token", "secret", "key",
+ * "password", "card", "ssn", "pii" are dropped. Output is capped at 1KB
+ * — anything larger gets a {_truncated: true, _original_size: N}
+ * marker. The replay harness uses input_hash for exact-match
+ * deduplication; redacted payload is for human inspection only.
+ */
+function api_logCallInput_(action, payload, tenantId, performedBy) {
+  try {
+    __MIG_CORRELATION_ID__ = Utilities.getUuid();
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) return __MIG_CORRELATION_ID__;
+    var redacted = api_redactPayloadForCorpus_(payload || {});
+    var inputJson = JSON.stringify(payload || {});
+    var inputHash = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, inputJson)
+      .map(function(b) { return ("0" + (b & 0xFF).toString(16)).slice(-2); }).join("");
+    UrlFetchApp.fetch(url + "/rest/v1/gas_call_log", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + key,
+        "apikey": key,
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal"
+      },
+      payload: JSON.stringify({
+        correlation_id: __MIG_CORRELATION_ID__,
+        action: String(action || ""),
+        input_redacted: redacted,
+        input_hash: inputHash,
+        tenant_id: tenantId ? String(tenantId) : null,
+        user_id: null,                                  // Supabase user_id is uuid; performedBy is email — not the same column
+        status: "started",
+        called_at: new Date().toISOString()
+      }),
+      muteHttpExceptions: true
+    });
+  } catch (e) {
+    Logger.log("api_logCallInput_ error (non-fatal): " + e);
+  }
+  return __MIG_CORRELATION_ID__;
+}
+
+/**
+ * v38.199.0 — [MIGRATION-P1.2] PII-conscious redaction of doPost
+ * payloads for the gas_call_log corpus. Whitelists the field names that
+ * are structurally relevant for replay; drops anything else. Caps output
+ * at 1KB with a truncation marker.
+ */
+function api_redactPayloadForCorpus_(payload) {
+  var SAFE_FIELDS = {
+    action:1, requestId:1, tenantId:1, clientSheetId:1,
+    itemId:1, itemIds:1, taskId:1, taskIds:1, repairId:1, repairIds:1,
+    shipmentId:1, shipmentNo:1, willCallId:1, wcId:1, wcNumber:1,
+    invoiceNo:1, ledgerRowId:1, ledgerRowIds:1, sidemark:1,
+    status:1, statusValue:1, resultValue:1, action_type:1,
+    qty:1, quantity:1, rate:1, total:1, amount:1, line_count:1,
+    svcCode:1, svc_code:1, category:1,
+    fromTenantId:1, toTenantId:1, fromClientSheetId:1, toClientSheetId:1,
+    skipEmail:1, sendEmail:1, autoCharge:1, auto_charge:1,
+    type:1, kind:1, mode:1, scope:1
+  };
+  function walk(node) {
+    if (node === null || node === undefined) return null;
+    if (typeof node === "string") return node.length > 200 ? node.slice(0, 200) + "…" : node;
+    if (typeof node === "number" || typeof node === "boolean") return node;
+    if (Array.isArray(node)) {
+      var out = [];
+      for (var i = 0; i < node.length && i < 50; i++) out.push(walk(node[i]));
+      if (node.length > 50) out.push({ _truncated_array_length: node.length });
+      return out;
+    }
+    if (typeof node === "object") {
+      var redacted = {};
+      var keys = Object.keys(node);
+      for (var k = 0; k < keys.length; k++) {
+        var key = keys[k];
+        if (SAFE_FIELDS[key]) {
+          redacted[key] = walk(node[key]);
+        } else if (/token|secret|key|password|card|ssn|cvv|pii|email|phone/i.test(key)) {
+          redacted[key] = "[redacted]";
+        }
+        // else: drop silently
+      }
+      return redacted;
+    }
+    return null;
+  }
+  try {
+    var redacted = walk(payload);
+    var serialized = JSON.stringify(redacted);
+    if (serialized.length > 1024) {
+      return { _truncated: true, _original_size: serialized.length, _action: redacted.action || null };
+    }
+    return redacted;
+  } catch (_) {
+    return { _redact_error: true };
+  }
 }
 
 /**
@@ -6719,6 +6850,12 @@ function doPost(e) {
 
     var callerEmail = String(params.callerEmail || "").trim().toLowerCase();
     var clientSheetId = String(params.clientSheetId || "").trim();
+
+    // [MIGRATION-P1.2] Capture the input payload for the replay corpus.
+    // Sets __MIG_CORRELATION_ID__ which api_auditLog_ reads to stamp every
+    // entity_audit_log row produced during this request. Best-effort —
+    // never blocks the handler.
+    api_logCallInput_(action, payload, clientSheetId, callerEmail);
 
     switch (action) {
       case "completeShipment":

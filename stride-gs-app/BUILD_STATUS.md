@@ -1,6 +1,36 @@
 # Stride GS App — Build Status
 
-> Last updated: 2026-05-09 ([MIGRATION-P1] substrate migration applied — `feature_flags` / `parity_results` / `gas_call_log` tables + `entity_audit_log.correlation_id`).
+> Last updated: 2026-05-09 ([MIGRATION-P1.2] GAS-side input capture shipped, StrideAPI v38.199.0; replay corpus clock starts on deploy).
+
+---
+
+## Recent Changes (2026-05-09, [MIGRATION-P1.2] GAS-side input capture)
+
+**Trigger:** P1.1 (PR #310) created `public.gas_call_log` and `entity_audit_log.correlation_id` but neither was populated yet. P1.2 wires the GAS side so every `doPost` call to StrideAPI lands a row in `gas_call_log` and threads its `correlation_id` through every `api_auditLog_` write produced during the same request. Together this gives the replay harness (P1.7) the (input → output) join it needs to verify the SB-side rewrite against historical GAS outputs.
+
+**What landed (StrideAPI.gs v38.199.0):**
+
+- New file-scope `__MIG_CORRELATION_ID__` global (set per-request, single-threaded execution makes this safe in GAS).
+- New `api_logCallInput_(action, payload, tenantId, performedBy)` helper. Generates a UUID, sets `__MIG_CORRELATION_ID__`, POSTs to `public.gas_call_log` with `correlation_id`, redacted payload, SHA-256 input hash, `tenant_id`, `status='started'`, `called_at`. Best-effort — Supabase outage logs and continues, never blocks the handler.
+- New `api_redactPayloadForCorpus_(payload)` helper. Whitelists the structural fields that matter for replay (action, ids, statuses, amounts, sidemarks, scope flags). Drops anything else, replaces fields matching `/token|secret|key|password|card|ssn|cvv|pii|email|phone/i` with `"[redacted]"`. Caps output at 1KB; strings cap at 200 chars; arrays cap at 50 elements.
+- `api_auditLog_` now reads `__MIG_CORRELATION_ID__` and stamps it onto every `entity_audit_log` row. The check is a `typeof !== "undefined"` guard so the function still works when called outside `doPost` (script triggers, manual admin entries) — those simply produce rows with `correlation_id IS NULL`.
+- `doPost` calls `api_logCallInput_` once after token validation + JSON parse, before the routing switch — so spam/auth-fail requests don't pollute the corpus, but every successfully routed call gets captured.
+
+**Pins (do not regress):**
+- Per **MIG-006**, `entity_audit_log` + `gas_call_log` is the canonical answer key for replay. The `correlation_id` linkage between the two tables is load-bearing — any future refactor must preserve it.
+- The redaction whitelist is the boundary between operational data and customer PII. New fields added to the corpus should be reviewed for PII exposure before joining the whitelist.
+
+**What this PR does NOT do:**
+- No status update on call completion. `gas_call_log.status` stays `'started'` — the replay harness infers success from `entity_audit_log` rows existing for the correlation_id, error from their absence + a `gas_call_log` row. Per-call success/error stamping requires a `doPost`-wide response-capture refactor and is deferred to a small follow-up. Net acceptable for now: replay harness joins on correlation_id whether status is updated or not.
+- No P1.3 (`parity_dryrun` schema), no P1.4 (reverse writethrough), no P1.5 (React `FeatureFlagProvider`), no P1.6 (Settings UI), no P1.7 (replay Edge Function).
+
+**Files touched:**
+- `AppScripts/stride-api/StrideAPI.gs` (v38.198.0 → v38.199.0)
+- `stride-gs-app/MIGRATION_STATUS.md` (P1.2 → done)
+
+**Pending user action:**
+- [ ] Deploy GAS: `npm run push-api && npm run deploy-api` from `AppScripts/stride-client-inventory/` after merge. (Builder will run this directly; noted here for the activity log.)
+- [ ] After deploy: smoke-check by inspecting `public.gas_call_log` 1-2 minutes after a normal user click (e.g. start a task) — expect a row with `action='startTask'`, `correlation_id` non-null, `tenant_id` populated, `input_redacted` containing only whitelisted fields.
 
 ---
 
