@@ -28,6 +28,7 @@ import { writeSyncFailed } from '../../lib/syncEvents';
 import { useAuth } from '../../contexts/AuthContext';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { FloatingActionMenu, type FABAction } from './FloatingActionMenu';
+import { ClientAcceptAsIsAction } from '../notes/ClientAcceptAsIsAction';
 
 import type { Repair } from '../../lib/types';
 interface Props {
@@ -1416,6 +1417,23 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
           </div>
         )}
 
+      {/* Client acknowledge — surfaces only for client-role users on a
+          Failed repair when no prior acceptance exists. The component
+          self-hides otherwise, so this block is a no-op for staff/admin
+          and for any non-Failed status. */}
+      {effectiveStatus === 'Failed' && (
+        <div style={{ padding: '14px 20px', borderTop: `1px solid ${theme.colors.border}`, flexShrink: 0, display: 'flex', justifyContent: 'center' }}>
+          <ClientAcceptAsIsAction
+            entityType="repair"
+            entityId={repair.repairId}
+            itemId={repair.itemId ? String(repair.itemId) : null}
+            tenantId={repair.clientSheetId ?? null}
+            eligible={true}
+            pillStyle={{ width: '100%', maxWidth: 360, padding: '12px 18px', fontSize: 13 }}
+          />
+        </div>
+      )}
+
       {(!isActive || completed) && !submitResult && (
         <button onClick={onClose} style={{ width: '100%', padding: '10px', fontSize: 13, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>Close</button>
       )}
@@ -1777,6 +1795,18 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
 
   const pageFooter = isCompactViewport ? null : (
     <>
+      {/* Client acknowledge — surfaces only for client-role users on a
+          Failed repair when no prior acceptance exists. The component
+          self-hides otherwise, so this line is a no-op for staff/admin
+          and for any non-Failed status. */}
+      <ClientAcceptAsIsAction
+        entityType="repair"
+        entityId={repair.repairId}
+        itemId={repair.itemId ? String(repair.itemId) : null}
+        tenantId={repair.clientSheetId ?? null}
+        eligible={effectiveStatus === 'Failed'}
+        pillStyle={pagePillBase}
+      />
       {/* Cancel Repair — active, not editing */}
       {active && (
         <button onClick={async () => {
