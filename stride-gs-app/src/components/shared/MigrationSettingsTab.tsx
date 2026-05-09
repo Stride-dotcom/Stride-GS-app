@@ -87,7 +87,7 @@ const thStyle: React.CSSProperties = {
 
 const tdStyle: React.CSSProperties = {
   padding: '10px',
-  borderBottom: `1px solid ${theme.colors.borderLight || '#F0F0F0'}`,
+  borderBottom: `1px solid ${theme.colors.borderLight}`,
   verticalAlign: 'top',
 };
 
@@ -193,10 +193,12 @@ export function MigrationSettingsTab() {
   async function commitScopeEdit(flag: FeatureFlagRow) {
     const draft = scopeDrafts[flag.function_key];
     if (draft === undefined) return;
-    const ids = draft
-      .split(',')
-      .map(s => s.trim())
-      .filter(Boolean);
+    const ids = Array.from(new Set(
+      draft
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean)
+    ));
     const next = ids.length > 0 ? ids : null;
     const ok = await patchFlag(flag.function_key, { tenant_scope: next });
     if (ok) {
@@ -218,13 +220,29 @@ export function MigrationSettingsTab() {
   async function runMasterRevert() {
     setMasterRevertProcessing(true);
     setError(null);
-    // One-statement UPDATE: every row gets active_backend='gas' AND
-    // tenant_scope=NULL. PostgREST issues this as a single UPDATE
-    // WHERE TRUE which is atomic at the SQL level.
+    // MIG-003 emergency global revert. Sets:
+    //   active_backend = 'gas'
+    //   tenant_scope   = NULL   (REQUIRED by MIG-010 semantics — leaving
+    //                            a non-null tenant_scope alongside
+    //                            active_backend='gas' would route
+    //                            non-listed tenants to the OPPOSITE
+    //                            backend (=supabase), the exact thing
+    //                            the operator is trying to back out of.)
+    // Intentionally NOT cleared:
+    //   parity_enabled  — keep parity logging running during the
+    //                     incident; it's the diagnostic surface that
+    //                     told us to revert in the first place.
+    //   shadow_backend  — same reason.
+    //
+    // Predicate: .gte('function_key','') matches every non-null
+    // function_key (which is the PK, so every row). PostgREST emits a
+    // single UPDATE statement, atomic at the SQL level. A future cleanup
+    // could expose this as a SECURITY DEFINER RPC for stronger atomicity
+    // semantics + audit logging — tracked as a P1.6 follow-up.
     const { error: err } = await supabase
       .from('feature_flags')
-      .update({ active_backend: 'gas', tenant_scope: null, parity_enabled: false, shadow_backend: null })
-      .neq('function_key', '');  // PostgREST requires SOMETHING in WHERE — always-true filter
+      .update({ active_backend: 'gas', tenant_scope: null })
+      .gte('function_key', '');
     setMasterRevertProcessing(false);
     if (err) {
       setError(`Master revert failed: ${err.message}`);
@@ -262,8 +280,7 @@ export function MigrationSettingsTab() {
           <button
             type="button"
             onClick={() => setMasterRevertOpen(true)}
-            disabled={summary.supabasePrimary === 0 && summary.canary === 0 && summary.parity === 0}
-            title="MIG-003 emergency revert: flips every active_backend back to gas, clears every tenant_scope, disables every parity flag. One-way."
+            title="MIG-003 emergency revert: flips every active_backend back to gas + clears every tenant_scope. Parity flags stay on so diagnostic data keeps flowing during the incident."
             style={{
               display: 'inline-flex',
               alignItems: 'center',
@@ -275,8 +292,7 @@ export function MigrationSettingsTab() {
               borderRadius: 8,
               background: '#fff',
               color: '#DC2626',
-              cursor: summary.supabasePrimary === 0 && summary.canary === 0 && summary.parity === 0 ? 'not-allowed' : 'pointer',
-              opacity: summary.supabasePrimary === 0 && summary.canary === 0 && summary.parity === 0 ? 0.5 : 1,
+              cursor: 'pointer',
             }}
           >
             <RotateCcw size={14} />
@@ -316,6 +332,7 @@ export function MigrationSettingsTab() {
                     const draft = scopeDrafts[f.function_key];
                     const inScopeEdit = draft !== undefined;
                     const isSaving = savingKey === f.function_key;
+                    const hasMismatches = f.mismatch_count_7d > 0;
                     return (
                       <tr key={f.function_key}>
                         <td style={tdStyle}>
@@ -405,7 +422,7 @@ export function MigrationSettingsTab() {
                             </div>
                           )}
                         </td>
-                        <td style={{ ...tdStyle, fontWeight: f.mismatch_count_7d > 0 ? 700 : 400, color: f.mismatch_count_7d > 0 ? '#DC2626' : theme.colors.textMuted }}>
+                        <td style={{ ...tdStyle, fontWeight: hasMismatches ? 700 : 400, color: hasMismatches ? '#DC2626' : theme.colors.textMuted }}>
                           {f.mismatch_count_7d}
                         </td>
                         <td style={{ ...tdStyle, color: theme.colors.textMuted, fontSize: 11 }}>
@@ -432,14 +449,14 @@ export function MigrationSettingsTab() {
         onConfirm={runMasterRevert}
         message={
           <div style={{ fontSize: 13, lineHeight: 1.55 }}>
-            <p style={{ margin: '0 0 10px' }}>This is the <strong>MIG-003 master switch</strong>: an emergency global revert. It will, in one transaction:</p>
+            <p style={{ margin: '0 0 10px' }}>This is the <strong>MIG-003 master switch</strong>: an emergency global revert. It will, in one atomic UPDATE:</p>
             <ul style={{ margin: '0 0 10px 18px', padding: 0 }}>
               <li>Flip every <code>active_backend</code> back to <code>gas</code>.</li>
-              <li>Clear every <code>tenant_scope</code> (back to fleet-wide).</li>
-              <li>Disable every <code>parity_enabled</code> + clear <code>shadow_backend</code>.</li>
+              <li>Clear every <code>tenant_scope</code> back to NULL (required — see MIG-010, otherwise non-listed tenants would route to <code>supabase</code>).</li>
             </ul>
+            <p style={{ margin: '0 0 10px' }}><code>parity_enabled</code> + <code>shadow_backend</code> stay as-is — keep parity diagnostics running during the incident.</p>
             <p style={{ margin: '0 0 10px' }}>Use only when a fleet-wide regression has appeared post-cutover. For a single-function or single-tenant revert, edit that flag's row instead.</p>
-            <p style={{ margin: 0, color: '#991B1B' }}><strong>Currently affected:</strong> {summary.supabasePrimary} fleet-wide on supabase, {summary.canary} canary-scoped, {summary.parity} with parity enabled. After revert: 0 / 0 / 0.</p>
+            <p style={{ margin: 0, color: '#991B1B' }}><strong>Currently affected:</strong> {summary.supabasePrimary} fleet-wide on supabase, {summary.canary} canary-scoped. After revert: 0 / 0.</p>
           </div>
         }
       />
