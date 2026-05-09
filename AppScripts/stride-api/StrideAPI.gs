@@ -2279,10 +2279,34 @@ function notifySupabaseFailed_(params) {
 // Centralizing the registry means a future builder grep'ing
 // `REVERSE_WRITETHROUGH_TABLES_` finds every table covered + every gap.
 //
-// The Sheet writer must be IDEMPOTENT by row identifier — calling twice
-// with the same row payload produces the same sheet state. That's how
-// we sidestep an idempotency-key store: at-least-once delivery from the
-// Edge Function side is fine because the receiver squashes duplicates.
+// ── Per-table-writer contract (load-bearing) ─────────────────────────
+// Every writer MUST be idempotent by row identifier. Calling twice
+// with the same row payload MUST produce the same sheet state. This
+// sidesteps an idempotency-key store: at-least-once delivery from the
+// Edge Function side is safe because the receiver squashes duplicates.
+//
+// Concretely, writers MUST derive their sheet primary key purely from
+// SB row contents (Ledger Row ID, Task ID, Item ID, etc.). Writers
+// MUST NOT use a `lastDataRow + 1` style append counter or any other
+// counter whose value depends on the order of arrivals — that breaks
+// idempotency silently (re-delivery produces a duplicate row at a new
+// offset). For inserts that don't have a natural SB-row primary key,
+// derive one (e.g. `${parentId}-${slug}-${seqFromRowContent}`); never
+// from sheet state.
+//
+// ── Failure handling ─────────────────────────────────────────────────
+// Failures land in gs_sync_events with action_type='writethrough_reverse'.
+// The React FailedOperationsDrawer (which filters on
+// sync_status='sync_failed' alone) surfaces these for manual retry by
+// an operator.
+//
+// IMPORTANT: this action_type intentionally does NOT match the
+// `*_write_through` LIKE pattern that the existing retryFailedSyncs_
+// cron picks up. That cron retries via `resyncEntityToSupabase_` which
+// syncs in the GAS→SB direction — the OPPOSITE of what a reverse-
+// writethrough failure needs. A future P-phase may add a parallel
+// retry cron that calls back into this endpoint to retry sheet writes;
+// until then, drawer-driven manual retry is the recovery path.
 // ─────────────────────────────────────────────────────────────────────────────
 
 function __writeThroughReverseStub_(_ss, payload) {
@@ -2315,6 +2339,37 @@ var REVERSE_WRITETHROUGH_TABLES_ = {
   "stax_invoices":     __writeThroughReverseStub_,
   "stax_charges":      __writeThroughReverseStub_
 };
+
+/**
+ * v38.200.0 — [MIGRATION-P1.4] Validate that a spreadsheet_id is one of
+ * Stride's known clients before allowing the reverse-writethrough
+ * endpoint to openById on it. Returns true on confirmed match, false on
+ * miss OR on any error (Supabase outage, etc.) so we fail closed —
+ * better to reject a legit reverse writethrough during a transient
+ * outage than to allow a writethrough to a non-Stride sheet.
+ */
+function api_isKnownTenantId_(tenantId) {
+  if (!tenantId) return false;
+  try {
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) return false;  // fail closed
+    var resp = UrlFetchApp.fetch(
+      url + "/rest/v1/clients?select=spreadsheet_id&spreadsheet_id=eq." + encodeURIComponent(tenantId) + "&limit=1",
+      {
+        method: "GET",
+        headers: { "Authorization": "Bearer " + key, "apikey": key },
+        muteHttpExceptions: true
+      }
+    );
+    if (resp.getResponseCode() < 200 || resp.getResponseCode() >= 300) return false;
+    var rows = JSON.parse(resp.getContentText());
+    return Array.isArray(rows) && rows.length > 0 && rows[0].spreadsheet_id === tenantId;
+  } catch (e) {
+    Logger.log("api_isKnownTenantId_ error (failing closed): " + e);
+    return false;
+  }
+}
 
 /**
  * v38.200.0 — [MIGRATION-P1.4] Reverse writethrough handler. Called from
@@ -2360,6 +2415,19 @@ function handleWriteThroughReverse_(payload, callerEmail) {
   var writer = REVERSE_WRITETHROUGH_TABLES_[table];
   if (!writer) {
     return errorResponse_("writeThroughReverse: unsupported table '" + table + "'", "INVALID_TABLE");
+  }
+
+  // Hardening: tenantId must be a known client spreadsheet_id. Without
+  // this check, an authorized caller (anyone with API_TOKEN) could pass
+  // any spreadsheet ID and openById would happily open it — including
+  // Master Price List, Consolidated Billing, internal admin sheets, or
+  // any unrelated sheet the script account has access to. Validate
+  // against public.clients before openById. One PostgREST GET; cached
+  // would be nicer but the simple uncached check is fine for now since
+  // this endpoint is called only by SB Edge Functions that already
+  // know their tenant_id.
+  if (!api_isKnownTenantId_(tenantId)) {
+    return errorResponse_("writeThroughReverse: tenantId '" + tenantId + "' is not a known client spreadsheet", "UNKNOWN_TENANT");
   }
 
   var ss;
