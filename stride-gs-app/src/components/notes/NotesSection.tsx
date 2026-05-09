@@ -40,6 +40,11 @@ interface Props {
   composerOnly?: boolean;
   /** Oldest-first is default so the thread reads chronologically; toggle via UI. */
   initialOrder?: 'newest' | 'oldest';
+  /** v2026-05-08 — override the composer's placeholder text. Lets the rollup
+   *  views label the input with the host entity ("Add Task note…") so it's
+   *  unambiguous where a new note will land, since the timeline above mixes
+   *  notes from multiple entities. */
+  composerPlaceholder?: string;
 }
 
 // ── Colors for the internal-note treatment ──────────────────────────────────
@@ -73,7 +78,7 @@ function colorForAuthor(key: string): string {
   return `hsl(${hue} 55% 50%)`;
 }
 
-export function NotesSection({ entityType, entityId, itemId, tenantId, composerOnly, initialOrder = 'oldest' }: Props) {
+export function NotesSection({ entityType, entityId, itemId, tenantId, composerOnly, initialOrder = 'oldest', composerPlaceholder }: Props) {
   const v2 = theme.v2;
   const { user } = useAuth();
   const { notes, loading, error, addNote, deleteNote } = useEntityNotes(entityType, entityId, itemId, tenantId);
@@ -210,7 +215,7 @@ export function NotesSection({ entityType, entityId, itemId, tenantId, composerO
           onKeyDown={handleKey}
           placeholder={isInternalMode
             ? 'Write an internal note (staff/admin only)…'
-            : 'Add a note…'}
+            : (composerPlaceholder ?? 'Add a note…')}
           rows={3}
           style={{
             width: '100%', border: 'none', outline: 'none', resize: 'vertical',

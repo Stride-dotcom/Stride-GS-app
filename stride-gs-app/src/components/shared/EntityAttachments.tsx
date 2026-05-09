@@ -25,16 +25,37 @@ import { PhotoGallery } from '../media/PhotoGallery';
 import { DocumentList } from '../media/DocumentList';
 import { DocumentUploadButton } from '../media/DocumentUploadButton';
 import { DocumentScanButton } from '../media/DocumentScanButton';
-// NotesSection is still the flat conversation renderer — ThreadedNotes
-// wraps it and adds the pill-based thread switcher. We only import the
-// ThreadedNotes composition here; the flat one is a transitive dep.
-import { ThreadedNotes } from '../notes/ThreadedNotes';
+// v2026-05-08 — single composer + unified timeline. The ThreadedNotes pill
+// switcher is gone; staff kept picking the wrong pill and posting on the
+// wrong entity. Composer is now ALWAYS scoped to the host entity (the
+// detail panel's primary entity), and the timeline rolls up notes across
+// related entities (Item / Task / Repair / WC / Shipment) via the existing
+// rollup hooks. Without an item_id rollup, we just render NotesSection
+// for the host directly.
 import { NotesSection } from '../notes/NotesSection';
 import { usePhotos, type EntityType as PhotoEntityType } from '../../hooks/usePhotos';
 import { useDocuments, type DocumentContextType } from '../../hooks/useDocuments';
 import { useEntityNotes, useEntityNotesRollup, type EntityNote } from '../../hooks/useEntityNotes';
 import { useNoteGraphRollup, usePhotoGraphRollup, type RollupContext } from '../../hooks/useGraphRollup';
 import { EntitySourceTabs, ENTITY_LABEL } from './EntitySourceTabs';
+
+// v2026-05-08 — entity-type accent colors for the source-of-note badge in the
+// rollup timeline. Mirrors the palette used elsewhere (TaskDetailPanel
+// TYPE_CFG, ThreadedNotes ENTITY_META) so a "Task" note tag in the Notes
+// timeline reads with the same orange that "INSP" gets on the task badge.
+const ENTITY_BADGE_COLORS: Record<string, { bg: string; color: string }> = {
+  inventory: { bg: '#EFF6FF', color: '#1D4ED8' }, // Item — blue
+  task:      { bg: '#FEF3EE', color: '#E85D2D' }, // Task — orange
+  repair:    { bg: '#FEF3C7', color: '#B45309' }, // Repair — amber
+  shipment:  { bg: '#ECFDF5', color: '#0F766E' }, // Shipment — teal
+  will_call: { bg: '#FCE7F3', color: '#BE185D' }, // Will Call — pink
+  claim:     { bg: '#F5F3FF', color: '#6D28D9' }, // Claim — violet
+};
+
+function composerPlaceholderFor(entityType: string): string {
+  const label = ENTITY_LABEL[entityType] ?? entityType;
+  return `Add ${label} note…`;
+}
 
 interface PhotosCfg {
   entityType: PhotoEntityType;
@@ -350,15 +371,20 @@ export function DocumentsPanel({
 }
 
 export function NotesPanel({
-  entityType, entityId, relatedEntities, enableSourceFilter, itemId, tenantId, pinnedNote, rollupCtx,
+  entityType, entityId, enableSourceFilter, itemId, tenantId, pinnedNote, rollupCtx,
 }: {
   entityType: string;
   entityId: string;
+  /** v2026-05-08 — accepted for back-compat with TabbedDetailPanel + the
+   *  collapsible wrapper, but no longer consumed. The previous ThreadedNotes
+   *  pill switcher used these to build extra threads; the unified-timeline
+   *  refactor reads from the rollup hooks (item_id / graph) instead, which
+   *  pull every related thread automatically. Kept in the type so callers
+   *  still compile without churn. */
   relatedEntities?: Array<{ type: string; id: string; label?: string }>;
   /** v2026-04-22 — opt-in: renders a cross-entity rollup by item_id with
-   *  source-entity sub-tabs. When false (default), falls back to the
-   *  ThreadedNotes pill switcher so Claim and legacy composition stay
-   *  byte-identical. */
+   *  source-entity sub-tabs. When false, the panel renders a single-thread
+   *  NotesSection scoped to the host entity. */
   enableSourceFilter?: boolean;
   /** Parent item_id — required when enableSourceFilter=true for the rollup
    *  query. Ignored otherwise. */
@@ -428,8 +454,10 @@ export function NotesPanel({
       </div>
     );
   }
-  // Heading differentiates the threaded entity_notes system from the
-  // single-text "Item Notes" field that lives on the Details tab.
+  // No rollup context (no parent item, or this entity_type doesn't roll up
+  // — e.g. will_call / shipment / claim). Render a single-thread NotesSection
+  // directly; the composer is locked to the host entity, no pill switcher
+  // that could send a note to the wrong place.
   return (
     <div>
       <div style={{
@@ -437,14 +465,14 @@ export function NotesPanel({
         color: theme.colors.textMuted, textTransform: 'uppercase',
         marginBottom: 10,
       }}>
-        Threaded Notes
+        Notes
       </div>
       {pinned}
-      <ThreadedNotes
+      <NotesSection
         entityType={entityType}
         entityId={entityId}
-        relatedEntities={relatedEntities}
         tenantId={effectiveTenantId}
+        composerPlaceholder={composerPlaceholderFor(entityType)}
       />
     </div>
   );
@@ -554,6 +582,7 @@ function NotesRollupView({
           itemId={itemId}
           tenantId={tenantId}
           composerOnly
+          composerPlaceholder={composerPlaceholderFor(primaryEntityType)}
         />
       </div>
     </div>
@@ -621,6 +650,7 @@ function NotesGraphRollupView({
           itemId={itemId ?? undefined}
           tenantId={tenantId}
           composerOnly
+          composerPlaceholder={composerPlaceholderFor(primaryEntityType)}
         />
       </div>
     </div>
@@ -629,6 +659,7 @@ function NotesGraphRollupView({
 
 function RollupNoteRow({ note }: { note: EntityNote }) {
   const sourceLabel = ENTITY_LABEL[note.entityType] ?? note.entityType;
+  const badgeColor = ENTITY_BADGE_COLORS[note.entityType] ?? { bg: theme.colors.bgSubtle, color: theme.colors.textSecondary };
   const isInternal = note.visibility === 'internal';
   return (
     <div style={{
@@ -642,8 +673,10 @@ function RollupNoteRow({ note }: { note: EntityNote }) {
         fontSize: 11, color: theme.colors.textMuted,
       }}>
         <span style={{
-          padding: '1px 6px', borderRadius: 10, background: theme.colors.bgSubtle,
-          fontWeight: 600, fontSize: 10,
+          padding: '2px 8px', borderRadius: 10,
+          background: badgeColor.bg, color: badgeColor.color,
+          fontWeight: 700, fontSize: 10, letterSpacing: '0.04em',
+          textTransform: 'uppercase',
         }}>{sourceLabel}</span>
         <span style={{ fontWeight: 600, color: theme.colors.text }}>
           {note.authorName || 'Unknown'}
@@ -701,15 +734,15 @@ function NotesSectionCollapsible({
             rollupCtx={rollupCtx}
           />
         ) : (
-          // Session 74: flat NotesSection replaced by ThreadedNotes. The
-          // component renders a pill row for the primary entity + any
-          // relatedEntities passed by the parent panel, plus the currently
-          // selected thread's notes via the existing NotesSection.
-          <ThreadedNotes
+          // v2026-05-08 — single composer + single thread, scoped to the host
+          // entity. Replaces ThreadedNotes' pill switcher (which let users
+          // accidentally post a note on the wrong entity by clicking a
+          // related-entity pill before composing).
+          <NotesSection
             entityType={entityType}
             entityId={entityId}
-            relatedEntities={relatedEntities}
             tenantId={effectiveTenantId}
+            composerPlaceholder={composerPlaceholderFor(entityType)}
           />
         )}
       </CollapsibleBody>
