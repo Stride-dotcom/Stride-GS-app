@@ -1,6 +1,31 @@
 # Stride GS App — Build Status
 
-> Last updated: 2026-05-08 (GAS→Supabase migration roadmap review + corrected v1.1 produced). Verified against actual codebase.
+> Last updated: 2026-05-09 ([MIGRATION-P1] substrate migration applied — `feature_flags` / `parity_results` / `gas_call_log` tables + `entity_audit_log.correlation_id`).
+
+---
+
+## Recent Changes (2026-05-09, [MIGRATION-P1.1] parity substrate)
+
+**Trigger:** Per `MIGRATION_STATUS.md` Phase 1 sub-tasks, P1.1 is the first deliverable that everything else hangs off — without `feature_flags` and `gas_call_log` in place, neither GAS-side input capture (P1.2) nor the replay harness (P1.7) has anywhere to write.
+
+**What landed:** `supabase/migrations/20260509000001_migration_parity_substrate.sql` (applied via MCP). Four pieces:
+
+- `public.feature_flags` — per-function backend selector. Columns: `function_key` (PK), `active_backend` (`gas`|`supabase`, default `gas`), `shadow_backend` (nullable), `parity_enabled` (bool), `tenant_scope` (text[], NULL = fleet-wide), `last_parity_check`, `mismatch_count_7d`, `notes`, `created_at`, `updated_at`. RLS: authenticated read, admin write, service_role bypass. `updated_at` trigger. Realtime publication enabled for the future Settings → Migration tab. Seeded with **25 rows** covering every function in the migration inventory at `active_backend='gas'` (today's reality — non-disruptive).
+- `public.parity_results` — per-call match record from the replay harness (P1.7). Columns include `function_key`, `tenant_id`, `call_id` (links to `gas_call_log.correlation_id`), `fixture_id` (non-null for parity-fixture runs), `gas_state_hash`, `sb_state_hash`, `match`, durations, `mismatch_details` (jsonb diff). RLS: staff/admin read, service_role write. Partial index on `match=false` for the mismatches dashboard.
+- `public.gas_call_log` — raw input payload for every `doPost_` call. Columns: `correlation_id` (UNIQUE — threads through `entity_audit_log`), `action`, `input_redacted` (jsonb), `input_hash`, `tenant_id`, `user_id`, `gas_duration_ms`, `status` (`started`/`success`/`error`), `called_at`, `completed_at`. P1.2 wires this from the GAS side.
+- `public.entity_audit_log.correlation_id` — new nullable text column + partial index. Joins each state change to the `gas_call_log` row that produced it. The replay harness reconstructs (input → output) pairs from this join.
+
+**Pins (do not regress):**
+- Per **MIG-001 / MIG-008**, the parity substrate lives in the prod SB project — no cloned-app architecture. Credential-absence is enforced via per-shadow-Edge-Function placeholder env vars in P1.7, not by standing up a second project.
+- Per **MIG-006**, `entity_audit_log` + `gas_call_log` is the canonical answer key for replay. Any future schema change to `entity_audit_log` must preserve the `correlation_id` linkage.
+
+**What this PR does NOT do:** No GAS-side code changes (P1.2). No `parity_dryrun` schema (P1.3). No reverse writethrough harness (P1.4). No React `FeatureFlagProvider` (P1.5). No Settings UI (P1.6). No replay Edge Function (P1.7). All seeded `feature_flags` rows stay at `active_backend='gas'`, so no production handler routing changes — the substrate is invisible to operators until P1.5/P1.6 ship.
+
+**Files touched:**
+- `stride-gs-app/supabase/migrations/20260509000001_migration_parity_substrate.sql` (new)
+- `stride-gs-app/MIGRATION_STATUS.md` (P1.1 → done)
+
+**Pending user action:** none for P1.1 specifically. Justin's nomination of a canary tenant is still pending but doesn't gate P1.
 
 ---
 

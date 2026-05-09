@@ -1,6 +1,6 @@
 # GAS → Supabase Migration — Living Status
 
-> Last updated: 2026-05-08 (scaffold PR — initial doc + decisions MIG-001 through MIG-009 captured).
+> Last updated: 2026-05-09 (P1.1 substrate migration applied — `feature_flags` seeded with 25 rows at `active_backend='gas'`, `parity_results` and `gas_call_log` tables created, `correlation_id` column added to `entity_audit_log`).
 > This file is **authoritative for execution**. The v1.1 docx in `Dropbox\Apps\GS Inventory\` is a stakeholder snapshot.
 
 ---
@@ -23,7 +23,6 @@ If you only have time for one section: read **Architectural Decisions** in full.
 
 | Worktree | Branch | Phase | Scope | Started |
 |---|---|---|---|---|
-| `/c/dev/stride-migration-scaffold` | `feat/migration/scaffold` | P1 | This file + parity-fixtures README + CLAUDE.md updates | 2026-05-08 |
 
 (Empty rows after merge. Add yourself at session start; remove at session end.)
 
@@ -46,7 +45,7 @@ If you only have time for one section: read **Architectural Decisions** in full.
 
 | Sub | State | Owner-session | Deliverable |
 |---|---|---|---|
-| P1.1 | not_started | — | Migrations: `feature_flags`, `parity_results`, `gas_call_log`, `correlation_id` column on `entity_audit_log`. Seed `feature_flags` rows for every function in the inventory. |
+| P1.1 | **done** | 2026-05-09 | Migrations: `feature_flags`, `parity_results`, `gas_call_log`, `correlation_id` column on `entity_audit_log`. 25 `feature_flags` rows seeded at `active_backend='gas'`. Migration file: `supabase/migrations/20260509000001_migration_parity_substrate.sql`. Applied via Supabase MCP. |
 | P1.2 | not_started | — | GAS-side input capture: `logCallInput_` in `doPost_`, thread `correlation_id` through `entity_audit_log` writes. |
 | P1.3 | not_started | — | `parity_dryrun` Postgres schema mirroring the tables write-handlers touch. |
 | P1.4 | not_started | — | Reverse writethrough harness: GAS Web App endpoint accepting row payloads, idempotent on row-id key. |
