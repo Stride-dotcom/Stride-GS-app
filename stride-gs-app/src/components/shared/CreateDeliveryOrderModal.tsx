@@ -2433,7 +2433,7 @@ export function CreateDeliveryOrderModal({
         // the one the OrderPage navigates to). Mirrors single-leg behaviour.
         const isClientResubmittingPD = !wasDraftPD
           && user?.role === 'client'
-          && originalReviewStatusRef.current
+          && !!originalReviewStatusRef.current
           && originalReviewStatusRef.current !== 'draft';
         if (isClientResubmittingPD) {
           pickupEdit.review_status = 'pending_review';
@@ -2571,7 +2571,7 @@ export function CreateDeliveryOrderModal({
         // from the OrderPage onSubmit handler.
         const isClientResubmittingSingle = !wasDraft
           && user?.role === 'client'
-          && originalReviewStatusRef.current
+          && !!originalReviewStatusRef.current
           && originalReviewStatusRef.current !== 'draft';
         if (isClientResubmittingSingle) {
           editPayload.review_status = 'pending_review';
