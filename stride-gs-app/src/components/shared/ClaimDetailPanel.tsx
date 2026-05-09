@@ -702,8 +702,8 @@ export function ClaimDetailPanel({ claim: initialClaim, onClose, onUpdated, appl
               <EntityNotesInline
                 entityType="claim"
                 entityId={claim.claimId}
-                itemId={claim.itemId ?? null}
-                tenantId={claim.clientSheetId ?? null}
+                itemId={null}
+                tenantId={null}
               />
 
               {/* Folder link */}

@@ -26,7 +26,6 @@
 import { useMemo } from 'react';
 import { MessageSquare, ChevronRight } from 'lucide-react';
 import { theme } from '../../styles/theme';
-import { v2 } from '../../styles/theme.v2';
 import { useEntityNotes } from '../../hooks/useEntityNotes';
 
 interface Props {
@@ -78,7 +77,7 @@ export function EntityNotesInline({
   return (
     <div style={{
       marginBottom: 16,
-      borderRadius: v2.radius.input,
+      borderRadius: 8,
       border: `1px solid ${theme.colors.border}`,
       background: '#FFFFFF',
       overflow: 'hidden',
