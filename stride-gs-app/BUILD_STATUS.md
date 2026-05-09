@@ -1,6 +1,51 @@
 # Stride GS App — Build Status
 
-> Last updated: 2026-05-05 (Invoice Review overhaul — invoice_tracking + push-status columns + bulk push). Verified against actual codebase.
+> Last updated: 2026-05-08 (GAS→Supabase migration roadmap review + corrected v1.1 produced). Verified against actual codebase.
+
+---
+
+## Recent Changes (2026-05-08, GAS→Supabase migration roadmap review)
+
+**Trigger:** Justin shared `Apps\GS Inventory\GAS_to_Supabase_Migration_Roadmap.docx` (v1.0, May 2026) for review before any Phase 1 work begins. Cross-referenced against current `CLAUDE.md` invariants + this file's "Recent Changes" / "Open hardening backlog" sections. Net: skeleton is sound, but 4 blocking design flaws and 13 stale/missing items would derail execution as written. Produced corrected v1.1.
+
+### Blocking design flaws in v1.0 (must resolve before Phase 1)
+
+1. **Parity model doesn't compose for writes.** "Both GAS and SB process the same input, results compared" creates duplicate side effects: two invoice numbers from `next_invoice_no()`, two PDFs, two customer emails, two `Billing_Ledger` rows, two CB rows, two QBO pushes. Replays the v38.182 dup-invoice incident class on every shadowed createInvoice. v1.1 reframes write parity as **dry-run-on-shadow**: SB-side runs the full code path against a parity scratch schema (or in a transaction that always rolls back) and compares the *would-have-been* state against the GAS-authored state. No external side effects from the shadow side.
+2. **CB Consolidated_Ledger is missing entirely.** v1.0 only addresses the per-tenant `Billing_Ledger` sheet. The three-storage-layer model (per-tenant sheet + `public.billing` + CB sheet) is unmentioned. Bugs #5 and #7 in the open hardening backlog are exactly this class. v1.1 splits Phase 4 into 4a (per-tenant + SB mirror) and 4b (CB retirement / QBO-direct push), with explicit migration of the IIF auto-import pipeline.
+3. **Rollback semantics are lossy.** "Hourly SB→Sheets sync" + "master switch reverts to GAS-primary" loses up to 60 min of writes on rollback. v1.1 specifies synchronous SB→Sheets writethrough (replacing today's GAS→SB writethrough) with the same best-effort semantics already proven in `api_writeThrough_`, plus per-tenant rollback (one tenant at a time, not master switch).
+4. **`completeTask` cannot be split across Phase 3 and Phase 4.** `handleCompleteTask_` writes status, billing row, addon rows, and email send in one lock. Same for `handleCompleteRepair_` and `handleProcessWcRelease_`. v1.1 collapses these into Phase 4 in full.
+
+### Stale function-inventory entries in v1.0
+
+The following were marked "GAS" in v1.0 but are already partially or fully migrated per current code state:
+
+- **Email migration is largely shipped.** Session 90 (PRs #174-#182) moved `notify-new-order`, `notify-public-request`, `ONBOARDING_EMAIL`, `CLAIM_RECEIVED`/`MORE_INFO`/`DENIAL`, `ORDER_REJECTED`, `ORDER_REVISION_REQUESTED`, `ACCOUNT_REFRESH_INVITATION` to `send-email` (Resend). Phase 3 plan should only cover the still-on-GAS senders: shipment created/updated emails, INSP_EMAIL (blocked on PDF source), CLAIM_SETTLEMENT (blocked on PDF source), task complete/repair quote/repair complete emails.
+- **`createInvoice` listed twice** in v1.0's status tables (Write Functions row + Billing & Payments row). Single canonical row in v1.1.
+- **`generateStorageCharges`** — Postgres RPC already shipped (PR #189). What remains is the GAS commit-to-ledger path. v1.1 corrects.
+- **`releaseItems`** — bulk-rewritten in PR #186 (v38.142.8). Performance-sensitive baseline for any SB-side parity comparison.
+- **`transferItems`** — overhaul shipped in session 92: `inventory_live` view, provenance columns, auxiliary-table migration on transfer. Phase 5 must build on this, not start fresh.
+- **DispatchTrack module** entirely SB-only (already-Done case study). Not credited in v1.0's inventory.
+- **Marketing, Intake, Audit log, In-app notifications** — also entirely SB-only. Missing from v1.0.
+
+### Missing pieces v1.1 adds
+
+- **`next_invoice_no()` SEQUENCE pin.** Explicit "SB-side createInvoice continues to call `public.next_invoice_no()`; never reach back to the Master-RPC `getNextInvoiceId`." Closes the regression footgun.
+- **`invoice_tracking` table reference.** PR #285 (v38.194) already provides per-invoice QBO/Stax push state. Phase 4/6 builds on this, not parallel to it.
+- **RLS write-policy review section.** Today's RLS covers reads (`user_has_tenant_access` helper, multi-tenant access fix). Direct-from-React writes need write policies on every affected table — section enumerates the 18+ tables that need them.
+- **49 per-tenant Apps Script projects.** Phase 7 decommission must enumerate `Code.gs` v4.6.0, `Import.gs` v4.3.0, and `StaxAutoPay.gs` v4.7.6 across each tenant's own Apps Script project. Rollout-script-equivalent is needed to either retire the per-client scripts or freeze them at a known version.
+- **GAS time-driven triggers.** `runBillingAnomalySweep` (manual), KC's rollout/sync triggers, Stax Auto Pay daily charge run, daily sync events — each becomes either `pg_cron` or a scheduled Edge Function invocation.
+- **Existing-tenant migration story.** v1.0 only described new-client onboarding post-cutover. v1.1 adds explicit per-tenant cutover sequence: pick a low-volume canary tenant, run dry-run parity for 2 weeks, hot-cut that tenant only, observe 7 days, expand.
+- **Canary plan.** No staging environment exists; `feature_flags` gain a `tenant_id` scope so a flag can be flipped for one tenant before the fleet.
+- **Drive folder URL story.** Every entity row carries a Drive folder URL referenced from emails and the Entity History tab. v1.1 specifies: keep URLs as data (don't break old emails), redirect new uploads through Supabase Storage (already the case for photos/documents).
+- **Master switch redesign.** v1.0's "flip ALL flags simultaneously" defeats the per-function-flag rollout. v1.1 keeps the granular flags as the rollout mechanism and reframes "master switch" as an emergency global rollback toggle (one-way: flip everything back to GAS), not a forward cutover.
+- **Timeline reset.** v1.0's 14 weeks is optimistic given the parity-for-writes design problem. v1.1 leaves estimates blank pending Phase 1 execution; commits to re-estimating after the parity infrastructure is in place and one canary function has shipped.
+
+**Files touched (this session):**
+- `stride-gs-app/BUILD_STATUS.md` (this entry)
+- `Apps\GS Inventory\GAS_to_Supabase_Migration_Roadmap_v1.1.docx` (corrected roadmap; original v1.0 preserved alongside)
+
+**Pending user action:**
+- [ ] Justin: review v1.1, decide whether to proceed with Phase 1 (parity infrastructure + feature_flags table) or pause for further design review on the dry-run-on-shadow parity model.
 
 ---
 
