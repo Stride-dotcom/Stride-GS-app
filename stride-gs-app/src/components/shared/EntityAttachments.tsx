@@ -371,15 +371,20 @@ export function DocumentsPanel({
 }
 
 export function NotesPanel({
-  entityType, entityId, relatedEntities, enableSourceFilter, itemId, tenantId, pinnedNote, rollupCtx,
+  entityType, entityId, enableSourceFilter, itemId, tenantId, pinnedNote, rollupCtx,
 }: {
   entityType: string;
   entityId: string;
+  /** v2026-05-08 — accepted for back-compat with TabbedDetailPanel + the
+   *  collapsible wrapper, but no longer consumed. The previous ThreadedNotes
+   *  pill switcher used these to build extra threads; the unified-timeline
+   *  refactor reads from the rollup hooks (item_id / graph) instead, which
+   *  pull every related thread automatically. Kept in the type so callers
+   *  still compile without churn. */
   relatedEntities?: Array<{ type: string; id: string; label?: string }>;
   /** v2026-04-22 — opt-in: renders a cross-entity rollup by item_id with
-   *  source-entity sub-tabs. When false (default), falls back to the
-   *  ThreadedNotes pill switcher so Claim and legacy composition stay
-   *  byte-identical. */
+   *  source-entity sub-tabs. When false, the panel renders a single-thread
+   *  NotesSection scoped to the host entity. */
   enableSourceFilter?: boolean;
   /** Parent item_id — required when enableSourceFilter=true for the rollup
    *  query. Ignored otherwise. */
