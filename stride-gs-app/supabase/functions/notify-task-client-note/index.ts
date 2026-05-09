@@ -39,15 +39,18 @@ const corsHeaders = {
 const APP_BASE = 'https://www.mystridehub.com';
 const ACCEPTANCE_PREFIX = '✓ Accepted as-is';
 
-// Per-entity routing for hydration + deep links. Keep the keys in sync with
-// the React-side gate in useEntityNotes.addNote.
+// Per-entity routing for hydration + deep links. v4 (2026-05-09) added
+// inventory / shipment / will_call / claim — the React side fires the
+// notifier on every client-authored note now, so the route map is the
+// authoritative coverage list. Adding a new entity type means: one
+// entry here, no React changes.
 const ENTITY_ROUTES: Record<string, {
   table: string;
   idColumn: string;
   typeColumn?: string;       // optional sub-classifier (tasks have type=INSP/ASM/...)
   resultColumn?: string;     // optional pass/fail field
-  defaultTypeLabel: string;  // shown in the email when typeColumn is empty/missing
-  routePath: string;         // /#/tasks or /#/repairs
+  defaultTypeLabel: string;  // ENTITY_LABEL — used in subject + table rows + CTA
+  routePath: string;         // CLAUDE.md deep-link format: /#/<route>?open=<id>&client=<tenant>
 }> = {
   task: {
     table: 'tasks',
@@ -65,6 +68,30 @@ const ENTITY_ROUTES: Record<string, {
     resultColumn: 'repair_result',
     defaultTypeLabel: 'Repair',
     routePath: '/#/repairs',
+  },
+  inventory: {
+    table: 'inventory',
+    idColumn: 'item_id',         // entity_id == item_id for inventory notes
+    defaultTypeLabel: 'Item',
+    routePath: '/#/inventory',
+  },
+  shipment: {
+    table: 'shipments',
+    idColumn: 'shipment_number',
+    defaultTypeLabel: 'Shipment',
+    routePath: '/#/shipments',
+  },
+  will_call: {
+    table: 'will_calls',
+    idColumn: 'wc_number',
+    defaultTypeLabel: 'Will Call',
+    routePath: '/#/will-calls',
+  },
+  claim: {
+    table: 'claims',
+    idColumn: 'claim_id',
+    defaultTypeLabel: 'Claim',
+    routePath: '/#/claims',
   },
 };
 
