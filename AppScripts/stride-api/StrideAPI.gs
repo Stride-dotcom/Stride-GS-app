@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.201.0 — 2026-05-09 PST — handleUpdateInventoryItem_ now fans Sidemark + Reference edits OUT to Billing_Ledger Unbilled rows on the same client sheet, mirroring the propagate_sidemark_to_billing Postgres trigger. Without this, the SHEET's Billing_Ledger stayed stale after a sidemark/reference change on Inventory because the Postgres trigger only updated the Supabase mirror — and invoice generation, IIF export, storage-charge dedup, QBO push, and full client billing sync ALL read the SHEET directly (Supabase billing is a downstream mirror until the P4a billing migration ships). Failure mode this fixes: transfer items A→B → reset sidemark on B's inventory → next invoice for B prints the OLD (pre-transfer) sidemark from the stale Billing_Ledger row, even though the React UI showed the new sidemark via the Supabase mirror. New behavior: after the inventory write + Tasks/Repairs fan-out, walks Billing_Ledger for rows matching (Item ID = updated item, Status = 'Unbilled') and writes the new Sidemark / Reference value (only those two fields propagate — Item Notes / Description / Vendor stay sheet-side only because they're not mirrored on billing rows). Touched rows are then resync'd to Supabase via resyncEntityToSupabase_("billing", …) so the mirror catches up. Scope is exactly 'Unbilled' — Invoiced / Billed / Void rows are intentionally untouched (immutable history). Best-effort: a fan-out failure logs and continues; never blocks the inventory write. Telemetry: response now carries billingFanOutCount. Stop-gap until P4a flips invoice generation to Supabase-authoritative — once P4a ships, the Postgres trigger alone is sufficient and this fan-out becomes a defense-in-depth backstop. See stride-gs-app/MIGRATION_STATUS.md (P4a — billing core) for the long-term plan.
+   StrideAPI.gs — v38.201.1 — 2026-05-09 PST — Column-presence guard on the v38.201.0 Billing_Ledger fan-out. The earlier version called api_ensureColumn_(billSheet, "Sidemark") which AUTO-APPENDS the column when missing — meaning the first time anyone reset a sidemark on a default-schema client, my fan-out would silently add a Sidemark column to that client's Billing_Ledger. Across 49 client sheets, that's quiet schema drift. The actual bug only exists on customized-schema clients (the subset that added Sidemark / Reference columns to Billing_Ledger after the fact, per Decision #18); default-schema clients route through CB13 Unbilled Reports' Inventory fallback (sidemarkByItemId at CB13 Unbilled Reports.js:153-203) which already reads the current per-tenant Inventory value at invoice-generation time. Refactored the fan-out body into a new helper api_propagateInvFieldsToBilling_(ss, itemId, fieldUpdates) that uses api_getHeaderMap_ presence detection: writes only when the header already exists, no-ops otherwise. The helper is reusable from the per-client onEdit handler (which now also propagates direct sheet edits to Sidemark / Reference columns when those columns exist). Behavioural diff vs. v38.201.0 — default-schema clients now correctly no-op (was: silently appended columns); customized-schema clients still get the propagation they need. Telemetry billingFanOutCount unchanged.
+   v38.201.0 — 2026-05-09 PST — handleUpdateInventoryItem_ now fans Sidemark + Reference edits OUT to Billing_Ledger Unbilled rows on the same client sheet, mirroring the propagate_sidemark_to_billing Postgres trigger. Without this, the SHEET's Billing_Ledger stayed stale after a sidemark/reference change on Inventory because the Postgres trigger only updated the Supabase mirror — and invoice generation, IIF export, storage-charge dedup, QBO push, and full client billing sync ALL read the SHEET directly (Supabase billing is a downstream mirror until the P4a billing migration ships). Failure mode this fixes: transfer items A→B → reset sidemark on B's inventory → next invoice for B prints the OLD (pre-transfer) sidemark from the stale Billing_Ledger row, even though the React UI showed the new sidemark via the Supabase mirror. New behavior: after the inventory write + Tasks/Repairs fan-out, walks Billing_Ledger for rows matching (Item ID = updated item, Status = 'Unbilled') and writes the new Sidemark / Reference value (only those two fields propagate — Item Notes / Description / Vendor stay sheet-side only because they're not mirrored on billing rows). Touched rows are then resync'd to Supabase via resyncEntityToSupabase_("billing", …) so the mirror catches up. Scope is exactly 'Unbilled' — Invoiced / Billed / Void rows are intentionally untouched (immutable history). Best-effort: a fan-out failure logs and continues; never blocks the inventory write. Telemetry: response now carries billingFanOutCount. Stop-gap until P4a flips invoice generation to Supabase-authoritative — once P4a ships, the Postgres trigger alone is sufficient and this fan-out becomes a defense-in-depth backstop. See stride-gs-app/MIGRATION_STATUS.md (P4a — billing core) for the long-term plan.
    v38.200.0 — 2026-05-09 PST — [MIGRATION-P1.4] Reverse SB→Sheets writethrough endpoint. New doPost case "writeThroughReverse" routes to handleWriteThroughReverse_(payload, callerEmail), which dispatches to a per-table writer registry (REVERSE_WRITETHROUGH_TABLES_). Every SB-primary handler that ships in P2+ will fire this endpoint after its `public.<table>` write commits, keeping the per-tenant Google Sheet current as a read-only mirror — the rollback insurance behind MIG-002 (synchronous SB→Sheets reverse writethrough). This PR ships the FRAMEWORK ONLY: every entry in the registry is a stub that throws "writeThroughReverse: <table> not yet implemented (P1.4 framework only)" so a stray call surfaces clearly. Per-table writers land in their corresponding P2/P3/P4 PRs alongside the function migration. Failures land in gs_sync_events with sync_status='sync_failed', action_type='writethrough_reverse', so the React FailedOperationsDrawer surfaces them just like GAS→SB writethrough failures. Authentication: the existing API_TOKEN bearer at the top of doPost is the auth surface — there is no per-action HMAC. The Edge Function caller passes the same token. Because no production handler is yet on active_backend='supabase', this endpoint is currently invoked by zero callers; it's pure substrate. Companion: stride-gs-app/supabase/functions/_shared/reverse-writethrough.ts (TypeScript helper for Edge Functions to invoke this endpoint). Decision: MIG-002 (synchronous reverse writethrough is the rollback foundation) — see stride-gs-app/MIGRATION_STATUS.md.
    v38.199.0 — 2026-05-09 PST — [MIGRATION-P1.2] GAS-side input capture for the GAS→Supabase replay corpus. New helper api_logCallInput_(action, payload, tenantId, userId) generates a UUID correlation_id, posts the redacted input payload to public.gas_call_log (one row per doPost call), and stashes the correlation_id in a script-level __MIG_CORRELATION_ID__ that api_auditLog_ now reads and stamps onto every entity_audit_log row written during the same request. doPost calls api_logCallInput_ once after token validation + JSON parse, before the routing switch — so spam/auth-fail requests don't pollute the corpus, but every successful routed call gets captured. Best-effort writes: a Supabase outage or REST 4xx logs and continues; never blocks the GAS handler. PII redaction uses a 1KB-cap whitelist of safe field names (action, ids, statuses, amounts, sidemarks) so card numbers, tokens, and free-text comments don't land in the corpus. Together with the v38.199-companion migration parity_substrate (PR #310 — public.gas_call_log + public.feature_flags + entity_audit_log.correlation_id column), this gives the replay harness its (input, output) join for every GAS call going forward. The harness itself ships in P1.7. Decision: MIG-006 (entity_audit_log + gas_call_log is the answer key) — see stride-gs-app/MIGRATION_STATUS.md.
    v38.198.0 — 2026-05-06 PST — Root-cause fix for the duplicate-billing-row bug v38.197.1 worked around. New helper api_writeBillingRowIdempotent_(billSheet, billMap, ledgerRowId, fields) replaces every "build row + setValues at lastDataRow+1" append with a Ledger Row ID lookup followed by one of: in-place un-void (Status=Void match → refresh fields, flip Status to Unbilled, blank Invoice # / Date / URL), in-place idempotent update (Status=Unbilled match → refresh fields), skip with warning (Status=Invoiced/Billed match → caller surfaces "void the invoice first"), or append (no match). Used in handleCompleteTask_ (single-row), handleCompleteRepair_ (multi-line + legacy single-row paths), and handleProcessWcRelease_ (per-item WC fees) — every billing-row-creating completion handler that uses a deterministic Ledger Row ID. Pre-fix all three appended unconditionally, so a reopen + re-complete cycle (or a cancel + re-release for WC) produced two rows with the same Ledger Row ID: one Voided in place by api_voidBillingRowsWhere_, one Unbilled appended by the re-completion. Symptom: Justin's Vida Design - Merit invoice failed because INSP-TASK-INSP-62840-1 had row 24 (Void) + row 25 (Unbilled). v38.197.1 made the assertion tolerate the bad state by preferring the Unbilled match; this commit prevents the bad state from being created in the first place. Existing duplicates from past cycles are NOT auto-collapsed by this commit (they're correctly handled by the v38.197.1 assertion + the new helper's "prefer Unbilled, then Void" matching); a separate cleanup pass can collapse them later if desired.
@@ -29315,6 +29316,109 @@ function handleRemoveItemAddon_(clientSheetId, payload) {
    Accepts any subset of editable fields; updates only those provided.
    ================================================================ */
 
+/**
+ * v38.201.1 — Propagate item-level field edits to a client's Billing_Ledger.
+ *
+ * Used by handleUpdateInventoryItem_ (after the Inventory write) and by the
+ * client-side onEdit handler in Triggers.gs (for direct sheet edits to
+ * Inventory.Sidemark / Inventory.Reference that bypass the React app).
+ *
+ * Args:
+ *   ss            — open SpreadsheetApp object for the client sheet
+ *   itemId        — the inventory Item ID whose billing rows to update
+ *   fieldUpdates  — object keyed by Billing_Ledger HEADER NAME (e.g.
+ *                   { Sidemark: "PROJECT-X", Reference: "PO-123" }).
+ *                   Pass `undefined` for any field you don't want to touch
+ *                   on this call. Header names must match the schema exactly
+ *                   (case + spelling) — there's no fuzzy / case-insensitive
+ *                   resolution, BY DESIGN: this guards against accidentally
+ *                   appending a misspelled column.
+ *
+ * Returns: array of Ledger Row IDs that were actually written to. Caller
+ * uses this to trigger Supabase mirror resyncs.
+ *
+ * Behaviour:
+ *   - Walks Billing_Ledger and updates rows where:
+ *       Item ID === itemId  AND  Status === 'Unbilled'
+ *   - For each field in fieldUpdates:
+ *       - If the header EXISTS on this client's Billing_Ledger, write the value.
+ *       - If the header DOES NOT EXIST, skip silently. NO auto-append.
+ *         (This is the critical change from v38.201.0 — auto-appending
+ *         silently mutated the schema of every default-schema client.)
+ *   - Never touches Invoiced / Billed / Void rows (immutable history).
+ *   - Best-effort: any per-row throw is logged and skipped.
+ */
+function api_propagateInvFieldsToBilling_(ss, itemId, fieldUpdates) {
+  var touchedLedgerIds = [];
+  if (!ss || !itemId || !fieldUpdates) return touchedLedgerIds;
+
+  // Strip undefined fields up-front so the inner loop doesn't waste work.
+  var activeFields = {};
+  var hasActive = false;
+  for (var fk in fieldUpdates) {
+    if (fieldUpdates[fk] !== undefined) {
+      activeFields[fk] = fieldUpdates[fk];
+      hasActive = true;
+    }
+  }
+  if (!hasActive) return touchedLedgerIds;
+
+  try {
+    var billSheet = ss.getSheetByName("Billing_Ledger");
+    if (!billSheet) return touchedLedgerIds;
+
+    var bhmap = api_getHeaderMap_(billSheet);
+    var bItemCol   = bhmap["Item ID"];
+    var bStatusCol = bhmap["Status"] || bhmap["Billing Status"];
+    var bLedgerCol = bhmap["Ledger Row ID"];
+    if (!bItemCol || !bStatusCol) return touchedLedgerIds;
+
+    // Resolve which target columns actually exist on this sheet — the
+    // load-bearing column-presence guard. Default-schema clients have
+    // neither Sidemark nor Reference here; the fan-out is a no-op for
+    // them (and CB13 Unbilled Reports' Inventory fallback handles the
+    // rest at invoice-generation time).
+    var resolvedCols = {};
+    for (var fName in activeFields) {
+      if (bhmap.hasOwnProperty(fName)) {
+        resolvedCols[fName] = bhmap[fName];
+      }
+    }
+    var willWriteAnyField = false;
+    for (var rk in resolvedCols) { willWriteAnyField = true; break; }
+    if (!willWriteAnyField) return touchedLedgerIds;
+
+    var bLast = api_getLastDataRow_(billSheet);
+    if (bLast < 2) return touchedLedgerIds;
+
+    var bRows = billSheet.getRange(2, 1, bLast - 1, billSheet.getLastColumn()).getValues();
+    for (var bi = 0; bi < bRows.length; bi++) {
+      var bItem   = String(bRows[bi][bItemCol - 1]   || "").trim();
+      var bStatus = String(bRows[bi][bStatusCol - 1] || "").trim();
+      if (bItem !== itemId)        continue;
+      if (bStatus !== "Unbilled")  continue;
+
+      try {
+        for (var hdr in resolvedCols) {
+          billSheet.getRange(bi + 2, resolvedCols[hdr]).setValue(activeFields[hdr]);
+        }
+        if (bLedgerCol) {
+          var lridVal = String(bRows[bi][bLedgerCol - 1] || "").trim();
+          if (lridVal) touchedLedgerIds.push(lridVal);
+        }
+      } catch (rowErr) {
+        Logger.log("api_propagateInvFieldsToBilling_ row " + (bi + 2) + " warning: " + rowErr);
+      }
+    }
+  } catch (err) {
+    // Never let a fan-out failure block the caller (inventory write +
+    // Supabase mirror). The Postgres trigger remains as the Supabase-side
+    // backstop, and the next inventory edit retries the fan-out.
+    Logger.log("api_propagateInvFieldsToBilling_ outer warning: " + err);
+  }
+  return touchedLedgerIds;
+}
+
 function handleUpdateInventoryItem_(clientSheetId, payload) {
   var itemId = String((payload || {}).itemId || "").trim();
   if (!itemId) return errorResponse_("itemId is required", "INVALID_PARAMS");
@@ -29545,88 +29649,45 @@ function handleUpdateInventoryItem_(clientSheetId, payload) {
       } catch (sbErr3) { Logger.log("sb_mirror: repair " + mirroredRepairIds[mri] + " threw " + sbErr3); }
     }
 
-    // v38.201.0 — Billing_Ledger fan-out for Sidemark + Reference.
+    // v38.201.1 — Billing_Ledger fan-out for Sidemark + Reference, with
+    // column-presence guard (no auto-append of new schema columns).
     //
-    // Why this is needed: invoice generation, IIF export, storage-charge
-    // dedup, QBO push, and full client billing sync all read the SHEET's
-    // Billing_Ledger directly (not Supabase). Until the P4a billing
-    // migration ships, Supabase billing is a downstream mirror, not the
-    // source of truth for those write paths. So the Postgres
-    // propagate_sidemark_to_billing trigger alone isn't enough — if a
-    // sidemark/reference is updated on Inventory after a transfer (or any
-    // other time), the SHEET's Billing_Ledger Unbilled rows still carry
-    // the stale value and the next invoice prints the wrong sidemark, the
-    // next full billing sync clobbers the Postgres-corrected Supabase
-    // value, etc.
+    // Layered with the Postgres propagate_sidemark_to_billing trigger:
+    //   - Postgres trigger keeps public.billing.sidemark current — React
+    //     billing UI sees fresh values via the Supabase read mirror.
+    //   - This fan-out keeps the SHEET's Billing_Ledger consistent on
+    //     CUSTOMIZED-schema clients (those that added Sidemark / Reference
+    //     columns to Billing_Ledger after the fact, per Decision #18).
     //
-    // Fix: when handleUpdateInventoryItem_ writes Sidemark or Reference,
-    // also walk the client's Billing_Ledger and update every Status =
-    // 'Unbilled' row for this Item ID. Mirrors the Postgres trigger 1:1:
-    //   - same scope ('Unbilled' only — never touch Invoiced/Billed/Void)
-    //   - same fields (sidemark, reference)
-    //   - same idempotency (set new value; if it already matches, the
-    //     write is a no-op overwrite of the same value)
+    // Default-schema clients (BILLING_LEDGER_HEADERS in the rolled-out
+    // client Code.gs has NO Sidemark / Reference columns) are skipped
+    // here — they don't have the staleness bug. CB13 Unbilled Reports'
+    // sidemark resolution falls back to a per-tenant Inventory lookup
+    // when the Billing_Ledger column is missing, so the invoice PDF
+    // picks up the current Inventory value automatically (and
+    // handleUpdateInventoryItem_ already wrote the new sidemark to
+    // Inventory on this same call before reaching this block).
     //
-    // Then resync the affected Ledger Row IDs to Supabase via the existing
-    // helper so the mirror catches up with the sheet immediately. The
-    // Postgres trigger will also fire on the inventory mirror write
-    // upstream — both paths converge to the same value.
-    var BILLING_FANOUT_FIELDS = {
-      sidemark:  "Sidemark",
-      reference: "Reference"
-    };
-    var billingFanOutNeeded = false;
-    var billingFieldsToSync = {};
-    for (var bfk in BILLING_FANOUT_FIELDS) {
-      if (updates.hasOwnProperty(bfk)) {
-        billingFieldsToSync[BILLING_FANOUT_FIELDS[bfk]] = updates[bfk];
-        billingFanOutNeeded = true;
-      }
-    }
-    var mirroredBillingIds = [];
-    if (billingFanOutNeeded) {
+    // The bug only exists on customized-schema clients where the cell was
+    // populated at row creation and never updated. v38.201.0 used
+    // api_ensureColumn_ which would have AUTO-APPENDED the columns on
+    // every default-schema client the first time someone reset a
+    // sidemark — silent schema drift across 49 client sheets. This
+    // version uses presence detection: write only when the column already
+    // exists, skip otherwise.
+    //
+    // Stop-gap until P4a flips invoice generation to Supabase-authoritative.
+    // After P4a, the Postgres trigger alone is sufficient and this fan-out
+    // becomes defense-in-depth.
+    var mirroredBillingIds = api_propagateInvFieldsToBilling_(ss, itemId, {
+      Sidemark:  updates.hasOwnProperty("sidemark")  ? updates.sidemark  : undefined,
+      Reference: updates.hasOwnProperty("reference") ? updates.reference : undefined
+    });
+    for (var mbi = 0; mbi < mirroredBillingIds.length; mbi++) {
       try {
-        var billSheet = ss.getSheetByName("Billing_Ledger");
-        if (billSheet) {
-          var bhmap = api_getHeaderMap_(billSheet);
-          var bItemCol   = bhmap["Item ID"];
-          var bStatusCol = bhmap["Status"] || bhmap["Billing Status"];
-          var bLedgerCol = bhmap["Ledger Row ID"];
-          if (bItemCol && bStatusCol) {
-            var bLast = api_getLastDataRow_(billSheet);
-            if (bLast >= 2) {
-              var bRows = billSheet.getRange(2, 1, bLast - 1, billSheet.getLastColumn()).getValues();
-              for (var bi = 0; bi < bRows.length; bi++) {
-                var bItem   = String(bRows[bi][bItemCol - 1]   || "").trim();
-                var bStatus = String(bRows[bi][bStatusCol - 1] || "").trim();
-                if (bItem !== itemId)        continue;
-                if (bStatus !== "Unbilled")  continue; // never touch Invoiced/Billed/Void
-                for (var bSyncHeader in billingFieldsToSync) {
-                  // api_ensureColumn_ self-heals legacy sheets that don't
-                  // yet have the Sidemark / Reference billing columns.
-                  var bCol = api_ensureColumn_(billSheet, bSyncHeader);
-                  billSheet.getRange(bi + 2, bCol).setValue(billingFieldsToSync[bSyncHeader]);
-                }
-                if (bLedgerCol) {
-                  var lridVal = String(bRows[bi][bLedgerCol - 1] || "").trim();
-                  if (lridVal) mirroredBillingIds.push(lridVal);
-                }
-              }
-            }
-          }
-        }
-      } catch (bFanErr) {
-        // Never block the inventory write on a billing-fan-out failure.
-        // The Postgres trigger is still a backstop for the Supabase mirror;
-        // the next sheet edit on the same item will retry.
-        Logger.log("handleUpdateInventoryItem_ billing fan-out warning: " + bFanErr);
-      }
-      for (var mbi = 0; mbi < mirroredBillingIds.length; mbi++) {
-        try {
-          var bMirror = resyncEntityToSupabase_("billing", clientSheetId, mirroredBillingIds[mbi]);
-          Logger.log("sb_mirror: billing " + mirroredBillingIds[mbi] + " " + (bMirror && bMirror.ok ? "ok" : "fail"));
-        } catch (sbErr4) { Logger.log("sb_mirror: billing " + mirroredBillingIds[mbi] + " threw " + sbErr4); }
-      }
+        var bMirror = resyncEntityToSupabase_("billing", clientSheetId, mirroredBillingIds[mbi]);
+        Logger.log("sb_mirror: billing " + mirroredBillingIds[mbi] + " " + (bMirror && bMirror.ok ? "ok" : "fail"));
+      } catch (sbErr4) { Logger.log("sb_mirror: billing " + mirroredBillingIds[mbi] + " threw " + sbErr4); }
     }
 
     return jsonResponse_({
