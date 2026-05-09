@@ -5,6 +5,7 @@ import App from './App.tsx'
 import { AuthProvider } from './contexts/AuthContext.tsx'
 import { BatchDataProvider } from './contexts/BatchDataContext.tsx'
 import { BillingBatchProvider } from './contexts/BillingBatchContext.tsx'
+import { FeatureFlagProvider } from './contexts/FeatureFlagContext.tsx'
 import { QboPushJobsProvider } from './contexts/QboPushJobsContext.tsx'
 import { supabase } from './lib/supabase.ts'
 
@@ -53,13 +54,15 @@ async function bootstrap() {
   createRoot(document.getElementById('root')!).render(
     <StrictMode>
       <AuthProvider>
-        <BatchDataProvider>
-          <BillingBatchProvider>
-            <QboPushJobsProvider>
-              <App />
-            </QboPushJobsProvider>
-          </BillingBatchProvider>
-        </BatchDataProvider>
+        <FeatureFlagProvider>
+          <BatchDataProvider>
+            <BillingBatchProvider>
+              <QboPushJobsProvider>
+                <App />
+              </QboPushJobsProvider>
+            </BillingBatchProvider>
+          </BatchDataProvider>
+        </FeatureFlagProvider>
       </AuthProvider>
     </StrictMode>,
   )
