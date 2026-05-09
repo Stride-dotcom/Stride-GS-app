@@ -1,5 +1,6 @@
 /* ===================================================
-   Triggers.gs — v4.7.1 — 2026-04-16 PST — Repair quote "VIEW INSPECTION PHOTOS" points to Source Task folder
+   Triggers.gs — v4.8.0 — 2026-05-09 PST — onClientEdit now propagates Inventory.Sidemark + Inventory.Reference manual sheet edits to (a) open Tasks rows, (b) open Repairs rows, and (c) Billing_Ledger Unbilled rows on customized-schema clients (column-presence guarded — default-schema clients silently skip the Billing_Ledger write because they have no Sidemark / Reference column there per Decision #18; CB13 Unbilled Reports' Inventory fallback handles them at invoice-generation time). Without this, manual sheet edits to those two fields silently drifted vs. the React-app inline-edit path which already propagates Sidemark/Reference via handleUpdateInventoryItem_'s SYNC_FIELDS map. Closes the gap raised by the transfer-then-reset-sidemark scenario for operators / Justin who edit Inventory directly on the sheet. Mirrors the helper api_propagateInvFieldsToBilling_ added to StrideAPI v38.201.1 in the same shipping pair.
+   v4.7.1 — 2026-04-16 PST — Repair quote "VIEW INSPECTION PHOTOS" points to Source Task folder
    v4.7.1: FIX — processRepairQuoteById_ was falling back to the Item folder
            for the {{PHOTOS_BUTTON}} URL because the Source Task ID column
            stores plain text, not a hyperlink. Added a fourth tier that
@@ -137,7 +138,13 @@ if (editedRow < 2) return;
 
     // v2.6.0: Propagate item-level field changes from Inventory to Tasks and Repairs
     // Matches spec: Item Notes, Task Notes, Repair Notes, Assigned To, Repair Vendor, Repair Result, Scheduled Date, Status
-    var INVENTORY_SYNC_FIELDS = ["Item Notes", "Task Notes", "Repair Notes", "Assigned To", "Repair Vendor", "Repair Result", "Scheduled Date", "Status", "Location", "Vendor", "Description"];
+    // v4.8.0: Added Sidemark + Reference. Without these, manual sheet edits to
+    //         Inventory.Sidemark/Reference drifted vs. Tasks/Repairs (and vs.
+    //         Billing_Ledger on customized-schema clients) — only the React-
+    //         app inline edit propagated those two fields. The fan-out below
+    //         now also touches Billing_Ledger for customized clients (with a
+    //         column-presence guard so default-schema clients no-op).
+    var INVENTORY_SYNC_FIELDS = ["Item Notes", "Task Notes", "Repair Notes", "Assigned To", "Repair Vendor", "Repair Result", "Scheduled Date", "Status", "Location", "Vendor", "Description", "Sidemark", "Reference"];
     var editedHeader = null;
     for (var sf = 0; sf < INVENTORY_SYNC_FIELDS.length; sf++) {
       var syncCol = map[INVENTORY_SYNC_FIELDS[sf]];
@@ -179,6 +186,44 @@ if (editedRow < 2) return;
                 if (rIds[ri] === String(itemIdSync)) rsh.getRange(ri + 2, rTargetCol).setValue(newVal);
               }
             }
+          }
+        }
+        // v4.8.0 — Billing_Ledger fan-out for Sidemark / Reference manual
+        // sheet edits (mirrors StrideAPI's api_propagateInvFieldsToBilling_
+        // for the React-driven path). Column-presence guarded — default-
+        // schema clients (no Sidemark / Reference column on Billing_Ledger
+        // per Decision #18) silently skip; customized-schema clients get
+        // the propagation. CB13 Unbilled Reports falls back to Inventory
+        // for default-schema clients, so they're already correct without
+        // a write here.
+        //
+        // Scope: Status='Unbilled' rows only — never touch Invoiced /
+        // Billed / Void (immutable history). Same as the Postgres trigger
+        // and the StrideAPI fan-out.
+        if (editedHeader === "Sidemark" || editedHeader === "Reference") {
+          try {
+            var bsh = ssSync.getSheetByName(CI_SH.BILLING_LEDGER || "Billing_Ledger");
+            if (bsh) {
+              var bMap = getHeaderMap_(bsh);
+              var bItemCol2   = bMap["Item ID"];
+              var bStatusCol2 = bMap["Status"] || bMap["Billing Status"];
+              var bTargetCol2 = bMap[editedHeader]; // ← presence guard: undefined = no-op
+              if (bItemCol2 && bStatusCol2 && bTargetCol2) {
+                var bLast = bsh.getLastRow();
+                if (bLast >= 2) {
+                  var bRows = bsh.getRange(2, 1, bLast - 1, bsh.getLastColumn()).getValues();
+                  for (var bi2 = 0; bi2 < bRows.length; bi2++) {
+                    var bItem2   = String(bRows[bi2][bItemCol2 - 1]   || "").trim();
+                    var bStatus2 = String(bRows[bi2][bStatusCol2 - 1] || "").trim();
+                    if (bItem2 === String(itemIdSync) && bStatus2 === "Unbilled") {
+                      bsh.getRange(bi2 + 2, bTargetCol2).setValue(newVal);
+                    }
+                  }
+                }
+              }
+            }
+          } catch (bFanErr2) {
+            Logger.log("onClientEdit billing fan-out warning: " + bFanErr2);
           }
         }
       }
