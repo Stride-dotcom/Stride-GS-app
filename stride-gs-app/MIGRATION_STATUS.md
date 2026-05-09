@@ -1,6 +1,6 @@
 # GAS → Supabase Migration — Living Status
 
-> Last updated: 2026-05-09 (P1.2 GAS-side input capture shipped — StrideAPI v38.199.0, `api_logCallInput_` populates `gas_call_log` and threads `correlation_id` through `api_auditLog_`. Replay corpus clock starts on next deploy.).
+> Last updated: 2026-05-09 (P1.2 deployed as Web App v494 at 05:02:05Z. Smoke check deferred to organic Monday-morning traffic — Friday-evening-PST window had zero real `doPost` calls in the 5 minutes after deploy.).
 > This file is **authoritative for execution**. The v1.1 docx in `Dropbox\Apps\GS Inventory\` is a stakeholder snapshot.
 
 ---
@@ -46,7 +46,7 @@ If you only have time for one section: read **Architectural Decisions** in full.
 | Sub | State | Owner-session | Deliverable |
 |---|---|---|---|
 | P1.1 | **done** | 2026-05-09 | Migrations: `feature_flags`, `parity_results`, `gas_call_log`, `correlation_id` column on `entity_audit_log`. 25 `feature_flags` rows seeded at `active_backend='gas'`. Migration file: `supabase/migrations/20260509000001_migration_parity_substrate.sql`. Applied via Supabase MCP. |
-| P1.2 | **done** | 2026-05-09 | GAS-side input capture: `api_logCallInput_` in `doPost`, threads `correlation_id` via `__MIG_CORRELATION_ID__` script-level global into `api_auditLog_`. PII-conscious redaction (1KB cap, whitelist of structural fields). StrideAPI v38.199.0 (deploy pending). Replay corpus clock starts on next `npm run push-api && npm run deploy-api`. |
+| P1.2 | **done (verify deferred)** | 2026-05-09 | GAS-side input capture: `api_logCallInput_` in `doPost`, threads `correlation_id` via `__MIG_CORRELATION_ID__` script-level global into `api_auditLog_`. PII-conscious redaction (1KB cap, whitelist of structural fields). StrideAPI v38.199.0 deployed as Web App v494 at 2026-05-09T05:02:05Z. **Verify pending**: 5-min post-deploy window had zero organic `doPost` traffic (Friday evening PST). Re-check Monday morning: expect non-zero `gas_call_log` rows + non-null `correlation_id` on `entity_audit_log` rows from same requests. |
 | P1.3 | not_started | — | `parity_dryrun` Postgres schema mirroring the tables write-handlers touch. |
 | P1.4 | not_started | — | Reverse writethrough harness: GAS Web App endpoint accepting row payloads, idempotent on row-id key. |
 | P1.5 | not_started | — | React `FeatureFlagProvider` + `useFeatureFlag(key)` hook with per-tenant scope resolution. |
@@ -161,6 +161,7 @@ Append-only, numbered. Never edit historical entries. Reference by `MIG-NNN` in 
 
 ## Open questions / blockers
 
+- [ ] **P1.2 organic-traffic verification** — Web App v494 was deployed at 2026-05-09T05:02:05Z but had zero `doPost` calls in the post-deploy window (Friday evening PST). On the next session start (Monday morning), run the smoke query in `BUILD_STATUS.md` "Recent Changes (2026-05-09, [MIGRATION-P1.2])" → "Pending user action" → smoke query. Expected: non-zero rows in `gas_call_log` since deploy, non-null `correlation_id` on the matching `entity_audit_log` rows. If still zero traffic-derived rows, investigate.
 - [ ] **Canary tenant nomination** — needed before any function flips to `canary_active`. Justin to nominate a low-volume tenant (likely a recently-onboarded test tenant or an opt-in active tenant). Not blocking P1.
 - [ ] **PDF source migration** — `INSP_EMAIL` and `CLAIM_SETTLEMENT` are blocked on moving the PDF source off Drive (attachments path landed in PR #182). Not blocking P1–P3; will block portions of P4.
 
