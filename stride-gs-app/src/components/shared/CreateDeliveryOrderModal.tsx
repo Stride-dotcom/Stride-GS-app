@@ -709,16 +709,23 @@ export function CreateDeliveryOrderModal({
   // mental model ("new client → start fresh") and prevents cross-tenant
   // item IDs from leaking into the order payload.
   //
-  // First-render skip: the initial selectedIds came from preSelectedItemIds
-  // (when modal opened from Inventory's "Create Order" path). Clearing
-  // on mount would wipe those before the user sees them. The ref guards
-  // against firing on the initial clientName-resolves-from-empty
-  // transition. Subsequent dropdown-driven changes do fire the clear.
+  // Guard: skip the clear when `prev` is falsy. That covers both:
+  //   - Initial mount (prev = null) → preSelectedItemIds from the
+  //     Inventory "Create Order" path stay intact.
+  //   - Empty → resolved transitions (prev = '') — including the
+  //     edit-mode load path where apiClients resolves async and
+  //     `setClientName(matched)` + `setSelectedIds(new Set(itemIds))`
+  //     can land in the same React 18 batch. Without this, the
+  //     effect would fire post-batch and wipe the just-restored
+  //     itemIds because prev had already snapshotted to ''.
+  //
+  // A genuine user-driven dropdown switch (`'Client A' → 'Client B'`)
+  // still has truthy prev so the clear fires as intended.
   const prevClientNameRef = useRef<string | null>(null);
   useEffect(() => {
     const prev = prevClientNameRef.current;
     prevClientNameRef.current = clientName;
-    if (prev === null) return; // first render — preSelectedItemIds intact
+    if (!prev) return; // covers null (mount) + '' (pre-resolve edit-load)
     if (prev === clientName) return; // no actual change
     setSelectedIds(new Set());
     setPickupFreeItems([]);
