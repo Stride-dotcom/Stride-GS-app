@@ -49,8 +49,15 @@ const EMPTY: ItemIndicators = {
 
 /** Task statuses that mean "done" for badge purposes. */
 const TASK_DONE = new Set(['completed', 'Completed']);
+/** Task statuses that should produce NO badge. Without this skip the loop's
+ *  else-branch (status not in TASK_DONE → open) would paint Cancelled tasks
+ *  orange, which contradicts the hook's docstring promise. */
+const TASK_CANCELLED = new Set(['Cancelled', 'cancelled']);
 /** Repair statuses that mean "done" for badge purposes. */
 const REPAIR_DONE = new Set(['complete', 'Complete', 'completed', 'Completed']);
+/** Repair statuses that should produce NO badge. Same fix as TASK_CANCELLED:
+ *  the else-branch previously misclassified Cancelled repairs as open. */
+const REPAIR_CANCELLED = new Set(['Cancelled', 'cancelled']);
 /** v2026-04-23 — Will Call statuses that mean "done" (item released) → green W. */
 const WC_DONE = new Set(['Released', 'released']);
 /** v2026-04-23 — Will Call statuses that mean "open/in-progress" → orange W.
@@ -99,6 +106,7 @@ export function useItemIndicators(clientSheetIds?: string | string[]): ItemIndic
       if (tasks && !ctx.cancelled) {
         for (const t of tasks as { item_id: string | null; type: string | null; status: string | null; result: string | null }[]) {
           if (!t.item_id) continue;
+          if (TASK_CANCELLED.has(t.status ?? '')) continue; // no badge for cancelled tasks
           const done = TASK_DONE.has(t.status ?? '');
           const code = (t.type || '').toUpperCase();
           if (code === 'INSP' || code === 'INSPECTION') {
@@ -124,6 +132,7 @@ export function useItemIndicators(clientSheetIds?: string | string[]): ItemIndic
       if (repairs && !ctx.cancelled) {
         for (const r of repairs as { item_id: string | null; status: string | null }[]) {
           if (!r.item_id) continue;
+          if (REPAIR_CANCELLED.has(r.status ?? '')) continue; // no badge for cancelled repairs
           const done = REPAIR_DONE.has(r.status ?? '');
           if (done) { if (!repOpen.has(r.item_id)) repDone.add(r.item_id); }
           else { repOpen.add(r.item_id); repDone.delete(r.item_id); }
