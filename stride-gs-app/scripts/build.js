@@ -11,6 +11,11 @@
  *   4. Post-build sanity checks:
  *      - module-count check           (catches the session-58 no-op echo bundle failure)
  *      - bundle-size check            (catches empty / stub bundles)
+ *   5. scripts/verify-dist-integrity (every /assets/* file referenced by
+ *                                     dist/index.html must exist on disk —
+ *                                     catches the 2026-05-11 broken-deploy
+ *                                     mode where index.html shipped pointing
+ *                                     at a JS bundle that wasn't in dist/)
  *
  * If any check fails, the build exits non-zero with a clear, actionable
  * remediation message. No more silent stale builds.
@@ -183,6 +188,22 @@ if (biggestJs.size < MIN_BUNDLE_BYTES) {
     'Either a lot of dependencies are missing, or the bundle is a stub.\n' +
       'Try: rm -rf node_modules/.vite dist && npm install && npm run build'
   );
+}
+
+// \u2500\u2500 Step 5 \u2014 dist referential-integrity check \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// Walks every <script src> / <link href> in dist/index.html that points at
+// /assets/* and confirms the file actually exists on disk. Catches the
+// 2026-05-11 failure where index.html referenced a bundle file that wasn't
+// in dist/ \u2014 which the disk integrity guard missed because the file just
+// wasn't there. Disk-only check at this stage (no --check-git) because
+// build runs before staging; deploy.js re-runs the same script with
+// --check-git AFTER staging to catch missed `git add` cases.
+console.log('[build] step 5/5: dist referential-integrity');
+{
+  const integrity = run('node', ['scripts/verify-dist-integrity.js'], { shell: false });
+  if (integrity.status !== 0) {
+    process.exit(integrity.status || 1);
+  }
 }
 
 console.log('[build] OK \u2014 all sanity checks passed');
