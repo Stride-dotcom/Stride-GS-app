@@ -138,8 +138,14 @@ export function InlineEditableCell({
     }
     savedRef.current = true;
 
-    // Optimistic — paint new value immediately
-    applyItemPatch(itemId, { [fieldKey]: trimmed });
+    // Optimistic — paint new value immediately.
+    // v2026-05-04 — MERGE (not replace) the patch so editing Field A
+    // then Field B on the same row in quick succession doesn't wipe
+    // Field A's optimistic value while its GAS write is still in flight.
+    // The bug Justin reported as "Room/Reference disappear then come
+    // back" was applyItemPatch overwriting prior per-field patches.
+    if (mergeItemPatch) mergeItemPatch(itemId, { [fieldKey]: trimmed });
+    else applyItemPatch(itemId, { [fieldKey]: trimmed });
     setSaving(true);
     setError(false);
 
