@@ -700,38 +700,6 @@ export function CreateDeliveryOrderModal({
   const [mode, setMode] = useState<OrderMode>(hasPreSelected ? 'delivery' : 'delivery');
   const [itemsSource, setItemsSource] = useState<ItemsSource>('warehouse');
 
-  // v2026-05-11 — Switching clients in the dropdown clears any item
-  // selections from the prior client. Without this, selectedIds (a Set
-  // of item IDs from Client A) silently persisted when the operator
-  // switched to Client B — those IDs vanished from the filtered
-  // activeItems list, but selectedAccessorials / qty / counts still
-  // referenced them downstream. Clearing on switch matches the user's
-  // mental model ("new client → start fresh") and prevents cross-tenant
-  // item IDs from leaking into the order payload.
-  //
-  // Guard: skip the clear when `prev` is falsy. That covers both:
-  //   - Initial mount (prev = null) → preSelectedItemIds from the
-  //     Inventory "Create Order" path stay intact.
-  //   - Empty → resolved transitions (prev = '') — including the
-  //     edit-mode load path where apiClients resolves async and
-  //     `setClientName(matched)` + `setSelectedIds(new Set(itemIds))`
-  //     can land in the same React 18 batch. Without this, the
-  //     effect would fire post-batch and wipe the just-restored
-  //     itemIds because prev had already snapshotted to ''.
-  //
-  // A genuine user-driven dropdown switch (`'Client A' → 'Client B'`)
-  // still has truthy prev so the clear fires as intended.
-  const prevClientNameRef = useRef<string | null>(null);
-  useEffect(() => {
-    const prev = prevClientNameRef.current;
-    prevClientNameRef.current = clientName;
-    if (!prev) return; // covers null (mount) + '' (pre-resolve edit-load)
-    if (prev === clientName) return; // no actual change
-    setSelectedIds(new Set());
-    setPickupFreeItems([]);
-    setDeliveryFreeItems([]);
-  }, [clientName]);
-
   // Switching to pickup-related modes clears the inventory selection
   useEffect(() => {
     if (mode === 'pickup' || mode === 'service_only') {
@@ -885,6 +853,42 @@ export function CreateDeliveryOrderModal({
 
   // ── Inventory item selection (delivery + warehouse-source only) ────────
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set(preSelectedItemIds));
+
+  // v2026-05-11 — Switching clients in the dropdown clears any item
+  // selections from the prior client. Without this, selectedIds (a Set
+  // of item IDs from Client A) silently persisted when the operator
+  // switched to Client B — those IDs vanished from the filtered
+  // activeItems list, but selectedAccessorials / qty / counts still
+  // referenced them downstream. Clearing on switch matches the user's
+  // mental model ("new client → start fresh") and prevents cross-tenant
+  // item IDs from leaking into the order payload.
+  //
+  // Guard: skip the clear when `prev` is falsy. That covers both:
+  //   - Initial mount (prev = null) → preSelectedItemIds from the
+  //     Inventory "Create Order" path stay intact.
+  //   - Empty → resolved transitions (prev = '') — including the
+  //     edit-mode load path where apiClients resolves async and
+  //     `setClientName(matched)` + `setSelectedIds(new Set(itemIds))`
+  //     can land in the same React 18 batch. Without this, the
+  //     effect would fire post-batch and wipe the just-restored
+  //     itemIds because prev had already snapshotted to ''.
+  //
+  // A genuine user-driven dropdown switch (`'Client A' → 'Client B'`)
+  // still has truthy prev so the clear fires as intended.
+  //
+  // Effect placed AFTER all state declarations it references —
+  // TypeScript flags use-before-declaration even when the reference
+  // is inside a closure that only runs post-render.
+  const prevClientNameRef = useRef<string | null>(null);
+  useEffect(() => {
+    const prev = prevClientNameRef.current;
+    prevClientNameRef.current = clientName;
+    if (!prev) return; // covers null (mount) + '' (pre-resolve edit-load)
+    if (prev === clientName) return; // no actual change
+    setSelectedIds(new Set());
+    setPickupFreeItems([]);
+    setDeliveryFreeItems([]);
+  }, [clientName]);
   // Per-order room overrides for inventory items. Keyed by dt_item_code.
   // The inventory row carries a default room that flows in when an item
   // is selected — but the operator can override it on a per-order basis
