@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.202.0 — 2026-05-11 PST — handleCreateInvoice_ now accepts an optional extraSheetLedgerRowIdsToMark: string[] payload param. The React-side STOR-summarization path collapses N per-item storage charges into ONE summary line for the invoice (so a 150-item monthly storage bill prints as one line on the PDF + lands as one row in Consolidated_Ledger instead of 150), then passes the ORIGINAL per-item Ledger Row IDs via this param so GAS still flips those rows to Invoiced in the client Billing_Ledger sheet — critical because the storage-charge dedup logic on the next run reads the Status column from the sheet, not Supabase. Best-effort marking: api_markClientLedgerInvoiced_ is called for the extras AFTER the standard rows[] flip succeeds; a partial flip or throw is LOGGED but does NOT roll back the invoice (the invoice + the primary rows are already committed and the extras are a hygiene pass on top). Telemetry: response now carries extraSheetMarked count when the param was supplied. Companion React change: Billing.tsx adds summarizeStorageRowsForInvoice helper + a post-success Supabase UPDATE on the collapsed STOR ledger_row_ids so the Billing report shows them Invoiced immediately (independent of the syncClientBilling pass that follows). Individual per-item STOR rows remain visible in both the sheet's Billing_Ledger (status=Invoiced) and Supabase (status=Invoiced) for audit; the summary line is the only one that appears on the customer-facing invoice PDF + Consolidated_Ledger.
+   StrideAPI.gs — v38.202.1 — 2026-05-11 PST — CRITICAL fix for v38.202.0 STOR summarization. The React-side summarizer (Billing.tsx summarizeStorageRowsForInvoice) ships ONE synthetic STOR-SUMMARY-<uuid> row in rows[] as the customer-facing line on the invoice + Consolidated_Ledger. That synthetic ID does NOT exist on the client's Billing_Ledger sheet — api_markClientLedgerInvoiced_ silently skips IDs not on the sheet (line 23966 — "ID not on sheet — silent skip"), so the returned `marked` count comes back short by exactly one. The pre-v38.202.1 partial-flip check at handleCreateInvoice_ compared `marked < ledgerRowIds.length` (which INCLUDED the synthetic), saw the off-by-one gap, assumed corruption, and rolled back EVERY storage-summarized invoice. Net effect: zero STOR-summarized invoices could commit since v38.202.0 / React #328 shipped — the LEDGER_PARTIAL_FLIP error fired 100% of the time and rolled the CB insert back. Caught by an independent post-merge Opus code review (the build-process step that v38.202.0 skipped). Fix: new local `sheetMarkableLedgerRowIds = ledgerRowIds.filter(id => !id.startsWith("STOR-SUMMARY-"))` used for both the api_markClientLedgerInvoiced_ call AND the partial-flip count check. The unfiltered `ledgerRowIds` is still used for the CB write + the idempotency CB-rows-already-present lookup (those genuinely want the synthetic ID there — it's the canonical Ledger Row ID of the customer-facing summary line in Consolidated_Ledger). The api_verifyClientLedgerFlipped_ call inside the idempotent-retry path is also switched to sheetMarkableLedgerRowIds so a legitimate retry doesn't false-positive HALF_WRITE_DETECTED on the synthetic. Tested by tracing the failure manually against api_markClientLedgerInvoiced_ at line 23966 (silent skip) → line 24028 (returns changedRows.length, not ledgerRowIds.length passed-in) → handleCreateInvoice_ partial-flip rollback at 24756. No companion React change — the summary row's ledger_row_id format and the extraSheetLedgerRowIdsToMark plumbing both stay as-is.
+   v38.202.0 — 2026-05-11 PST — handleCreateInvoice_ now accepts an optional extraSheetLedgerRowIdsToMark: string[] payload param. The React-side STOR-summarization path collapses N per-item storage charges into ONE summary line for the invoice (so a 150-item monthly storage bill prints as one line on the PDF + lands as one row in Consolidated_Ledger instead of 150), then passes the ORIGINAL per-item Ledger Row IDs via this param so GAS still flips those rows to Invoiced in the client Billing_Ledger sheet — critical because the storage-charge dedup logic on the next run reads the Status column from the sheet, not Supabase. Best-effort marking: api_markClientLedgerInvoiced_ is called for the extras AFTER the standard rows[] flip succeeds; a partial flip or throw is LOGGED but does NOT roll back the invoice (the invoice + the primary rows are already committed and the extras are a hygiene pass on top). Telemetry: response now carries extraSheetMarked count when the param was supplied. Companion React change: Billing.tsx adds summarizeStorageRowsForInvoice helper + a post-success Supabase UPDATE on the collapsed STOR ledger_row_ids so the Billing report shows them Invoiced immediately (independent of the syncClientBilling pass that follows). Individual per-item STOR rows remain visible in both the sheet's Billing_Ledger (status=Invoiced) and Supabase (status=Invoiced) for audit; the summary line is the only one that appears on the customer-facing invoice PDF + Consolidated_Ledger.
    v38.201.1 — 2026-05-09 PST — Column-presence guard on the v38.201.0 Billing_Ledger fan-out. The earlier version called api_ensureColumn_(billSheet, "Sidemark") which AUTO-APPENDS the column when missing — meaning the first time anyone reset a sidemark on a default-schema client, my fan-out would silently add a Sidemark column to that client's Billing_Ledger. Across 49 client sheets, that's quiet schema drift. The actual bug only exists on customized-schema clients (the subset that added Sidemark / Reference columns to Billing_Ledger after the fact, per Decision #18); default-schema clients route through CB13 Unbilled Reports' Inventory fallback (sidemarkByItemId at CB13 Unbilled Reports.js:153-203) which already reads the current per-tenant Inventory value at invoice-generation time. Refactored the fan-out body into a new helper api_propagateInvFieldsToBilling_(ss, itemId, fieldUpdates) that uses api_getHeaderMap_ presence detection: writes only when the header already exists, no-ops otherwise. The helper is reusable from the per-client onEdit handler (which now also propagates direct sheet edits to Sidemark / Reference columns when those columns exist). Behavioural diff vs. v38.201.0 — default-schema clients now correctly no-op (was: silently appended columns); customized-schema clients still get the propagation they need. Telemetry billingFanOutCount unchanged.
    v38.201.0 — 2026-05-09 PST — handleUpdateInventoryItem_ now fans Sidemark + Reference edits OUT to Billing_Ledger Unbilled rows on the same client sheet, mirroring the propagate_sidemark_to_billing Postgres trigger. Without this, the SHEET's Billing_Ledger stayed stale after a sidemark/reference change on Inventory because the Postgres trigger only updated the Supabase mirror — and invoice generation, IIF export, storage-charge dedup, QBO push, and full client billing sync ALL read the SHEET directly (Supabase billing is a downstream mirror until the P4a billing migration ships). Failure mode this fixes: transfer items A→B → reset sidemark on B's inventory → next invoice for B prints the OLD (pre-transfer) sidemark from the stale Billing_Ledger row, even though the React UI showed the new sidemark via the Supabase mirror. New behavior: after the inventory write + Tasks/Repairs fan-out, walks Billing_Ledger for rows matching (Item ID = updated item, Status = 'Unbilled') and writes the new Sidemark / Reference value (only those two fields propagate — Item Notes / Description / Vendor stay sheet-side only because they're not mirrored on billing rows). Touched rows are then resync'd to Supabase via resyncEntityToSupabase_("billing", …) so the mirror catches up. Scope is exactly 'Unbilled' — Invoiced / Billed / Void rows are intentionally untouched (immutable history). Best-effort: a fan-out failure logs and continues; never blocks the inventory write. Telemetry: response now carries billingFanOutCount. Stop-gap until P4a flips invoice generation to Supabase-authoritative — once P4a ships, the Postgres trigger alone is sufficient and this fan-out becomes a defense-in-depth backstop. See stride-gs-app/MIGRATION_STATUS.md (P4a — billing core) for the long-term plan.
    v38.200.0 — 2026-05-09 PST — [MIGRATION-P1.4] Reverse SB→Sheets writethrough endpoint. New doPost case "writeThroughReverse" routes to handleWriteThroughReverse_(payload, callerEmail), which dispatches to a per-table writer registry (REVERSE_WRITETHROUGH_TABLES_). Every SB-primary handler that ships in P2+ will fire this endpoint after its `public.<table>` write commits, keeping the per-tenant Google Sheet current as a read-only mirror — the rollback insurance behind MIG-002 (synchronous SB→Sheets reverse writethrough). This PR ships the FRAMEWORK ONLY: every entry in the registry is a stub that throws "writeThroughReverse: <table> not yet implemented (P1.4 framework only)" so a stray call surfaces clearly. Per-table writers land in their corresponding P2/P3/P4 PRs alongside the function migration. Failures land in gs_sync_events with sync_status='sync_failed', action_type='writethrough_reverse', so the React FailedOperationsDrawer surfaces them just like GAS→SB writethrough failures. Authentication: the existing API_TOKEN bearer at the top of doPost is the auth surface — there is no per-action HMAC. The Edge Function caller passes the same token. Because no production handler is yet on active_backend='supabase', this endpoint is currently invoked by zero callers; it's pure substrate. Companion: stride-gs-app/supabase/functions/_shared/reverse-writethrough.ts (TypeScript helper for Edge Functions to invoke this endpoint). Decision: MIG-002 (synchronous reverse writethrough is the rollback foundation) — see stride-gs-app/MIGRATION_STATUS.md.
@@ -24258,6 +24259,21 @@ function handleCreateInvoice_(payload) {
   // template copy + export), so skipping it is a ~50% wall-time reduction for
   // already-invoiced rows in a re-run batch.
   var ledgerRowIds = rows.map(function(r) { return String(r.ledgerRowId || "").trim(); }).filter(Boolean);
+  // v38.202.1 (2026-05-11) — Sheet-markable subset. The React-side STOR
+  // summarization (Billing.tsx summarizeStorageRowsForInvoice) ships ONE
+  // synthetic STOR-SUMMARY-<uuid> row in rows[] as the customer-facing
+  // line on the invoice + Consolidated_Ledger. That synthetic ID does
+  // NOT exist on the client's Billing_Ledger sheet — api_markClientLedgerInvoiced_
+  // silently skips IDs not on the sheet, so the returned `marked` count
+  // comes back short by exactly one (the synthetic). Without this
+  // filter the partial-flip check below would compare `marked` to
+  // `ledgerRowIds.length` (which includes the synthetic), see the gap,
+  // assume corruption, and roll back EVERY storage-summarized invoice.
+  // The synthetic ID is left in `ledgerRowIds` for the CB write +
+  // idempotency-check paths — those genuinely want it there.
+  var sheetMarkableLedgerRowIds = ledgerRowIds.filter(function(id) {
+    return id.indexOf("STOR-SUMMARY-") !== 0;
+  });
   if (ledgerRowIds.length > 0) {
     var cl0 = cbSS.getSheetByName("Consolidated_Ledger");
     if (cl0 && cl0.getLastRow() > 1) {
@@ -24290,7 +24306,14 @@ function handleCreateInvoice_(payload) {
           // half-write so the operator can run runRepairOrphanLedgerRows
           // and try again clean.
           var matchedInvNo = Object.keys(matchedNos)[0];
-          var verifyResult = api_verifyClientLedgerFlipped_(sourceSheetId, ledgerRowIds, matchedInvNo);
+          // v38.202.1 — verify against the sheet-markable subset, not the
+          // full ledgerRowIds. Synthetic STOR-SUMMARY-<uuid> IDs from
+          // the React-side summarizer don't exist on the client sheet
+          // (by design — they're the customer-facing line, not a per-
+          // item row), so including them here would always report
+          // "not flipped" and false-positive HALF_WRITE_DETECTED on a
+          // legitimate already-processed retry.
+          var verifyResult = api_verifyClientLedgerFlipped_(sourceSheetId, sheetMarkableLedgerRowIds, matchedInvNo);
           if (verifyResult.allFlipped) {
             return jsonResponse_({
               success: true,
@@ -24301,7 +24324,7 @@ function handleCreateInvoice_(payload) {
           }
           return errorResponse_(
             "HALF-WRITE STATE: invoice " + matchedInvNo + " exists in Consolidated_Ledger for all " +
-            ledgerRowIds.length + " ledger rows, but only " + verifyResult.flipped + " of them are " +
+            sheetMarkableLedgerRowIds.length + " ledger rows, but only " + verifyResult.flipped + " of them are " +
             "flipped to Invoiced on the client sheet. A previous commit failed mid-write. " +
             "Set the REPAIR_ORPHAN_LEDGER_IDS Script Property to the comma-separated ledger row IDs " +
             "and run runRepairOrphanLedgerRows from the Apps Script editor to remove the orphan " +
@@ -24741,7 +24764,11 @@ function handleCreateInvoice_(payload) {
 
   var marked = 0;
   try {
-    marked = api_markClientLedgerInvoiced_(sourceSheetId, ledgerRowIds, invNo, invDate, invoiceUrl);
+    // v38.202.1 — pass the sheet-markable subset (synthetic STOR-SUMMARY
+    // IDs filtered out) so the silent-skip behaviour of
+    // api_markClientLedgerInvoiced_ on unknown IDs doesn't trip the
+    // partial-flip check below.
+    marked = api_markClientLedgerInvoiced_(sourceSheetId, sheetMarkableLedgerRowIds, invNo, invDate, invoiceUrl);
   } catch (ledgerErr) {
     var rb1 = rollbackByInvoiceNo_();
     return errorResponse_(
@@ -24753,10 +24780,10 @@ function handleCreateInvoice_(payload) {
       "LEDGER_FLIP_FAILED"
     );
   }
-  if (marked < ledgerRowIds.length) {
+  if (marked < sheetMarkableLedgerRowIds.length) {
     var rb2 = rollbackByInvoiceNo_();
     return errorResponse_(
-      "Client ledger partial flip: " + marked + " of " + ledgerRowIds.length + " ledger rows " +
+      "Client ledger partial flip: " + marked + " of " + sheetMarkableLedgerRowIds.length + " ledger rows " +
       "were marked Invoiced (the rest didn't match any rows on the client Billing_Ledger sheet — " +
       "possibly transferred or deleted between the unbilled-report read and the commit)." +
       (rb2.ok
