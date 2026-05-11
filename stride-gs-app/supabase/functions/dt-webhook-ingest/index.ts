@@ -1,6 +1,14 @@
 /**
  * dt-webhook-ingest — Supabase Edge Function
  *
+ * Version: v7 (2026-05-11 PST)
+ *   v7: Real-time pickup-completion email. When DT pushes
+ *       Service_Route_Finished and the order is order_type='pickup'
+ *       (standalone or P+D linked pickup leg), fire-and-forget invoke
+ *       the new notify-pickup-completed function. Idempotency handled
+ *       by send-email's idempotency_key column (order id), so DT
+ *       redelivering the webhook produces exactly one email.
+ *
  * Version: v6 (2026-04-26 PST)
  *   v6: account_name_map shape canonicalized to {tenant_id → name}.
  *       Reverse-lookup at runtime: scan map for entries whose VALUE
@@ -467,7 +475,7 @@ Deno.serve(async (req: Request) => {
       onConflict:        'tenant_id,dt_identifier',
       ignoreDuplicates:  false,  // always update fields
     })
-    .select('id')
+    .select('id, order_type, paid_at')
     .maybeSingle();
 
   if (orderErr) {
@@ -483,38 +491,77 @@ Deno.serve(async (req: Request) => {
   }
 
   const orderId = orderRow?.id ?? null;
+  const orderOrderType = (orderRow as { order_type?: string | null } | null)?.order_type ?? null;
+  const orderPaidAt    = (orderRow as { paid_at?: string | null } | null)?.paid_at ?? null;
 
   // ── 9b. Auto-transition Completed → Collected when order is paid ──────
   // When DT reports Service_Route_Finished and the order has already been
   // marked paid in Stride (paid_at IS NOT NULL), move it directly from
   // Completed (3) to Collected (22) so the billing-review queue doesn't
-  // have to chase a manual second click.
-  if (eventType === 'Service_Route_Finished' && orderId) {
-    const { data: paidCheck, error: paidCheckErr } = await supabase
+  // have to chase a manual second click. paid_at comes from the upsert
+  // RETURNING clause above (was a separate SELECT before v7).
+  if (eventType === 'Service_Route_Finished' && orderId && orderPaidAt) {
+    const { error: collectedErr } = await supabase
       .from('dt_orders')
-      .select('paid_at')
-      .eq('id', orderId)
-      .maybeSingle();
-    if (paidCheckErr) {
-      console.warn(
-        `[dt-webhook-ingest] Auto-Collected: failed to read paid_at for order=${orderId}:`,
-        paidCheckErr.message
+      .update({ status_id: STATUS_COLLECTED })
+      .eq('id', orderId);
+    if (collectedErr) {
+      console.error(
+        `[dt-webhook-ingest] Auto-Collected update failed for order=${orderId} (${dtIdentifier}):`,
+        collectedErr.message
       );
-    } else if (paidCheck?.paid_at) {
-      const { error: collectedErr } = await supabase
-        .from('dt_orders')
-        .update({ status_id: STATUS_COLLECTED })
-        .eq('id', orderId);
-      if (collectedErr) {
-        console.error(
-          `[dt-webhook-ingest] Auto-Collected update failed for order=${orderId} (${dtIdentifier}):`,
-          collectedErr.message
-        );
+    } else {
+      console.log(
+        `[dt-webhook-ingest] Auto-marked order=${orderId} (${dtIdentifier}) as Collected (completed + paid)`
+      );
+    }
+  }
+
+  // ── 9c. Real-time pickup-completion email ──────────────────────────────
+  // 2026-05-11 — when DT pushes Service_Route_Finished for ANY pickup-type
+  // order (standalone pickup-back-to-warehouse OR the pickup leg of a P+D
+  // pair), invoke notify-pickup-completed so the ops team gets a real-time
+  // email within seconds of the driver tapping "Finish" in the DT driver
+  // app. Idempotency is enforced downstream by send-email's
+  // idempotency_key (keyed on order id) so DT redelivering the webhook
+  // produces exactly one email.
+  //
+  // EdgeRuntime.waitUntil() is the Supabase-Deno idiom for "do this work
+  // but don't block the response". Plain fire-and-forget (orphan promise)
+  // can be dropped when the runtime freezes the isolate after the
+  // response writes — confirmed in Supabase docs + our 2026-05-11 review.
+  // waitUntil keeps the isolate alive for the dispatched fetch without
+  // adding latency to the webhook ack DT is waiting for.
+  if (eventType === 'Service_Route_Finished' && orderId && orderOrderType === 'pickup') {
+    const notifyUrl = `${Deno.env.get('SUPABASE_URL')}/functions/v1/notify-pickup-completed`;
+    const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+    const dispatchPromise = fetch(notifyUrl, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${serviceKey}`,
+        'apikey': serviceKey,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ orderId }),
+    }).then(async (resp) => {
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => '');
+        console.warn(`[dt-webhook-ingest] notify-pickup-completed returned ${resp.status} for order=${dtIdentifier}: ${text.slice(0, 200)}`);
       } else {
-        console.log(
-          `[dt-webhook-ingest] Auto-marked order=${orderId} (${dtIdentifier}) as Collected (completed + paid)`
-        );
+        console.log(`[dt-webhook-ingest] notify-pickup-completed dispatched for pickup order=${dtIdentifier}`);
       }
+    }).catch((err) => {
+      console.warn(`[dt-webhook-ingest] notify-pickup-completed dispatch failed for order=${dtIdentifier}:`, (err as Error).message);
+    });
+
+    // Cast — EdgeRuntime is a Supabase-Deno global not in the standard
+    // Deno types. Falls back to plain orphan-promise on environments
+    // that don't expose it (local supabase functions serve) so dev
+    // doesn't blow up; in those cases the await is implicit because
+    // the dev runtime doesn't aggressively freeze isolates.
+    const edgeRuntime = (globalThis as unknown as { EdgeRuntime?: { waitUntil(p: Promise<unknown>): void } }).EdgeRuntime;
+    if (edgeRuntime && typeof edgeRuntime.waitUntil === 'function') {
+      edgeRuntime.waitUntil(dispatchPromise);
     }
   }
 
