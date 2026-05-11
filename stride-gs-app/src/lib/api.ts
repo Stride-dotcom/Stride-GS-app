@@ -2380,6 +2380,15 @@ export interface CreateInvoicePayload {
   client: string;
   sidemark?: string;
   sourceSheetId: string;
+  /** v2026-05-11 — when the React-side STOR summarization fires, this
+   *  carries the ORIGINAL per-item STOR Ledger Row IDs that aren't in
+   *  the `rows` array (they're collapsed into ONE summary line on the
+   *  invoice). GAS uses this to additionally mark those rows as
+   *  Invoiced in the client Billing_Ledger sheet so storage-charge
+   *  dedup (which reads Status from the sheet) continues to work.
+   *  No-op when omitted — preserves legacy behaviour for non-STOR
+   *  invoices or callers that don't summarize. */
+  extraSheetLedgerRowIdsToMark?: string[];
 }
 
 export interface CreateInvoiceResponse {
