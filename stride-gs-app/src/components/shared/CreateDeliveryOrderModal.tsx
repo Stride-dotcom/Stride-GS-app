@@ -907,33 +907,48 @@ export function CreateDeliveryOrderModal({
     if (override !== undefined) return override;
     return fallback ?? '';
   };
-  // Collapse-toggle for the inventory list section. Defaults to expanded
-  // when there are no selections yet (you need to see the list to pick),
-  // collapsed once you've added items (you don't need the picker, you
-  // need to see what you've added). Operator can flip either way.
-  // Inventory picker starts collapsed for any existing order, expanded
-  // for brand-new entries. Pickup-only and pickup_and_delivery orders
-  // typically don't carry warehouse inventory items at all, so the
-  // earlier "only collapse if selectedIds.size > 0" condition left
-  // the picker stretching the whole modal on those orders. Simpler
-  // rule: if you're editing something, you probably want to review
-  // it first; click the chevron to expand and add items.
-  const [inventoryExpanded, setInventoryExpanded] = useState(!editOrderId);
-  // If editOrderId arrives after mount (e.g. a new draft just saved
-  // and got an id), collapse so the modal stays compact for review.
-  // Ref guard prevents fighting subsequent manual expands.
+  // Collapse-toggle for the inventory list section. Defaults to
+  // EXPANDED in two cases:
+  //   1. Brand-new order (no editOrderId) — operator needs to see the
+  //      list to pick anything in the first place.
+  //   2. Edit Full Order opened against an existing order (editOrderId
+  //      set at mount) — operator most often clicks Edit Full Order to
+  //      add items that came in after the order was created (the
+  //      05-11 AUB-00030 incident: operator couldn't find how to add
+  //      more inventory because the picker collapsed below the chevron).
+  // Defaults to COLLAPSED only when editOrderId arrives AFTER mount
+  // (e.g. a brand-new draft that just got saved an id) — that flow
+  // wants to settle into a compact review state.
+  const [inventoryExpanded, setInventoryExpanded] = useState(true);
+  // Snapshot "was this modal opened on an existing order?" at mount.
+  // Drives the two auto-collapse effects below — if true, both stay
+  // out of the operator's way so the picker remains expanded for the
+  // entire edit session (operator can still flip it manually).
+  const editAtMountRef = useRef(!!editOrderId);
+  // If editOrderId arrives after mount (new draft just saved), collapse
+  // for compact review. Skipped when editOrderId was already set at
+  // mount (edit-from-orders-list flow stays expanded).
   const autoCollapsedInvRef = useRef(false);
+  // Re-arm autoCollapsedInvRef whenever editOrderId transitions. No-op
+  // when the modal was opened on an existing order (editAtMountRef.current
+  // is true so the effect below bails anyway), but keeps the reset
+  // semantics correct for the draft-just-saved transition.
   useEffect(() => { autoCollapsedInvRef.current = false; }, [editOrderId]);
   useEffect(() => {
     if (autoCollapsedInvRef.current) return;
     if (!editOrderId) return;
+    if (editAtMountRef.current) return;
     setInventoryExpanded(false);
     autoCollapsedInvRef.current = true;
   }, [editOrderId]);
   // Auto-collapse the picker the first time selections appear so the
-  // selected-items summary takes the focus. Doesn't fight subsequent
-  // manual toggles.
-  const collapsedAfterFirstSelection = React.useRef(false);
+  // selected-items summary takes the focus. For NEW-order flow this
+  // fires when the operator clicks the first checkbox. For
+  // edit-from-orders-list flow, the ref is pre-armed (true) at mount
+  // so the load hydrating selectedIds doesn't trigger a collapse —
+  // the operator just opened Edit Full Order, they want to see the
+  // picker, not have it disappear the moment their items load.
+  const collapsedAfterFirstSelection = React.useRef(editAtMountRef.current);
   useEffect(() => {
     if (selectedIds.size > 0 && !collapsedAfterFirstSelection.current) {
       setInventoryExpanded(false);
