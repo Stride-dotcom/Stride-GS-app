@@ -234,6 +234,10 @@ export function Repairs() {
 
   const table = useReactTable({
     data, columns,
+    // Stable row identity — see Inventory.tsx note. Without this, a sort
+    // shuffle after an optimistic patch makes the typed value briefly
+    // appear in the wrong row.
+    getRowId: row => row.repairId,
     state: { sorting, columnFilters, globalFilter, columnVisibility: colVis, rowSelection: rowSel, columnOrder: columnOrder.length ? columnOrder : DEFAULT_COL_ORDER },
     onSortingChange: setSorting, onColumnFiltersChange: setColumnFilters, onGlobalFilterChange: setGlobalFilter, onColumnVisibilityChange: setColVis, onRowSelectionChange: setRowSel,
     onColumnOrderChange: (updater) => setColumnOrder(typeof updater === 'function' ? updater(columnOrder.length ? columnOrder : DEFAULT_COL_ORDER) : updater),

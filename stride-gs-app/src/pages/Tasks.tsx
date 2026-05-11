@@ -532,6 +532,10 @@ export function Tasks() {
 
   const table = useReactTable({
     data, columns,
+    // Stable row identity — without this TanStack uses row index, so a sort
+    // change after a patch swaps DOM nodes between items and optimistic
+    // edits flash on the wrong line for one frame.
+    getRowId: row => row.taskId,
     state: { sorting, columnFilters, globalFilter, columnVisibility: colVis, rowSelection: rowSel, columnOrder: columnOrder.length ? columnOrder : DEFAULT_COL_ORDER },
     onSortingChange: setSorting, onColumnFiltersChange: setColumnFilters,
     onGlobalFilterChange: setGlobalFilter, onColumnVisibilityChange: setColVis,

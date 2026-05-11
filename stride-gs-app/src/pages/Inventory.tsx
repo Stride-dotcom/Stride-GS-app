@@ -1467,6 +1467,14 @@ export function Inventory() {
   const table = useReactTable({
     data: tableData,
     columns,
+    // Stable row identity by Item ID — without this TanStack defaults to
+    // row INDEX, so sorting/refetch reassigns row keys by position and
+    // React reuses DOM nodes between different items. Optimistic inline
+    // edits then appeared to "jump" to a neighbouring line for one frame
+    // while the table re-sorted, and rowSelection drifted when the order
+    // changed underneath it. Mirrors the pattern Billing/Claims/Shipments
+    // already use.
+    getRowId: row => row.itemId,
     state: { sorting, columnFilters, globalFilter, columnVisibility, rowSelection, columnOrder, columnSizing },
     enableRowSelection: true,
     enableMultiSort: true,
