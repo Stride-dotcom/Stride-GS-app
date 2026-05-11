@@ -186,7 +186,15 @@ interface StorSummarizeResult {
   didSummarize: boolean;
 }
 
-function summarizeStorageRowsForInvoice(rows: UnbilledReportRow[]): StorSummarizeResult {
+/**
+ * @param rows         All rows in the invoice group.
+ * @param groupSidemark Caller-resolved sidemark to stamp on the summary row.
+ *                     Caller computes this off the WHOLE group (STOR + non-
+ *                     STOR) so the summary row's sidemark stays consistent
+ *                     with the payload-level / PDF-header sidemark. Pass ''
+ *                     for groups that span multiple distinct sidemarks.
+ */
+function summarizeStorageRowsForInvoice(rows: UnbilledReportRow[], groupSidemark: string): StorSummarizeResult {
   const storRows = rows.filter(r => String(r.svcCode || '').toUpperCase() === 'STOR');
   // Need at least 2 STOR rows to summarize — a single STOR line stays
   // as-is so the invoice still shows the per-item detail when there's
@@ -196,8 +204,10 @@ function summarizeStorageRowsForInvoice(rows: UnbilledReportRow[]): StorSummariz
   }
   const nonStorRows = rows.filter(r => String(r.svcCode || '').toUpperCase() !== 'STOR');
 
-  // Aggregate the summary line.
-  const totalSum = storRows.reduce((sum, r) => sum + (Number(r.total) || 0), 0);
+  // v2 (2026-05-11) — total math in integer cents to avoid sum-then-round
+  // drift versus a reconciler that sums per-item (cents-rounded) totals
+  // from Supabase. Reduces over integer cents, divides at the end.
+  const totalCents = storRows.reduce((sum, r) => sum + Math.round((Number(r.total) || 0) * 100), 0);
   const itemCount = storRows.length;
 
   // Period: parse each row's date column. The sheet typically writes
@@ -218,27 +228,46 @@ function summarizeStorageRowsForInvoice(rows: UnbilledReportRow[]): StorSummariz
     if (start.toDateString() === end.toDateString()) {
       periodLabel = fmt(start);
     } else if (start.getFullYear() === end.getFullYear() && start.getMonth() === end.getMonth()) {
-      // Same month → "Apr 1-30, 2026"
-      const monthYear = start.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
-      periodLabel = `${start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}-${end.getDate()}, ${start.getFullYear()}`.replace(/^[A-Za-z]+ /, m => m) || monthYear;
+      // Same month → "Apr 1-30, 2026". Built directly; no dead-code
+      // fallback (v1 had `.replace(/.../,m=>m) || monthYear` which was a
+      // no-op identity replace + an unreachable fallback).
+      const monthDay = start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      periodLabel = `${monthDay}-${end.getDate()}, ${start.getFullYear()}`;
     } else {
       periodLabel = `${fmt(start)} to ${fmt(end)}`;
     }
   }
 
-  // Build the summary row. Inherits client/sidemark/sourceSheetId from
-  // the first STOR row (they're identical across a single group by
-  // construction — we're already inside a per-group call). Date is the
-  // latest STOR date so the invoice line dates as recent.
+  // v3 (2026-05-11) — Sidemark on the summary row uses the caller's
+  // pre-resolved groupSidemark so it stays consistent with the payload-
+  // level sidemark / PDF header. Both are computed off the WHOLE group
+  // (STOR + non-STOR rows) in the call() closure. Blank when the group
+  // legitimately spans multiple sidemarks (separate_by_sidemark=OFF +
+  // multi-project client); otherwise inherits the single sidemark.
   const first = storRows[0];
   const summaryDate = parsedDates.length > 0
     ? parsedDates[parsedDates.length - 1].toISOString().slice(0, 10)
     : String(first.date || '');
-  const summaryLedgerRowId = `STOR-SUMMARY-${(globalThis.crypto?.randomUUID?.() || String(Date.now())).slice(0, 18)}`;
+  // v2 (2026-05-11) — full UUID (no slice). Previously sliced to 18 chars
+  // which silently dropped the last UUID segment + collided trivially on
+  // the Date.now() fallback path.
+  const summaryLedgerRowId = `STOR-SUMMARY-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`}`;
+
+  // v2 (2026-05-11) — audit-trail note carries the original ledger row
+  // ID range so an operator voiding the summary line can find the per-
+  // item rows in Supabase / the sheet's Billing_Ledger. Capped at a
+  // single line; full enumeration would bloat the notes column.
+  const sortedIds = storRows
+    .map(r => r.ledgerRowId)
+    .filter((id): id is string => !!id)
+    .sort();
+  const idRangeNote = sortedIds.length > 0
+    ? ` (range ${sortedIds[0]} … ${sortedIds[sortedIds.length - 1]})`
+    : '';
 
   const summary: UnbilledReportRow = {
     client: first.client,
-    sidemark: first.sidemark || '',
+    sidemark: groupSidemark,
     date: summaryDate,
     svcCode: 'STOR',
     svcName: 'Storage',
@@ -249,8 +278,8 @@ function summarizeStorageRowsForInvoice(rows: UnbilledReportRow[]): StorSummariz
     // Rate left blank — the line is a flat total, not a unit price.
     // jsPDF invoice renderer treats null/0/undefined rate as "blank".
     rate: 0,
-    total: Math.round(totalSum * 100) / 100,
-    notes: `Summarized from ${itemCount} per-item STOR rows`,
+    total: totalCents / 100,
+    notes: `Summarized from ${itemCount} per-item STOR rows${idRangeNote}`,
     taskId: '',
     repairId: '',
     shipmentNo: '',
@@ -2212,13 +2241,36 @@ export function Billing() {
           // Invoiced in the client Billing_Ledger sheet (where storage
           // dedup reads the Status column). Non-STOR rows + the summary
           // line ride together as the regular `rows` payload.
+          // v3 (2026-05-11) — Compute a single normalised sidemark for
+          // the whole invoice and use it everywhere:
+          //   - postCreateInvoice payload (drives GAS payload header +
+          //     Consolidated_Ledger sidemark column)
+          //   - summarizeStorageRowsForInvoice (so the summary row's
+          //     sidemark agrees with the header)
+          //   - pdfQueue (so the archived PDF in the invoices bucket
+          //     matches what staff + client see)
+          //
+          // For separate_by_sidemark=ON clients, invoiceGroupKey already
+          // pins each group to a single sidemark — distinctRowSidemarks
+          // is length 1 and we inherit it unchanged.
+          //
+          // For separate_by_sidemark=OFF clients with a single-project
+          // book of business, distinctRowSidemarks is also length 1.
+          //
+          // For separate_by_sidemark=OFF clients with multiple projects
+          // in one invoice (the case the prior PR's BLOCKER was about),
+          // distinctRowSidemarks is >1 and we blank — the summary line,
+          // the payload header, and the PDF header all agree the invoice
+          // is mixed.
+          const distinctRowSidemarks = Array.from(new Set(g.rows.map(r => String(r.sidemark || '').trim())));
+          const normalizedSidemark = distinctRowSidemarks.length <= 1 ? (g.sidemark || '') : '';
           const { rowsForInvoice, collapsedStorLedgerRowIds, didSummarize } =
-            summarizeStorageRowsForInvoice(g.rows);
+            summarizeStorageRowsForInvoice(g.rows, normalizedSidemark);
           const res = await postCreateInvoice({
             idempotencyKey: crypto.randomUUID(),
             rows: rowsForInvoice,
             client: g.client,
-            sidemark: g.sidemark || undefined,
+            sidemark: normalizedSidemark || undefined,
             sourceSheetId: g.sourceSheetId,
             // v2026-05-11 — only present when we summarized (>=2 STOR
             // rows). GAS additionally marks these in the sheet's
@@ -2262,7 +2314,13 @@ export function Billing() {
                 invoiceNo: res.data.invoiceNo,
                 invoiceDate: new Date().toISOString().slice(0, 10),
                 clientName: g.client,
-                sidemark: g.sidemark || '',
+                // v3 (2026-05-11) — uses normalizedSidemark so the
+                // archived PDF stamps the same value as the payload
+                // header + summary row. Pre-fix the PDF queue passed
+                // raw `g.sidemark` (first-row inherited at group
+                // construction), so mixed-sidemark OFF groups got
+                // a wrong single sidemark on the archived artifact.
+                sidemark: normalizedSidemark,
                 rows: rowsForInvoice,
               });
             }
@@ -2274,11 +2332,14 @@ export function Billing() {
             // wants the optimistic-confirmed status now. Best-effort —
             // a Supabase outage here doesn't roll back the invoice;
             // syncClientBilling backstops eventual consistency.
+            // v2 (2026-05-11) — capture both throws AND the supabase
+            // result.error so an RLS / conflict failure is logged
+            // instead of silently swallowed.
             if (didSummarize && res.data.invoiceNo && collapsedStorLedgerRowIds.length > 0) {
+              const invoiceNoForMark = res.data.invoiceNo;
+              const invoiceDateForMark = new Date().toISOString().slice(0, 10);
               try {
-                const invoiceNoForMark = res.data.invoiceNo;
-                const invoiceDateForMark = new Date().toISOString().slice(0, 10);
-                await supabase
+                const { error: sbUpdErr } = await supabase
                   .from('billing')
                   .update({
                     status: 'Invoiced',
@@ -2287,8 +2348,34 @@ export function Billing() {
                   })
                   .eq('tenant_id', g.sourceSheetId)
                   .in('ledger_row_id', collapsedStorLedgerRowIds);
+                if (sbUpdErr) {
+                  console.warn('[invoice] STOR summary post-update returned error (non-fatal):', sbUpdErr.message);
+                }
               } catch (sbErr) {
-                console.warn('[invoice] STOR summary post-update failed (non-fatal):', sbErr);
+                console.warn('[invoice] STOR summary post-update threw (non-fatal):', sbErr);
+              }
+            }
+            // v2 (2026-05-11) — surface a partial flip on the GAS side.
+            // The invoice itself is committed even on partial flip, but
+            // un-flipped STOR rows in the SHEET will be re-billed by the
+            // next storage-charge run. extraSheetMarked is undefined
+            // when no extras were passed (no summary). Pushed onto the
+            // existing batch results' warnings[] array so the post-batch
+            // bulk-result modal renders it alongside other warnings —
+            // BatchInvoiceResult itself doesn't carry warnings yet, but
+            // the CreateInvoiceResponse spread into `results` above does.
+            const extraExpected = collapsedStorLedgerRowIds.length;
+            const extraMarked = res.data.extraSheetMarked;
+            if (didSummarize && extraExpected > 0 && typeof extraMarked === 'number' && extraMarked < extraExpected) {
+              const warnMsg = `Invoice ${res.data.invoiceNo}: only ${extraMarked} of ${extraExpected} per-item STOR rows were marked Invoiced in the client sheet. Next storage run may re-bill ${extraExpected - extraMarked} item(s) — review the sheet's Billing_Ledger and hand-flip stragglers.`;
+              console.warn('[invoice]', warnMsg);
+              // Annotate the last pushed result in-place so the bulk-
+              // results modal can display the warning. results.push above
+              // copied via spread, so we mutate that copy specifically.
+              const lastResult = results[results.length - 1];
+              if (lastResult) {
+                if (!Array.isArray(lastResult.warnings)) lastResult.warnings = [];
+                lastResult.warnings.push(warnMsg);
               }
             }
             billingBatch.recordInvoice({
