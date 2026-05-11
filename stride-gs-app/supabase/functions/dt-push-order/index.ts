@@ -1,5 +1,22 @@
 /**
- * dt-push-order — Supabase Edge Function (Phase 2c) — v20 2026-05-11 PST
+ * dt-push-order — Supabase Edge Function (Phase 2c) — v21 2026-05-11 PST
+ * v21: Ad-hoc items get a short-UUID-prefix item_id (was empty since
+ *      v18). DT's add_order importer treats <item_id> as the per-order
+ *      primary key for items: multiple <item> elements sharing the same
+ *      item_id collapse to one on receipt. v18 emitted empty <item_id/>
+ *      for rows with no inventory_id AND no dt_item_code — which made
+ *      every ad-hoc row look identical to DT, so an order with 8 unique
+ *      ad-hoc lines (MRS-00047-D) imported as 1 item.
+ *
+ *      Fix: emit the first 8 hex chars of dt_order_items.id as the
+ *      item_id for ad-hoc rows. The row UUID never changes so the
+ *      identifier is stable across re-pushes, DT sees 8 distinct keys
+ *      and keeps the items separate, and the driver app shows a short
+ *      hex string (e.g. "12017456") in the SKU column instead of a
+ *      full 36-char UUID. Compromise between v17 (full UUID on driver
+ *      app, ugly but works) and v18 (clean empty, but DT collapses).
+ *
+ * v20 2026-05-11 PST
  * v20: Pushing from EITHER leg of a pickup_and_delivery pair now flushes
  *      BOTH legs to DT. Pre-v20, Section 4 only fired when the primary
  *      had order_type='pickup_and_delivery' (the delivery leg). If the
@@ -345,18 +362,26 @@ function buildOrderXml(
     const extras = (it.extras || {}) as Record<string, unknown>;
     const locationRaw = (extras.location ?? '') as string;
     const locationVal = locationRaw ? `\n      <location>${xmlEscape(locationRaw)}</location>` : '';
-    // SKU resolution:
+    // SKU resolution (v21 2026-05-11):
     //   • Use dt_item_code when set (inventory pick AND ad-hoc rows can both
     //     carry one once the inventory-link sync has run).
     //   • Inventory-sourced rows that haven't been backfilled fall back to
     //     it.id so DT still sees something stable across re-pushes.
-    //   • Ad-hoc rows (no inventory_id AND no dt_item_code) emit empty —
-    //     previously these were getting the random dt_order_items UUID
-    //     which DT then displayed as the SKU on the driver app
-    //     ("12017456-c353-48b8-9c0c-417c0dd60fcf"). Empty <item_id/> is
-    //     valid and lets DT just show the description.
+    //   • Ad-hoc rows (no inventory_id AND no dt_item_code) get the FIRST
+    //     8 hex chars of it.id. v18 emitted EMPTY here because v17's full
+    //     UUID rendered as an ugly 36-char SKU on the driver app — but DT
+    //     uses item_id as the per-order primary key for items, and empty
+    //     == empty == collapsed-to-one-item on DT's importer. That was
+    //     hidden by single-ad-hoc orders for weeks, then surfaced as
+    //     MRS-00047-D-shows-1-item-of-9 on 2026-05-11. 8 hex chars is
+    //     unique-enough within an order (~4.3B values; collision odds
+    //     N²/2^33 — vanishing for any realistic order), stable across
+    //     re-pushes since dt_order_items.id never changes, and short
+    //     enough that the driver app's SKU column doesn't look insane.
     const isAdHoc = !it.inventory_id && !it.dt_item_code;
-    const sku = isAdHoc ? '' : (it.dt_item_code || it.id);
+    const sku = isAdHoc
+      ? it.id.replace(/-/g, '').slice(0, 8)
+      : (it.dt_item_code || it.id);
     return `    <item>\n      <item_id>${xmlEscape(sku)}</item_id>\n      <description>${xmlEscape(desc)}</description>\n      <quantity>${qty}</quantity>${cubeVal}${locationVal}\n    </item>`;
   }).join('\n');
 
