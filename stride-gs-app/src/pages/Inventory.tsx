@@ -1608,7 +1608,20 @@ export function Inventory() {
   }
 
   function doExportSelected() {
-    exportVisibleToExcel(table.getSelectedRowModel().rows, table.getVisibleLeafColumns(), buildExportFilename('selected'));
+    // Use the sorted row model filtered by selection so the exported file
+    // matches the on-screen sort order — TanStack's getSelectedRowModel
+    // returns rows in click order, which surprises users sorting by ID etc.
+    const rows = table.getSortedRowModel().rows.filter(r => r.getIsSelected());
+    exportVisibleToExcel(rows, table.getVisibleLeafColumns(), buildExportFilename('selected'));
+  }
+
+  // Toolbar Export button — auto-route to selected when any are checked.
+  // The old behavior was to always export all visible filtered rows, which
+  // ignored the user's checkbox selection entirely and surprised everyone
+  // who'd just checked 5 items expecting to export those 5.
+  function doExportToolbar() {
+    if (table.getSelectedRowModel().rows.length > 0) doExportSelected();
+    else doExportAll();
   }
 
   // Print — 2026-05-03 fix. Old version called window.print() inside a
@@ -1887,7 +1900,7 @@ export function Inventory() {
         {/* Export — hidden on mobile */}
         {!isMobile && (
           <button
-            onClick={doExportAll}
+            onClick={doExportToolbar}
             style={{
               display: 'flex', alignItems: 'center', gap: 5,
               padding: '7px 12px', borderRadius: theme.radii.md,
@@ -2367,7 +2380,13 @@ export function Inventory() {
               variant="ghost"
               size="sm"
               onClick={async () => {
-                const ids = selectedRows.map(r => r.original.itemId).filter(Boolean);
+                // Use sort-order-aware selection so labels print in the
+                // table's current order (e.g. by Item ID numerically).
+                // selectedRows comes from getSelectedRowModel which returns
+                // rows in click order — surprising the user.
+                const ids = table.getSortedRowModel().rows
+                  .filter(r => r.getIsSelected())
+                  .map(r => r.original.itemId).filter(Boolean);
                 if (!ids.length) { showToast('Select at least one item to print labels'); return; }
                 navigate(`/labels?ids=${encodeURIComponent(ids.join(','))}`);
               }}
@@ -2598,7 +2617,10 @@ export function Inventory() {
                 setShowReleaseModal(true);
               } },
               { label: 'Print Labels', icon: <Printer size={16} />, onClick: () => {
-                const ids = selectedRows.map(r => r.original.itemId).filter(Boolean);
+                // Sort-order-aware ids — see Print Labels button above.
+                const ids = table.getSortedRowModel().rows
+                  .filter(r => r.getIsSelected())
+                  .map(r => r.original.itemId).filter(Boolean);
                 if (!ids.length) { showToast('Select at least one item to print labels'); return; }
                 navigate(`/labels?ids=${encodeURIComponent(ids.join(','))}`);
               } },
