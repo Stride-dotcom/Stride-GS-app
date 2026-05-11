@@ -449,6 +449,8 @@ export function Orders() {
   const table = useReactTable({
     data: filteredByStatus,
     columns,
+    // Stable row identity — see Inventory.tsx note.
+    getRowId: row => row.id,
     state: { sorting, globalFilter },
     onSortingChange: setSorting,
     onGlobalFilterChange: setGlobalFilter,
