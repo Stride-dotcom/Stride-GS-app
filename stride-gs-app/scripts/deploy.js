@@ -111,6 +111,36 @@ run('git add -A', distDir);
 // Commit only if there are staged changes (idempotent if nothing changed)
 if (hasStagedChanges(distDir)) {
   run(`git commit -m "Deploy: ${message}"`, distDir);
+
+  // ── Pre-push integrity gate ─────────────────────────────────────────────
+  // 2026-05-11 incident: a deploy shipped index.html referencing
+  // /assets/index-Dow4zmFT.js, but that file was never staged/committed
+  // to dist/. Result: every page load 404'd and the site went dark.
+  // The build's module-count / size checks couldn't catch it because vite
+  // *did* produce a valid bundle on disk — the failure was at the git
+  // staging layer.
+  //
+  // Re-run the integrity script with --check-git AFTER commit, so we
+  // verify the tree we're about to PUSH has every asset reference
+  // resolved AND tracked. If anything is off, abort before push AND
+  // roll back the local commit so the operator's dist/ isn't left with
+  // a stale broken commit that the next deploy would re-stage on top of.
+  console.log('\n[deploy] ── pre-push: verify dist/ tree integrity ──────────');
+  try {
+    run('node scripts/verify-dist-integrity.js --check-git', appDir);
+  } catch (err) {
+    console.error('\n[deploy] integrity check failed — rolling back the local');
+    console.error('[deploy] dist commit (soft reset, keeps files in working tree).');
+    try {
+      run('git reset --soft HEAD~1', distDir);
+      console.error('[deploy] ✓ dist/ rolled back to pre-commit state.');
+    } catch (resetErr) {
+      console.error('[deploy] WARNING: rollback failed — inspect dist/ manually.');
+      console.error('[deploy]   ' + (resetErr && resetErr.message ? resetErr.message : resetErr));
+    }
+    throw err;
+  }
+
   pushWithRetry(['origin', 'main', '--force'], distDir);
   console.log('[deploy] ✓ bundle pushed to GitHub Pages (origin/main)');
 } else {
