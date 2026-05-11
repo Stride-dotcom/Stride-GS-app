@@ -1042,7 +1042,12 @@ export function Inventory() {
     }
   }, [apiConfigured, showToast, refetch, addOptimisticRepair, removeOptimisticRepair]);
 
-  // Session 71+: Build item-level task/repair/WC/DT indicator sets from already-loaded data
+  // Session 71+: Build item-level task/repair/WC/DT indicator sets from already-loaded data.
+  // Cancelled tasks / repairs / will-calls and Cancelled DT orders produce NO badge —
+  // without these skips, every non-Completed status falls through to the else-branch
+  // and paints the item orange (the pattern that left badges lingering on cancelled
+  // entities until item-by-item cleanup). Mirrors the same skip logic in
+  // hooks/useItemIndicators.ts so the two derivations stay in sync.
   const { inspOpenItems, inspDoneItems, inspFailedItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems, wcOpenItems, wcDoneItems, dtOpenItems, dtDoneItems } = useMemo(() => {
     const inspOpen = new Set<string>();
     const inspDone = new Set<string>();
@@ -1053,6 +1058,7 @@ export function Inventory() {
     const repDone = new Set<string>();
     for (const t of tasks) {
       if (!t.itemId) continue;
+      if (t.status === 'Cancelled') continue; // no badge for cancelled tasks
       const code = (t.svcCode || t.type || '').toUpperCase();
       const done = t.status === 'Completed';
       if (code === 'INSP') {
@@ -1066,15 +1072,17 @@ export function Inventory() {
     }
     for (const r of repairs) {
       if (!r.itemId) continue;
+      if (r.status === 'Cancelled') continue; // no badge for cancelled repairs
       const done = r.status === 'Complete';
       if (done) { if (!repOpen.has(r.itemId)) repDone.add(r.itemId); }
       else { repOpen.add(r.itemId); repDone.delete(r.itemId); }
     }
 
-    // Will call indicators — Released → green, everything else → orange
+    // Will call indicators — Released → green, Cancelled → no badge, everything else → orange
     const wcOpen = new Set<string>();
     const wcDone = new Set<string>();
     for (const wc of willCalls) {
+      if (wc.status === 'Cancelled') continue; // no badge for cancelled will calls
       for (const item of wc.items ?? []) {
         if (!item.itemId) continue;
         if (wc.status === 'Released') {
@@ -1086,10 +1094,15 @@ export function Inventory() {
       }
     }
 
-    // DT delivery order indicators — completed → green, everything else → orange
+    // DT delivery order indicators — completed → green, cancelled → no badge,
+    // everything else (draft/review/open) → orange. dt_order_items soft-removed
+    // rows (removed_at IS NOT NULL) are already filtered out upstream in
+    // fetchDtOrdersFromSupabase, so deletes propagate to the D badge on the
+    // next fetch without any extra logic here.
     const dtOpen = new Set<string>();
     const dtDone = new Set<string>();
     for (const order of orders) {
+      if (order.statusCategory === 'cancelled') continue; // no D badge for cancelled orders
       for (const item of order.items) {
         const id = item.dtItemCode;
         if (!id) continue;
