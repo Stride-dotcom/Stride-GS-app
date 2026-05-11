@@ -2400,6 +2400,12 @@ export interface CreateInvoiceResponse {
   lineItemCount?: number;
   alreadyProcessed?: boolean;
   warnings?: string[];
+  /** v2026-05-11 — count of `extraSheetLedgerRowIdsToMark` GAS flipped
+   *  to Invoiced in the client Billing_Ledger. Undefined when the
+   *  payload didn't pass any extras. React compares vs. the requested
+   *  count to detect partial flips (operator-actionable — un-flipped
+   *  per-item STOR rows will be re-billed by the next storage run). */
+  extraSheetMarked?: number;
   error?: string;
 }
 

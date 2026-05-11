@@ -186,7 +186,15 @@ interface StorSummarizeResult {
   didSummarize: boolean;
 }
 
-function summarizeStorageRowsForInvoice(rows: UnbilledReportRow[]): StorSummarizeResult {
+/**
+ * @param rows         All rows in the invoice group.
+ * @param groupSidemark Caller-resolved sidemark to stamp on the summary row.
+ *                     Caller computes this off the WHOLE group (STOR + non-
+ *                     STOR) so the summary row's sidemark stays consistent
+ *                     with the payload-level / PDF-header sidemark. Pass ''
+ *                     for groups that span multiple distinct sidemarks.
+ */
+function summarizeStorageRowsForInvoice(rows: UnbilledReportRow[], groupSidemark: string): StorSummarizeResult {
   const storRows = rows.filter(r => String(r.svcCode || '').toUpperCase() === 'STOR');
   // Need at least 2 STOR rows to summarize — a single STOR line stays
   // as-is so the invoice still shows the per-item detail when there's
@@ -230,17 +238,12 @@ function summarizeStorageRowsForInvoice(rows: UnbilledReportRow[]): StorSummariz
     }
   }
 
-  // v2 (2026-05-11) — Sidemark on the summary row. When the input STOR
-  // rows all share one sidemark (the separate_by_sidemark=ON case, or
-  // the OFF case where the client only uses one project), inherit it.
-  // When they're mixed (separate_by_sidemark=OFF + multiple sidemarks
-  // in one invoice), blank the summary's sidemark — labelling the line
-  // with one arbitrary sidemark would be wrong. The caller (Billing.tsx
-  // call() closure) handles the matching g.sidemark normalisation so
-  // the PDF header doesn't show an arbitrary single sidemark either.
-  const distinctStorSidemarks = Array.from(new Set(storRows.map(r => String(r.sidemark || '').trim())));
-  const unifiedStorSidemark = distinctStorSidemarks.length === 1 ? distinctStorSidemarks[0] : '';
-
+  // v3 (2026-05-11) — Sidemark on the summary row uses the caller's
+  // pre-resolved groupSidemark so it stays consistent with the payload-
+  // level sidemark / PDF header. Both are computed off the WHOLE group
+  // (STOR + non-STOR rows) in the call() closure. Blank when the group
+  // legitimately spans multiple sidemarks (separate_by_sidemark=OFF +
+  // multi-project client); otherwise inherits the single sidemark.
   const first = storRows[0];
   const summaryDate = parsedDates.length > 0
     ? parsedDates[parsedDates.length - 1].toISOString().slice(0, 10)
@@ -264,7 +267,7 @@ function summarizeStorageRowsForInvoice(rows: UnbilledReportRow[]): StorSummariz
 
   const summary: UnbilledReportRow = {
     client: first.client,
-    sidemark: unifiedStorSidemark,
+    sidemark: groupSidemark,
     date: summaryDate,
     svcCode: 'STOR',
     svcName: 'Storage',
@@ -2238,20 +2241,31 @@ export function Billing() {
           // Invoiced in the client Billing_Ledger sheet (where storage
           // dedup reads the Status column). Non-STOR rows + the summary
           // line ride together as the regular `rows` payload.
-          const { rowsForInvoice, collapsedStorLedgerRowIds, didSummarize } =
-            summarizeStorageRowsForInvoice(g.rows);
-          // v2 (2026-05-11) — normalize the payload-level sidemark when
-          // the group legitimately spans multiple sidemarks. This only
-          // happens on separate_by_sidemark=OFF clients (the
-          // invoiceGroupKey logic puts everything into ONE group for
-          // those, regardless of per-row sidemark). Pre-fix g.sidemark
-          // was seeded from the first row's sidemark at group
-          // construction time — so a mixed-sidemark group would stamp
-          // an arbitrary single sidemark onto the PDF header. Blank it
-          // when mixed; ON-flag groups always pass through unchanged
-          // (their key already pinned to a single sidemark).
+          // v3 (2026-05-11) — Compute a single normalised sidemark for
+          // the whole invoice and use it everywhere:
+          //   - postCreateInvoice payload (drives GAS payload header +
+          //     Consolidated_Ledger sidemark column)
+          //   - summarizeStorageRowsForInvoice (so the summary row's
+          //     sidemark agrees with the header)
+          //   - pdfQueue (so the archived PDF in the invoices bucket
+          //     matches what staff + client see)
+          //
+          // For separate_by_sidemark=ON clients, invoiceGroupKey already
+          // pins each group to a single sidemark — distinctRowSidemarks
+          // is length 1 and we inherit it unchanged.
+          //
+          // For separate_by_sidemark=OFF clients with a single-project
+          // book of business, distinctRowSidemarks is also length 1.
+          //
+          // For separate_by_sidemark=OFF clients with multiple projects
+          // in one invoice (the case the prior PR's BLOCKER was about),
+          // distinctRowSidemarks is >1 and we blank — the summary line,
+          // the payload header, and the PDF header all agree the invoice
+          // is mixed.
           const distinctRowSidemarks = Array.from(new Set(g.rows.map(r => String(r.sidemark || '').trim())));
-          const normalizedSidemark = distinctRowSidemarks.length <= 1 ? g.sidemark : '';
+          const normalizedSidemark = distinctRowSidemarks.length <= 1 ? (g.sidemark || '') : '';
+          const { rowsForInvoice, collapsedStorLedgerRowIds, didSummarize } =
+            summarizeStorageRowsForInvoice(g.rows, normalizedSidemark);
           const res = await postCreateInvoice({
             idempotencyKey: crypto.randomUUID(),
             rows: rowsForInvoice,
@@ -2300,7 +2314,13 @@ export function Billing() {
                 invoiceNo: res.data.invoiceNo,
                 invoiceDate: new Date().toISOString().slice(0, 10),
                 clientName: g.client,
-                sidemark: g.sidemark || '',
+                // v3 (2026-05-11) — uses normalizedSidemark so the
+                // archived PDF stamps the same value as the payload
+                // header + summary row. Pre-fix the PDF queue passed
+                // raw `g.sidemark` (first-row inherited at group
+                // construction), so mixed-sidemark OFF groups got
+                // a wrong single sidemark on the archived artifact.
+                sidemark: normalizedSidemark,
                 rows: rowsForInvoice,
               });
             }
@@ -2345,7 +2365,7 @@ export function Billing() {
             // BatchInvoiceResult itself doesn't carry warnings yet, but
             // the CreateInvoiceResponse spread into `results` above does.
             const extraExpected = collapsedStorLedgerRowIds.length;
-            const extraMarked = (res.data as { extraSheetMarked?: number }).extraSheetMarked;
+            const extraMarked = res.data.extraSheetMarked;
             if (didSummarize && extraExpected > 0 && typeof extraMarked === 'number' && extraMarked < extraExpected) {
               const warnMsg = `Invoice ${res.data.invoiceNo}: only ${extraMarked} of ${extraExpected} per-item STOR rows were marked Invoiced in the client sheet. Next storage run may re-bill ${extraExpected - extraMarked} item(s) — review the sheet's Billing_Ledger and hand-flip stragglers.`;
               console.warn('[invoice]', warnMsg);
