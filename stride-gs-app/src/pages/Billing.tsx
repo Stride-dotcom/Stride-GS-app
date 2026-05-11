@@ -148,6 +148,22 @@ const DEFAULT_COL_ORDER = ['select', 'ledgerRowId', 'status', 'invoiceNo', 'clie
 
 const mf: FilterFn<BillingRow> = (row, _colId, val: string[]) => { if (!val || !val.length) return true; return val.includes(String(row.getValue(_colId))); };
 
+// ─── v2026-05-11 — Sidemark normalization ─────────────────────────────────
+//
+// Sidemarks are entered by clients in free text and we get genuine
+// variants — "DONOHUE", "Donohue", "donohue", "Donohue " all refer to
+// the same project. For GROUPING / MATCHING (invoice key, mixed-
+// detection, deduped display sets) we compare on the normalized form
+// (trim + uppercase). For DISPLAY (PDF, Consolidated_Ledger sidemark
+// column, billing report table) we preserve the first-seen original
+// casing so the invoice doesn't shout in caps at the customer.
+//
+// One source of truth — anywhere sidemark is COMPARED for grouping must
+// route through this helper.
+function normalizeSidemarkForMatch(s: unknown): string {
+  return String(s || '').trim().toUpperCase();
+}
+
 // ─── v2026-05-11 — STOR summarization for invoicing ───────────────────────
 //
 // Storage charges are generated per-item per-billing-period (one Unbilled
@@ -552,7 +568,12 @@ export function Billing() {
     const tenantId = row.sourceSheetId || '';
     const tenant = tenantId || row.client;
     const sepFlag = tenantId ? (sepBySidemarkBySheetId[tenantId] ?? false) : false;
-    const sidemarkPart = sepFlag ? (row.sidemark || '') : '';
+    // v2026-05-11 — case-insensitive + trimmed sidemark match. Clients
+    // enter "DONOHUE", "Donohue", "donohue" interchangeably for the
+    // same project; pre-fix they generated separate invoice groups.
+    // Display still uses the original casing (stamped on g.sidemark
+    // from the first row in the group at construction time).
+    const sidemarkPart = sepFlag ? normalizeSidemarkForMatch(row.sidemark) : '';
     return tenant + '|' + sidemarkPart;
   }, [sepBySidemarkBySheetId]);
 
@@ -1167,7 +1188,18 @@ export function Billing() {
     }
     const invoicedGroups: InvoiceGroup[] = order.map(k => {
       const g = groupMap[k];
-      const sidemarks = [...g._sidemarks];
+      // v2026-05-11 — dedupe sidemarks by normalized form so historical
+      // rows with mixed case ("DONOHUE" / "Donohue") on a single
+      // invoice render as one sidemark instead of "Multiple". First-
+      // seen original casing wins for display, with trailing/leading
+      // whitespace trimmed so a stored "Donohue " doesn't render with
+      // an awkward trailing space when it dedupes against "Donohue".
+      const sidemarkMap = new Map<string, string>();
+      for (const sm of g._sidemarks) {
+        const norm = normalizeSidemarkForMatch(sm);
+        if (!sidemarkMap.has(norm)) sidemarkMap.set(norm, String(sm).trim());
+      }
+      const sidemarks = [...sidemarkMap.values()];
       const qboStatuses = [...g._qboStatuses];
       const dates = g._dates.slice().sort();
       const invoiceDates = [...g._invoiceDates].sort();
@@ -2262,7 +2294,11 @@ export function Billing() {
           // distinctRowSidemarks is >1 and we blank — the summary line,
           // the payload header, and the PDF header all agree the invoice
           // is mixed.
-          const distinctRowSidemarks = Array.from(new Set(g.rows.map(r => String(r.sidemark || '').trim())));
+          // v2026-05-11 — distinct check uses the same normalization as
+          // invoiceGroupKey so "DONOHUE" / "Donohue" / "donohue" within
+          // one group all count as a single sidemark. Display value
+          // (g.sidemark) keeps the first-seen original casing.
+          const distinctRowSidemarks = Array.from(new Set(g.rows.map(r => normalizeSidemarkForMatch(r.sidemark))));
           const normalizedSidemark = distinctRowSidemarks.length <= 1 ? (g.sidemark || '') : '';
           const { rowsForInvoice, collapsedStorLedgerRowIds, didSummarize } =
             summarizeStorageRowsForInvoice(g.rows, normalizedSidemark);
