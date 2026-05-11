@@ -529,7 +529,31 @@ async function pushSingleOrder(
 ): Promise<{ ok: boolean; body: string; errMsg?: string }> {
   const xml = buildOrderXml(order, items, accountName, crossRefIdent, linkedDeliveryInfo);
   console.log(`[dt-push-order] POST order=${order.dt_identifier} type=${order.order_type || 'delivery'} items=${items.length} account=${accountName}${crossRefIdent ? ` crossRef=${crossRefIdent}` : ''}`);
-  console.log(`[dt-push-order] XML payload:\n${xml.slice(0, 800)}`);
+  // v2026-05-11 debug — investigate "delivery leg only shows 1 item
+  // in DT even though dt_order_items has 9" on MRS-00047-D. The
+  // hypothesis is that DT collapses items by item_id and the v18
+  // change ("ad-hoc rows emit empty <item_id/>") makes every ad-hoc
+  // row look identical to DT's importer. Logging:
+  //   1. Every item row's (id, sku, description, quantity) before XML build
+  //   2. Item count expected vs the count of <item> elements actually
+  //      produced in the XML (catches any silent map drops).
+  //   3. Full items XML section verbatim (the existing 800-char
+  //      slice cut it off at item 4-5 for orders this size).
+  for (const it of items) {
+    const skuPreview = it.dt_item_code
+      ? `sku=${it.dt_item_code}`
+      : (it.inventory_id ? `inventory_id=${it.inventory_id}` : 'EMPTY-ITEM-ID');
+    console.log(`[dt-push-order] item id=${it.id} ${skuPreview} qty=${it.quantity} desc="${(it.description || '').slice(0, 80)}"`);
+  }
+  const itemElementCount = (xml.match(/<item>/g) || []).length;
+  console.log(`[dt-push-order] XML item element count = ${itemElementCount} (expected ${items.length})`);
+  const itemsSectionMatch = xml.match(/<items>[\s\S]*?<\/items>/);
+  if (itemsSectionMatch) {
+    console.log(`[dt-push-order] Full <items> section:\n${itemsSectionMatch[0]}`);
+  } else {
+    console.log(`[dt-push-order] WARNING — no <items> section found in payload`);
+  }
+  console.log(`[dt-push-order] XML head (first 1200 chars):\n${xml.slice(0, 1200)}`);
   try {
     // DT API expects XML as a form-encoded "data" parameter (per API docs v8.1)
     const formBody = `data=${encodeURIComponent(xml)}`;
