@@ -4143,113 +4143,14 @@ export function CreateDeliveryOrderModal({
                     )}
                   </div>
 
-                  {/* Selected-items summary — always visible (whether the
-                      picker is expanded or collapsed). Table format mirrors
-                      the picker columns so the operator can re-confirm
-                      what's on the order without cross-referencing.
-                      Trash icon per row removes without re-opening the
-                      picker. */}
-                  {selectedInvItems.length > 0 && (
-                    <div style={{
-                      marginBottom: 10,
-                      background: '#FFF7ED', border: '1px solid #FED7AA',
-                      borderRadius: 8, overflow: 'hidden',
-                    }}>
-                      <div style={{
-                        padding: '10px 12px',
-                        fontSize: 10, fontWeight: 700, color: '#9A3412',
-                        textTransform: 'uppercase', letterSpacing: '1px',
-                        borderBottom: '1px solid #FED7AA',
-                      }}>
-                        On this order ({selectedInvItems.length} {selectedInvItems.length === 1 ? 'item' : 'items'}{totalSelectedCuFt > 0 ? ` · ${totalSelectedCuFt} cuFt` : ''})
-                      </div>
-                      <div style={{ overflowX: 'auto' }}>
-                        <table style={{
-                          width: '100%', borderCollapse: 'collapse',
-                          fontSize: 12, color: theme.colors.text,
-                        }}>
-                          <thead>
-                            <tr style={{ background: '#FFEDD5' }}>
-                              <th style={{ ...summaryTh, width: 90 }}>Item ID</th>
-                              <th style={{ ...summaryTh, width: 50, textAlign: 'right' }}>Qty</th>
-                              <th style={{ ...summaryTh, width: 110 }}>Vendor</th>
-                              <th style={summaryTh}>Description</th>
-                              <th style={{ ...summaryTh, width: 110 }}>Sidemark</th>
-                              <th style={{ ...summaryTh, width: 110 }}>Reference</th>
-                              <th style={{ ...summaryTh, width: 130 }}>Room</th>
-                              <th style={{ ...summaryTh, width: 32 }}></th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {selectedInvItems.map((it, idx) => (
-                              <tr
-                                key={it.itemId}
-                                style={{
-                                  background: idx % 2 === 0 ? '#FFFBF5' : '#FFF7ED',
-                                  borderTop: idx === 0 ? 'none' : '1px solid #FFEDD5',
-                                }}
-                              >
-                                <td style={{ ...summaryTd, fontFamily: 'monospace', fontWeight: 700, color: theme.colors.primary }}>
-                                  {it.itemId}
-                                </td>
-                                <td style={{ ...summaryTd, textAlign: 'right', color: theme.colors.textMuted }}>
-                                  {it.qty ?? 1}
-                                </td>
-                                <td style={{ ...summaryTd, color: theme.colors.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 110 }} title={it.vendor || ''}>
-                                  {it.vendor || '—'}
-                                </td>
-                                <td style={{ ...summaryTd, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={it.description || ''}>
-                                  {it.description || '—'}
-                                </td>
-                                <td style={{ ...summaryTd, color: theme.colors.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 110 }} title={it.sidemark || ''}>
-                                  {it.sidemark || '—'}
-                                </td>
-                                <td style={{ ...summaryTd, color: theme.colors.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 110 }} title={(it as { reference?: string }).reference || ''}>
-                                  {(it as { reference?: string }).reference || '—'}
-                                </td>
-                                <td style={{ ...summaryTd, padding: '4px 6px' }}>
-                                  {/* Per-order room override. Default flows in
-                                      from the inventory row; any edit here
-                                      gets persisted to dt_order_items.room
-                                      (and extras.room) on save and is
-                                      appended to the DT description as
-                                      "Vendor desc — Room". The inventory row
-                                      itself is NOT modified. */}
-                                  <input
-                                    type="text"
-                                    value={effectiveRoom(it.itemId, it.room)}
-                                    onChange={e => setRoomOverride(it.itemId, e.target.value)}
-                                    placeholder="—"
-                                    style={{
-                                      width: '100%', boxSizing: 'border-box',
-                                      padding: '3px 6px', fontSize: 12,
-                                      border: `1px solid ${theme.colors.border}`,
-                                      borderRadius: 4, background: '#fff',
-                                      fontFamily: 'inherit',
-                                    }}
-                                  />
-                                </td>
-                                <td style={{ ...summaryTd, textAlign: 'center' }}>
-                                  <button
-                                    type="button"
-                                    onClick={() => toggleItem(it.itemId)}
-                                    title="Remove from order"
-                                    style={{
-                                      background: 'transparent', border: 'none', cursor: 'pointer',
-                                      color: '#9A3412', padding: 4, borderRadius: 4,
-                                      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                                    }}
-                                  >
-                                    <Trash2 size={13} />
-                                  </button>
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  )}
+                  {/* v2026-05-11 — the "On this order" summary table that
+                      used to live here has been moved BELOW the ad-hoc
+                      items section (see ~line 4490 area). New layout:
+                      inventory picker first, then ad-hoc editor, then the
+                      read-only summary at the bottom. Adding new items
+                      shouldn't require scrolling past 22 rows of
+                      already-saved items to find the "+ Add Ad-Hoc Item"
+                      button (the AUB-00030 layout-confusion incident). */}
 
                   {/* Picker — only mounted when expanded so the modal
                       doesn't waste vertical space when the operator's
@@ -4488,6 +4389,121 @@ export function CreateDeliveryOrderModal({
                       </div>
                     )}
                   </div>
+
+                  {/* v2026-05-11 — "On this order" inventory summary
+                      moved here from above the picker, per operator
+                      feedback on AUB-00030. Original layout put the
+                      already-saved 22-item table between the picker
+                      header and the picker grid, which on edit-load
+                      pushed every "add more items" affordance below
+                      the fold. New layout: picker → ad-hoc editor →
+                      this read-only summary. Adding items is now the
+                      first thing the operator sees; the summary acts
+                      as the manifest at the bottom.
+                      Inventory-only (selectedInvItems). Ad-hoc items
+                      surface in their own editor + the pickup mirror
+                      block right below this. */}
+                  {selectedInvItems.length > 0 && (
+                    <div style={{
+                      marginTop: 18,
+                      background: '#FFF7ED', border: '1px solid #FED7AA',
+                      borderRadius: 8, overflow: 'hidden',
+                    }}>
+                      <div style={{
+                        padding: '10px 12px',
+                        fontSize: 10, fontWeight: 700, color: '#9A3412',
+                        textTransform: 'uppercase', letterSpacing: '1px',
+                        borderBottom: '1px solid #FED7AA',
+                      }}>
+                        On this order ({selectedInvItems.length} {selectedInvItems.length === 1 ? 'item' : 'items'}{totalSelectedCuFt > 0 ? ` · ${totalSelectedCuFt} cuFt` : ''})
+                      </div>
+                      <div style={{ overflowX: 'auto' }}>
+                        <table style={{
+                          width: '100%', borderCollapse: 'collapse',
+                          fontSize: 12, color: theme.colors.text,
+                        }}>
+                          <thead>
+                            <tr style={{ background: '#FFEDD5' }}>
+                              <th style={{ ...summaryTh, width: 90 }}>Item ID</th>
+                              <th style={{ ...summaryTh, width: 50, textAlign: 'right' }}>Qty</th>
+                              <th style={{ ...summaryTh, width: 110 }}>Vendor</th>
+                              <th style={summaryTh}>Description</th>
+                              <th style={{ ...summaryTh, width: 110 }}>Sidemark</th>
+                              <th style={{ ...summaryTh, width: 110 }}>Reference</th>
+                              <th style={{ ...summaryTh, width: 130 }}>Room</th>
+                              <th style={{ ...summaryTh, width: 32 }}></th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {selectedInvItems.map((it, idx) => (
+                              <tr
+                                key={it.itemId}
+                                style={{
+                                  background: idx % 2 === 0 ? '#FFFBF5' : '#FFF7ED',
+                                  borderTop: idx === 0 ? 'none' : '1px solid #FFEDD5',
+                                }}
+                              >
+                                <td style={{ ...summaryTd, fontFamily: 'monospace', fontWeight: 700, color: theme.colors.primary }}>
+                                  {it.itemId}
+                                </td>
+                                <td style={{ ...summaryTd, textAlign: 'right', color: theme.colors.textMuted }}>
+                                  {it.qty ?? 1}
+                                </td>
+                                <td style={{ ...summaryTd, color: theme.colors.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 110 }} title={it.vendor || ''}>
+                                  {it.vendor || '—'}
+                                </td>
+                                <td style={{ ...summaryTd, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={it.description || ''}>
+                                  {it.description || '—'}
+                                </td>
+                                <td style={{ ...summaryTd, color: theme.colors.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 110 }} title={it.sidemark || ''}>
+                                  {it.sidemark || '—'}
+                                </td>
+                                <td style={{ ...summaryTd, color: theme.colors.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 110 }} title={(it as { reference?: string }).reference || ''}>
+                                  {(it as { reference?: string }).reference || '—'}
+                                </td>
+                                <td style={{ ...summaryTd, padding: '4px 6px' }}>
+                                  {/* Per-order room override. Default flows in
+                                      from the inventory row; any edit here
+                                      gets persisted to dt_order_items.room
+                                      (and extras.room) on save and is
+                                      appended to the DT description as
+                                      "Vendor desc — Room". The inventory row
+                                      itself is NOT modified. */}
+                                  <input
+                                    type="text"
+                                    value={effectiveRoom(it.itemId, it.room)}
+                                    onChange={e => setRoomOverride(it.itemId, e.target.value)}
+                                    placeholder="—"
+                                    style={{
+                                      width: '100%', boxSizing: 'border-box',
+                                      padding: '3px 6px', fontSize: 12,
+                                      border: `1px solid ${theme.colors.border}`,
+                                      borderRadius: 4, background: '#fff',
+                                      fontFamily: 'inherit',
+                                    }}
+                                  />
+                                </td>
+                                <td style={{ ...summaryTd, textAlign: 'center' }}>
+                                  <button
+                                    type="button"
+                                    onClick={() => toggleItem(it.itemId)}
+                                    title="Remove from order"
+                                    style={{
+                                      background: 'transparent', border: 'none', cursor: 'pointer',
+                                      color: '#9A3412', padding: 4, borderRadius: 4,
+                                      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                                    }}
+                                  >
+                                    <Trash2 size={13} />
+                                  </button>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -4958,7 +4974,25 @@ export function CreateDeliveryOrderModal({
               )}
               {extraItemsCount > 0 && (
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4, alignItems: 'center' }}>
-                  <span>Extra Items ({extraItemsCount} × ${extraItemRate.toFixed(2)}{extraItemsLegMultiplier > 1 ? ` × ${extraItemsLegMultiplier} legs` : ''})</span>
+                  {/* v2026-05-11 — surface override state in the label so the
+                      math reads honestly. Pre-fix the label always showed
+                      the auto formula "(66 × $25.00)" even when the value
+                      input had been manually overridden to a non-matching
+                      amount, which read as broken arithmetic to the
+                      operator (the AUB-00030-shows-66×$25=$450.01 confusion).
+                      When overridden, the formula is replaced with an
+                      "overridden — auto would be $X" note so the displayed
+                      number and its label agree at a glance. */}
+                  <span>
+                    Extra Items{' '}
+                    {extraItemsFeeOverride != null ? (
+                      <span style={{ color: theme.colors.textMuted }}>
+                        (manual override — auto would be ${extraItemsFeeAuto.toFixed(2)})
+                      </span>
+                    ) : (
+                      <>({extraItemsCount} × ${extraItemRate.toFixed(2)}{extraItemsLegMultiplier > 1 ? ` × ${extraItemsLegMultiplier} legs` : ''})</>
+                    )}
+                  </span>
                   <RateOverrideCell
                     value={extraItemsFee} override={extraItemsFeeOverride} onChange={setExtraItemsFeeOverride}
                     canEdit={isAdmin}
