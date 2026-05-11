@@ -1191,11 +1191,13 @@ export function Billing() {
       // v2026-05-11 — dedupe sidemarks by normalized form so historical
       // rows with mixed case ("DONOHUE" / "Donohue") on a single
       // invoice render as one sidemark instead of "Multiple". First-
-      // seen original casing wins for display.
+      // seen original casing wins for display, with trailing/leading
+      // whitespace trimmed so a stored "Donohue " doesn't render with
+      // an awkward trailing space when it dedupes against "Donohue".
       const sidemarkMap = new Map<string, string>();
       for (const sm of g._sidemarks) {
         const norm = normalizeSidemarkForMatch(sm);
-        if (!sidemarkMap.has(norm)) sidemarkMap.set(norm, sm);
+        if (!sidemarkMap.has(norm)) sidemarkMap.set(norm, String(sm).trim());
       }
       const sidemarks = [...sidemarkMap.values()];
       const qboStatuses = [...g._qboStatuses];
