@@ -24323,9 +24323,14 @@ function handleCreateInvoice_(payload) {
             });
           }
           return errorResponse_(
+            // v38.202.1 — "exists in CB" count uses the full ledgerRowIds
+            // (synthetic STOR-SUMMARY included — it DOES land in CB), but
+            // "flipped on the client sheet" count uses the markable subset
+            // (synthetic excluded — it never goes to the sheet).
             "HALF-WRITE STATE: invoice " + matchedInvNo + " exists in Consolidated_Ledger for all " +
-            sheetMarkableLedgerRowIds.length + " ledger rows, but only " + verifyResult.flipped + " of them are " +
-            "flipped to Invoiced on the client sheet. A previous commit failed mid-write. " +
+            ledgerRowIds.length + " ledger rows, but only " + verifyResult.flipped + " of " +
+            sheetMarkableLedgerRowIds.length + " sheet-resident rows are flipped to Invoiced on the " +
+            "client sheet. A previous commit failed mid-write. " +
             "Set the REPAIR_ORPHAN_LEDGER_IDS Script Property to the comma-separated ledger row IDs " +
             "and run runRepairOrphanLedgerRows from the Apps Script editor to remove the orphan " +
             "Consolidated_Ledger rows, then retry the invoice creation.",
