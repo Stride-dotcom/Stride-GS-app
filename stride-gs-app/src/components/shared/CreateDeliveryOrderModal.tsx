@@ -700,6 +700,31 @@ export function CreateDeliveryOrderModal({
   const [mode, setMode] = useState<OrderMode>(hasPreSelected ? 'delivery' : 'delivery');
   const [itemsSource, setItemsSource] = useState<ItemsSource>('warehouse');
 
+  // v2026-05-11 — Switching clients in the dropdown clears any item
+  // selections from the prior client. Without this, selectedIds (a Set
+  // of item IDs from Client A) silently persisted when the operator
+  // switched to Client B — those IDs vanished from the filtered
+  // activeItems list, but selectedAccessorials / qty / counts still
+  // referenced them downstream. Clearing on switch matches the user's
+  // mental model ("new client → start fresh") and prevents cross-tenant
+  // item IDs from leaking into the order payload.
+  //
+  // First-render skip: the initial selectedIds came from preSelectedItemIds
+  // (when modal opened from Inventory's "Create Order" path). Clearing
+  // on mount would wipe those before the user sees them. The ref guards
+  // against firing on the initial clientName-resolves-from-empty
+  // transition. Subsequent dropdown-driven changes do fire the clear.
+  const prevClientNameRef = useRef<string | null>(null);
+  useEffect(() => {
+    const prev = prevClientNameRef.current;
+    prevClientNameRef.current = clientName;
+    if (prev === null) return; // first render — preSelectedItemIds intact
+    if (prev === clientName) return; // no actual change
+    setSelectedIds(new Set());
+    setPickupFreeItems([]);
+    setDeliveryFreeItems([]);
+  }, [clientName]);
+
   // Switching to pickup-related modes clears the inventory selection
   useEffect(() => {
     if (mode === 'pickup' || mode === 'service_only') {
@@ -907,9 +932,18 @@ export function CreateDeliveryOrderModal({
   const activeItems = useMemo(
     () => liveItems.filter(i => {
       if (i.status !== 'Active') return false;
-      if (!clientName) return true;
-      // Match by name OR by sheet ID (covers cases where clientName hasn't resolved yet)
-      if (i.clientName === clientName) return true;
+      // v2026-05-11 — require a client match. Pre-fix `if (!clientName)
+      // return true` was a pass-through fallback intended for the brief
+      // window between modal mount and client resolution, but it leaked
+      // ALL clients' inventory into the picker for staff/admin users
+      // (whose useInventory fetch is un-scoped — useClientFilter only
+      // narrows for client-role users). With no client identifier set,
+      // there's no correct answer; show nothing instead of everything.
+      if (!clientName && !clientSheetId) return false;
+      // Match by name OR by sheet ID. Sheet ID is the authoritative
+      // tenant identifier; name match is a fallback when the item row's
+      // clientId is missing (legacy data) but the name canonical-matches.
+      if (clientName && i.clientName === clientName) return true;
       if (clientSheetId && i.clientId === clientSheetId) return true;
       return false;
     }),
