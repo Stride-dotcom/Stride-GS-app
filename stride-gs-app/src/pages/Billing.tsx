@@ -147,6 +147,132 @@ const TOGGLEABLE = Object.keys(COL_LABELS);
 const DEFAULT_COL_ORDER = ['select', 'ledgerRowId', 'status', 'invoiceNo', 'client', 'sidemark', 'reference', 'date', 'svcCode', 'svcName', 'itemId', 'description', 'itemClass', 'qty', 'rate', 'total', 'taskId', 'repairId', 'shipmentNo', 'notes', 'actions'];
 
 const mf: FilterFn<BillingRow> = (row, _colId, val: string[]) => { if (!val || !val.length) return true; return val.includes(String(row.getValue(_colId))); };
+
+// ─── v2026-05-11 — STOR summarization for invoicing ───────────────────────
+//
+// Storage charges are generated per-item per-billing-period (one Unbilled
+// row per item × month), which means a large client with 150 stored items
+// shows 150 STOR lines on every monthly invoice. Operators + clients want
+// ONE line per period instead. This helper collapses all STOR rows for a
+// single invoice group (client + optional sidemark) into a single summary
+// row, returning both the rewritten row list (non-STOR + summary) and the
+// list of original STOR Ledger Row IDs so the caller can:
+//   1. Send only the summary line to GAS (one CB row instead of 150)
+//   2. Tell GAS to additionally mark the originals in the client sheet's
+//      Billing_Ledger (via extraSheetLedgerRowIdsToMark) so storage dedup
+//      keeps working
+//   3. UPDATE the originals in Supabase directly so the React Billing
+//      report shows them as Invoiced immediately (independent of the
+//      GAS-side sheet sync that follows)
+//
+// Period detection: scans every STOR row's date and reports the min/max
+// as the period. Description ends up like "Storage charges — Apr 1-30,
+// 2026 (42 items)" when dates fall in one month, or "Storage charges —
+// Apr 1, 2026 to May 15, 2026 (42 items)" when they span months.
+//
+// Non-STOR rows pass through unchanged. Returns the original rows as the
+// rowsForInvoice when there's nothing to summarize (0 or 1 STOR row) so
+// callers don't pay the cost of a no-op rewrite.
+interface StorSummarizeResult {
+  rowsForInvoice: UnbilledReportRow[];
+  /** Original per-item STOR Ledger Row IDs, EXCLUDED from rowsForInvoice
+   *  (they were collapsed into the summary line). Pass these to GAS via
+   *  extraSheetLedgerRowIdsToMark + UPDATE the matching Supabase billing
+   *  rows so both the sheet and Supabase show Status=Invoiced. */
+  collapsedStorLedgerRowIds: string[];
+  /** True when at least 2 STOR rows were collapsed. Drives the post-
+   *  success Supabase UPDATE — when nothing was collapsed there's
+   *  nothing to update. */
+  didSummarize: boolean;
+}
+
+function summarizeStorageRowsForInvoice(rows: UnbilledReportRow[]): StorSummarizeResult {
+  const storRows = rows.filter(r => String(r.svcCode || '').toUpperCase() === 'STOR');
+  // Need at least 2 STOR rows to summarize — a single STOR line stays
+  // as-is so the invoice still shows the per-item detail when there's
+  // only one storage charge.
+  if (storRows.length < 2) {
+    return { rowsForInvoice: rows, collapsedStorLedgerRowIds: [], didSummarize: false };
+  }
+  const nonStorRows = rows.filter(r => String(r.svcCode || '').toUpperCase() !== 'STOR');
+
+  // Aggregate the summary line.
+  const totalSum = storRows.reduce((sum, r) => sum + (Number(r.total) || 0), 0);
+  const itemCount = storRows.length;
+
+  // Period: parse each row's date column. The sheet typically writes
+  // YYYY-MM-DD or a human-readable form; new Date() handles both. Falls
+  // back to "various dates" if no row parses.
+  const parsedDates = storRows
+    .map(r => {
+      const d = new Date(String(r.date || ''));
+      return Number.isNaN(d.getTime()) ? null : d;
+    })
+    .filter((d): d is Date => d !== null)
+    .sort((a, b) => a.getTime() - b.getTime());
+  const fmt = (d: Date) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  let periodLabel = 'various dates';
+  if (parsedDates.length > 0) {
+    const start = parsedDates[0];
+    const end   = parsedDates[parsedDates.length - 1];
+    if (start.toDateString() === end.toDateString()) {
+      periodLabel = fmt(start);
+    } else if (start.getFullYear() === end.getFullYear() && start.getMonth() === end.getMonth()) {
+      // Same month → "Apr 1-30, 2026"
+      const monthYear = start.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+      periodLabel = `${start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}-${end.getDate()}, ${start.getFullYear()}`.replace(/^[A-Za-z]+ /, m => m) || monthYear;
+    } else {
+      periodLabel = `${fmt(start)} to ${fmt(end)}`;
+    }
+  }
+
+  // Build the summary row. Inherits client/sidemark/sourceSheetId from
+  // the first STOR row (they're identical across a single group by
+  // construction — we're already inside a per-group call). Date is the
+  // latest STOR date so the invoice line dates as recent.
+  const first = storRows[0];
+  const summaryDate = parsedDates.length > 0
+    ? parsedDates[parsedDates.length - 1].toISOString().slice(0, 10)
+    : String(first.date || '');
+  const summaryLedgerRowId = `STOR-SUMMARY-${(globalThis.crypto?.randomUUID?.() || String(Date.now())).slice(0, 18)}`;
+
+  const summary: UnbilledReportRow = {
+    client: first.client,
+    sidemark: first.sidemark || '',
+    date: summaryDate,
+    svcCode: 'STOR',
+    svcName: 'Storage',
+    itemId: '',
+    description: `Storage charges — ${periodLabel} (${itemCount} items)`,
+    itemClass: '',
+    qty: 1,
+    // Rate left blank — the line is a flat total, not a unit price.
+    // jsPDF invoice renderer treats null/0/undefined rate as "blank".
+    rate: 0,
+    total: Math.round(totalSum * 100) / 100,
+    notes: `Summarized from ${itemCount} per-item STOR rows`,
+    taskId: '',
+    repairId: '',
+    shipmentNo: '',
+    category: 'Storage Charges',
+    ledgerRowId: summaryLedgerRowId,
+    sourceSheetId: first.sourceSheetId,
+  };
+
+  const collapsedStorLedgerRowIds = storRows
+    .map(r => r.ledgerRowId)
+    .filter((id): id is string => !!id);
+
+  return {
+    // Non-STOR rows first, then the summary — keeps service-fee lines
+    // at the top of the invoice and storage as the closing line, which
+    // matches how operators read the PDFs today.
+    rowsForInvoice: [...nonStorRows, summary],
+    collapsedStorLedgerRowIds,
+    didSummarize: true,
+  };
+}
+
 mf.autoRemove = (v: string[]) => !v || !v.length;
 
 const fmt = fmtDate;
@@ -2078,12 +2204,26 @@ export function Billing() {
       items: invokable.map(g => ({ id: g.client + (g.sidemark ? ` · ${g.sidemark}` : ''), item: g })),
       call: async (g) => {
         try {
+          // v2026-05-11 — STOR summarization. When a group has ≥2 STOR
+          // rows (typical monthly storage invoice — 1 row per item),
+          // collapse them into ONE summary line for the invoice +
+          // Consolidated_Ledger, and pass the original Ledger Row IDs
+          // via extraSheetLedgerRowIdsToMark so GAS still marks them
+          // Invoiced in the client Billing_Ledger sheet (where storage
+          // dedup reads the Status column). Non-STOR rows + the summary
+          // line ride together as the regular `rows` payload.
+          const { rowsForInvoice, collapsedStorLedgerRowIds, didSummarize } =
+            summarizeStorageRowsForInvoice(g.rows);
           const res = await postCreateInvoice({
             idempotencyKey: crypto.randomUUID(),
-            rows: g.rows,
+            rows: rowsForInvoice,
             client: g.client,
             sidemark: g.sidemark || undefined,
             sourceSheetId: g.sourceSheetId,
+            // v2026-05-11 — only present when we summarized (>=2 STOR
+            // rows). GAS additionally marks these in the sheet's
+            // Billing_Ledger so storage-charge dedup keeps working.
+            extraSheetLedgerRowIdsToMark: didSummarize ? collapsedStorLedgerRowIds : undefined,
             // Session 93: skipPdf is now always true on the GAS side. The
             // Drive Doc → PDF flow has been replaced by client-side jsPDF
             // generation that uploads to public.storage `invoices` bucket
@@ -2110,6 +2250,12 @@ export function Billing() {
               return { ok: false, error: res.data.error || 'Server returned success=false' };
             }
             // Capture data we need for the post-commit PDF pass.
+            // v2026-05-11 — PDF renders from rowsForInvoice so the
+            // archived PDF in the `invoices` bucket matches what the
+            // operator + client see in the email + on the Invoice tab.
+            // Original per-item STOR rows are NOT in the PDF — the
+            // single summary line is — but they remain in Supabase
+            // for audit (see the post-success UPDATE below).
             if (res.data.invoiceNo && g.sourceSheetId) {
               pdfQueue.push({
                 tenantId: g.sourceSheetId,
@@ -2117,8 +2263,33 @@ export function Billing() {
                 invoiceDate: new Date().toISOString().slice(0, 10),
                 clientName: g.client,
                 sidemark: g.sidemark || '',
-                rows: g.rows,
+                rows: rowsForInvoice,
               });
+            }
+            // v2026-05-11 — flag the collapsed STOR rows in Supabase so
+            // the Billing report reflects them as Invoiced immediately,
+            // independent of the GAS-side syncClientBilling pass that
+            // follows. GAS will also mark them in the sheet (via
+            // extraSheetLedgerRowIdsToMark above), but the React UI
+            // wants the optimistic-confirmed status now. Best-effort —
+            // a Supabase outage here doesn't roll back the invoice;
+            // syncClientBilling backstops eventual consistency.
+            if (didSummarize && res.data.invoiceNo && collapsedStorLedgerRowIds.length > 0) {
+              try {
+                const invoiceNoForMark = res.data.invoiceNo;
+                const invoiceDateForMark = new Date().toISOString().slice(0, 10);
+                await supabase
+                  .from('billing')
+                  .update({
+                    status: 'Invoiced',
+                    invoice_no: invoiceNoForMark,
+                    invoice_date: invoiceDateForMark,
+                  })
+                  .eq('tenant_id', g.sourceSheetId)
+                  .in('ledger_row_id', collapsedStorLedgerRowIds);
+              } catch (sbErr) {
+                console.warn('[invoice] STOR summary post-update failed (non-fatal):', sbErr);
+              }
             }
             billingBatch.recordInvoice({
               ok: true,
