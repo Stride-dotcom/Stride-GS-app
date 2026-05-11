@@ -1417,6 +1417,13 @@ export function CreateDeliveryOrderModal({
         },
       });
     }
+    // v2026-05-11 — pickup-leg ad-hoc items now live ONLY on the
+    // pickup leg's dt_order_items rows. Pre-fix they were duplicated
+    // to BOTH legs (with "PU: " prefix on pickup, plain on delivery),
+    // which meant a P+D order's delivery DT push showed pickup-only
+    // items too. The new model: pickupFreeItems → pickup leg only,
+    // deliveryFreeItems → delivery leg only. Two truly independent
+    // ad-hoc lists.
     for (const i of pickupFreeItems) {
       const desc = i.description.trim();
       if (!desc) continue;
@@ -1429,13 +1436,38 @@ export function CreateDeliveryOrderModal({
         original_quantity: qty,
         extras: { source: 'pickup_free_text' },
       });
+    }
+    for (const i of deliveryFreeItems) {
+      const desc = i.description.trim();
+      if (!desc) continue;
+      const qty = Math.max(1, Number(i.quantity) || 1);
+      const wRaw = i.weight != null ? Number(i.weight) : null;
+      const cuftPerUnit = Number.isFinite(Number(i.cubicFeet)) && Number(i.cubicFeet) > 0
+        ? Number(i.cubicFeet)
+        : null;
+      // Match the convention used by the delivery-only / pickup-only
+      // adhoc-save paths (see ~line 2492 and friends):
+      //   - dt_order_items.cubic_feet = per-unit × qty (total for the
+      //     line, used downstream by pricing rollups)
+      //   - extras.cuft = per-unit (what the editor stores + reads
+      //     back; renaming would break round-trip with edit-load)
+      //   - extras.weight = per-unit lbs
+      // Pre-fix this stored extras.cubicFeet (wrong key) and
+      // cubic_feet=per-unit (no qty multiplier), which silently lost
+      // cuft on reopen AND undercounted weight/cube rollups on the
+      // delivery leg of P+D orders.
       rows.push({
         dt_order_id: deliveryId,
         dt_item_code: null,
         description: desc,
         quantity: qty,
         original_quantity: qty,
-        extras: { source: 'pickup_free_text', linked_to_pickup: pickupId },
+        cubic_feet: cuftPerUnit != null ? cuftPerUnit * qty : null,
+        extras: {
+          source: 'delivery_free_text',
+          weight: Number.isFinite(wRaw) && wRaw && wRaw > 0 ? wRaw : null,
+          cuft: cuftPerUnit,
+        },
       });
     }
     return rows;
@@ -1451,19 +1483,19 @@ export function CreateDeliveryOrderModal({
   const itemCount = useMemo(() => {
     if (mode === 'service_only') return 0;
     const invQty = selectedInvItems.reduce((s, i) => s + Math.max(1, Number(i.qty) || 1), 0);
-    if (mode === 'delivery' && itemsSource === 'warehouse') {
-      const adhoc = deliveryFreeItems
-        .filter(i => i.description.trim())
-        .reduce((sum, i) => sum + Math.max(1, Number(i.quantity) || 1), 0);
-      return invQty + adhoc;
-    }
     const pickupQty = pickupFreeItems
       .filter(i => i.description.trim())
       .reduce((sum, i) => sum + Math.max(1, Number(i.quantity) || 1), 0);
-    // P+D supports both warehouse + pickup-leg ad-hoc items in the
-    // same order; pickup-only mode has no warehouse items so invQty
-    // is 0 there anyway.
-    if (mode === 'pickup_and_delivery') return invQty + pickupQty;
+    const deliveryQty = deliveryFreeItems
+      .filter(i => i.description.trim())
+      .reduce((sum, i) => sum + Math.max(1, Number(i.quantity) || 1), 0);
+    if (mode === 'delivery' && itemsSource === 'warehouse') {
+      return invQty + deliveryQty;
+    }
+    // v2026-05-11 — P+D now sums all three: warehouse inventory +
+    // pickup-leg ad-hoc + delivery-leg ad-hoc. Pre-fix only pickupQty
+    // counted; deliveryFreeItems didn't exist on P+D mode.
+    if (mode === 'pickup_and_delivery') return invQty + pickupQty + deliveryQty;
     return pickupQty;
   }, [mode, itemsSource, selectedInvItems, pickupFreeItems, deliveryFreeItems]);
 
@@ -1621,7 +1653,15 @@ export function CreateDeliveryOrderModal({
       // items, or both. (Customer might just want us to deliver from
       // storage and grab one thing along the way, or vice versa.)
       if (mode === 'pickup' && !hasPickupItems) return false;
-      if (mode === 'pickup_and_delivery' && !hasPickupItems && selectedInvItems.length === 0) return false;
+      // v2026-05-11 — P+D now has THREE potential item sources:
+      // warehouse inventory, pickup ad-hoc lines, OR delivery ad-hoc
+      // lines (new independent list). Require at least one of them.
+      // Pre-fix the gate only checked pickup + inventory and would
+      // block submit on a "delivery-only ad-hoc + grab nothing on the
+      // way" P+D order even though the operator clearly had something
+      // to deliver.
+      const hasDeliveryAdhoc = deliveryFreeItems.some(i => i.description.trim());
+      if (mode === 'pickup_and_delivery' && !hasPickupItems && selectedInvItems.length === 0 && !hasDeliveryAdhoc) return false;
     }
     if (needsDelivery) {
       if (!deliveryContactName.trim() || !deliveryAddress.trim() || !deliveryCity.trim() || !deliveryZip.trim()) return false;
@@ -1672,8 +1712,9 @@ export function CreateDeliveryOrderModal({
       if (!pickupZip.trim())         out.push('pickup ZIP');
       const hasPickupItems = pickupFreeItems.some(i => i.description.trim());
       if (mode === 'pickup' && !hasPickupItems) out.push('at least one pickup item');
-      if (mode === 'pickup_and_delivery' && !hasPickupItems && selectedInvItems.length === 0) {
-        out.push('at least one item (pickup or from warehouse)');
+      const hasDeliveryAdhocMF = deliveryFreeItems.some(i => i.description.trim());
+      if (mode === 'pickup_and_delivery' && !hasPickupItems && selectedInvItems.length === 0 && !hasDeliveryAdhocMF) {
+        out.push('at least one item (pickup, delivery, or from warehouse)');
       }
     }
     if (needsDelivery) {
@@ -1818,6 +1859,17 @@ export function CreateDeliveryOrderModal({
         return;
       }
       let r = row as Record<string, unknown>;
+      // v2026-05-11 — capture the pickup leg's own items so the P+D
+      // edit path can split ad-hoc lines into pickupFreeItems (from
+      // the pickup leg) vs. deliveryFreeItems (from the delivery
+      // leg). Populated in two paths:
+      //   Path A — pickup-opened-then-swapped: pickup items live on
+      //   the originally-loaded `row.dt_order_items`. Capture BEFORE
+      //   the swap-to-delivery overwrites r.
+      //   Path B — delivery-opened: the linked-fetch at the contact-
+      //   stash block below pulls pickup contacts; we extend its
+      //   SELECT to also include dt_order_items.
+      let pickupLegItems: Array<Record<string, unknown>> = [];
       // Pickup-leg-of-P+D detection. When the user opens a pickup row
       // that's half of a P+D pair (order_type='pickup' AND
       // linked_order_id points at a delivery leg), the modal needs
@@ -1843,6 +1895,10 @@ export function CreateDeliveryOrderModal({
           phone2: r.contact_phone2,
           email: r.contact_email,
         };
+        // Path A — capture pickup items BEFORE we overwrite r.
+        pickupLegItems = Array.isArray(r.dt_order_items)
+          ? (r.dt_order_items as Array<Record<string, unknown>>)
+          : [];
         const pickupLegRowId = String(r.id || '');
         const { data: deliveryRow } = await supabase
           .from('dt_orders')
@@ -1985,9 +2041,14 @@ export function CreateDeliveryOrderModal({
       // pricing); linked_order_id points at the PICKUP leg.
       if (ot === 'pickup_and_delivery' && r.linked_order_id) {
         try {
+          // v2026-05-11 — Path B: also pull the pickup leg's
+          // dt_order_items so the ad-hoc split below can hydrate
+          // pickupFreeItems from the PICKUP row (not the delivery row,
+          // which now only carries delivery ad-hoc).
           const { data: pickupRow } = await supabase
             .from('dt_orders')
-            .select('id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_phone2, contact_email')
+            .select('id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_phone2, contact_email, dt_order_items(*)')
+            .is('dt_order_items.removed_at', null)
             .eq('id', r.linked_order_id as string)
             .maybeSingle();
           if (pickupRow && !cancelled) {
@@ -2001,6 +2062,9 @@ export function CreateDeliveryOrderModal({
             if (p.contact_phone)   setPickupPhone(p.contact_phone as string);
             if (p.contact_phone2)  setPickupPhone2(p.contact_phone2 as string);
             if (p.contact_email)   setPickupEmail(p.contact_email as string);
+            pickupLegItems = Array.isArray(p.dt_order_items)
+              ? (p.dt_order_items as Array<Record<string, unknown>>)
+              : [];
           }
         } catch (_) { /* tolerate — pickup leg edit will be unavailable */ }
       }
@@ -2045,14 +2109,85 @@ export function CreateDeliveryOrderModal({
             };
           });
         if (adhoc.length > 0) setDeliveryFreeItems(adhoc);
-      } else if (ot === 'pickup_and_delivery' || ot === 'pickup') {
-        // P+D and pickup-only both store ad-hoc lines as
-        // dt_order_items rows with extras.source = 'pickup_free_text'.
-        // The pickup leg also prefixes "PU: " on the description so DT
-        // distinguishes the two legs in its UI; strip it back out
-        // when hydrating so the editor shows the human description.
-        // Without this branch the modal opened on a P+D order showed
-        // an empty item editor (the 2026-05-07 MRS-00047 incident).
+      } else if (ot === 'pickup_and_delivery') {
+        // v2026-05-11 — P+D now stores ad-hoc lines on the appropriate
+        // leg only:
+        //   - pickup ad-hoc → PICKUP leg row (description prefixed
+        //     "PU: " so DT differentiates in its UI; strip it back out
+        //     here for the editor)
+        //   - delivery ad-hoc → DELIVERY leg row (no prefix)
+        // Older orders saved under the previous single-list model have
+        // every ad-hoc line on BOTH legs (the old buildPDItemRows
+        // duplicated them). Loading from pickupLegItems for pickup +
+        // delivery items for delivery would double-show those legacy
+        // rows. We dedupe by walking pickupLegItems first, then only
+        // including delivery-leg ad-hoc lines that aren't already a
+        // PU-prefixed match on the pickup side.
+        const pickupAdhoc: FreeItem[] = pickupLegItems
+          .filter(it => !String(it.dt_item_code || '').trim())
+          .map(it => {
+            const qtyN = Number(it.quantity);
+            const ex = (it.extras && typeof it.extras === 'object' ? it.extras : {}) as Record<string, unknown>;
+            const wRaw = Number(ex.weight);
+            const cuftRaw = Number(ex.cuft);
+            const desc = String(it.description || '');
+            const cleanDesc = desc.startsWith('PU: ') ? desc.slice(4) : desc;
+            return {
+              id: genUid(),
+              description: cleanDesc,
+              quantity: Number.isFinite(qtyN) && qtyN > 0 ? qtyN : 1,
+              weight: Number.isFinite(wRaw) && wRaw > 0 ? wRaw : null,
+              cubicFeet: Number.isFinite(cuftRaw) && cuftRaw > 0 ? cuftRaw : null,
+            };
+          });
+        if (pickupAdhoc.length > 0) setPickupFreeItems(pickupAdhoc);
+        // Build a signature set from pickup descriptions so legacy
+        // duplicated rows on the delivery leg get filtered out.
+        const pickupDescSig = new Set(
+          pickupAdhoc.map(i => `${i.description.trim().toLowerCase()}|${i.quantity}`),
+        );
+        const deliveryAdhoc: FreeItem[] = items
+          .filter(it => {
+            if (String(it.dt_item_code || '').trim()) return false;
+            const ex = (it.extras && typeof it.extras === 'object' ? it.extras : {}) as Record<string, unknown>;
+            // Delivery-side ad-hoc has source='delivery_free_text' for
+            // new orders, or source='pickup_free_text' for legacy
+            // duplicated rows. Either is included; legacy duplicates
+            // get deduped by the signature check below.
+            return ex.source === 'delivery_free_text' || ex.source === 'pickup_free_text';
+          })
+          .reduce<FreeItem[]>((acc, it) => {
+            const ex = (it.extras && typeof it.extras === 'object' ? it.extras : {}) as Record<string, unknown>;
+            const qtyN = Number(it.quantity);
+            const wRaw = Number(ex.weight);
+            // Read both cuft keys for back-compat: new writes use
+            // extras.cuft (per-unit); a brief in-progress version of
+            // this PR wrote extras.cubicFeet before review caught the
+            // mismatch with the rest of the codebase. Either survives
+            // a reopen.
+            const cuftRaw = Number.isFinite(Number(ex.cuft)) ? Number(ex.cuft) : Number(ex.cubicFeet);
+            const desc = String(it.description || '');
+            // Strip a leading "PU: " on the delivery row only if it's
+            // a legacy duplicate of a pickup line — without this the
+            // dedupe check below would miss the match.
+            const cleanDesc = desc.startsWith('PU: ') ? desc.slice(4) : desc;
+            const qty = Number.isFinite(qtyN) && qtyN > 0 ? qtyN : 1;
+            const sig = `${cleanDesc.trim().toLowerCase()}|${qty}`;
+            if (pickupDescSig.has(sig)) return acc;
+            acc.push({
+              id: genUid(),
+              description: cleanDesc,
+              quantity: qty,
+              weight: Number.isFinite(wRaw) && wRaw > 0 ? wRaw : null,
+              cubicFeet: Number.isFinite(cuftRaw) && cuftRaw > 0 ? cuftRaw : null,
+            });
+            return acc;
+          }, []);
+        if (deliveryAdhoc.length > 0) setDeliveryFreeItems(deliveryAdhoc);
+      } else if (ot === 'pickup') {
+        // Standalone pickup-only (not part of a P+D pair — those get
+        // swapped to delivery above before we reach this branch).
+        // Loads ad-hoc lines from the pickup row's own items.
         const adhoc: FreeItem[] = items
           .filter(it => !String(it.dt_item_code || '').trim())
           .map(it => {
@@ -3836,8 +3971,8 @@ export function CreateDeliveryOrderModal({
                       <button
                         type="button"
                         onClick={() => setPickupFreeItems(prev => prev.filter(i => i.id !== item.id))}
-                        disabled={pickupFreeItems.length <= 1}
-                        style={{ background: 'none', border: 'none', cursor: pickupFreeItems.length > 1 ? 'pointer' : 'not-allowed', color: '#991B1B', padding: 4, opacity: pickupFreeItems.length > 1 ? 1 : 0.4 }}
+                        title="Remove ad-hoc item"
+                        style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#991B1B', padding: 4 }}
                       >
                         <Trash2 size={14} />
                       </button>
@@ -3846,7 +3981,7 @@ export function CreateDeliveryOrderModal({
                 </div>
                 {mode === 'pickup_and_delivery' && (
                   <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 8, fontStyle: 'italic' }}>
-                    These items will auto-appear on the delivery leg below.
+                    Pickup-only items. Add the items to be delivered in the Delivery section below.
                   </div>
                 )}
               </div>
@@ -4298,54 +4433,16 @@ export function CreateDeliveryOrderModal({
                 </div>
               )}
 
-              {/* Auto-copied items display for pickup_and_delivery */}
-              {mode === 'pickup_and_delivery' && (
-                <div style={{ marginTop: 18 }}>
-                  <div style={{
-                    fontSize: 13, fontWeight: 700, color: theme.colors.text,
-                    textTransform: 'uppercase', letterSpacing: '0.06em',
-                    marginBottom: 8,
-                  }}>
-                    Items To Deliver <span style={{ color: theme.colors.textMuted, fontWeight: 600 }}>(copied from pickup)</span>
-                  </div>
-                  {/* Items list lifted out of muted gray — these are the
-                      confirmed items the operator + driver act on, so
-                      they should read at the same weight as a normal
-                      data table. The empty-state copy stays muted so
-                      it's clearly a hint, not a list entry. */}
-                  {pickupFreeItems.filter(i => i.description.trim()).length === 0 ? (
-                    <div style={{ padding: 12, background: '#F9FAFB', borderRadius: 8, fontSize: 12, color: theme.colors.textMuted, fontStyle: 'italic' }}>
-                      Add items on the Pickup section above — they&apos;ll appear here automatically.
-                    </div>
-                  ) : (
-                    <div style={{
-                      padding: 12, background: '#F9FAFB',
-                      border: `1px solid ${theme.colors.borderLight || '#e5e7eb'}`,
-                      borderRadius: 8,
-                      display: 'flex', flexDirection: 'column', gap: 6,
-                    }}>
-                      {pickupFreeItems.filter(i => i.description.trim()).map(i => (
-                        <div key={i.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, fontSize: 13, color: theme.colors.text }}>
-                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 }}>
-                            <span style={{ width: 4, height: 4, borderRadius: '50%', background: theme.colors.primary, flexShrink: 0 }} />
-                            <span style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                              {i.description}
-                            </span>
-                          </span>
-                          <span style={{
-                            fontSize: 11, fontWeight: 600,
-                            padding: '2px 8px', borderRadius: 100,
-                            background: '#FFEDD5', color: '#9A3412',
-                            flexShrink: 0,
-                          }}>
-                            qty {i.quantity}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
+              {/* v2026-05-11 — the legacy "Items To Deliver (copied from
+                  pickup)" mirror block was removed. P+D now uses two
+                  independent ad-hoc lists: pickup items live in the
+                  PICKUP section above, delivery items live in the
+                  delivery Ad-Hoc Items editor right above this comment.
+                  Mirroring pickup items into the delivery view confused
+                  operators into thinking they didn't need to type them
+                  twice — but the new model is intentional: a P+D order
+                  ships some items one-way (pickup only, or delivery
+                  only) and the operator decides per leg. */}
 
               {/* Service description for service-only */}
               {mode === 'service_only' && (

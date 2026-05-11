@@ -1,5 +1,22 @@
 /**
- * dt-push-order — Supabase Edge Function (Phase 2c) — v19 2026-05-08 PST
+ * dt-push-order — Supabase Edge Function (Phase 2c) — v20 2026-05-11 PST
+ * v20: Pushing from EITHER leg of a pickup_and_delivery pair now flushes
+ *      BOTH legs to DT. Pre-v20, Section 4 only fired when the primary
+ *      had order_type='pickup_and_delivery' (the delivery leg). If the
+ *      operator clicked Push on the pickup leg's OrderPage, only the
+ *      pickup leg was pushed and the linked delivery stayed stale in
+ *      DT (and vice versa when items were edited on the other leg).
+ *      Now Section 4 also fires when the primary has order_type='pickup'
+ *      AND linked_order_id is set — pushes the linked delivery first,
+ *      then the primary pickup. Identification of which fetched row
+ *      is the pickup vs. delivery is done via isPDDeliveryPrimary /
+ *      isPDPickupPrimary flags, so linkedDeliveryInfo (which drives
+ *      the "PICK UP for Del <id>" item prefix + LINKED DELIVERY block
+ *      in the description) is correctly threaded to whichever leg is
+ *      the pickup. DT's add_order is upsert-by-identifier so re-pushing
+ *      both legs is idempotent — no duplicates created.
+ *
+ * v19 2026-05-08 PST
  * v19: Pickup-leg item descriptions get a contextual prefix instead of
  *      the flat "PICK UP: " label so dispatch/staff can tell at a
  *      glance what each piece is for. Two cases:
@@ -645,13 +662,34 @@ Deno.serve(async (req: Request) => {
 
   const postUrl = `${baseUrl}/orders/api/add_order?code=expressinstallation&api_key=${encodeURIComponent(apiKey)}`;
 
-  // ── 4. Handle linked pickup (for pickup_and_delivery orders) ──────────
-  // If this order is a delivery leg of a pickup_and_delivery pair AND the
-  // pickup hasn't been pushed yet, push the pickup first.
+  // ── 4. Handle linked leg (for pickup_and_delivery pairs) ──────────────
+  // When the primary is the DELIVERY leg of a P+D pair (order_type=
+  // 'pickup_and_delivery' + linked_order_id set), push the linked pickup
+  // first, then the delivery. When the primary is the PICKUP leg of a
+  // P+D pair (order_type='pickup' + linked_order_id set), push the
+  // linked delivery first, then the pickup. Either way, pushing from
+  // either leg flushes both legs to DT — so the operator can re-push
+  // from either page after editing items on either side.
+  //
+  // v20 (2026-05-11): pickup-primary case added. Pre-fix only the
+  // delivery-primary branch ran Section 4, so a user pushing from the
+  // pickup OrderPage left the delivery stale in DT (and vice versa
+  // when the pickup leg got an item added after the initial push but
+  // the user only re-pushed the delivery). Both branches now also
+  // re-mirror via the upsert-by-identifier behavior of DT add_order,
+  // so re-clicking is safe and idempotent.
   let linkedPushedIdentifier: string | undefined;
+  // Stash the fetched linked row so Section 5 below (which needs the
+  // linked delivery's contact info when pushing a pickup-primary) can
+  // reuse the same row instead of a second round-trip.
+  let stashedLinkedRow: DtOrderRow | null = null;
+  const isPDDeliveryPrimary = orderType === 'pickup_and_delivery' && !!orderTyped.linked_order_id;
+  const isPDPickupPrimary   = orderType === 'pickup'                && !!orderTyped.linked_order_id;
 
-  if (orderType === 'pickup_and_delivery' && orderTyped.linked_order_id) {
-    // Fetch the linked pickup order
+  if (isPDDeliveryPrimary || isPDPickupPrimary) {
+    // Fetch the linked leg (delivery if primary is pickup; pickup if
+    // primary is delivery). The v18 cross-ref + service-date fallback
+    // works the same either direction.
     const { data: linkedOrder, error: linkedErr } = await supabase
       .from('dt_orders')
       .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_phone2, contact_email, local_service_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, order_notes, driver_notes, internal_notes, service_time_minutes, review_status, pushed_to_dt_at, billing_method, order_total, base_delivery_fee, extra_items_count, extra_items_fee, accessorials_json, accessorials_total, billing_review_status, paid_at, paid_amount, paid_method')
@@ -660,6 +698,12 @@ Deno.serve(async (req: Request) => {
 
     if (!linkedErr && linkedOrder) {
       const linkedTyped = linkedOrder as DtOrderRow;
+      stashedLinkedRow = linkedTyped;
+      // Identify which row is the pickup leg vs. delivery leg of the
+      // pair. For a P+D pair: one row has order_type='pickup', the
+      // other 'pickup_and_delivery'.
+      const pickupRow   = isPDDeliveryPrimary ? linkedTyped : orderTyped;
+      const deliveryRow = isPDDeliveryPrimary ? orderTyped : linkedTyped;
       // v18 fix: pickup leg shows "-" for service date in DT when the
       // linked pickup row's `local_service_date` is null (the React
       // create-order path didn't always stamp it on the pickup leg).
@@ -667,14 +711,14 @@ Deno.serve(async (req: Request) => {
       // calendar day, so fall back to the delivery leg's date here
       // before building the pickup XML. Same fallback for the time
       // window since DT's pickup card renders both side-by-side.
-      if (!linkedTyped.local_service_date && orderTyped.local_service_date) {
-        linkedTyped.local_service_date = orderTyped.local_service_date;
+      if (!pickupRow.local_service_date && deliveryRow.local_service_date) {
+        pickupRow.local_service_date = deliveryRow.local_service_date;
       }
-      if (!linkedTyped.window_start_local && orderTyped.window_start_local) {
-        linkedTyped.window_start_local = orderTyped.window_start_local;
+      if (!pickupRow.window_start_local && deliveryRow.window_start_local) {
+        pickupRow.window_start_local = deliveryRow.window_start_local;
       }
-      if (!linkedTyped.window_end_local && orderTyped.window_end_local) {
-        linkedTyped.window_end_local = orderTyped.window_end_local;
+      if (!pickupRow.window_end_local && deliveryRow.window_end_local) {
+        pickupRow.window_end_local = deliveryRow.window_end_local;
       }
       // v2026-05-04: Lifted the "skip if already pushed" guard. DT's
       // add_order is upsert-by-identifier (Ashok confirmed): re-posting
@@ -691,23 +735,32 @@ Deno.serve(async (req: Request) => {
         .is('removed_at', null);
       const linkedItemsTyped = (linkedItems || []) as DtOrderItemRow[];
 
+      // The linked push needs the OTHER leg's info as cross-ref. For
+      // pickup-as-linked the description points "to delivery" (the
+      // primary). For delivery-as-linked the cross-ref points "to
+      // pickup" (the primary). linkedDeliveryInfo is only used when
+      // pushing the pickup leg (drives "PICK UP for Del <id>" prefix
+      // + the description's LINKED DELIVERY block), so we only pass
+      // it when linkedTyped IS the pickup.
+      const linkedIsPickup = String(linkedTyped.order_type || '') === 'pickup'
+        || linkedTyped.is_pickup === true;
       const linkedPush = await pushSingleOrder(
         linkedTyped, linkedItemsTyped, accountName, postUrl,
-        orderTyped.dt_identifier, // cross-ref points to the delivery
-        { // delivery info for the pickup leg's description
-          identifier: orderTyped.dt_identifier,
-          contactName: orderTyped.contact_name || undefined,
-          address: orderTyped.contact_address || undefined,
-          city: orderTyped.contact_city || undefined,
-          state: orderTyped.contact_state || undefined,
-          zip: orderTyped.contact_zip || undefined,
-        },
+        orderTyped.dt_identifier, // cross-ref always points to the primary
+        linkedIsPickup ? {
+          identifier: deliveryRow.dt_identifier,
+          contactName: deliveryRow.contact_name || undefined,
+          address: deliveryRow.contact_address || undefined,
+          city: deliveryRow.contact_city || undefined,
+          state: deliveryRow.contact_state || undefined,
+          zip: deliveryRow.contact_zip || undefined,
+        } : undefined,
       );
 
       if (!linkedPush.ok) {
         return new Response(JSON.stringify({
           ok: false,
-          error: `Linked pickup push failed: ${linkedPush.errMsg}`,
+          error: `Linked leg push failed: ${linkedPush.errMsg}`,
           responseBody: linkedPush.body.slice(0, 500),
         }), { status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
@@ -726,9 +779,25 @@ Deno.serve(async (req: Request) => {
   }
 
   // ── 5. Push the primary (delivery/pickup/service) order ───────────────
+  // When the primary IS the pickup leg of a P+D pair, the description
+  // needs the linkedDeliveryInfo block so dispatch sees the delivery
+  // address. Reuse the linked row Section 4 already fetched into
+  // stashedLinkedRow — no extra round-trip.
+  let primaryLinkedDeliveryInfo: Parameters<typeof pushSingleOrder>[5] | undefined;
+  if (isPDPickupPrimary && stashedLinkedRow) {
+    primaryLinkedDeliveryInfo = {
+      identifier: stashedLinkedRow.dt_identifier as string,
+      contactName: stashedLinkedRow.contact_name || undefined,
+      address: stashedLinkedRow.contact_address || undefined,
+      city: stashedLinkedRow.contact_city || undefined,
+      state: stashedLinkedRow.contact_state || undefined,
+      zip: stashedLinkedRow.contact_zip || undefined,
+    };
+  }
   const primaryPush = await pushSingleOrder(
     orderTyped, itemsTyped, accountName, postUrl,
-    linkedPushedIdentifier, // include cross-ref if we pushed a linked pickup
+    linkedPushedIdentifier, // include cross-ref if we pushed a linked leg
+    primaryLinkedDeliveryInfo,
   );
 
   if (!primaryPush.ok) {
