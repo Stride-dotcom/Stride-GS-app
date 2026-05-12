@@ -182,7 +182,7 @@ Every change must go through this sequence before being shipped:
 3. **Commit immediately** — `git commit -am "..."`. Do this as soon as the edits compile in your head — *before* typecheck/build/review. A parallel builder's `git pull` or `npm run deploy` will erase any uncommitted file in your working tree without warning. See [⚠️ CRITICAL: Branching Rules](#-critical-branching-rules).
 4. **Type-check** — `node node_modules/typescript/lib/tsc.js --noEmit` (zero errors required). If it fails, fix and amend or add a commit — never leave the fix uncommitted.
 5. **Full build** — `npm run build` (catches real bundler/vite errors the type-check misses)
-6. **Code review** — spawn an Opus 4.7 subagent to review all diffs before merging
+6. **Code review** — spawn the locked-in `code-reviewer` subagent (Opus 4.7, read-only) to review all diffs before merging. Defined in `.claude/agents/code-reviewer.md` with the Stride-landmine checklist baked in. Trigger via `Agent({subagent_type: 'code-reviewer', prompt: ...})` or the `/code-review` slash command. Never substitute `general-purpose` — the locked-in agent has the model + landmines pre-loaded and stays consistent across sessions/builders.
 7. **PR + merge + deploy** — `git push -u origin <branch>` → `gh pr create --base source` → `gh pr merge --squash --delete-branch` → `git checkout source && git pull` → `npm run deploy -- "what changed"`
 
 Do not skip steps. `tsc --noEmit` passing is not sufficient — always run `npm run build` to catch vite-level errors. Steps 1 and 3 are the ones that historically get skipped and cause the most pain.
