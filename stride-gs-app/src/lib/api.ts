@@ -3824,6 +3824,10 @@ export interface BatchTask {
   shipmentFolderUrl?: string;
   dueDate?: string;
   priority?: string;
+  /** v2026-05-12 — overlaid from inventory; needed by BillingPreviewCard
+   *  / AddTaskServiceModal to pre-fill class-based addon rates from the
+   *  Master Price List catalog. Without it the modal pre-fills $0. */
+  itemClass?: string;
 }
 
 /** Lightweight repair from batch response */
