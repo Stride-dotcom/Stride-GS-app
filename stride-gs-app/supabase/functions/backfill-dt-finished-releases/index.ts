@@ -88,6 +88,23 @@ Deno.serve(async (req: Request) => {
     return json({ ok: false, error: 'Missing GAS_API_URL / GAS_API_TOKEN — required for real run (dry-run does not need them)' }, 500);
   }
 
+  // Belt-and-braces: verify_jwt=false makes the function URL-callable
+  // by anyone who knows the URL. Lock the destructive (non-dry-run)
+  // path behind a shared secret stored as a Supabase secret. Dry-run
+  // stays open since it's read-only. If the env var isn't set the
+  // function refuses real runs entirely — operator must configure
+  // BACKFILL_ADMIN_TOKEN in the Supabase dashboard before first apply.
+  if (!dryRun) {
+    const adminTokenExpected = Deno.env.get('BACKFILL_ADMIN_TOKEN') ?? '';
+    const adminTokenProvided = String((body as unknown as { adminToken?: string }).adminToken ?? '').trim();
+    if (!adminTokenExpected) {
+      return json({ ok: false, error: 'BACKFILL_ADMIN_TOKEN env var not configured — set it on the edge function before running with dryRun=false' }, 500);
+    }
+    if (adminTokenProvided !== adminTokenExpected) {
+      return json({ ok: false, error: 'adminToken required and must match BACKFILL_ADMIN_TOKEN. Pass it in the JSON body.' }, 401);
+    }
+  }
+
   const supabase = createClient(supabaseUrl, serviceKey);
 
   // ── 1. Find eligible orders ────────────────────────────────────────
@@ -235,33 +252,52 @@ Deno.serve(async (req: Request) => {
   for (const [, group] of groups) {
     const { tenantId: gTenant, releaseDate: gDate } = group[0];
     const invIds = group.map(g => g.inventoryId);
-    const { error: updErr } = await supabase
+    // .select('id') returns only the rows that actually flipped — the
+    // .neq('status', 'Released') filter excludes rows that were
+    // already Released, so the returned set is the true set of
+    // writes. Counting `group` directly would inflate
+    // items_supabase_updated by phantom "already Released" rows that
+    // the server-side filter dropped.
+    const { data: updatedRows, error: updErr } = await supabase
       .from('inventory')
       .update({ status: 'Released', release_date: gDate })
       .eq('tenant_id', gTenant)
       .in('id', invIds)
-      .neq('status', 'Released');
+      .neq('status', 'Released')
+      .select('id');
     if (updErr) {
       updateFailed.push({ tenantId: gTenant, releaseDate: gDate, error: updErr.message, itemIds: group.map(g => g.itemId) });
-    } else {
-      for (const t of group) updateSucceeded.push(t);
+      continue;
+    }
+    const flippedIds = new Set(((updatedRows ?? []) as Array<{ id: string }>).map(r => r.id));
+    for (const t of group) {
+      if (flippedIds.has(t.inventoryId)) updateSucceeded.push(t);
     }
   }
 
-  // ── 5. entity_audit_log — one row per order with > 0 releases ──────
-  for (const p of perOrder) {
-    if (p.itemsToRelease.length === 0) continue;
+  // ── 5. entity_audit_log — one row per order whose Supabase UPDATE
+  //      actually flipped at least one row. Sourcing this from
+  //      updateSucceeded (vs. perOrder) avoids audit-logging a
+  //      release that the database refused.
+  const succeededByOrder = new Map<string, ReleaseTuple[]>();
+  for (const t of updateSucceeded) {
+    if (!succeededByOrder.has(t.orderId)) succeededByOrder.set(t.orderId, []);
+    succeededByOrder.get(t.orderId)!.push(t);
+  }
+  for (const [orderId, tuples] of succeededByOrder) {
+    if (tuples.length === 0) continue;
+    const first = tuples[0];
     await supabase.from('entity_audit_log').insert({
       entity_type:  'dt_order',
-      entity_id:    p.orderId,
-      tenant_id:    p.tenantId,
+      entity_id:    orderId,
+      tenant_id:    first.tenantId,
       action:       'release_items',
       changes: {
-        itemIds:      p.itemsToRelease.map(i => i.itemId),
-        inventoryIds: p.itemsToRelease.map(i => i.inventoryId),
-        releaseDate:  p.releaseDate,
-        releasedCount: p.itemsToRelease.length,
-        source:       'backfill_dt_finished',
+        itemIds:       tuples.map(t => t.itemId),
+        inventoryIds:  tuples.map(t => t.inventoryId),
+        releaseDate:   first.releaseDate,
+        releasedCount: tuples.length,
+        source:        'backfill_dt_finished',
       },
       performed_by: 'backfill-dt-finished-releases',
       source:       'edge',
@@ -334,8 +370,16 @@ Deno.serve(async (req: Request) => {
     }
   }
 
+  // Top-level `ok` reflects whether EVERY step succeeded — Supabase
+  // writes AND every per-tenant sheet mirror. A partial failure
+  // (e.g. one tenant's GAS sync timed out) returns `ok: false` even
+  // though most of the work landed; the `summary` + `mirror_results`
+  // arrays carry the breakdown so callers branching on `ok` get a
+  // signal that matches reality. Sheet-mirror failures also have a
+  // gs_sync_events row for the FailedOperationsDrawer to retry.
+  const anyFailure = updateFailed.length > 0 || mirrorResults.some(r => !r.ok);
   return json({
-    ok: true,
+    ok: !anyFailure,
     dryRun: false,
     summary: {
       ...summary,
