@@ -1,6 +1,34 @@
 # Stride GS App — Build Status
 
-> Last updated: 2026-05-12 ([MIGRATION-P1.7][MIGRATION-P2.1] **Replay harness MVP shipped, StrideAPI v38.207.0** (Web App v502). End-to-end parity-testing pipeline live: `replay-shadow` + `update-item-shadow` Edge Functions + parity_results rollup trigger + redaction-whitelist fix. DB pipeline smoke-verified. Phase 1 now **7/7 done**. Cron schedule + UI "Run replay now" button deferred to MIG-012 follow-ups.).
+> Last updated: 2026-05-12 ([feat/billing] Re-issue button now appears on **voided** invoices in the Billing → Report tab Invoices section. Operator filters Status → Void, clicks Re-issue, rows flip back to Unbilled. Pure UI fix — the backend `handleReissueInvoice_` already accepted Void rows; the UI was hiding the action.).
+
+---
+
+## Recent Changes (2026-05-12, allow Re-issue on voided invoices)
+
+**Trigger:** Justin asked "what if we voided the invoice — after we void we can't re-issue?" The server-side `handleReissueInvoice_` ([StrideAPI.gs:13110](AppScripts/stride-api/StrideAPI.gs#L13110)) already accepts Void rows — its docstring says "Flip Invoiced/Void → Unbilled" — but the UI was hiding both action buttons on Void with an em-dash placeholder. Pure UI gap.
+
+**What landed** ([PR #376](https://github.com/Stride-dotcom/Stride-GS-app/pull/376), commit `1bff5e3`):
+
+- [Billing.tsx:1785](stride-gs-app/src/pages/Billing.tsx#L1785): replaced the `if (isVoid)` em-dash early return with a render path that shows only the **Re-issue** button (no Void button — voiding a void is meaningless).
+- Confirm-dialog copy now branches on `isVoid`: drops the now-stale "and removes the invoice from CB" clause (CB rows were already deleted by the prior Void) and replaces the "void in Stax/QBO FIRST" precondition with an informational note about external records still existing.
+
+**Operator workflow on the live site:**
+
+1. Billing → Report tab
+2. Status filter → **Void**
+3. Voided invoices appear in the Invoices section
+4. Click **Re-issue** → rows release back to Unbilled
+5. Re-bill via the existing Create Invoices flow under a fresh number
+
+**Files touched:**
+- [stride-gs-app/src/pages/Billing.tsx](stride-gs-app/src/pages/Billing.tsx) (cell renderer at L1736-1825 + confirm dialog at L1756-1770)
+
+**Pins (do not regress):**
+- The Re-issue handler is the single point of release for voided invoices. Do not re-introduce a UI path that suppresses the button on Void status.
+- The Void button must remain hidden on Void rows. Voiding a row that's already Void is a no-op at best, confusing at worst.
+
+**Deploy note (worth flagging):** The standard `npm run deploy` retry (`-c http.postBuffer=524288000 -c http.version=HTTP/1.1`) failed repeatedly on this push across both schannel AND openssl backends. What finally worked was constraining pack generation: `-c pack.windowMemory=10m -c pack.packSizeLimit=20m -c pack.threads=1`. The `pushWithRetry` helper in [scripts/deploy.js](stride-gs-app/scripts/deploy.js) should be upgraded with these flags as a deeper fallback.
 
 ---
 
