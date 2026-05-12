@@ -266,22 +266,40 @@ export function Orders() {
   // resolved yet) can't be acted on from the table because the
   // client filter excludes it. Counting it here was producing a
   // pill that filtered to zero rows when clicked.
+  // Staff/admin always see untenanted (tenant_id NULL) orders so the
+  // public-form orphans submitted via /delivery-request surface in the
+  // table regardless of which clients the operator has filter-selected.
+  // Without this, an anonymous submission lands in dt_orders but the
+  // client-name predicate below filters it out (clientName === '' isn't
+  // in any client filter set), so staff has no way to find it and assign
+  // a tenant. Justin reported a public form submission "not showing up".
+  const isStaffOrAdmin = user?.role === 'admin' || user?.role === 'staff';
+
   const needsActionCount = useMemo(
     () => orders.filter(o => {
-      if (!o.tenantId) return false; // not visible in the orders table
+      // v2026-05-12 — untenanted public_form orphans count toward the
+      // pill for staff/admin since the table now surfaces them.
+      const visibleUntenanted = isStaffOrAdmin && !o.tenantId;
+      if (!o.tenantId && !visibleUntenanted) return false;
       if (o.reviewStatus === 'pending_review') return true;
       if (o.reviewStatus === 'revision_requested') return true;
       if (o.reviewStatus === 'approved' && !o.pushedToDtAt && o.source === 'app') return true;
       return false;
     }).length,
-    [orders]
+    [orders, isStaffOrAdmin]
   );
 
   const clientFilteredOrders = useMemo(() => {
     if (clientFilter.length === 0) return [] as DtOrderForUI[];
     const set = new Set(clientFilter);
-    return orders.filter(o => set.has(o.clientName));
-  }, [orders, clientFilter]);
+    return orders.filter(o => {
+      // Untenanted orders (e.g. public_form orphans awaiting client
+      // assignment) always show for staff/admin regardless of the
+      // client filter, so they can be reviewed and tenanted.
+      if (isStaffOrAdmin && !o.tenantId) return true;
+      return set.has(o.clientName);
+    });
+  }, [orders, clientFilter, isStaffOrAdmin]);
 
   const filteredByCategory = useMemo(() => {
     if (!categoryFilter) return clientFilteredOrders;
