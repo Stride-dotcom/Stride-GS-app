@@ -42,17 +42,39 @@ function isSkippableKey(key: string): boolean {
   return false;
 }
 
+// Fields that "look like an ID" — searched specifically when the user
+// types a pure-numeric query (e.g. "63286" → "I'm looking for item
+// 63286"). Substring-matching that query across every text field on
+// the row generates noisy false positives (a customPrice or trailing
+// digits in some note that happens to include the digits would match);
+// users searching by ID number expect ID-column results only.
+const ID_KEY_SUFFIXES = ['Id', 'No', 'Number', 'Identifier', 'Code'];
+function isIdShapedKey(key: string): boolean {
+  for (const s of ID_KEY_SUFFIXES) if (key.endsWith(s) || key === s.toLowerCase()) return true;
+  return false;
+}
+
 // Scan an entity row for a free-text query. Walks every top-level string
 // or number field (skipping opaque IDs, timestamps, enums, etc.) and
 // returns true on first substring hit. This is what makes per-page
 // table search cover reference + notes (and any other useful text field)
 // without each page having to enumerate them.
+//
+// Smart numeric mode: when the query is pure digits (3+), restrict the
+// scan to ID-shaped fields (itemId / taskId / repairId / wcNumber /
+// shipmentNumber / reference / etc.) so an Item ID search doesn't get
+// polluted by random digits buried in unrelated text columns. Plain-text
+// queries keep the substring-everywhere semantics that make notes /
+// description searches useful.
 export function rowMatchesSearch(obj: unknown, query: string): boolean {
   if (!query) return true;
   if (obj == null || typeof obj !== 'object') return false;
-  const needle = query.toLowerCase();
+  const needle = query.toLowerCase().trim();
+  if (!needle) return true;
+  const numericOnly = /^\d{3,}$/.test(needle);
   for (const key in obj as Record<string, unknown>) {
     if (isSkippableKey(key)) continue;
+    if (numericOnly && !isIdShapedKey(key)) continue;
     const v = (obj as Record<string, unknown>)[key];
     if (v == null) continue;
     if (typeof v === 'string') {
