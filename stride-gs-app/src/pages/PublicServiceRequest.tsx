@@ -1174,6 +1174,21 @@ export function PublicServiceRequest() {
                   </button>
                 </div>
                 <div style={{ display: 'grid', gap: 6 }}>
+                  <div style={{ fontSize: 11, color: theme.colors.textMuted, fontStyle: 'italic', padding: '0 4px', marginBottom: 2 }}>
+                    Pieces = how many physical units the crew carries. Bulk packaging counts as one piece (e.g. 24 light bulbs in 1 box = 1 piece).
+                  </div>
+                  <div style={{
+                    display: 'grid',
+                    gridTemplateColumns: '1fr 80px 32px',
+                    gap: 8,
+                    fontSize: 10, fontWeight: 600, color: '#92400E',
+                    textTransform: 'uppercase', letterSpacing: '0.5px',
+                    padding: '0 4px',
+                  }}>
+                    <span>Description</span>
+                    <span>Pieces</span>
+                    <span />
+                  </div>
                   {pickupFreeItems.map(item => (
                     <div key={item.id} style={{ display: 'grid', gridTemplateColumns: '1fr 80px 32px', gap: 8, alignItems: 'center' }}>
                       <input
@@ -1185,7 +1200,7 @@ export function PublicServiceRequest() {
                       <input
                         style={input}
                         type="number" min={1}
-                        placeholder="Qty"
+                        placeholder="Pcs"
                         value={item.quantity}
                         onChange={e => setPickupFreeItems(prev => prev.map(i => i.id === item.id ? { ...i, quantity: Math.max(1, parseInt(e.target.value, 10) || 1) } : i))}
                       />
@@ -1247,6 +1262,9 @@ export function PublicServiceRequest() {
                     padding: 8,
                     display: 'grid', gap: 6,
                   }}>
+                    <div style={{ fontSize: 11, color: theme.colors.textMuted, fontStyle: 'italic', padding: '0 4px', marginBottom: 2 }}>
+                      Pieces = how many physical units the crew carries. Bulk packaging counts as one piece (e.g. 24 light bulbs in 1 box = 1 piece).
+                    </div>
                     <div style={{
                       display: 'grid',
                       gridTemplateColumns: '1fr 70px 80px 80px 32px',
@@ -1256,7 +1274,7 @@ export function PublicServiceRequest() {
                       padding: '0 4px',
                     }}>
                       <span>Description</span>
-                      <span>Qty</span>
+                      <span>Pieces</span>
                       <span>Weight (lb)</span>
                       <span>Volume (cu ft)</span>
                       <span />
@@ -1277,7 +1295,7 @@ export function PublicServiceRequest() {
                         <input
                           style={input}
                           type="number" min={1}
-                          placeholder="Qty"
+                          placeholder="Pcs"
                           value={item.quantity}
                           onChange={e => setDeliveryFreeItems(prev => prev.map(i => i.id === item.id ? { ...i, quantity: Math.max(1, parseInt(e.target.value, 10) || 1) } : i))}
                         />
