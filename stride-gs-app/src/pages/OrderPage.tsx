@@ -43,7 +43,7 @@ import { PhotosPanel, DocumentsPanel } from '../components/shared/EntityAttachme
 import { useServiceCatalog } from '../hooks/useServiceCatalog';
 import { supabase } from '../lib/supabase';
 import { CreateDeliveryOrderModal } from '../components/shared/CreateDeliveryOrderModal';
-import { ReleaseItemsModal } from '../components/shared/ReleaseItemsModal';
+import { DtOrderReleasePanel, type ReleasableItem } from '../components/shared/DtOrderReleasePanel';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { FloatingActionMenu, type FABAction } from '../components/shared/FloatingActionMenu';
 import { generateOrderPdf } from '../lib/orderPdf';
@@ -337,6 +337,30 @@ function ResubmitBanner({ order }: { order: DtOrderForUI }) {
   );
 }
 
+// Small status pill for the Items table's Status column. Color
+// scheme matches Inventory.tsx's STATUS_CONFIG so a row's status
+// reads identically across surfaces.
+function InventoryStatusChip({ status }: { status: string }) {
+  const cfg: Record<string, { bg: string; fg: string }> = {
+    Active:        { bg: theme.colors.statusGreenBg, fg: theme.colors.statusGreen },
+    Released:      { bg: theme.colors.statusBlueBg,  fg: theme.colors.statusBlue  },
+    'On Hold':     { bg: theme.colors.statusAmberBg, fg: theme.colors.statusAmber },
+    Transferred:   { bg: theme.colors.statusGrayBg,  fg: theme.colors.statusGray  },
+  };
+  const c = cfg[status] ?? { bg: theme.colors.statusGrayBg, fg: theme.colors.statusGray };
+  return (
+    <span style={{
+      display: 'inline-block',
+      fontSize: 10, fontWeight: 600,
+      padding: '2px 8px', borderRadius: 10,
+      background: c.bg, color: c.fg,
+      whiteSpace: 'nowrap',
+    }}>
+      {status}
+    </span>
+  );
+}
+
 function DetailsTab({
   order,
   linkedOrder,
@@ -351,6 +375,11 @@ function DetailsTab({
   onSaveAndResync,
   isStaff,
   accessorialNames,
+  inventoryStatuses,
+  releasableItems,
+  releasePanelOpen,
+  onCloseReleasePanel,
+  performedBy,
 }: {
   order: DtOrderForUI;
   /** P+D pair partner. Populated on the parent so DetailsTab can show
@@ -374,6 +403,21 @@ function DetailsTab({
   /** Code → human name map for accessorials. Caller (OrderPage) holds
    *  the useServiceCatalog hook so the fetch runs once at parent level. */
   accessorialNames: Record<string, string>;
+  /** Per-item inventory.status + release_date, keyed by inventory_id.
+   *  Drives the Status column on the items table — parent owns the
+   *  fetch + realtime subscription so this stays declarative. */
+  inventoryStatuses: Map<string, { status: string; releaseDate: string | null }>;
+  /** Items eligible for manual release (filtered to inventory-linked,
+   *  not already Released). Used by both the items table sort and
+   *  the inline release panel. */
+  releasableItems: ReleasableItem[];
+  /** True when the operator clicked "Release Items..." in the footer. */
+  releasePanelOpen: boolean;
+  /** Collapse the inline release panel (Cancel button or success). */
+  onCloseReleasePanel: () => void;
+  /** Email of the operator firing the release — stamped on the audit
+   *  entry. Null in demo / unauthenticated contexts. */
+  performedBy: string | null;
 }) {
   const addressLine = [order.contactAddress, order.contactCity, order.contactState, order.contactZip].filter(Boolean).join(', ');
   // Identify the P+D partner — when this row is the delivery leg of a
@@ -552,11 +596,26 @@ function DetailsTab({
       )}
 
 
+      {/* Inline release panel — opens when the operator clicks
+          "Release Items..." in the footer. Mirrors the WC "Release
+          Some..." UX. Writes go directly to Supabase (authoritative);
+          realtime fans the status change through the items table's
+          Status column + the footer button gate. */}
+      {releasePanelOpen && order.tenantId && releasableItems.length > 0 && (
+        <DtOrderReleasePanel
+          orderId={order.id}
+          tenantId={order.tenantId}
+          defaultReleaseDateSource={order.finishedAt}
+          items={releasableItems}
+          performedBy={performedBy}
+          onClose={onCloseReleasePanel}
+        />
+      )}
+
       {/* Items — moved inline from the old 'Items' tab. Compact table
-          covering description / vendor / room / qty / class / location.
-          Driver notes + return codes render as sub-rows when present so
-          we don't lose the post-DT-sync information. The full-fidelity
-          'Items' tab is gone; the freed slot now hosts Photos & Docs. */}
+          covering description / vendor / room / qty / class / location
+          / status. Driver notes + return codes render as sub-rows when
+          present so we don't lose the post-DT-sync information. */}
       {(order.items?.length ?? 0) > 0 && (
         <EPCard>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
@@ -577,6 +636,7 @@ function DetailsTab({
                   <th style={{ ...inlineItemTh, textAlign: 'right' }}>Delivered</th>
                   <th style={inlineItemTh}>Class</th>
                   <th style={inlineItemTh}>Location</th>
+                  <th style={inlineItemTh}>Status</th>
                 </tr>
               </thead>
               <tbody>
@@ -585,6 +645,13 @@ function DetailsTab({
                   const delQty = item.deliveredQuantity ?? null;
                   const qtyShort = delQty != null && orderedQty > 0 && delQty < orderedQty;
                   const fullyDelivered = item.delivered === true || (delQty != null && orderedQty > 0 && delQty >= orderedQty);
+                  // inventoryStatuses is keyed by the inventory_id UUID
+                  // (FK on dt_order_items). Ad-hoc / free-text items
+                  // (no inventoryId) get "—" since they have no
+                  // inventory row to track status on.
+                  const invStatus = item.inventoryId
+                    ? inventoryStatuses.get(item.inventoryId)
+                    : null;
                   return (
                     <React.Fragment key={item.id || idx}>
                       <tr style={{ borderBottom: `1px solid ${theme.colors.borderLight || '#f0f0f0'}`, background: idx % 2 === 0 ? '#fff' : '#FAFAF9' }}>
@@ -602,10 +669,19 @@ function DetailsTab({
                         </td>
                         <td style={inlineItemTd}>{item.className || '—'}</td>
                         <td style={inlineItemTd}>{item.dtLocation || item.location || '—'}</td>
+                        <td style={inlineItemTd}>
+                          {!item.inventoryId ? (
+                            <span style={{ color: EP.textMuted }}>—</span>
+                          ) : invStatus ? (
+                            <InventoryStatusChip status={invStatus.status} />
+                          ) : (
+                            <span style={{ color: EP.textMuted, fontSize: 11 }}>…</span>
+                          )}
+                        </td>
                       </tr>
                       {(item.itemNote || (item.returnCodes && item.returnCodes.length > 0)) && (
                         <tr>
-                          <td colSpan={7} style={{ padding: '0 10px 8px', background: idx % 2 === 0 ? '#fff' : '#FAFAF9' }}>
+                          <td colSpan={8} style={{ padding: '0 10px 8px', background: idx % 2 === 0 ? '#fff' : '#FAFAF9' }}>
                             {item.itemNote && (
                               <div style={{ fontSize: 11, color: '#92400E', padding: '4px 8px', background: '#FFFBEB', borderRadius: 6, borderLeft: '3px solid #F59E0B', marginBottom: 4 }}>
                                 <span style={{ fontWeight: 600 }}>Driver note:</span> {item.itemNote}
@@ -1252,15 +1328,92 @@ export function OrderPage() {
   // the Review queue.
   const [pushingDt, setPushingDt] = useState(false);
   const [pushDtError, setPushDtError] = useState<string | null>(null);
-  // Manual inventory release on completed delivery orders. Reuses
-  // ReleaseItemsModal (same flow Inventory.tsx uses), pre-selects all
-  // dt_order_items rows that have an inventory_id linkage, and defaults
-  // the release date to the delivery's finished_at.
-  const [showReleaseModal, setShowReleaseModal] = useState(false);
+  // Manual inventory release — inline panel (WC-style), Supabase-direct
+  // writes. The panel opens when the operator clicks "Release Items..."
+  // in the footer; releasing flips inventory.status + release_date via
+  // a direct supabase update, Supabase realtime then fans the update
+  // through inventoryStatuses → Status column → button gate. Sheet
+  // mirror is a separate fire-and-forget invoke that lands in Failed
+  // Operations on failure.
+  const [releaseMode, setReleaseMode] = useState<'none' | 'partial'>('none');
+  // inventoryStatuses caches the linked inventory rows' status +
+  // release_date so the items table can render a Status column without
+  // a separate per-row fetch, and so the "Release Items..." button can
+  // hide when all linked items are already Released. Keyed by
+  // inventory.id (UUID FK on dt_order_items.inventory_id).
+  const [inventoryStatuses, setInventoryStatuses] =
+    useState<Map<string, { status: string; releaseDate: string | null }>>(new Map());
 
   useEffect(() => {
     if (order && !editing) setEdit(orderToEdit(order));
   }, [order, editing]);
+
+  // Fetch + subscribe to inventory statuses for every dt_order_items
+  // row that has an inventory_id linkage. Drives both the Status
+  // column on the items table and the "Release Items..." button
+  // gate (hide when all linked items are already Released). Supabase
+  // realtime pushes status changes from any source — manual release,
+  // auto-release via DT-Finished, an admin manually flipping a row
+  // in the Inventory page — without requiring this page to re-mount.
+  useEffect(() => {
+    if (!order?.id || !order?.tenantId) {
+      setInventoryStatuses(new Map());
+      return;
+    }
+    const invIds = (order.items ?? [])
+      .map(it => it.inventoryId)
+      .filter((id): id is string => !!id);
+    if (invIds.length === 0) {
+      setInventoryStatuses(new Map());
+      return;
+    }
+
+    let cancelled = false;
+
+    void (async () => {
+      const { data } = await supabase
+        .from('inventory')
+        .select('id, status, release_date')
+        .in('id', invIds);
+      if (cancelled || !data) return;
+      const m = new Map<string, { status: string; releaseDate: string | null }>();
+      for (const r of data as Array<{ id: string; status: string | null; release_date: string | null }>) {
+        m.set(r.id, { status: r.status ?? 'Active', releaseDate: r.release_date });
+      }
+      setInventoryStatuses(m);
+    })();
+
+    // Realtime — narrow to this tenant; we re-check the row id against
+    // our invIds set in the handler so unrelated rows from the same
+    // tenant don't trigger setState churn.
+    const invIdSet = new Set(invIds);
+    const channel = supabase
+      .channel(`order_page_inventory_${order.id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'inventory',
+          filter: `tenant_id=eq.${order.tenantId}`,
+        },
+        (payload) => {
+          const row = payload.new as { id?: string; status?: string | null; release_date?: string | null };
+          if (!row?.id || !invIdSet.has(row.id)) return;
+          setInventoryStatuses(prev => {
+            const next = new Map(prev);
+            next.set(row.id!, { status: row.status ?? 'Active', releaseDate: row.release_date ?? null });
+            return next;
+          });
+        }
+      )
+      .subscribe();
+
+    return () => {
+      cancelled = true;
+      supabase.removeChannel(channel);
+    };
+  }, [order?.id, order?.tenantId, order?.items]);
 
   const setField = useCallback(<K extends keyof OrderEdit>(k: K, v: OrderEdit[K]) => {
     setEdit(prev => ({ ...prev, [k]: v }));
@@ -1587,6 +1740,11 @@ export function OrderPage() {
           onSaveAndResync={handleSaveAndResync}
           isStaff={canReview}
           accessorialNames={accessorialNames}
+          inventoryStatuses={inventoryStatuses}
+          releasableItems={releasableItems}
+          releasePanelOpen={releaseMode === 'partial'}
+          onCloseReleasePanel={() => setReleaseMode('none')}
+          performedBy={user?.email ?? null}
         />
       ),
     },
@@ -1692,38 +1850,47 @@ export function OrderPage() {
 
   // ── Footer ─────────────────────────────────────────────────────────────────
 
-  // Inventory items on this order that the manual-release flow can act
-  // on. dt_order_items.inventory_id is null for ad-hoc / free-text
-  // lines (filtered out — nothing in Stride inventory to flip from
-  // Active → Released for them). Dedup by inventory_id because two
-  // order lines can reference the same physical item (e.g. return +
-  // re-deliver pair); the modal's React keys + selection Set need
-  // unique inventory_ids, and you can only release a physical item
-  // once anyway.
-  const releasableItems = (() => {
-    // Existing dt_order_items rows have dt_item_code populated
-    // (human-readable Item ID) but inventory_id (UUID FK) is null on
-    // any order created before that column was added. Fall back to
-    // dt_item_code so the Release Items button still appears for those
-    // orders, and so the GAS releaseItems endpoint — which matches by
-    // human-readable Item ID against the Inventory sheet — gets the
-    // identifier it can actually look up. The UUID inventory_id alone
-    // wouldn't match anything sheet-side anyway, so dt_item_code is
-    // the practical linkage key here.
+  // Inventory items on this order eligible for the manual-release
+  // flow. Two filters:
+  //   1. Must have an inventory_id FK linkage. Ad-hoc / free-text
+  //      lines (inventory_id null) have nothing in Stride inventory
+  //      to flip from Active → Released — they're not selectable.
+  //      Note: we no longer fall back to dt_item_code; the new
+  //      Supabase-direct write path needs the UUID for the update,
+  //      and the GAS sheet mirror receives item_id alongside.
+  //   2. Inventory row must not already be Released. Dedup on
+  //      inventory_id since two order lines can reference the same
+  //      physical item (return + re-deliver pair) and you can only
+  //      release each row once.
+  const releasableItems: ReleasableItem[] = (() => {
     const seen = new Set<string>();
-    const out: typeof order.items = [];
+    const out: ReleasableItem[] = [];
     for (const it of order.items ?? []) {
-      const linkId = it.inventoryId || it.dtItemCode;
-      if (!linkId || seen.has(linkId)) continue;
-      seen.add(linkId);
-      out.push(it);
+      const invId = it.inventoryId;
+      if (!invId || seen.has(invId)) continue;
+      const cached = inventoryStatuses.get(invId);
+      // Show items whose status hasn't loaded yet (default Active)
+      // OR is explicitly something other than Released / Transferred.
+      // Already-Released rows are filtered so the panel only ever
+      // shows actionable lines.
+      const status = cached?.status ?? 'Active';
+      if (status === 'Released' || status === 'Transferred') continue;
+      seen.add(invId);
+      out.push({
+        inventoryId: invId,
+        itemId: it.dtItemCode || invId,
+        description: it.description || '',
+      });
     }
     return out;
   })();
-  const canReleaseItems =
-    order.statusCategory === 'completed' &&
-    !!order.tenantId &&
-    releasableItems.length > 0;
+  // Button is shown whenever there's at least one Active item on the
+  // order. The old `statusCategory === 'completed'` gate is gone — auto-
+  // release will handle the happy path on DT-Finished, and manual
+  // release stays available as the universal escape hatch (DT delayed,
+  // customer picked up in person, partial-delivery exceptions, etc.).
+  // Hides naturally when all items are Released (releasableItems empty).
+  const canReleaseItems = !!order.tenantId && releasableItems.length > 0;
 
   // v2026-05-09 — Edit Full Order is gated by STATUS, not role. Both
   // staff and clients can edit any non-terminal order. The modal's
@@ -1766,7 +1933,7 @@ export function OrderPage() {
   };
 
   const handleEditFullOrder = () => { setShowFullEditModal(true); };
-  const handleReleaseItems  = () => { setShowReleaseModal(true); };
+  const handleReleaseItems  = () => { setReleaseMode('partial'); };
 
   // Approve — same logic as the inline EPFooterButton onClick below, but
   // pulled out so the FAB can call it identically on mobile.
@@ -1962,7 +2129,7 @@ export function OrderPage() {
       return (
         <EPFooterButton
           key="release-mobile"
-          label="Release Items"
+          label="Release Items…"
           variant="primary"
           onClick={handleReleaseItems}
         />
@@ -1995,7 +2162,7 @@ export function OrderPage() {
       )}
       {canReview && canReleaseItems && (
         <EPFooterButton
-          label="Release Items"
+          label="Release Items…"
           variant="primary"
           onClick={handleReleaseItems}
         />
@@ -2116,35 +2283,11 @@ export function OrderPage() {
           }}
         />
       )}
-      {showReleaseModal && order.tenantId && (
-        <ReleaseItemsModal
-          // dt_item_code is the human-readable Item ID GAS releaseItems
-          // matches against in the Inventory sheet. inventoryId (UUID)
-          // is kept as a fallback only for rows that legitimately have
-          // no dt_item_code — see the releasableItems comment above.
-          itemIds={releasableItems.map(it => (it.dtItemCode || it.inventoryId)!)}
-          clientName={order.clientName || 'this client'}
-          clientSheetId={order.tenantId}
-          defaultReleaseDate={order.finishedAt ? order.finishedAt.slice(0, 10) : undefined}
-          selectableItems={releasableItems.map(it => ({
-            id: (it.dtItemCode || it.inventoryId)!,
-            label: it.description || it.dtItemCode || 'Item',
-            sublabel: [
-              it.dtItemCode && `SKU ${it.dtItemCode}`,
-              it.quantity != null && `Qty ${it.quantity}`,
-            ].filter(Boolean).join(' · ') || undefined,
-          }))}
-          onClose={() => setShowReleaseModal(false)}
-          onSuccess={async () => {
-            // Refetch so the page reflects the released items (and any
-            // dt_orders mirror columns that change as a side effect).
-            lastMutationAtRef.current = Date.now();
-            const fresh = await fetchDtOrderByIdFromSupabase(order.id);
-            if (fresh) setLocalOrder(fresh);
-            refetch();
-          }}
-        />
-      )}
+      {/* ReleaseItemsModal removed 2026-05-12 — replaced by the inline
+          DtOrderReleasePanel inside DetailsTab, which uses a Supabase-
+          direct write path. Supabase realtime fans the inventory
+          status change through the Status column + button gate, so no
+          modal-close refetch is needed here. */}
     </>
   );
 }
