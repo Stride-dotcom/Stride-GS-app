@@ -711,7 +711,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
         const resp = await postStartRepair({ repairId: repair.repairId }, clientSheetId);
         if (!resp.ok || !resp.data?.success) {
           const errMsg = resp.error || resp.data?.error || 'Work order generation failed.';
-          setSubmitError(errMsg + ' You can retry from the Regenerate Work Order button.');
+          setSubmitError(errMsg + ' Start Repair status flip already applied — you can print the Work Order from the button below.');
           void writeSyncFailed({ tenant_id: clientSheetId, entity_type: 'repair', entity_id: repair.repairId, action_type: 'start_repair', requested_by: user?.email ?? '', request_id: resp.requestId, payload: { repairId: repair.repairId, clientName: repair.clientName, description: repair.description }, error_message: errMsg });
         } else {
           // Refresh server-shaped data (URL, skipped flag, etc.) into the banner.
@@ -721,7 +721,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
       } catch (err) {
         setSubmitError(
           (err instanceof Error ? err.message : 'Network error')
-          + ' while generating work order — you can retry from the Regenerate Work Order button.'
+          + ' while starting repair — print the Work Order from the button below if the status flip succeeded.'
         );
       }
     })();
@@ -1126,11 +1126,13 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
           </div>
         )}
 
-        {/* Start Repair / Regenerate Work Order — available on Approved, In Progress, Complete.
-            Keep the button visible after success so the user can re-run regenerate as many
-            times as they want without having to dismiss the confirmation first.
-            Stage A: hidden for client role — clients don't start repairs or regenerate
-            work orders; that's a staff action. */}
+        {/* Start Repair / Print Work Order — available on Approved, In Progress,
+            Complete. On Approved the button fires the GAS state transition
+            (status flip + first PDF generation server-side). On In Progress /
+            Complete it collapses to client-side render of the Work Order PDF
+            (sub-second, no GAS) — operators can print again any time without
+            waiting on a 30-60s round trip. Stage A: hidden for client role —
+            clients don't start repairs or reprint warehouse forms. */}
         {(user?.role === 'admin' || user?.role === 'staff') &&
          (effectiveStatus === 'Approved' || effectiveStatus === 'In Progress' || effectiveStatus === 'Complete') && (
           <div style={{ padding: '14px 20px', borderTop: `1px solid ${theme.colors.border}`, flexShrink: 0 }}>
