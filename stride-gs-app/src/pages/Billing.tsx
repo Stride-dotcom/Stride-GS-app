@@ -1782,23 +1782,28 @@ export function Billing() {
             window.alert(`Re-issue failed: ${(err as Error).message}`);
           }
         };
+        const reissueBtn = (
+          <button
+            onClick={handleReissue}
+            title={isVoid
+              ? "Release this voided invoice's rows back to Unbilled so you can re-bill them"
+              : "Release this invoice's rows back to Unbilled so you can re-create the invoice"}
+            style={{
+              padding: '4px 8px', fontSize: 10, fontWeight: 600,
+              border: `1px solid ${theme.colors.border}`, borderRadius: 4,
+              background: '#fff', cursor: 'pointer', color: theme.colors.text,
+              fontFamily: 'inherit',
+            }}
+          >
+            Re-issue
+          </button>
+        );
         if (isVoid) {
-          return <span style={{ fontSize: 11, color: theme.colors.textMuted }}>—</span>;
+          return <div onClick={onClick} style={{ display: 'inline-flex', gap: 4 }}>{reissueBtn}</div>;
         }
         return (
           <div onClick={onClick} style={{ display: 'inline-flex', gap: 4 }}>
-            <button
-              onClick={handleReissue}
-              title="Release this invoice's rows back to Unbilled so you can re-create the invoice"
-              style={{
-                padding: '4px 8px', fontSize: 10, fontWeight: 600,
-                border: `1px solid ${theme.colors.border}`, borderRadius: 4,
-                background: '#fff', cursor: 'pointer', color: theme.colors.text,
-                fontFamily: 'inherit',
-              }}
-            >
-              Re-issue
-            </button>
+            {reissueBtn}
             <button
               onClick={handleVoid}
               title="Void this invoice (terminal — rows go to Status=Void, CB rows removed)"
