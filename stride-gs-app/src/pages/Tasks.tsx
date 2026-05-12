@@ -129,13 +129,39 @@ function cols(navigate: (path: string) => void) {
       >{val}</span>;
     } }),
     col.accessor('type', { header: 'Type', size: 100, filterFn: multiFilter, cell: i => {
-      // Tasks created with non-legacy service codes (LABEL, PLLT, PICK, etc.)
-      // get bucketed to type='OTHER' on the warehouse sheet but carry the
-      // real code in svcCode. Prefer svcCode for the badge text so the
-      // column reads as a service name, not a generic "OTHER".
+      // The legacy `type` column on the warehouse sheet stores values like
+      // "INSPECTION" / "ASSEMBLY" / "OTHER" — uppercase full words that
+      // don't appear in SERVICE_CODES (which is keyed on short codes:
+      // INSP / ASM / etc.). svcCode carries the canonical code on every
+      // task. Display rules:
+      //   1. Prefer svcCode → SERVICE_CODES friendly label ("Inspection",
+      //      "Palletize", etc.) — covers every modern task.
+      //   2. Fall back to the legacy-type → code alias map so older rows
+      //      where svcCode was never populated still resolve to a real
+      //      service name.
+      //   3. Last resort: title-case the raw type so the column never
+      //      shows ALL-CAPS GIBBERISH.
+      const LEGACY_TYPE_TO_CODE: Record<string, string> = {
+        INSPECTION: 'INSP',
+        ASSEMBLY:   'ASM',
+        REPAIR:     'REPAIR',
+        RECEIVING:  'RCVG',
+        STORAGE:    'STOR',
+        DELIVERY:   'DLVR',
+        WILLCALL:   'WC',
+        'WILL CALL':'WC',
+        WCPU:       'WCPU',
+        LABEL:      'LABEL',
+        PICK:       'PICK',
+        PALLETIZE:  'PLLT',
+        DISPOSAL:   'DISP',
+        RESTOCK:    'RSTK',
+        RUSH:       'RUSH',
+      };
       const row = i.row.original as { type: string; svcCode?: string };
-      const code = (row.type === 'OTHER' && row.svcCode) ? row.svcCode : row.type;
-      const label = SERVICE_CODES[code as keyof typeof SERVICE_CODES] || code;
+      const code = row.svcCode || LEGACY_TYPE_TO_CODE[(row.type || '').toUpperCase()] || row.type;
+      const label = SERVICE_CODES[code as keyof typeof SERVICE_CODES]
+        || (code ? code.charAt(0) + code.slice(1).toLowerCase() : '—');
       return <Badge t={label} c={TYPE_CFG[row.type]} />;
     } }),
     col.accessor('status', { header: 'Status', size: 100, filterFn: multiFilter, cell: i => <Badge t={i.getValue()} c={STATUS_CFG[i.getValue()]} /> }),
