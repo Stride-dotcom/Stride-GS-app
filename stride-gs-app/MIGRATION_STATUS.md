@@ -1,6 +1,6 @@
 # GAS → Supabase Migration — Living Status
 
-> Last updated: 2026-05-11 — **Shipment counter SEQUENCE shipped (StrideAPI v38.206.0)**, closing the dup-number race class for shipment numbering. Mirror of v38.182's invoice fix: `public.shipment_no_seq` + `public.next_shipment_no()` SQL function + `api_nextShipmentNo_` rewrite. The Master-RPC `getNextShipmentId` action is now bypassed (kept in place for backward compat; will retire alongside the rest of Master in P7). Only one open question from the 2026-05-11 inventory remains: the direct-sheet-edit → Supabase gap (P2 design decision).
+> Last updated: 2026-05-12 — **P1.7 + P2.1 MVP shipped**: replay-shadow Edge Function + update-item-shadow + parity_results rollup trigger + StrideAPI v38.207.0 redaction-whitelist fix. End-to-end pipeline plumbing for parity testing is live. DB pipeline smoke-verified (rollup trigger correctly updates `feature_flags.mismatch_count_7d` on parity_results INSERT). Real Edge Function invocation pending cron schedule or operator-driven smoke run with service_role key. **Phase 1 now 7/7 done.** Next: enhance the Settings → Migration UI with a "Run replay now" button (a Layer 2 improvement), or move into broader P2.x function migrations.
 > This file is **authoritative for execution**. The v1.1 docx in `Dropbox\Apps\GS Inventory\` is a stakeholder snapshot.
 
 ---
@@ -52,9 +52,9 @@ If you only have time for one section: read **Architectural Decisions** in full.
 | P1.4 | **done (framework only)** | 2026-05-09 | GAS endpoint: `doPost case "writeThroughReverse"` → `handleWriteThroughReverse_` dispatches to a per-table registry `REVERSE_WRITETHROUGH_TABLES_` (14 stubs). `api_isKnownTenantId_` validates `tenantId` against `public.clients.spreadsheet_id` before `openById` (fails closed on outage — prevents abuse via leaked API_TOKEN). Failures land in `gs_sync_events` with `action_type='writethrough_reverse'`. SB helper: `supabase/functions/_shared/reverse-writethrough.ts` with strict + best-effort variants. **Idempotency contract** (load-bearing): writers MUST derive sheet PK from SB row contents, never from `lastDataRow + 1` or arrival-order counters. Code review (Opus subagent) folded in: tenant validation, idempotency contract sharpened, retry-cron interaction documented. **StrideAPI v38.200.0 deployed as Web App v495** at 2026-05-09 ~05:18Z. **`GAS_API_URL` + `GAS_API_TOKEN` Edge Function secrets confirmed set** — SB→GAS plumbing is ready end-to-end. Per-table writers still ship in P2/P3/P4 PRs alongside their function migrations. |
 | P1.5 | **done** | 2026-05-09 | `src/contexts/FeatureFlagContext.tsx` — `FeatureFlagProvider` fetches all flags on mount + realtime-subscribes for cross-tab sync. Hooks: `useFeatureFlag(key)` (returns `'gas' \| 'supabase'`), `useFeatureFlagRow(key)`, `useAllFeatureFlags()`, `useFeatureFlagLoading()`. Pure resolver `resolveFlagBackend(flag, tenantId)` exported for non-React callers. Per-tenant scope semantics documented inline + in **MIG-010** below. Wired into `main.tsx` between `AuthProvider` and `BatchDataProvider`. tsc + build clean. Bundle: `index-CkUuWxyQ.js`. Code review (Opus 4.7 subagent) flagged + fixed: realtime channel name now per-mount-random (StrictMode-safe), `coerceBackend` whitelist replaces silent passthrough so a malformed DB value can't route to a non-existent backend. |
 | P1.6 | **done** | 2026-05-09 | `src/components/shared/MigrationSettingsTab.tsx` — Settings → Migration tab (admin-only via `TABS` filter + per-tab guard). Per-flag controls: toggle `active_backend` (chip), toggle `parity_enabled` (auto-sets opposite `shadow_backend`), edit `tenant_scope` (textarea, dedup'd on save). Master switch (MIG-003 refined) — atomic UPDATE clearing `active_backend → gas` + `tenant_scope → NULL` in one statement; parity stays on. Phase-grouped (P2 / P3 / P4a / P5 / P6 — empty phases skipped). Mismatch counts read from `feature_flags.mismatch_count_7d` (populated by P1.7). Code review (Opus subagent) flagged + fixed: predicate switched from `.neq` to `.gte` (more robust), narrowed master switch to MIG-003 actual semantics, dedup on tenant_scope save, always-enabled emergency button. Bundle: `index-BNJREu5o.js`. tsc + build clean. |
-| P1.7 | not_started | — | `replay-shadow` Edge Function (cron'd nightly per function). |
+| P1.7 | **done (MVP — cron schedule deferred)** | 2026-05-12 (PR #349) | `replay-shadow` Edge Function (deployed v2) + companion `update-item-shadow` (deployed v2, the first SB shadow handler — pure function returning `payload − {itemId, requestId}` to mirror the audit-log shape). Companion migration `parity_results_rollup_trigger` adds AFTER-INSERT trigger that updates `feature_flags.mismatch_count_7d` + `last_parity_check`. Plus UNIQUE INDEX on `parity_results (function_key, call_id)` for idempotent re-runs. Plus StrideAPI v38.207.0 (Web App v502) expanding the `api_redactPayloadForCorpus_` whitelist so future corpus has complete inputs for location/vendor/description/etc. Smoke-verified at DB layer: synthetic parity_results rows correctly drive `feature_flags.mismatch_count_7d`. **Cron schedule + "Run replay now" button** in Settings UI are explicit follow-ups (see new MIG-012). MVP today is a manually-invoked harness — operator with service_role key POSTs `/functions/v1/replay-shadow` with body `{}` or `{since: "2026-05-01"}` to run. |
 
-P1 exit: P1.1–P1.7 all merged + one no-op handler wired through the framework end-to-end with parity logging proven.
+P1 exit: P1.1–P1.7 all merged + one shadow handler wired end-to-end with parity logging proven. **Reached 2026-05-12 with PR #349.**
 
 ---
 
@@ -232,6 +232,35 @@ Master switch (MIG-003) emergency revert: every row to `{active_backend:'gas', t
 **Rationale:** the 25-flag table covered only the top-level migration handlers. With the full inventory, builders + Justin get a complete coverage picture and Justin can see "we've migrated X of Y across project Z" without grepping. The inventory doc is plain-English by directive — readable without code knowledge.
 
 **Operational rule:** every PR that adds, renames, or deletes a GAS function MUST also update `FUNCTION_INVENTORY.md` in the same commit. Drift between source and the inventory breaks the dashboard's coverage stats (once Layer 2 ships).
+
+### MIG-012 — Replay harness is operator-triggered today; cron + UI button deferred (2026-05-12)
+
+**Decision:** P1.7 ships as a manually-invokable Edge Function (`/functions/v1/replay-shadow`). Cron schedule + a "Run replay now" button on the Settings → Migration tab are explicit follow-ups, not part of the MVP.
+
+**Rationale:** the MVP proves the full pipeline (corpus → shadow → diff → parity_results → rollup trigger → feature_flags → UI surfacing) end-to-end on one function (`updateItem`). Cron is operational sugar; UI button is product polish. Neither changes the architectural shape. Shipping the cron requires `pg_cron` job scheduling + a way for the cron to authenticate to the Edge Function with service_role; that's its own design choice. Shipping the UI button requires a new admin-only PostgREST RPC wrapper (operators don't have service_role in the browser) that proxies the Edge Function call.
+
+**Today's invocation pattern:**
+- Operator with the service_role key runs:
+  ```bash
+  curl -X POST 'https://uqplppugeickmamycpuz.supabase.co/functions/v1/replay-shadow' \
+    -H 'Authorization: Bearer <SERVICE_ROLE_KEY>' \
+    -H 'Content-Type: application/json' \
+    -d '{}'
+  ```
+- Defaults: `function_key='updateItem'`, `since=90d ago`, `limit=500`.
+- Override either: `{"since": "2026-05-01T00:00:00Z", "limit": 100}`.
+- Result lands in `public.parity_results`; trigger updates `public.feature_flags.updateItem.mismatch_count_7d` + `last_parity_check`; Settings → Migration tab surfaces the data.
+
+**Future follow-ups (post-MVP):**
+- **pg_cron schedule.** Nightly invocation of replay-shadow at, say, 3 AM PST. Requires pg_cron + a wrapper that holds the service_role JWT (or a separate scheduler approach via Edge Function self-invocation with vault-stored credentials).
+- **"Run replay now" button** on the Settings → Migration UI. Admin clicks → React calls a new `public.run_replay_shadow(text)` RPC that proxies the Edge Function call. RPC is SECURITY DEFINER and admin-only via the same JWT user_metadata.role check that gates the Migration tab.
+- **`public.parity_dryrun_check_drift()` proxy wrapper** so the harness can invoke `parity_dryrun.check_drift()` via supabase-js. Tracked as a P1.7 follow-up.
+
+**Edge function shape (for future builders adding more shadow handlers):**
+1. Add an entry to `SHADOW_REGISTRY` in `replay-shadow/index.ts`: `{ shadow: 'your-handler-shadow', action: 'yourActionName' }`. `function_key` (the registry key) must match a `feature_flags.function_key`; `action` matches `gas_call_log.action`.
+2. Author the corresponding `your-handler-shadow` Edge Function. For pure handlers, mirror `update-item-shadow`. For stateful handlers, follow the design in MIG-007 layer 2 (read state from parity_dryrun, write would-be state back).
+3. Per MIG-008, deploy with placeholder external-service env vars.
+4. Run `POST /functions/v1/replay-shadow` with `{function_key: 'yourFunctionKey'}` to test.
 
 ---
 
