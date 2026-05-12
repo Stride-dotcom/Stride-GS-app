@@ -38,7 +38,7 @@ import { useVirtualRows } from '../hooks/useVirtualRows';
 import { useScrollRestoration } from '../hooks/useScrollRestoration';
 import { theme } from '../styles/theme';
 import { fmtDate } from '../lib/constants';
-import { tanstackGlobalFilter } from '../lib/searchFilters';
+import { tanstackGlobalFilter, rowMatchesSearch } from '../lib/searchFilters';
 import { ItemDetailPanel } from '../components/shared/ItemDetailPanel';
 import { ItemIdBadges } from '../components/shared/ItemIdBadges';
 import { CreateWillCallModal } from '../components/shared/CreateWillCallModal';
@@ -1559,6 +1559,42 @@ export function Inventory() {
   const statusFilterValue = (table.getColumn('status')?.getFilterValue() as string[] | undefined) ?? [];
   const sidemarkFilterValue = (table.getColumn('sidemark')?.getFilterValue() as string[] | undefined) ?? [];
 
+  // Items that pass every active filter EXCEPT the status filter, plus the
+  // global search. Drives the status-pill counts so "Active (94)" becomes
+  // "Active (N)" where N is the count of Active items under the current
+  // Sidemark / Client / search selection (rather than the full client total
+  // ignoring every other filter, which was the pre-fix behaviour). Mirrors
+  // multiSelectFilter / sidemarkMultiSelectFilter so the count and the
+  // actual filtered-row count agree.
+  const preStatusFilteredItems = useMemo(() => {
+    return inventoryItems.filter(item => {
+      for (const cf of columnFilters) {
+        if (cf.id === 'status') continue;
+        const val = cf.value as string[] | undefined;
+        if (!val || val.length === 0) continue;
+        const rawVal = (item as unknown as Record<string, unknown>)[cf.id];
+        if (cf.id === 'sidemark') {
+          const rowNorm = normSidemark(rawVal as string | null | undefined);
+          if (!rowNorm) return false;
+          if (!val.some(v => normSidemark(v) === rowNorm)) return false;
+        } else {
+          const rawStr = rawVal == null ? '' : String(rawVal);
+          if (!val.includes(rawStr)) return false;
+        }
+      }
+      if (globalFilter && !rowMatchesSearch(item, String(globalFilter))) return false;
+      return true;
+    });
+  }, [inventoryItems, columnFilters, globalFilter]);
+
+  /** Count for a single status pill — respects Client / Sidemark / search,
+   *  ignores the status filter itself so each pill shows a true breakdown
+   *  of the current non-status filter selection. `null` is the "All" pill. */
+  function pillCountFor(status: InventoryStatus | null): number {
+    if (status === null) return preStatusFilteredItems.length;
+    return preStatusFilteredItems.filter(i => i.status === status).length;
+  }
+
   function setStatusChip(status: InventoryStatus | null) {
     if (status === null) {
       table.getColumn('status')?.setFilterValue(undefined);
@@ -1997,9 +2033,7 @@ export function Inventory() {
           const isActive = s === null
             ? statusFilterValue.length === 0
             : statusFilterValue.includes(s);
-          const count = s === null
-            ? filteredCount
-            : inventoryItems.filter(i => i.status === s).length;
+          const count = pillCountFor(s);
           return (
             <button
               key={s ?? 'all'}
