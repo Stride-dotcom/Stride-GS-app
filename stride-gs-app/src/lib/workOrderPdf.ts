@@ -158,7 +158,15 @@ function applyTokens(html: string, tokens: Record<string, string>): string {
   return out;
 }
 
+// v2026-05-04: Per-tab template cache. Templates change rarely (admin
+// edits via Settings → Templates); caching avoids the Supabase round-trip
+// on every doc generation, so the second-and-later clicks fire the print
+// dialog instantly.
+const templateCache = new Map<string, string>();
+
 async function fetchTemplate(templateKey: string): Promise<string | null> {
+  const cached = templateCache.get(templateKey);
+  if (cached !== undefined) return cached;
   const { data, error } = await supabase
     .from('email_templates')
     .select('body')
@@ -168,7 +176,9 @@ async function fetchTemplate(templateKey: string): Promise<string | null> {
     console.error('[workOrderPdf] template fetch failed:', error);
     return null;
   }
-  return (data?.body as string | undefined) ?? null;
+  const body = (data?.body as string | undefined) ?? null;
+  if (body) templateCache.set(templateKey, body);
+  return body;
 }
 
 function openPrintWindow(html: string, title: string): void {
@@ -402,4 +412,91 @@ export async function generateWillCallReleasePdf(wc: WillCallReleaseInput): Prom
 
   const html = applyTokens(template, tokens);
   openPrintWindow(html, `Will Call Release — ${wc.wcNumber}`);
+}
+
+// ─── Receiving (shipment) ────────────────────────────────────────────────────
+
+export interface ReceivingItemInput {
+  itemId?: string;
+  qty?: number | string;
+  vendor?: string;
+  description?: string;
+  itemClass?: string;
+  location?: string;
+  sidemark?: string;
+  reference?: string;
+}
+
+export interface ReceivingDocInput {
+  shipmentNo: string;
+  clientName?: string;
+  clientEmail?: string;
+  carrier?: string;
+  tracking?: string;
+  receivedDate?: string;
+  notes?: string;
+  totalItems?: number | string;
+  items?: ReceivingItemInput[];
+}
+
+/**
+ * Generate a Receiving document for a shipment — header + items table.
+ * Pure client-side: fetches the DOC_RECEIVING template from Supabase
+ * (one query, cached per-tab), substitutes tokens, opens a print window.
+ * No GAS round-trip; subsequent calls in the same session are instant.
+ */
+export async function generateReceivingDocPdf(shipment: ReceivingDocInput): Promise<void> {
+  const template = await fetchTemplate('DOC_RECEIVING');
+  if (!template) {
+    alert('Receiving template (DOC_RECEIVING) not found in Supabase.');
+    return;
+  }
+
+  const items = shipment.items ?? [];
+  const totalItems = shipment.totalItems != null
+    ? String(shipment.totalItems)
+    : String(items.reduce((s, it) => s + (Number(it.qty) || 0), 0));
+
+  // Items table rows — same shape the Apps Script generator produced so
+  // the template renders identically whether the source is GAS-built or
+  // client-built.
+  const itemsTableRows = items.map((it) => (
+    '<tr>' +
+    `<td style="padding:6px 8px;border-bottom:1px solid #E2E8F0;font-size:11px;font-family:monospace;">${esc(it.itemId || '')}</td>` +
+    `<td style="padding:6px 8px;border-bottom:1px solid #E2E8F0;font-size:11px;text-align:center;">${esc(it.qty != null ? String(it.qty) : '')}</td>` +
+    `<td style="padding:6px 8px;border-bottom:1px solid #E2E8F0;font-size:11px;">${esc(it.vendor || '')}</td>` +
+    `<td style="padding:6px 8px;border-bottom:1px solid #E2E8F0;font-size:11px;">${esc(it.description || '')}</td>` +
+    `<td style="padding:6px 8px;border-bottom:1px solid #E2E8F0;font-size:11px;">${esc(it.itemClass || '')}</td>` +
+    `<td style="padding:6px 8px;border-bottom:1px solid #E2E8F0;font-size:11px;font-family:monospace;">${esc(it.location || '')}</td>` +
+    `<td style="padding:6px 8px;border-bottom:1px solid #E2E8F0;font-size:11px;">${esc(it.sidemark || '')}</td>` +
+    `<td style="padding:6px 8px;border-bottom:1px solid #E2E8F0;font-size:11px;">${esc(it.reference || '')}</td>` +
+    '</tr>'
+  )).join('');
+
+  const notes = (shipment.notes || '').trim();
+  const notesHtml = notes
+    ? `<div style="margin-top:12px;font-size:11px;"><span style="font-weight:700;color:#64748B;">NOTES:</span> ${notesToHtml(notes)}</div>`
+    : '';
+
+  const clientEmail = (shipment.clientEmail || '').trim();
+  const clientEmailHtml = clientEmail
+    ? rowHtml('Email', esc(clientEmail))
+    : '';
+
+  const tokens: Record<string, string> = {
+    '{{LOGO_URL}}':             esc(DEFAULT_LOGO_URL),
+    '{{SHIPMENT_NO}}':          esc(shipment.shipmentNo),
+    '{{CLIENT_NAME}}':          esc(shipment.clientName || ''),
+    '{{CLIENT_EMAIL_HTML}}':    clientEmailHtml,
+    '{{CARRIER}}':              esc(shipment.carrier || ''),
+    '{{TRACKING}}':             esc(shipment.tracking || ''),
+    '{{RECEIVED_DATE}}':        esc(fmtDateMMDDYYYY(shipment.receivedDate)),
+    '{{ITEM_COUNT}}':           esc(String(items.length)),
+    '{{TOTAL_ITEMS}}':          esc(totalItems),
+    '{{SHIPMENT_NOTES_HTML}}':  notesHtml,
+    '{{ITEMS_TABLE_ROWS}}':     itemsTableRows,
+  };
+
+  const html = applyTokens(template, tokens);
+  openPrintWindow(html, `Receiving — ${shipment.shipmentNo}`);
 }

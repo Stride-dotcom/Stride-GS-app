@@ -27,6 +27,7 @@ import { useDocuments } from '../../hooks/useDocuments';
 import { PhotosPanel as _PhotosPanel, DocumentsPanel as _DocumentsPanel, NotesPanel as _NotesPanel } from './EntityAttachments';
 import { EntityHistory } from './EntityHistory';
 import { InlineEditableCell } from './InlineEditableCell';
+import { generateReceivingDocPdf } from '../../lib/workOrderPdf';
 
 /**
  * Phase 7A-7 + 2026-04-22 tabbed migration.
@@ -330,6 +331,32 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
     return (shipment as unknown as Record<string, string>)[field] || '';
   }, [shipment, optimistic]);
 
+  // v2026-05-04: Receiving Doc generator — pure Supabase. Fetches the
+  // DOC_RECEIVING template (cached per tab), renders client-side, opens
+  // print dialog. No GAS round-trip. Used by all three button surfaces
+  // below (Quick Action card, page-mode footer pill, FAB).
+  const handleGenerateReceivingDoc = useCallback(() => {
+    void generateReceivingDocPdf({
+      shipmentNo:   shipment.shipmentNo,
+      clientName:   shipment.client,
+      carrier:      shipment.carrier,
+      tracking:     shipment.tracking,
+      receivedDate: shipment.receivedDate,
+      notes:        shipment.notes,
+      totalItems:   shipment.totalItems,
+      items: (mergedItems.length ? mergedItems : items).map(i => ({
+        itemId:      i.itemId,
+        qty:         i.qty,
+        vendor:      i.vendor,
+        description: i.description,
+        itemClass:   i.itemClass,
+        location:    i.location,
+        sidemark:    i.sidemark,
+        reference:   i.reference,
+      })),
+    });
+  }, [shipment, items, mergedItems]);
+
   // Item selection for quick actions
   const [selectedItemIds, setSelectedItemIds] = useState<Set<string>>(new Set());
   const [showCreateTask, setShowCreateTask] = useState(false);
@@ -487,7 +514,7 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
           >
             <LayoutList size={12} /> View in Inventory
           </button>
-          <button onClick={() => { /* Phase 8: link to receiving doc PDF */ }} style={{ padding: '6px 12px', fontSize: 11, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary, display: 'flex', alignItems: 'center', gap: 4 }}><FileText size={12} /> Receiving Document</button>
+          <button onClick={handleGenerateReceivingDoc} style={{ padding: '6px 12px', fontSize: 11, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary, display: 'flex', alignItems: 'center', gap: 4 }}><FileText size={12} /> Receiving Document</button>
           <button onClick={() => { /* Phase 8: resend email */ }} style={{ padding: '6px 12px', fontSize: 11, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary, display: 'flex', alignItems: 'center', gap: 4 }}><Mail size={12} /> Resend Email</button>
         </div>
       )}
@@ -758,7 +785,7 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
     ...(isStaffAdmin && !isEditing ? [{ label: 'Edit', icon: <Pencil size={16} />, onClick: handleEditStart }] : []),
     { label: 'View Inventory', icon: <LayoutList size={16} />, onClick: () => navigate('/inventory', { state: { shipmentFilter: shipment.shipmentNo } }) },
     ...(shipment.folderUrl ? [{ label: 'Folder', icon: <Truck size={16} />, onClick: () => window.open(shipment.folderUrl!, '_blank', 'noopener,noreferrer') }] : []),
-    { label: 'Receiving Doc', icon: <FileText size={16} />, onClick: () => { /* Phase 8 */ } },
+    { label: 'Receiving Doc', icon: <FileText size={16} />, onClick: handleGenerateReceivingDoc },
     { label: 'Resend Email', icon: <Mail size={16} />, onClick: () => { /* Phase 8 */ } },
     ...(hasItems ? [{ label: 'Inspection', icon: <ClipboardList size={16} />, onClick: () => openAction('task') }] : []),
     ...(hasItems && canTransfer ? [{ label: 'Transfer', icon: <Package size={16} />, onClick: () => openAction('transfer') }] : []),
@@ -791,7 +818,7 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
           <Truck size={13} /> Folder
         </a>
       )}
-      <button onClick={() => { /* Phase 8: receiving doc */ }} style={darkPill}>
+      <button onClick={handleGenerateReceivingDoc} style={darkPill}>
         <FileText size={13} /> Receiving Doc
       </button>
       <button onClick={() => { /* Phase 8: resend email */ }} style={darkPill}>
