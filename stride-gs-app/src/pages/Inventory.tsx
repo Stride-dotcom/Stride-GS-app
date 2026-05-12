@@ -158,6 +158,24 @@ const multiSelectFilter: FilterFn<InventoryItem> = (row, columnId, value: string
 };
 multiSelectFilter.autoRemove = (val: string[]) => !val || val.length === 0;
 
+/** Case-/whitespace-insensitive multi-select for the sidemark column.
+ *  Without this, picking "FAHRINGER" (the deduped display value from the
+ *  dropdown) wouldn't match a row whose raw value is "Fahringer" — the
+ *  dropdown collapses variants to one option but the exact-string filter
+ *  above would filter that option down to zero matches. Normalize both
+ *  sides through normSidemark so the dropdown's promise (one option per
+ *  case-variant cluster) matches the filtered result set. */
+const sidemarkMultiSelectFilter: FilterFn<InventoryItem> = (row, columnId, value: string[]) => {
+  if (!value || value.length === 0) return true;
+  const rowNorm = normSidemark(row.getValue(columnId) as string | null | undefined);
+  if (!rowNorm) return false;
+  for (const v of value) {
+    if (normSidemark(v) === rowNorm) return true;
+  }
+  return false;
+};
+sidemarkMultiSelectFilter.autoRemove = (val: string[]) => !val || val.length === 0;
+
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
 const formatDate = (iso: string) => fmtDate(iso);
@@ -378,11 +396,17 @@ function SidemarkFilterPopover({ anchorRect, allSidemarks, selectedSidemarks, in
     return () => document.removeEventListener('mousedown', onDown);
   }, [onClose]);
 
-  // Count items per sidemark
+  // Count items per sidemark, bucketed by normalized key so "FAHRINGER",
+  // "Fahringer", and " Fahringer " all roll up to the single canonical option
+  // shown in the dropdown. Without this the count next to "FAHRINGER" only
+  // tallies rows with that exact raw casing and undercounts variants.
   const counts = useMemo(() => {
     const map: Record<string, number> = {};
     for (const item of inventoryItems) {
-      if (item.sidemark) map[item.sidemark] = (map[item.sidemark] || 0) + 1;
+      if (!item.sidemark) continue;
+      const key = normSidemark(item.sidemark);
+      if (!key) continue;
+      map[key] = (map[key] || 0) + 1;
     }
     return map;
   }, [inventoryItems]);
@@ -494,7 +518,7 @@ function SidemarkFilterPopover({ anchorRect, allSidemarks, selectedSidemarks, in
                 style={{ display: 'none' }}
               />
               <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{sm}</span>
-              <span style={{ fontSize: 10, color: theme.colors.textMuted, flexShrink: 0 }}>{counts[sm] ?? 0}</span>
+              <span style={{ fontSize: 10, color: theme.colors.textMuted, flexShrink: 0 }}>{counts[normSidemark(sm)] ?? 0}</span>
             </label>
           );
         })}
@@ -1307,7 +1331,7 @@ export function Inventory() {
     // Sidemark — inline-editable autocomplete from client Autocomplete_DB
     ch.accessor('sidemark', {
       header: 'Sidemark', size: 190,
-      filterFn: multiSelectFilter,
+      filterFn: sidemarkMultiSelectFilter,
       cell: i => {
         const val = i.getValue() || '';
         const bg = val ? sidemarkColorMap.get(normSidemark(val)) : undefined;
