@@ -690,11 +690,24 @@ export function Dashboard() {
   // ── Task type filter (dropdown on tab button, persisted per user) ─────────────
   const { user } = useAuth();
   const typeFilterKey = user?.email ? `stride_dashboard_typeFilter_${user.email}` : 'stride_dashboard_typeFilter';
+  // taskTypeFilters semantics (v2 2026-05-11):
+  //   - Explicit list of svc codes to show. The empty array means "no
+  //     types selected, show nothing" — matching Select All unchecked.
+  //   - Pre-v2, an empty array overloaded "show all", which made it
+  //     impossible to uncheck Select All; clicking it just reset the
+  //     same "all" state and the checkbox stayed checked. Justin reported.
+  //   - localStorage values that were the legacy [] are migrated to "all"
+  //     on first load so users don't lose their default-show-all view.
+  const allTypeCodes = useMemo(() => ALL_SERVICE_TYPES.map(s => s.code), []);
   const [taskTypeFilters, setTaskTypeFiltersRaw] = useState<string[]>(() => {
     try {
       const raw = localStorage.getItem(typeFilterKey);
-      return raw ? JSON.parse(raw) : [];
-    } catch { return []; }
+      if (!raw) return allTypeCodes;
+      const parsed = JSON.parse(raw) as string[];
+      // Legacy migration: [] used to mean "all" — preserve that intent.
+      if (Array.isArray(parsed) && parsed.length === 0) return allTypeCodes;
+      return Array.isArray(parsed) ? parsed : allTypeCodes;
+    } catch { return allTypeCodes; }
   });
   const setTaskTypeFilters = useCallback((updater: string[] | ((prev: string[]) => string[])) => {
     setTaskTypeFiltersRaw(prev => {
@@ -711,24 +724,24 @@ export function Dashboard() {
     return () => document.removeEventListener('mousedown', h);
   }, []);
 
-  const allTypeCodes = useMemo(() => ALL_SERVICE_TYPES.map(s => s.code), []);
-  const filteredTasks = useMemo(() => taskTypeFilters.length === 0 ? tasks : tasks.filter(t => taskTypeFilters.includes(t.taskType)), [tasks, taskTypeFilters]);
-  const isAllSelected = taskTypeFilters.length === 0;
+  // Explicit-list semantics — always filter through includes(). Empty
+  // array → no tasks shown (matches "Select All unchecked" expectation).
+  const filteredTasks = useMemo(
+    () => tasks.filter(t => taskTypeFilters.includes(t.taskType)),
+    [tasks, taskTypeFilters],
+  );
+  const isAllSelected = taskTypeFilters.length === allTypeCodes.length;
 
   const toggleTaskType = useCallback((type: string) => {
-    setTaskTypeFilters(prev => {
-      // If currently "all" (empty), start with all codes MINUS the toggled one
-      if (prev.length === 0) return allTypeCodes.filter(t => t !== type);
-      const next = prev.includes(type) ? prev.filter(t => t !== type) : [...prev, type];
-      // If result includes all types, reset to empty (= show all)
-      if (next.length >= allTypeCodes.length) return [];
-      return next;
-    });
-  }, [allTypeCodes]);
+    setTaskTypeFilters(prev => prev.includes(type)
+      ? prev.filter(t => t !== type)
+      : [...prev, type]
+    );
+  }, [setTaskTypeFilters]);
 
   const toggleSelectAll = useCallback(() => {
-    setTaskTypeFilters([]);
-  }, []);
+    setTaskTypeFilters(isAllSelected ? [] : allTypeCodes);
+  }, [isAllSelected, allTypeCodes, setTaskTypeFilters]);
 
   // ── Loading / error states ────────────────────────────────────────────────────
   if (loading && tasks.length === 0 && repairs.length === 0 && willCalls.length === 0) {
@@ -865,7 +878,7 @@ export function Dashboard() {
                       Select All
                     </label>
                     {ALL_SERVICE_TYPES.map(svc => {
-                      const checked = isAllSelected || taskTypeFilters.includes(svc.code);
+                      const checked = taskTypeFilters.includes(svc.code);
                       return (
                         <label key={svc.code} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', fontSize: 12, cursor: 'pointer' }}>
                           <input type="checkbox" checked={checked} onChange={() => toggleTaskType(svc.code)} style={{ accentColor: '#E8692A' }} />
@@ -875,7 +888,7 @@ export function Dashboard() {
                     })}
                     {!isAllSelected && (
                       <div style={{ borderTop: `1px solid rgba(0,0,0,0.06)`, marginTop: 6, paddingTop: 6 }}>
-                        <button onClick={() => setTaskTypeFilters([])} style={{ width: '100%', padding: '6px 10px', fontSize: 11, border: 'none', background: 'none', cursor: 'pointer', color: '#E8692A', fontWeight: 600, textAlign: 'left', fontFamily: 'inherit' }}>
+                        <button onClick={() => setTaskTypeFilters(allTypeCodes)} style={{ width: '100%', padding: '6px 10px', fontSize: 11, border: 'none', background: 'none', cursor: 'pointer', color: '#E8692A', fontWeight: 600, textAlign: 'left', fontFamily: 'inherit' }}>
                           Reset to all types
                         </button>
                       </div>
