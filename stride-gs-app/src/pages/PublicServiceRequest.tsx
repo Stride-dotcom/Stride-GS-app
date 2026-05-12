@@ -619,9 +619,12 @@ export function PublicServiceRequest() {
         n.delete(acc.code);
         return n;
       }
-      const defaultQty = acc.billingMode === 'per_qty' && (acc.rateUnit === 'per_item' || acc.rateUnit === 'flat')
-        ? Math.max(1, itemCount || 1)
-        : 1;
+      // v2026-05-04: Default qty to 1 — operator/client bumps it to the
+      // count they need. Auto-filling from itemCount was wrong for the
+      // common case (Art Installation, Stair Charge, etc. — flat-rate
+      // services where the qty is an explicit choice, not a per-piece
+      // multiplier).
+      const defaultQty = 1;
       const quotePending = acc.quoteRequired || acc.billingMode === 'per_class';
       const rate = quotePending ? 0 : (acc.rate ?? 0);
       n.set(acc.code, {
