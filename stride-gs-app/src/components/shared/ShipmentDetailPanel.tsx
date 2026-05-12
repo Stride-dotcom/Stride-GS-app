@@ -146,6 +146,9 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
   // until the row is re-fetched.
   const [itemPatches, setItemPatches] = useState<Record<string, Partial<ShipmentItem>>>({});
   const applyShipmentItemPatch = (itemId: string, patch: Record<string, unknown>) => {
+    // Bump the mutation timestamp so the realtime listener below doesn't
+    // refetch+overwrite items during the GAS write-through window.
+    lastMutationAtRef.current = Date.now();
     setItemPatches(prev => ({
       ...prev,
       [itemId]: { ...(prev[itemId] ?? {}), ...(patch as Partial<ShipmentItem>) },
@@ -175,6 +178,12 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
     const ourItemIds = new Set(items.map(i => i.itemId));
     return entityEvents.subscribe(async (entityType, entityId) => {
       if (entityType !== 'inventory' || !ourItemIds.has(entityId)) return;
+      // Skip the refetch+overwrite if we recently fired a mutation —
+      // the GAS write-through can echo back before our optimistic patch
+      // has had a chance to surface to the user. The patch overlay keeps
+      // the cell looking correct; the server-authoritative refresh comes
+      // on the next event after the guard window expires.
+      if (Date.now() - lastMutationAtRef.current < OPTIMISTIC_GUARD_MS) return;
       try {
         const sbResult = await fetchShipmentItemsFromSupabase(shipment.clientSheetId!, shipment.shipmentNo);
         if (sbResult && sbResult.items.length > 0) {
@@ -226,6 +235,14 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [optimistic, setOptimistic] = useState<Partial<ShipmentDraft> | null>(null);
 
+  // Mutation timestamp guard, same shape as TaskPage / RepairPage / WillCallPage /
+  // OrderPage (PR #361). Bumped on every save/inline-edit; the realtime listener
+  // below skips the items refetch + setItems if a mutation just landed, so the
+  // user's in-progress patch isn't clobbered by their own realtime echo before
+  // the optimistic patch overlay has had a chance to clear naturally.
+  const lastMutationAtRef = useRef<number>(0);
+  const OPTIMISTIC_GUARD_MS = 6000;
+
   // Clear optimistic overrides when shipment id changes (panel re-used for
   // a different shipment) so the new shipment's prop values render clean.
   const lastShipmentNoRef = useRef(shipment.shipmentNo);
@@ -234,6 +251,7 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
       lastShipmentNoRef.current = shipment.shipmentNo;
       setOptimistic(null);
       setIsEditing(false);
+      lastMutationAtRef.current = 0;
     }
   }, [shipment.shipmentNo]);
 
@@ -279,6 +297,7 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
     };
     setOptimistic(overrides);
 
+    lastMutationAtRef.current = Date.now();
     setSaving(true);
     setSaveError(null);
     try {
