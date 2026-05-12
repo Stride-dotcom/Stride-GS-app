@@ -24,8 +24,15 @@ AppScripts/**/node_modules/
 AppScripts/**/.env
 AppScripts/**/.env.*
 
-# Claude Code workspace metadata
-.claude/
+# Claude Code workspace metadata. Per-builder state (worktrees, session
+# scratch, etc.) stays local; the shared agent + slash-command
+# definitions live in source control so every builder gets the same
+# locked-in tooling (the Opus 4.7 code reviewer, etc.).
+.claude/*
+!.claude/agents/
+!.claude/agents/**
+!.claude/commands/
+!.claude/commands/**
 
 # React app built output (served from stride-gs-app/dist/ via its own subtree repo)
 stride-gs-app/dist/
