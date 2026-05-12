@@ -45,7 +45,7 @@ Function counts (verified against per-agent extraction; the migration-phase roll
 
 | Project | Files | Functions | Status |
 |---|---|---|---|
-| StrideAPI | 1 | 556 | Active — primary migration target |
+| StrideAPI | 1 | 558 | Active — primary migration target |
 | Consolidated Billing | 10 | 158 | Active — P4a/P4b targets |
 | Master Price List | 1 | 18 | Active (limited use). Email-template functions are dead code (templates moved to Supabase). Counter routes (`getNextShipmentId`, `getNextInvoiceId`) both retired — StrideAPI now uses Postgres SEQUENCEs (`next_invoice_no()` v38.182.0, `next_shipment_no()` v38.206.0). Per-tenant client scripts' `nextGlobalShipmentNumber_` still hits the racy Master counter for direct-sheet receiving — P7 cleanup. |
 | Client Inventory (per-tenant, deployed × 49) | 13 | 240 | Active — P7 freeze target |
@@ -53,7 +53,7 @@ Function counts (verified against per-agent extraction; the migration-phase roll
 | QR Scanner | 2 | 35 | Active — out-of-scope (operator UI) |
 | Task Board | 1 | 56 | **DECOMMISSIONED** — replaced by React app's task views. Code remains as historical reference + frozen copy of the SH_* shared-handler block |
 | Stride Designer Campaign | 1 | 57 | Active — migrate last per project owner |
-| **TOTAL** | **30** | **1,196** | 7 active projects + 1 decommissioned |
+| **TOTAL** | **30** | **1,198** | 7 active projects + 1 decommissioned |
 
 ### Approximate migration-phase rollup across all projects
 
@@ -85,7 +85,7 @@ _Counts are approximate — they're derived by greping for each tag in a table c
 > Source: `AppScripts/stride-api/StrideAPI.gs` (~43,000 lines, single file)
 > Deployment: Web App at `script.google.com/macros/s/<id>/exec` (currently version 495).
 > Migration role: **primary migration target**. Most P2–P5 work happens here.
-> Function count: **556** (Part 1 lines 1-21000: 245; Part 2 lines 21001-end: 311).
+> Function count: **558** (Part 1 lines 1-21000: 247; Part 2 lines 21001-end: 311). Increment of +2 in Part 1 covers `api_nextShipmentNo_` + `api_nextShipmentNoSupabase_` added by v38.206.0; the initial inventory pass missed them because they lived in Part 1's shipments category but the agent collated them under inventory + writethrough cross-references.
 
 ### Part 1 — lines 1-21000
 
@@ -300,7 +300,7 @@ _Counts are approximate — they're derived by greping for each tag in a table c
 | `notifySupabaseConfirmed_(params)` (line 2203) | Inserts a "confirmed" row into Supabase `gs_sync_events` so the React FailedOperationsDrawer knows the write succeeded. Best-effort. | Writes Supabase `gs_sync_events` | internal-helper |
 | `notifySupabaseFailed_(params)` (line 2242) | Inserts a "sync_failed" row into `gs_sync_events`. Used for GAS-internal failures React can't observe (e.g. trigger failures). Do NOT call from synchronous doPost handlers — would duplicate React's own failure rows. | Writes Supabase `gs_sync_events` | internal-helper |
 | `api_logCallInput_(action, payload, tenantId, performedBy)` (line 3321) | [MIGRATION-P1.2] Captures every doPost call's redacted input payload to `public.gas_call_log` and sets a per-request UUID `__MIG_CORRELATION_ID__` that `api_auditLog_` stamps onto every entity_audit_log row produced during the same request. Gives the replay harness a (input, output) join for every GAS call. | Writes Supabase `gas_call_log` | done |
-| `api_redactPayloadForCorpus_(payload)` (line 3363) | PII-conscious redaction — whitelists structural field names (action, ids, statuses, amounts, sidemarks), drops anything containing token/secret/key/password/card/ssn/cvv/pii/email/phone. Output capped at 1KB with a truncation marker. | Pure function | internal-helper |
+| `api_redactPayloadForCorpus_(payload)` (line 3363) | PII-conscious redaction for the `gas_call_log` corpus. v38.207.0 expanded whitelist covers all inventory/task/repair/shipment editable fields (vendor, description, reference, sidemark, room, location, itemClass, qty, status, itemNotes, declaredValue, coverageOptionId, notes, priority, scheduledDate, carrier, trackingNumber, …) plus billing-row fields (rate, total, amount, svcCode, …) plus will-call fields (pickupParty, pickupPhone, codAmount, …). Drops anything containing token/secret/key/password/card/ssn/cvv/pii/email/phone. Output capped at 1KB with a truncation marker. Pre-v38.207.0 corpus was partially blind (location/vendor/description/etc. got stripped) — the replay harness's `skip_partial_input` classification handles those. | Pure function | internal-helper |
 | `api_auditLog_(entityType, entityId, tenantId, action, changes, performedBy)` (line 3257) | Writes one row to Supabase `entity_audit_log` after a mutation — entity_type, entity_id, tenant, action (create/update/complete/cancel/release/transfer/void/reopen/etc.), changes diff, performed_by, source="gas". Stamps the request's `correlation_id` so the migration replay harness can join inputs to outcomes. Best-effort. | Writes Supabase `entity_audit_log` | internal-helper |
 | `api_auditLogBatch_(rows)` (line 3511) | Batch-insert variant — POSTs an array of audit rows in one request. Used by the audit-log backfill and by `batchCreateTasks` to emit one row per created task. | Writes Supabase `entity_audit_log` | internal-helper |
 | `api_tenantBackfilled_(tenantId)` (line 3540) | Checks if a tenant has ever had a backfill:v1 audit row written, so re-running the backfill skips already-done tenants. | Reads Supabase `entity_audit_log` | internal-helper |
@@ -337,6 +337,8 @@ _Counts are approximate — they're derived by greping for each tag in a table c
 | `handleGetShipments_(clientSheetId)` | (already listed under inventory category — multi-client shipments list reader) | — | done |
 | `handleGetShipmentItems_(clientSheetId, params)` | (already listed under inventory category) | — | done |
 | `handleCompleteShipment_(clientSheetId, payload)` | (already listed under inventory category — the "receive a shipment" master handler) | — | P5 |
+| `api_nextShipmentNo_(rpcUrl, rpcToken)` (line 14803) | Returns the next Shipment # as `SHP-XXXXXX`. v38.206.0 — now a thin wrapper around `api_nextShipmentNoSupabase_`; the racy Master sheet RPC counter is retired (mirror of v38.182.0's invoice-counter fix). Legacy rpcUrl/rpcToken parameters kept for signature compat but ignored. | Supabase `next_shipment_no()` | internal-helper |
+| `api_nextShipmentNoSupabase_()` (line ~14826) | Calls the atomic `public.next_shipment_no()` RPC and returns the formatted shipment number string (e.g. `SHP-001000`). Format-validates against `/^SHP-\\d{6,}$/`. Mirror of `api_nextInvoiceNoSupabase_`. | Supabase RPC | internal-helper |
 
 #### Category: stax
 
@@ -1431,7 +1433,7 @@ These are not call-targets; they're load-time constants. I left them out of the 
 | Function | What it does (plain English) | What it affects | Migration |
 |---|---|---|---|
 | `doGet` | The Web App GET endpoint. Accepts `?token=...&action=...` query parameters and returns Master data as JSON. Validates the shared `MASTER_RPC_TOKEN` before opening any spreadsheet (quota protection on empty/bad tokens). Routes to `exportMasterData_` for actions: exportAll, exportPriceList, exportClassMap, exportEmailTemplates, exportInvoiceTemplates. Used by client scripts and other tools to refresh their local caches without using Apps Script openById reads. | Reads Master Settings + the requested sheet. HTTP response. | retiring (P6 / Supabase service_catalog API) |
-| `doPost` | The Web App POST endpoint — the **racy sheet-backed counter** for generating IDs. Validates the shared token, takes a script lock, then either: `action="getNextShipmentId"` increments GLOBAL_SHIPMENT_COUNTER and returns `SHP-000123`; or `action="getNextInvoiceId"` increments GLOBAL_INVOICE_COUNTER and returns `INV-000123`. Defaults to `getNextShipmentId` if action is absent (v1.x compat). **Both counters are now retired** — invoice counter superseded by `next_invoice_no()` SEQUENCE (v38.182.0); shipment counter superseded by `next_shipment_no()` SEQUENCE (v38.206.0). StrideAPI no longer calls either, but the route stays in place for backward compat — the per-tenant client scripts' `nextGlobalShipmentNumber_` (Client Inventory/Utils.gs) still hits this for direct-sheet receiving workflows. Full retirement is a P7 cleanup. | Reads/writes Master Settings counters. HTTP response. | retiring (both routes; full removal in P7) |
+| `doPost` | The Web App POST endpoint — the **racy sheet-backed counter** for generating IDs. Validates the shared token, takes a script lock, then either: `action="getNextShipmentId"` increments GLOBAL_SHIPMENT_COUNTER and returns `SHP-000123`; or `action="getNextInvoiceId"` increments GLOBAL_INVOICE_COUNTER and returns `INV-000123`. Defaults to `getNextShipmentId` if action is absent (v1.x compat). **Both counters are now retired** — invoice counter superseded by `next_invoice_no()` SEQUENCE (v38.182.0); shipment counter superseded by `next_shipment_no()` SEQUENCE (v38.206.0). StrideAPI no longer calls either, but the route stays in place for backward compat — the per-tenant client scripts' `nextGlobalShipmentNumber_` (Client Inventory/`Shipments.gs:522`) still hits this for direct-sheet receiving workflows. Full retirement is a P7 cleanup. | Reads/writes Master Settings counters. HTTP response. | retiring (both routes; full removal in P7) |
 | `onOpen` | Installs the "Stride MPL" menu when the spreadsheet is opened: Setup / Refresh, Re-Apply Owner Protections, Sync to All Clients. | Adds UI menu. | trigger |
 
 #### Category: helper-misc
