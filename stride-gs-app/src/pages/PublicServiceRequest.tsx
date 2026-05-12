@@ -567,7 +567,8 @@ export function PublicServiceRequest() {
     setSelectedAccessorials(prev => {
       const n = new Map(prev);
       if (forceRemove || n.has(acc.code)) {
-        if (forceRemove || n.has(acc.code)) { n.delete(acc.code); return n; }
+        n.delete(acc.code);
+        return n;
       }
       const defaultQty = acc.billingMode === 'per_qty' && (acc.rateUnit === 'per_item' || acc.rateUnit === 'flat')
         ? Math.max(1, itemCount || 1)
