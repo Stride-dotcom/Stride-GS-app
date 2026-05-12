@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.208.0 — 2026-05-12 PST — [MIGRATION-P2 inventory release] First per-table writer registered against the P1.4 reverse-writethrough framework. Replaces `__writeThroughReverseStub_` for the `inventory` table in `REVERSE_WRITETHROUGH_TABLES_` with `__writeThroughReverseInventory_` — finds the row by Item ID, idempotently writes Status + Release Date columns, calls `api_ledgerUpdateStatus_` for slot tracking when flipping to Released. Companion Edge Function `push-inventory-release-to-sheet` fires this after the React OrderPage release flow commits the Supabase-authoritative inventory.status='Released' + release_date write. Sheet stays current as the legacy-readers' read-only mirror until invoice generation flips to Supabase-primary in P4a. Hardening: handleWriteThroughReverse_ now stores the FULL incoming payload in the gs_sync_events row on writer failure (previously only stored {op, table}) so the FailedOperationsDrawer retry — which calls back into this endpoint with the stored payload — has all the fields needed for the second attempt. The earlier shape would have failed retry with "rowId required" on every failed reverse-writethrough.
+   StrideAPI.gs — v38.209.0 — 2026-05-12 PST — handleQboSyncCatalogItem_ now supplies IncomeAccountRef on Service item creates. QBO's /v3/.../item endpoint requires either IncomeAccountRef (sale-able) or ExpenseAccountRef (purchase-only); without it the API rejects the create with HTTP 400 "Required parameter ExpenseAccountRef or IncomeAccountRef is missing in the request". Surfaced by Justin's attempt to add a new FELT service in Price List Settings — the Stax mirror succeeded but the QBO mirror failed and the React layer raised a "Catalog sync failed for FELT — QBO: ..." banner with the full QBO error text. Fix is a new helper qbo_resolveIncomeAccount_(token, realmId, opts, watchdog_) that (1) checks Script Property QBO_INCOME_ACCOUNT_ID for an admin-configured override, (2) falls back to a one-shot QBO query (`SELECT * FROM Account WHERE AccountType='Income' MAXRESULTS 50`) that prefers obvious names (Services / Sales / Income / Sales of Product Income) and caches the resolved ID in Script Properties so subsequent item creates skip the round-trip entirely. handleQboSyncCatalogItem_'s create branch calls the helper inside the existing watchdog before issuing the create. Update + dup-name-update branches are untouched (QBO's update endpoint doesn't require IncomeAccountRef when the field is already set on the existing item). Admins can override the auto-resolved account by setting QBO_INCOME_ACCOUNT_ID directly in Apps Script → Project Settings → Script Properties (useful when Stride services should book to a specific GL line distinct from other income). No schema change, no React change.
+   v38.208.0 — 2026-05-12 PST — [MIGRATION-P2 inventory release] First per-table writer registered against the P1.4 reverse-writethrough framework. Replaces `__writeThroughReverseStub_` for the `inventory` table in `REVERSE_WRITETHROUGH_TABLES_` with `__writeThroughReverseInventory_` — finds the row by Item ID, idempotently writes Status + Release Date columns, calls `api_ledgerUpdateStatus_` for slot tracking when flipping to Released. Companion Edge Function `push-inventory-release-to-sheet` fires this after the React OrderPage release flow commits the Supabase-authoritative inventory.status='Released' + release_date write. Sheet stays current as the legacy-readers' read-only mirror until invoice generation flips to Supabase-primary in P4a. Hardening: handleWriteThroughReverse_ now stores the FULL incoming payload in the gs_sync_events row on writer failure (previously only stored {op, table}) so the FailedOperationsDrawer retry — which calls back into this endpoint with the stored payload — has all the fields needed for the second attempt. The earlier shape would have failed retry with "rowId required" on every failed reverse-writethrough.
    v38.207.0 — 2026-05-11 PST — [MIGRATION-P1.7] Expanded `api_redactPayloadForCorpus_` SAFE_FIELDS whitelist for the replay-harness corpus. The original P1.2 list (only sidemark/status/qty/rate/total/amount among the editable fields) was too narrow: every `updateInventoryItem` call that changed `location`/`vendor`/`description`/`reference`/`room`/`itemClass`/`itemNotes`/`declaredValue` got captured with `input_redacted={itemId, requestId}` only — the actual field change got stripped. Replay harness couldn't reconstruct what those calls did. Expanded to cover every field in handleUpdateInventoryItem_'s FIELD_MAP, the Tasks/Repairs SYNC_FIELDS fan-out, the will-call fields, and a few more billing/flag fields commonly seen across migration-target handlers. PII risk stays minimal — these are operator-entered short strings about furniture pieces. Past corpus is partially blind to those fields; replay-harness MVP filters to calls whose changed fields ARE in the original whitelist (so it can be tested today). Future post-deploy traffic will have complete inputs.
    v38.206.0 — 2026-05-11 PST — Atomic shipment-counter SEQUENCE retires the Master sheet RPC race for shipment numbering. Mirror of v38.182.0's invoice-counter fix. Surfaced by the 2026-05-11 function inventory: `api_nextShipmentNo_` was still hitting Master-RPC with `action: "getNextShipmentId"` against a sheet-backed counter (`GLOBAL_SHIPMENT_COUNTER` cell, read-then-write without a transaction lock). Two concurrent `handleCompleteShipment_` calls could both grab the same number — same race class as the INV-000131 dup on 2026-05-03, just on shipments. Companion migration `shipment_no_atomic_counter` creates `public.shipment_no_seq` Postgres SEQUENCE seeded at 1000 (640+ rows of headroom over max production shipment_number 358) + `public.next_shipment_no()` SQL function returning `'SHP-' || LPAD(nextval(seq), 6, '0')` + `public.peek_shipment_no_seq()` diagnostic. `api_nextShipmentNo_` becomes a thin wrapper around the new `api_nextShipmentNoSupabase_` helper, exact same shape as `api_nextInvoiceNo_` → `api_nextInvoiceNoSupabase_`. Legacy `rpcUrl/rpcToken` parameters kept for signature compat but ignored. Atomic by Postgres design — no retries needed. The Master RPC `getNextShipmentId` action is left in place for backward compat but is no longer called by StrideAPI; can be retired in P7 alongside the rest of Master.
    v38.205.0 — 2026-05-11 PST — handleAddItemAddon_ / handleRemoveItemAddon_ / handleAddManualCharge_ were calling `LockService.getDocumentLock()` instead of `getScriptLock()`. StrideAPI is a standalone web-app script with no bound document, so getDocumentLock() returns null. The next line — `lock.waitLock(15000)` — then threw `TypeError: Cannot read properties of null (reading 'waitLock')` and the doPost wrapper bubbled the error back to React as a failed toast on every receiving-addon checkbox tap (and similar on every manual-charge add). The manual-charge handler had a try/catch around tryLock() that absorbed the TypeError and surfaced the misleading "Sheet busy — try again" message instead — same root cause, different symptom. All three call sites flipped to getScriptLock(), matching every other lock in this file. The error never surfaced in dev because LockService is only fully enforced server-side and the symptom was 100% reproducible only against the deployed web app. Companion: no React change; no schema change.
@@ -40901,6 +40902,60 @@ function handleQboDisconnect_() {
  * Payload: { serviceCode, serviceName, qbItemId (optional — update if present) }
  * Returns: { success, qb_item_id, action: 'created'|'updated' }
  */
+/**
+ * Resolve the QBO Income account to use as IncomeAccountRef on Service
+ * item creates. QBO rejects item creates without IncomeAccountRef /
+ * ExpenseAccountRef, so a missing value here breaks `Add Service` in
+ * the Price List.
+ *
+ * Strategy:
+ *   1. Check Script Property QBO_INCOME_ACCOUNT_ID. If present, use it.
+ *   2. Otherwise query QBO for any Income-type account (prefer
+ *      "Services", "Sales", or "Income" by name; fall back to first).
+ *   3. Cache the resolved ID in Script Properties so subsequent
+ *      creates skip the round-trip.
+ *
+ * Admins can override by setting QBO_INCOME_ACCOUNT_ID manually (e.g.
+ * to route Stride services to a specific GL account separate from
+ * other income).
+ *
+ * Throws if no Income account exists in the realm (very rare —
+ * every QBO company has at least one).
+ */
+function qbo_resolveIncomeAccount_(token, realmId, opts, watchdog_) {
+  var cached = prop_("QBO_INCOME_ACCOUNT_ID");
+  if (cached) return cached;
+  watchdog_ && watchdog_("GET query income account");
+  var query = "select Id, Name from Account where AccountType = 'Income' MAXRESULTS 50";
+  var resp = qbo_apiRequest_("GET", "query?query=" + encodeURIComponent(query), null, token, realmId, opts);
+  if (!resp.success || !resp.data || !resp.data.QueryResponse) {
+    throw new Error("QBO income-account lookup failed: " + (resp.error || JSON.stringify(resp)));
+  }
+  var accounts = (resp.data.QueryResponse.Account || []);
+  if (accounts.length === 0) {
+    throw new Error("No Income-type account found in QBO. Add one in QBO Chart of Accounts, then retry.");
+  }
+  // Prefer obvious candidates by name; fall back to first.
+  var preferred = ['services', 'sales', 'income', 'sales of product income'];
+  var pick = null;
+  for (var i = 0; i < preferred.length && !pick; i++) {
+    for (var j = 0; j < accounts.length; j++) {
+      if (String(accounts[j].Name || '').toLowerCase() === preferred[i]) { pick = accounts[j]; break; }
+    }
+  }
+  if (!pick) {
+    // Loose contains-match as a second pass before falling back.
+    for (var k = 0; k < accounts.length && !pick; k++) {
+      var n = String(accounts[k].Name || '').toLowerCase();
+      if (n.indexOf('service') >= 0 || n.indexOf('sales') >= 0) pick = accounts[k];
+    }
+  }
+  if (!pick) pick = accounts[0];
+  var id = String(pick.Id);
+  PropertiesService.getScriptProperties().setProperty("QBO_INCOME_ACCOUNT_ID", id);
+  return id;
+}
+
 function handleQboSyncCatalogItem_(payload) {
   // v38.134.0: fast-fail rewrite. Old version called qbo_getValidToken_()
   // (one full companyinfo round-trip) plus up to two more qbo_apiRequest_
@@ -41003,11 +41058,19 @@ function handleQboSyncCatalogItem_(payload) {
       }
     } else {
       // ── Create new QBO Service item ──
+      // v38.200.0: QBO requires IncomeAccountRef on every Service item
+      // create. We auto-resolve the first Income account from the
+      // realm's chart, cache its ID in Script Properties (one-shot —
+      // until an admin re-authorizes or clears the cache), and pass it
+      // on every subsequent create.
+      watchdog_("GET resolve income account");
+      var incomeAccountRef = qbo_resolveIncomeAccount_(token, realmId, QBO_OPTS, watchdog_);
       var createPayload = {
         Name: code,
         Description: name,
         Type: "Service",
-        Active: true
+        Active: true,
+        IncomeAccountRef: { value: incomeAccountRef }
       };
       watchdog_("POST item (create)");
       var createResult = qbo_apiRequest_("POST", "item", createPayload, token, realmId, QBO_OPTS);
