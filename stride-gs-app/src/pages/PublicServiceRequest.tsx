@@ -594,9 +594,24 @@ export function PublicServiceRequest() {
 
   const isPieceCountOverLimit = itemCount > MAX_PIECES;
 
-  // ── Accessorial helpers (public = always quote-pending) ─────────────
-  // Mirrors the modal's !isStaff branch — rate / subtotal forced to 0,
-  // qty editable, optional clientNotes for staff to read on review.
+  // ── Accessorial helpers ──────────────────────────────────────────────
+  // v2026-05-04: Only true "Quote Required" add-ons stay quote-pending on
+  // the public form. Everything else gets a real rate × qty price so the
+  // client sees a more complete estimate before submitting.
+  //
+  // The acc.quoteRequired flag is the source of truth — set on the
+  // service_catalog row via Price List Settings → Delivery Settings.
+  // billingMode='per_class' also stays quote-pending because the public
+  // form has no per-item class info; staff price it during review.
+  const computePublicSubtotal = (acc: DeliveryAccessorial, quantity: number): number => {
+    if (acc.quoteRequired) return 0;
+    if (acc.billingMode === 'per_class') return 0;
+    const rate = acc.rate ?? 0;
+    if (acc.billingMode === 'per_job') return Math.max(0, rate);
+    // per_qty
+    return Math.max(0, rate) * Math.max(0, quantity);
+  };
+
   const toggleAccessorial = (acc: DeliveryAccessorial, forceRemove?: boolean) => {
     setSelectedAccessorials(prev => {
       const n = new Map(prev);
@@ -607,12 +622,14 @@ export function PublicServiceRequest() {
       const defaultQty = acc.billingMode === 'per_qty' && (acc.rateUnit === 'per_item' || acc.rateUnit === 'flat')
         ? Math.max(1, itemCount || 1)
         : 1;
+      const quotePending = acc.quoteRequired || acc.billingMode === 'per_class';
+      const rate = quotePending ? 0 : (acc.rate ?? 0);
       n.set(acc.code, {
         code: acc.code,
         quantity: defaultQty,
-        rate: 0,
-        subtotal: 0,
-        quotePending: true,
+        rate,
+        subtotal: computePublicSubtotal(acc, defaultQty),
+        quotePending,
         clientNotes: '',
       });
       return n;
@@ -624,8 +641,10 @@ export function PublicServiceRequest() {
       const cur = prev.get(code);
       if (!cur) return prev;
       const q = Math.max(1, Math.floor(quantity));
+      const acc = accessorials.find(a => a.code === code);
+      const newSubtotal = acc ? computePublicSubtotal(acc, q) : cur.subtotal;
       const n = new Map(prev);
-      n.set(code, { ...cur, quantity: q });
+      n.set(code, { ...cur, quantity: q, subtotal: newSubtotal });
       return n;
     });
   };
@@ -1690,16 +1709,24 @@ export function PublicServiceRequest() {
 
             {Array.from(selectedAccessorials.values()).map(a => {
               const acc = accessorials.find(x => x.code === a.code);
+              // v2026-05-04: "Quote pending" only renders for add-ons that
+              // actually require a quote (price list flag) or use the
+              // per-class billing mode (no class info on the public form).
+              // Everything else shows the computed price.
               return (
                 <div key={a.code} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
                   <span>{acc?.name ?? a.code}{a.quantity > 1 ? ` × ${a.quantity}` : ''}</span>
-                  <span style={{ fontWeight: 500, color: '#B45309', fontStyle: 'italic' }}>Quote pending</span>
+                  {a.quotePending ? (
+                    <span style={{ fontWeight: 500, color: '#B45309', fontStyle: 'italic' }}>Quote pending</span>
+                  ) : (
+                    <span style={{ fontWeight: 500 }}>${a.subtotal.toFixed(2)}</span>
+                  )}
                 </div>
               );
             })}
-            {Array.from(selectedAccessorials.values()).length > 0 && (
+            {Array.from(selectedAccessorials.values()).some(a => a.quotePending) && (
               <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 4, marginBottom: 4, fontStyle: 'italic', lineHeight: 1.45 }}>
-                Add-ons will be priced by our team during review.
+                Quote-required add-ons will be priced by our team during review.
               </div>
             )}
 
