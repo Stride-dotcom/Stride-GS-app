@@ -1,6 +1,6 @@
 # GAS → Supabase Migration — Living Status
 
-> Last updated: 2026-05-09 (Documented the **transitional sync layers** added by PR #322 — three sheet ↔ Supabase mirrors with explicit P4a/P4b/P7 sunset triggers. Added the direct-sheet-edit → Supabase gap as a P2.1 design decision in Open questions. PR #322 itself shipped the column-presence-guarded fan-out for Sidemark/Reference + the onClientEdit handler — see BUILD_STATUS for that work; this commit is the institutional-memory note so future P4/P7 builders don't preserve the layers as permanent infrastructure or delete them prematurely.).
+> Last updated: 2026-05-11 — **Full GAS function inventory shipped** at `stride-gs-app/FUNCTION_INVENTORY.md`. 1,196 functions across 30 files in 8 Apps Script projects, every function with a plain-English description + what-it-affects + migration-phase tag. P1.2 input capture verified working (194 doPost calls captured Monday). Phase 1 still 6/7 done; the inventory unblocks scoped planning for P2 onward.
 > This file is **authoritative for execution**. The v1.1 docx in `Dropbox\Apps\GS Inventory\` is a stakeholder snapshot.
 
 ---
@@ -10,10 +10,11 @@
 1. Read `CLAUDE.md` (always).
 2. Read `BUILD_STATUS.md` "Recent Changes" (always).
 3. **Read this file cover to cover** before doing any migration work.
-4. Skim `supabase/parity-fixtures/README.md` if touching fixtures.
-5. Check **Currently in flight** below — do not collide with another active worktree.
-6. Check **Open questions / blockers** — do not start work that's gated on user input.
-7. `git log --grep='\[MIGRATION' -n 10` for recent migration PRs.
+4. Open `FUNCTION_INVENTORY.md` when you need to know "what does X do?" or "how many functions are in P4a?" — 1,196 functions across all 8 GAS projects with plain-English descriptions, what-it-affects notes, and migration-phase tags.
+5. Skim `supabase/parity-fixtures/README.md` if touching fixtures.
+6. Check **Currently in flight** below — do not collide with another active worktree.
+7. Check **Open questions / blockers** — do not start work that's gated on user input.
+8. `git log --grep='\[MIGRATION' -n 10` for recent migration PRs.
 
 If you only have time for one section: read **Architectural Decisions** in full. Those choices are append-only and not up for re-litigation without explicit user sign-off.
 
@@ -224,6 +225,75 @@ Master switch (MIG-003) emergency revert: every row to `{active_backend:'gas', t
 
 **Edge case:** unauthenticated callers / cross-tenant impersonation default to `'gas'` even when scoped flags would otherwise apply. A function under canary should be exercised under the real user's primary tenant, not arbitrary tenants the admin happens to be looking at.
 
+### MIG-011 — `FUNCTION_INVENTORY.md` is the canonical function reference; Settings → Migration tab extends to 1,196 functions (2026-05-11)
+
+**Decision:** `stride-gs-app/FUNCTION_INVENTORY.md` is the authoritative function-level reference for the migration. The Settings → Migration tab today shows the 25-flag substrate; Layer 2 (a `migration_function_inventory` SQL table + extended UI) renders all 1,196 functions with coverage stats per project + per phase. Layer 2 plan is captured in the section below, not in this decision entry.
+
+**Rationale:** the 25-flag table covered only the top-level migration handlers. With the full inventory, builders + Justin get a complete coverage picture and Justin can see "we've migrated X of Y across project Z" without grepping. The inventory doc is plain-English by directive — readable without code knowledge.
+
+**Operational rule:** every PR that adds, renames, or deletes a GAS function MUST also update `FUNCTION_INVENTORY.md` in the same commit. Drift between source and the inventory breaks the dashboard's coverage stats (once Layer 2 ships).
+
+---
+
+## Function inventory (shipped 2026-05-11)
+
+`stride-gs-app/FUNCTION_INVENTORY.md` is now the canonical reference for **every function in every Apps Script project** that the migration touches. **1,196 functions across 30 files in 8 projects**, each with a plain-English description, what-it-affects note, and migration-phase tag (`done` / `P2`–`P7` / `internal-helper` / `retiring` / `out-of-scope`).
+
+### Headline numbers from the inventory
+
+| Project | Files | Functions |
+|---|---|---|
+| StrideAPI | 1 | 556 |
+| Consolidated Billing | 10 | 158 |
+| Master Price List | 1 | 18 |
+| Client Inventory (per-tenant × 49) | 13 | 240 |
+| Stax Auto Pay | 1 | 76 |
+| QR Scanner | 2 | 35 |
+| Task Board | 1 | 56 |
+| Stride Designer Campaign | 1 | 57 |
+| **TOTAL** | **30** | **1,196** |
+
+### Findings from the inventory pass worth carrying forward
+
+1. **Two parallel CB invoice flows still wired up** — legacy Phase-2 (`StrideGenerateInvoices` → `StrideApproveOrVoidInvoices`, Invoice_Review approval queue, HTML→Doc PDFs) and modern (`CB13_createAndSendInvoices` → `CB13_commitInvoice`). Operator menu hits the modern one; Phase-2 helpers (~9 functions) tagged `retiring` but still in the codebase. **P4b cleanup target** alongside the CB sheet retirement.
+2. **Three parallel IIF export paths** — staging-sheet two-step, combined wrapper, modern direct-from-selection. All tagged P4b/P6; `qboCreateInvoice` direct push will displace them.
+3. **`getNextShipmentId` is still using the racy Master-RPC `doPost` counter** — not currently in the per-function migration table above. Add it. The `doPost` route in `Master Price list script.txt` can't be fully retired until shipment numbering also migrates to a Postgres SEQUENCE (mirroring the v38.182 `next_invoice_no()` fix).
+4. **`processRepairDeclinedById_` may be missing from Task Board** — `TB_OnBoardEdit` calls it on Approved → Declined dropdown changes but the function isn't defined in `task board script.txt`. The other `process*ById_` functions ARE in the shared-handler block. Apps Script `.gs` files in one project don't auto-import from another project, so this is a likely real bug — operators selecting Declined on the board may hit a ReferenceError. Verify and either add the function or remove the menu option.
+5. **Two parallel email-send paths** in Client Inventory — `sendTemplateEmail_` (Emails.gs, full-featured with cache fallback + deep-link self-heal) and `SH_sendTemplateEmail_` (Triggers.gs shared-handler block, lighter). They diverge on cache usage and the self-heal logic. P3's email-handler migrations need to consolidate or explicitly document the divergence.
+6. **Dead-code candidates for P7 cleanup** — `StrideRequestInspection` (Utils.gs), `buildWorkOrderHtml_` (Repairs.gs), `generateTaskWorkOrderPdf_` (Tasks.gs as of v4.3.0), `getImportInventoryDialogHtml_` (Import.gs), the 8-function `getEditableRanges_*` family + `clearAllProtections_` (Utils.gs, both gated by commented-out `StrideClientApplyProtections`), `backfillImpShipmentFolderUrls_` (one-shot, already applied). All currently tagged `retiring` in the inventory.
+7. **Shared-handler parity contract** — Client Inventory `Triggers.gs` v4.8.0 has 23 `SH_*` functions that must stay byte-identical to the same block in `task board script.txt`. Both sides depend on the SHARED_HANDLER_VERSION marker. P3/P4a graduation needs to coordinate when each of these can flip to SB-primary; rolling out a Triggers.gs update that diverges from Task Board breaks the board.
+8. **Master Price List `ensureEmailTemplatesSheet_`** only writes headers in the source committed to repo — the actual template HTML blocks were stripped from the .txt with a "templates omitted for brevity" comment. **Live deployments must have the full version somewhere else.** Verify before any P6 work touches the template surface.
+
+### Next-step plan: dashboard integration (Layer 2)
+
+The Settings → Migration tab today renders the 25-flag substrate. With the inventory now in place, the next build is to expand the tab to render **all 1,196 functions** with coverage stats per project + per phase.
+
+Plan:
+
+1. **New migration** `migration_function_inventory` — a SQL table with one row per inventoried function:
+   ```
+   function_key text PRIMARY KEY     -- e.g. "stride-api:handleCompleteTask_"
+   project text NOT NULL              -- "stride-api" | "consolidated-billing" | etc.
+   file_path text NOT NULL
+   category text                       -- e.g. "billing", "helper-format"
+   description text                    -- plain-English description from FUNCTION_INVENTORY.md
+   affects text                        -- what-it-affects column
+   migration_phase text                -- "done" | "P2" .. "P7" | "internal-helper" | "retiring" | "out-of-scope"
+   updated_at timestamptz DEFAULT now()
+   ```
+2. **Seed the table** by parsing `FUNCTION_INVENTORY.md` once via a `seedMigrationInventory.py` admin script. Re-runnable when the doc changes.
+3. **Extend Settings → Migration tab** to:
+   - Add a "Function coverage" widget at the top showing total / migrated / in-progress / not-started across all 8 projects.
+   - Below the existing 25 feature-flag table, add a function-level table grouped by project, paginated/searchable.
+   - Filter controls: by project, by category, by phase, by migration status.
+4. **Link the two surfaces**: when a function in the new function-level table corresponds to a feature-flag row (the 25 top-level handlers), link them so flipping the flag updates both.
+
+Scope estimate: one session for the migration + seed script (~3 hours); one session for the Settings UI extension (~3 hours). Total ~1 day's work to give Justin the complete coverage view.
+
+### How to keep `FUNCTION_INVENTORY.md` current
+
+Per its own "How to keep this doc current" section: add/update/remove rows as part of the PR that touches the function. Also part of the standard end-of-session doc updates per `CLAUDE.md`. Once Layer 2 ships (the SQL table + UI), every doc update should also issue a small upsert to `migration_function_inventory` so the dashboard reflects reality.
+
 ---
 
 ## Open questions / blockers
@@ -233,6 +303,8 @@ Master switch (MIG-003) emergency revert: every row to `{active_backend:'gas', t
 - [ ] **Canary tenant nomination** — needed before any function flips to `canary_active`. Justin to nominate a low-volume tenant (likely a recently-onboarded test tenant or an opt-in active tenant). Not blocking P1.
 - [ ] **PDF source migration** — `INSP_EMAIL` and `CLAIM_SETTLEMENT` are blocked on moving the PDF source off Drive (attachments path landed in PR #182). Not blocking P1–P3; will block portions of P4.
 - [ ] **Direct-sheet-edit → Supabase gap (P2 design decision)** — pre-existing limitation: when an admin edits a per-tenant sheet directly (Inventory, Tasks, Billing_Ledger), the change does NOT push to Supabase. Today's writethrough (`api_writeThrough_`) only fires from `doPost` handler call sites; sheet `onEdit` triggers in client scripts (Triggers.gs v4.8.0 as of PR #322) propagate WITHIN the sheet but do not call StrideAPI. Backstops: PR #322's `propagate_sidemark_to_billing` Postgres trigger catches inventory.sidemark via the React-edit path; full-client sync (`api_fullClientSync_`) catches everything on its next run. **Decision needed before P2.1 (`updateItem`)**: does P2's SB-primary `updateItem` need a sheet→SB writethrough mechanism for admin direct edits, or is "direct sheet edits are admin-only and rare; full-sync backstops them" acceptable for the migration window? If the former, scope a small `onEdit → POST writeThroughForward` endpoint as part of P2.1's design. If the latter, document explicitly so future incident postmortems don't relitigate it.
+- [ ] **`getNextShipmentId` is not in the per-function migration table** — surfaced by the 2026-05-11 function inventory. The same racy Master-RPC `doPost` counter that the v38.182 atomic invoice counter replaced is STILL in use for shipment numbering. The `doPost` route in `AppScripts/Master Price list script.txt` can't be fully retired until shipment numbering also migrates to a Postgres SEQUENCE (mirror of `next_invoice_no()`). **Action:** add `getNextShipmentId` to the per-function migration table above (likely P5 alongside `receiveShipment`, or its own mini-phase). Also add the source location to the inventory backlog so the racy counter doesn't survive into prod past P5.
+- [ ] **Task Board `processRepairDeclinedById_` may be missing** — surfaced by the 2026-05-11 inventory. `TB_OnBoardEdit` calls the function on Approved → Declined dropdown changes, but the function isn't defined in `task board script.txt`. Apps Script `.gs` files don't auto-import across projects, so an operator picking "Declined" on the board may hit a `ReferenceError`. **Action:** verify on the board (try a Declined transition on a test repair) and either add the function to `task board script.txt` or remove the Declined menu option. Not blocking the migration, but a latent operational bug.
 
 ---
 
@@ -257,6 +329,7 @@ Master switch (MIG-003) emergency revert: every row to `{active_backend:'gas', t
 ## Cross-references
 
 - **CLAUDE.md** — branching, worktree, deploy, design-system rules. Universal.
+- **`FUNCTION_INVENTORY.md`** — every function in every GAS project with plain-English description + what-it-affects + migration phase. 1,196 functions across 30 files. Authoritative function-level reference (MIG-011).
 - **BUILD_STATUS.md** — global change log. Migration-specific entries here use the `[MIGRATION-Pn]` tag for grep.
 - **`_archive/Docs/Archive/Session_History.md`** — one-liner per session, also `[MIGRATION-Pn]` tagged.
 - **`supabase/parity-fixtures/`** — incident-derived regression suite. Each fixture self-documents via its JSON shape.
