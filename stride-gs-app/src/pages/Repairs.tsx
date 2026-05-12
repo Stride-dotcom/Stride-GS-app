@@ -29,6 +29,7 @@ import { runBatchLoop, mergePreflightSkips } from '../lib/batchLoop';
 import { FloatingActionMenu, type FABAction } from '../components/shared/FloatingActionMenu';
 import { XCircle, Send as SendIcon, CheckSquare } from 'lucide-react';
 import { useRepairs } from '../hooks/useRepairs';
+import { useEntityCompleters, shortEmail, type CompleterRecord } from '../hooks/useEntityCompleters';
 import { useBatchData } from '../contexts/BatchDataContext';
 import { useAuth } from '../contexts/AuthContext';
 import { MultiSelectFilter } from '../components/shared/MultiSelectFilter';
@@ -83,7 +84,7 @@ function toCSV(rows: Repair[], fn: string) {
 }
 
 const col = createColumnHelper<Repair>();
-function cols() {
+function cols(completerMap: Map<string, CompleterRecord>) {
   return [
     col.display({ id: 'select', header: ({ table }) => <input type="checkbox" checked={table.getIsAllPageRowsSelected()} onChange={table.getToggleAllPageRowsSelectedHandler()} style={{ cursor: 'pointer', accentColor: theme.colors.orange }} />, cell: ({ row }) => <input type="checkbox" checked={row.getIsSelected()} onChange={row.getToggleSelectedHandler()} style={{ cursor: 'pointer', accentColor: theme.colors.orange }} />, size: 40, enableSorting: false }),
     col.accessor('repairId', { header: 'Repair ID', size: 100, cell: i => <span style={{ fontWeight: 600, fontSize: 12 }}>{i.getValue()}</span> }),
@@ -101,7 +102,25 @@ function cols() {
     col.accessor('quoteAmount', { header: 'Quote $', size: 90, cell: i => <span style={{ fontSize: 12, fontWeight: 600, color: i.getValue() ? theme.colors.text : theme.colors.textMuted }}>{fmtMoney(i.getValue())}</span> }),
     col.accessor('approvedAmount', { header: 'Approved $', size: 100, cell: i => <span style={{ fontSize: 12, fontWeight: 600, color: i.getValue() ? '#15803D' : theme.colors.textMuted }}>{fmtMoney(i.getValue())}</span> }),
     col.accessor('repairVendor', { header: 'Repair Tech', size: 140, cell: i => <span style={{ color: theme.colors.textSecondary, fontSize: 12 }}>{i.getValue() || '\u2014'}</span> }),
-    col.accessor('assignedTo', { header: 'Assigned', size: 90, cell: i => <span style={{ fontSize: 12, color: i.getValue() ? theme.colors.text : theme.colors.textMuted }}>{i.getValue() || '\u2014'}</span> }),
+    col.accessor('assignedTo', { header: 'Assigned', size: 110, cell: i => {
+      const assigned = i.getValue() as string | undefined;
+      const status = (i.row.original.status || '').toLowerCase();
+      // Repair "Completed" is the terminal verbatim status. Cancelled
+      // exists too \u2014 surface the completer for both.
+      const terminal = status === 'completed' || status === 'cancelled';
+      const c = terminal ? completerMap.get(i.row.original.repairId) : undefined;
+      if (c?.performedBy) {
+        return (
+          <span
+            style={{ fontSize: 12, color: theme.colors.text, fontStyle: 'italic' }}
+            title={`${c.action === 'cancel' ? 'Cancelled' : 'Completed'} by ${c.performedBy} on ${new Date(c.performedAt).toLocaleString()}`}
+          >
+            {shortEmail(c.performedBy)}
+          </span>
+        );
+      }
+      return <span style={{ fontSize: 12, color: assigned ? theme.colors.text : theme.colors.textMuted }}>{assigned || '\u2014'}</span>;
+    } }),
     col.accessor('createdDate', { header: 'Created', size: 100, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{fmt(i.getValue())}</span> }),
     col.accessor('quoteSentDate', { header: 'Quote Sent', size: 100, cell: i => <span style={{ fontSize: 12, color: theme.colors.textMuted }}>{fmt(i.getValue())}</span> }),
     col.accessor('completedDate', { header: 'Completed', size: 100, cell: i => <span style={{ fontSize: 12, color: theme.colors.textMuted }}>{fmt(i.getValue())}</span> }),
@@ -164,10 +183,13 @@ export function Repairs() {
   }, [clientFilter, apiClients]);
 
   const { repairs, loading: repairsLoading, refetch: refetchRepairs, applyRepairPatch, clearRepairPatch } = useRepairs(apiConfigured && clientFilter.length > 0, selectedSheetId);
+  // v2026-05-04: who-completed-it lookup for the Assigned column.
+  const repairIdsForCompleter = useMemo(() => repairs.map(r => r.repairId).filter(Boolean), [repairs]);
+  const { completerMap: repairCompleterMap } = useEntityCompleters('repair', repairIdsForCompleter);
   const itemIndicators = useItemIndicators(selectedSheetId);
   (window as any).__itemIndicators = itemIndicators.loaded ? itemIndicators : null;
 
-  const columns = useMemo(() => cols(), []);
+  const columns = useMemo(() => cols(repairCompleterMap), [repairCompleterMap]);
   (window as any).__openRepairDetail = (r: Repair) => navigate(`/repairs/${r.repairId}`);
 
   // Effect 1: ?open= query param → navigate directly to entity page.

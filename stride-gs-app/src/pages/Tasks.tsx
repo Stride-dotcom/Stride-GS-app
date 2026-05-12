@@ -36,6 +36,7 @@ import { isApiConfigured, postRequestRepairQuote, postBatchCancelTasks, postBatc
 import { mergePreflightSkips } from '../lib/batchLoop';
 import { applyBulkPatch, revertBulkPatchForFailures } from '../lib/optimisticBulk';
 import { useTasks } from '../hooks/useTasks';
+import { useEntityCompleters, shortEmail, type CompleterRecord } from '../hooks/useEntityCompleters';
 import { useBatchData } from '../contexts/BatchDataContext';
 import { useAuth } from '../contexts/AuthContext';
 import { MultiSelectFilter } from '../components/shared/MultiSelectFilter';
@@ -123,6 +124,11 @@ function cols(
   // an admin has configured (e.g. "Inspection" / "Pickup & Delivery" /
   // "Furniture Assembly") instead of a hardcoded SERVICE_CODES fallback.
   svcNameByCode: Map<string, string>,
+  // v2026-05-04: task_id → who completed/cancelled it, sourced from
+  // entity_audit_log. Surfaced in the Assigned cell for terminal tasks
+  // so the list reads "who actually did the work" instead of "who was
+  // on the hook for it" after the fact.
+  completerMap: Map<string, CompleterRecord>,
 ) {
   return [
     col.display({ id: 'select', header: ({ table }) => <input type="checkbox" checked={table.getIsAllPageRowsSelected()} onChange={table.getToggleAllPageRowsSelectedHandler()} style={{ cursor: 'pointer', accentColor: theme.colors.orange }} />, cell: ({ row }) => <input type="checkbox" checked={row.getIsSelected()} onChange={row.getToggleSelectedHandler()} style={{ cursor: 'pointer', accentColor: theme.colors.orange }} />, size: 40, enableSorting: false }),
@@ -178,7 +184,26 @@ function cols(
     col.accessor('location', { header: 'Location', size: 90, cell: i => <span style={{ fontSize: 12, fontFamily: 'monospace', color: theme.colors.textSecondary }}>{i.getValue()}</span> }),
     col.accessor('sidemark', { header: 'Sidemark', size: 180, cell: i => <span style={{ color: theme.colors.textSecondary, fontSize: 12, maxWidth: 170, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}>{i.getValue()}</span> }),
     col.accessor('reference', { header: 'Reference', size: 140, cell: i => <span style={{ color: theme.colors.textSecondary, fontSize: 12, maxWidth: 130, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}>{i.getValue() || '\u2014'}</span> }),
-    col.accessor('assignedTo', { header: 'Assigned', size: 90, filterFn: multiFilter, cell: i => <span style={{ fontSize: 12, color: i.getValue() ? theme.colors.text : theme.colors.textMuted }}>{i.getValue() || '\u2014'}</span> }),
+    col.accessor('assignedTo', { header: 'Assigned', size: 110, filterFn: multiFilter, cell: i => {
+      const assigned = i.getValue() as string | undefined;
+      const status = (i.row.original.status || '').toLowerCase();
+      const terminal = status === 'completed' || status === 'cancelled';
+      const c = terminal ? completerMap.get(i.row.original.taskId) : undefined;
+      if (c?.performedBy) {
+        // "Pass / Fail" passes through from the row's existing `result`
+        // field; we just identify the actor. Italicize so the cell reads
+        // as a distinct piece of info from the (manual) Assignee value.
+        return (
+          <span
+            style={{ fontSize: 12, color: theme.colors.text, fontStyle: 'italic' }}
+            title={`${c.action === 'cancel' ? 'Cancelled' : 'Completed'} by ${c.performedBy} on ${new Date(c.performedAt).toLocaleString()}`}
+          >
+            {shortEmail(c.performedBy)}
+          </span>
+        );
+      }
+      return <span style={{ fontSize: 12, color: assigned ? theme.colors.text : theme.colors.textMuted }}>{assigned || '\u2014'}</span>;
+    } }),
     col.accessor('created', { header: 'Created', size: 100, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{fmt(i.getValue())}</span> }),
     col.accessor('dueDate', { header: 'Due Date', size: 100,
       sortingFn: (rowA, rowB) => {
@@ -279,6 +304,10 @@ export function Tasks() {
   }, [clientFilter, apiClients]);
 
   const { tasks, loading: tasksLoading, refetch: refetchTasks, applyTaskPatch, clearTaskPatch } = useTasks(apiConfigured && clientFilter.length > 0, selectedSheetId);
+  // v2026-05-04: enrich the Assigned column with who-completed-it from
+  // entity_audit_log. Single batched query keyed on the visible task IDs.
+  const taskIdsForCompleter = useMemo(() => tasks.map(t => t.taskId).filter(Boolean), [tasks]);
+  const { completerMap: taskCompleterMap } = useEntityCompleters('task', taskIdsForCompleter);
   const itemIndicators = useItemIndicators(selectedSheetId);
   (window as any).__itemIndicators = itemIndicators.loaded ? itemIndicators : null;
   const ALL_ASSIGNED = useMemo(() => [...new Set(tasks.map(t => t.assignedTo).filter(Boolean))].sort(), [tasks]);
@@ -294,7 +323,7 @@ export function Tasks() {
     return m;
   }, [catalogServices]);
 
-  const columns = useMemo(() => cols(navigate, svcNameByCode), [navigate, svcNameByCode]);
+  const columns = useMemo(() => cols(navigate, svcNameByCode, taskCompleterMap), [navigate, svcNameByCode, taskCompleterMap]);
   (window as any).__openTaskDetail = (task: Task) => navigate(`/tasks/${encodeURIComponent(task.taskId)}${task.clientSheetId ? `?client=${encodeURIComponent(task.clientSheetId)}` : ''}`);
   (window as any).__toggleTaskPriority = async (taskId: string, clientSheetId: string, currentPriority: string) => {
     if (!apiConfigured || !clientSheetId || user?.role === 'client') return;
