@@ -36,6 +36,7 @@ import { PublicRates } from './pages/PublicRates';
 import { ClientIntake } from './pages/ClientIntake';
 import { PublicPhotoGallery } from './pages/PublicPhotoGallery';
 import { PublicServiceRequest } from './pages/PublicServiceRequest';
+import { PublicOrderView } from './pages/PublicOrderView';
 import { MessagesPage } from './components/messages/MessagesPage';
 
 /** Route guard — redirects to dashboard if user's role is not in the allowed list */
@@ -77,6 +78,16 @@ export default function App() {
     ? window.location.hash.match(/^#\/public\/service-request/)
     : null;
   if (serviceRequestMatch) return <PublicServiceRequest />;
+
+  // v2026-05-12 — Public order view at /#/p/order/<uuid>?email=<encoded>.
+  // The order-confirmation email's "View your order" button links here.
+  // Anonymous public-form submitters don't have accounts, so the route
+  // sits OUTSIDE the auth wall. Two-factor lookup (order UUID + matching
+  // contact_email) is enforced server-side by public.get_public_order.
+  const publicOrderMatch = typeof window !== 'undefined'
+    ? window.location.hash.match(/^#\/p\/order\/([0-9a-fA-F-]+)/)
+    : null;
+  if (publicOrderMatch) return <PublicOrderView orderId={publicOrderMatch[1]} />;
 
   // Auth check in progress
   if (loading) return <LoadingScreen />;
