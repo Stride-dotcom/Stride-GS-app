@@ -38,7 +38,7 @@ import { useVirtualRows } from '../hooks/useVirtualRows';
 import { useScrollRestoration } from '../hooks/useScrollRestoration';
 import { theme } from '../styles/theme';
 import { fmtDate } from '../lib/constants';
-import { tanstackGlobalFilter } from '../lib/searchFilters';
+import { tanstackGlobalFilter, rowMatchesSearch } from '../lib/searchFilters';
 import { ItemDetailPanel } from '../components/shared/ItemDetailPanel';
 import { ItemIdBadges } from '../components/shared/ItemIdBadges';
 import { CreateWillCallModal } from '../components/shared/CreateWillCallModal';
@@ -157,6 +157,24 @@ const multiSelectFilter: FilterFn<InventoryItem> = (row, columnId, value: string
   return value.includes(String(row.getValue(columnId)));
 };
 multiSelectFilter.autoRemove = (val: string[]) => !val || val.length === 0;
+
+/** Case-/whitespace-insensitive multi-select for the sidemark column.
+ *  Without this, picking "FAHRINGER" (the deduped display value from the
+ *  dropdown) wouldn't match a row whose raw value is "Fahringer" — the
+ *  dropdown collapses variants to one option but the exact-string filter
+ *  above would filter that option down to zero matches. Normalize both
+ *  sides through normSidemark so the dropdown's promise (one option per
+ *  case-variant cluster) matches the filtered result set. */
+const sidemarkMultiSelectFilter: FilterFn<InventoryItem> = (row, columnId, value: string[]) => {
+  if (!value || value.length === 0) return true;
+  const rowNorm = normSidemark(row.getValue(columnId) as string | null | undefined);
+  if (!rowNorm) return false;
+  for (const v of value) {
+    if (normSidemark(v) === rowNorm) return true;
+  }
+  return false;
+};
+sidemarkMultiSelectFilter.autoRemove = (val: string[]) => !val || val.length === 0;
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
@@ -378,11 +396,17 @@ function SidemarkFilterPopover({ anchorRect, allSidemarks, selectedSidemarks, in
     return () => document.removeEventListener('mousedown', onDown);
   }, [onClose]);
 
-  // Count items per sidemark
+  // Count items per sidemark, bucketed by normalized key so "FAHRINGER",
+  // "Fahringer", and " Fahringer " all roll up to the single canonical option
+  // shown in the dropdown. Without this the count next to "FAHRINGER" only
+  // tallies rows with that exact raw casing and undercounts variants.
   const counts = useMemo(() => {
     const map: Record<string, number> = {};
     for (const item of inventoryItems) {
-      if (item.sidemark) map[item.sidemark] = (map[item.sidemark] || 0) + 1;
+      if (!item.sidemark) continue;
+      const key = normSidemark(item.sidemark);
+      if (!key) continue;
+      map[key] = (map[key] || 0) + 1;
     }
     return map;
   }, [inventoryItems]);
@@ -494,7 +518,7 @@ function SidemarkFilterPopover({ anchorRect, allSidemarks, selectedSidemarks, in
                 style={{ display: 'none' }}
               />
               <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{sm}</span>
-              <span style={{ fontSize: 10, color: theme.colors.textMuted, flexShrink: 0 }}>{counts[sm] ?? 0}</span>
+              <span style={{ fontSize: 10, color: theme.colors.textMuted, flexShrink: 0 }}>{counts[normSidemark(sm)] ?? 0}</span>
             </label>
           );
         })}
@@ -1307,7 +1331,7 @@ export function Inventory() {
     // Sidemark — inline-editable autocomplete from client Autocomplete_DB
     ch.accessor('sidemark', {
       header: 'Sidemark', size: 190,
-      filterFn: multiSelectFilter,
+      filterFn: sidemarkMultiSelectFilter,
       cell: i => {
         const val = i.getValue() || '';
         const bg = val ? sidemarkColorMap.get(normSidemark(val)) : undefined;
@@ -1534,6 +1558,42 @@ export function Inventory() {
   // Status chip filter helper
   const statusFilterValue = (table.getColumn('status')?.getFilterValue() as string[] | undefined) ?? [];
   const sidemarkFilterValue = (table.getColumn('sidemark')?.getFilterValue() as string[] | undefined) ?? [];
+
+  // Items that pass every active filter EXCEPT the status filter, plus the
+  // global search. Drives the status-pill counts so "Active (94)" becomes
+  // "Active (N)" where N is the count of Active items under the current
+  // Sidemark / Client / search selection (rather than the full client total
+  // ignoring every other filter, which was the pre-fix behaviour). Mirrors
+  // multiSelectFilter / sidemarkMultiSelectFilter so the count and the
+  // actual filtered-row count agree.
+  const preStatusFilteredItems = useMemo(() => {
+    return inventoryItems.filter(item => {
+      for (const cf of columnFilters) {
+        if (cf.id === 'status') continue;
+        const val = cf.value as string[] | undefined;
+        if (!val || val.length === 0) continue;
+        const rawVal = (item as unknown as Record<string, unknown>)[cf.id];
+        if (cf.id === 'sidemark') {
+          const rowNorm = normSidemark(rawVal as string | null | undefined);
+          if (!rowNorm) return false;
+          if (!val.some(v => normSidemark(v) === rowNorm)) return false;
+        } else {
+          const rawStr = rawVal == null ? '' : String(rawVal);
+          if (!val.includes(rawStr)) return false;
+        }
+      }
+      if (globalFilter && !rowMatchesSearch(item, String(globalFilter))) return false;
+      return true;
+    });
+  }, [inventoryItems, columnFilters, globalFilter]);
+
+  /** Count for a single status pill — respects Client / Sidemark / search,
+   *  ignores the status filter itself so each pill shows a true breakdown
+   *  of the current non-status filter selection. `null` is the "All" pill. */
+  function pillCountFor(status: InventoryStatus | null): number {
+    if (status === null) return preStatusFilteredItems.length;
+    return preStatusFilteredItems.filter(i => i.status === status).length;
+  }
 
   function setStatusChip(status: InventoryStatus | null) {
     if (status === null) {
@@ -1973,9 +2033,7 @@ export function Inventory() {
           const isActive = s === null
             ? statusFilterValue.length === 0
             : statusFilterValue.includes(s);
-          const count = s === null
-            ? filteredCount
-            : inventoryItems.filter(i => i.status === s).length;
+          const count = pillCountFor(s);
           return (
             <button
               key={s ?? 'all'}
