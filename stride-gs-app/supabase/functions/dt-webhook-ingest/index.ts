@@ -517,6 +517,51 @@ Deno.serve(async (req: Request) => {
     }
   }
 
+  // ── 9b'. Auto-release inventory when a delivery order Finishes ────────
+  // We DON'T call the release helper directly from the webhook because
+  // dt_order_items.delivered is null until dt-sync-statuses has pulled
+  // the DT export.xml for this order — and the webhook payload doesn't
+  // carry per-item state. Strict-mode (delivered=true only) would skip
+  // every item on a webhook-arrived-first order, leaving inventory in
+  // limbo until the periodic sync (which excludes Finished orders from
+  // its 'active' scope and so never re-polls).
+  //
+  // Instead: fire-and-forget invoke dt-sync-statuses with this order's
+  // id. The sync function pulls fresh DT data, populates per-item
+  // delivered=true/false, then fires the release helper at the end of
+  // its pipeline — strict mode works because state is fresh. Idempotent
+  // on Supabase (`.neq('status','Released')`) so a future sync that
+  // re-processes this order is a clean no-op.
+  //
+  // EdgeRuntime.waitUntil keeps the dispatched fetch alive after the
+  // webhook ack, mirroring the notify-pickup-completed pattern below.
+  if (eventType === 'Service_Route_Finished' && orderId && orderOrderType !== 'pickup') {
+    const syncUrl = `${Deno.env.get('SUPABASE_URL')}/functions/v1/dt-sync-statuses`;
+    const syncSvcKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+    const syncPromise = fetch(syncUrl, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${syncSvcKey}`,
+        'apikey': syncSvcKey,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ orderId }),
+    }).then(async (resp) => {
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => '');
+        console.warn(`[dt-webhook-ingest] dt-sync-statuses returned ${resp.status} for order=${dtIdentifier}: ${text.slice(0, 200)}`);
+      } else {
+        console.log(`[dt-webhook-ingest] dt-sync-statuses dispatched for order=${dtIdentifier} (auto-release runs there)`);
+      }
+    }).catch((err) => {
+      console.warn(`[dt-webhook-ingest] dt-sync-statuses dispatch failed for order=${dtIdentifier}:`, (err as Error).message);
+    });
+    const edgeRuntime = (globalThis as unknown as { EdgeRuntime?: { waitUntil(p: Promise<unknown>): void } }).EdgeRuntime;
+    if (edgeRuntime && typeof edgeRuntime.waitUntil === 'function') {
+      edgeRuntime.waitUntil(syncPromise);
+    }
+  }
+
   // ── 9c. Real-time pickup-completion email ──────────────────────────────
   // 2026-05-11 — when DT pushes Service_Route_Finished for ANY pickup-type
   // order (standalone pickup-back-to-warehouse OR the pickup leg of a P+D
