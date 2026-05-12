@@ -218,9 +218,16 @@ export function usePhotoGraphRollup(ctx: RollupContext): PhotoRollupResult {
     if (!filter) { setPhotos([]); setLoading(false); return; }
     setLoading(true); setError(null);
 
-    let q = supabase.from('item_photos').select('*').or(filter);
-    if (ctx.tenantId) q = q.eq('tenant_id', ctx.tenantId);
-    const { data, error: err } = await q
+    // v2026-05-04: Don't filter by tenant_id at the app level. RLS already
+    // enforces tenant scoping for client users; admin/staff legitimately
+    // see all tenants. Filtering by the *current* panel's tenant_id was
+    // hiding shipment-scoped photos for cross-tenant transferred items —
+    // e.g. shipment SHP-001005 received under tenant A, item later
+    // transferred to tenant B, viewer opens the item on tenant B and the
+    // shipment photos (still tagged tenant A) got filtered out. The OR
+    // filter on item_id / scope pairs is narrow enough without it.
+    const { data, error: err } = await supabase
+      .from('item_photos').select('*').or(filter)
       .order('created_at', { ascending: false })
       .limit(500);
     if (!mountedRef.current) return;
@@ -320,9 +327,12 @@ export function useNoteGraphRollup(ctx: RollupContext): NoteRollupResult {
     if (!filter) { setNotes([]); setLoading(false); return; }
     setLoading(true); setError(null);
 
-    let q = supabase.from('entity_notes').select('*').or(filter);
-    if (ctx.tenantId) q = q.eq('tenant_id', ctx.tenantId);
-    const { data, error: err } = await q
+    // v2026-05-04: Drop the app-level tenant_id filter — RLS handles
+    // tenant scoping for clients, admin/staff see all tenants legitimately,
+    // and cross-tenant transferred items need their shipment / WC scope
+    // photos to surface. Same fix as the photo path above.
+    const { data, error: err } = await supabase
+      .from('entity_notes').select('*').or(filter)
       .order('created_at', { ascending: false })
       .limit(500);
     if (!mountedRef.current) return;
