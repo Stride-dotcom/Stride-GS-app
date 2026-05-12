@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.207.0 — 2026-05-11 PST — [MIGRATION-P1.7] Expanded `api_redactPayloadForCorpus_` SAFE_FIELDS whitelist for the replay-harness corpus. The original P1.2 list (only sidemark/status/qty/rate/total/amount among the editable fields) was too narrow: every `updateInventoryItem` call that changed `location`/`vendor`/`description`/`reference`/`room`/`itemClass`/`itemNotes`/`declaredValue` got captured with `input_redacted={itemId, requestId}` only — the actual field change got stripped. Replay harness couldn't reconstruct what those calls did. Expanded to cover every field in handleUpdateInventoryItem_'s FIELD_MAP, the Tasks/Repairs SYNC_FIELDS fan-out, the will-call fields, and a few more billing/flag fields commonly seen across migration-target handlers. PII risk stays minimal — these are operator-entered short strings about furniture pieces. Past corpus is partially blind to those fields; replay-harness MVP filters to calls whose changed fields ARE in the original whitelist (so it can be tested today). Future post-deploy traffic will have complete inputs.
+   StrideAPI.gs — v38.208.0 — 2026-05-12 PST — [MIGRATION-P2 inventory release] First per-table writer registered against the P1.4 reverse-writethrough framework. Replaces `__writeThroughReverseStub_` for the `inventory` table in `REVERSE_WRITETHROUGH_TABLES_` with `__writeThroughReverseInventory_` — finds the row by Item ID, idempotently writes Status + Release Date columns, calls `api_ledgerUpdateStatus_` for slot tracking when flipping to Released. Companion Edge Function `push-inventory-release-to-sheet` fires this after the React OrderPage release flow commits the Supabase-authoritative inventory.status='Released' + release_date write. Sheet stays current as the legacy-readers' read-only mirror until invoice generation flips to Supabase-primary in P4a. Hardening: handleWriteThroughReverse_ now stores the FULL incoming payload in the gs_sync_events row on writer failure (previously only stored {op, table}) so the FailedOperationsDrawer retry — which calls back into this endpoint with the stored payload — has all the fields needed for the second attempt. The earlier shape would have failed retry with "rowId required" on every failed reverse-writethrough.
+   v38.207.0 — 2026-05-11 PST — [MIGRATION-P1.7] Expanded `api_redactPayloadForCorpus_` SAFE_FIELDS whitelist for the replay-harness corpus. The original P1.2 list (only sidemark/status/qty/rate/total/amount among the editable fields) was too narrow: every `updateInventoryItem` call that changed `location`/`vendor`/`description`/`reference`/`room`/`itemClass`/`itemNotes`/`declaredValue` got captured with `input_redacted={itemId, requestId}` only — the actual field change got stripped. Replay harness couldn't reconstruct what those calls did. Expanded to cover every field in handleUpdateInventoryItem_'s FIELD_MAP, the Tasks/Repairs SYNC_FIELDS fan-out, the will-call fields, and a few more billing/flag fields commonly seen across migration-target handlers. PII risk stays minimal — these are operator-entered short strings about furniture pieces. Past corpus is partially blind to those fields; replay-harness MVP filters to calls whose changed fields ARE in the original whitelist (so it can be tested today). Future post-deploy traffic will have complete inputs.
    v38.206.0 — 2026-05-11 PST — Atomic shipment-counter SEQUENCE retires the Master sheet RPC race for shipment numbering. Mirror of v38.182.0's invoice-counter fix. Surfaced by the 2026-05-11 function inventory: `api_nextShipmentNo_` was still hitting Master-RPC with `action: "getNextShipmentId"` against a sheet-backed counter (`GLOBAL_SHIPMENT_COUNTER` cell, read-then-write without a transaction lock). Two concurrent `handleCompleteShipment_` calls could both grab the same number — same race class as the INV-000131 dup on 2026-05-03, just on shipments. Companion migration `shipment_no_atomic_counter` creates `public.shipment_no_seq` Postgres SEQUENCE seeded at 1000 (640+ rows of headroom over max production shipment_number 358) + `public.next_shipment_no()` SQL function returning `'SHP-' || LPAD(nextval(seq), 6, '0')` + `public.peek_shipment_no_seq()` diagnostic. `api_nextShipmentNo_` becomes a thin wrapper around the new `api_nextShipmentNoSupabase_` helper, exact same shape as `api_nextInvoiceNo_` → `api_nextInvoiceNoSupabase_`. Legacy `rpcUrl/rpcToken` parameters kept for signature compat but ignored. Atomic by Postgres design — no retries needed. The Master RPC `getNextShipmentId` action is left in place for backward compat but is no longer called by StrideAPI; can be retired in P7 alongside the rest of Master.
    v38.205.0 — 2026-05-11 PST — handleAddItemAddon_ / handleRemoveItemAddon_ / handleAddManualCharge_ were calling `LockService.getDocumentLock()` instead of `getScriptLock()`. StrideAPI is a standalone web-app script with no bound document, so getDocumentLock() returns null. The next line — `lock.waitLock(15000)` — then threw `TypeError: Cannot read properties of null (reading 'waitLock')` and the doPost wrapper bubbled the error back to React as a failed toast on every receiving-addon checkbox tap (and similar on every manual-charge add). The manual-charge handler had a try/catch around tryLock() that absorbed the TypeError and surfaced the misleading "Sheet busy — try again" message instead — same root cause, different symptom. All three call sites flipped to getScriptLock(), matching every other lock in this file. The error never surfaced in dev because LockService is only fully enforced server-side and the symptom was 100% reproducible only against the deployed web app. Companion: no React change; no schema change.
    v38.202.1 — 2026-05-11 PST — CRITICAL fix for v38.202.0 STOR summarization. The React-side summarizer (Billing.tsx summarizeStorageRowsForInvoice) ships ONE synthetic STOR-SUMMARY-<uuid> row in rows[] as the customer-facing line on the invoice + Consolidated_Ledger. That synthetic ID does NOT exist on the client's Billing_Ledger sheet — api_markClientLedgerInvoiced_ silently skips IDs not on the sheet (line 23966 — "ID not on sheet — silent skip"), so the returned `marked` count comes back short by exactly one. The pre-v38.202.1 partial-flip check at handleCreateInvoice_ compared `marked < ledgerRowIds.length` (which INCLUDED the synthetic), saw the off-by-one gap, assumed corruption, and rolled back EVERY storage-summarized invoice. Net effect: zero STOR-summarized invoices could commit since v38.202.0 / React #328 shipped — the LEDGER_PARTIAL_FLIP error fired 100% of the time and rolled the CB insert back. Caught by an independent post-merge Opus code review (the build-process step that v38.202.0 skipped). Fix: new local `sheetMarkableLedgerRowIds = ledgerRowIds.filter(id => !id.startsWith("STOR-SUMMARY-"))` used for both the api_markClientLedgerInvoiced_ call AND the partial-flip count check. The unfiltered `ledgerRowIds` is still used for the CB write + the idempotency CB-rows-already-present lookup (those genuinely want the synthetic ID there — it's the canonical Ledger Row ID of the customer-facing summary line in Consolidated_Ledger). The api_verifyClientLedgerFlipped_ call inside the idempotent-retry path is also switched to sheetMarkableLedgerRowIds so a legitimate retry doesn't false-positive HALF_WRITE_DETECTED on the synthetic. Tested by tracing the failure manually against api_markClientLedgerInvoiced_ at line 23966 (silent skip) → line 24028 (returns changedRows.length, not ledgerRowIds.length passed-in) → handleCreateInvoice_ partial-flip rollback at 24756. No companion React change — the summary row's ledger_row_id format and the extraSheetLedgerRowIdsToMark plumbing both stay as-is.
@@ -2325,13 +2326,132 @@ function __writeThroughReverseStub_(_ss, payload) {
   );
 }
 
+/**
+ * v38.208.0 — Inventory reverse-writethrough writer. First real
+ * implementation against the P1.4 framework. Fires from the Edge
+ * Function `push-inventory-release-to-sheet` after the React
+ * OrderPage commits an inventory.status='Released' + release_date
+ * write directly to Supabase. This writer mirrors that single-row
+ * change into the per-tenant Inventory sheet so legacy readers
+ * (handleCreateInvoice_'s storage-charge dedup, api_fullClientSync_,
+ * QBO push, etc.) see the same state until invoice generation flips
+ * to Supabase-primary in P4a.
+ *
+ * Contract — receives (ss, payload):
+ *   ss      — SpreadsheetApp.openById(tenantId), already validated +
+ *             opened by handleWriteThroughReverse_
+ *   payload — { tenantId, table:'inventory', op:'update', row:{...},
+ *               rowId:<Item ID>, requestId?, correlationId? }
+ *
+ * Idempotent by Item ID: looks up the row, no-ops when the row
+ * already matches the target status + date. Throws on any
+ * unrecoverable error so handleWriteThroughReverse_ catches it and
+ * writes gs_sync_events for the FailedOperationsDrawer.
+ *
+ * Op support: only 'update' for now. Insert/delete on inventory
+ * aren't part of any active migration path (manual release is
+ * update-only). Future migrations can extend.
+ */
+function __writeThroughReverseInventory_(ss, payload) {
+  var rowId = payload && payload.rowId ? String(payload.rowId).trim() : "";
+  var row   = (payload && payload.row) || {};
+  var op    = payload && payload.op ? String(payload.op) : "";
+
+  if (op !== "update") {
+    throw new Error(
+      "__writeThroughReverseInventory_: op '" + op + "' not supported " +
+      "(only 'update' is implemented; inserts/deletes are not part of any active migration path)."
+    );
+  }
+  if (!rowId) throw new Error("__writeThroughReverseInventory_: rowId (Item ID) required");
+
+  var inv = ss.getSheetByName("Inventory");
+  if (!inv) throw new Error("__writeThroughReverseInventory_: Inventory sheet not found on this tenant");
+
+  var invMap = api_getHeaderMap_(inv);
+  var itemIdCol  = invMap["Item ID"];
+  var statusCol  = invMap["Status"];
+  var relDateCol = invMap["Release Date"];
+  if (!itemIdCol || !statusCol || !relDateCol) {
+    throw new Error("__writeThroughReverseInventory_: missing required columns (Item ID, Status, Release Date)");
+  }
+
+  // api_getLastDataRow_ guards against trailing-blank-row pollution
+  // that getLastRow() picks up. Skip work when the sheet is empty.
+  var lastRow = api_getLastDataRow_(inv);
+  if (lastRow < 2) throw new Error("__writeThroughReverseInventory_: Inventory sheet has no data rows");
+
+  // Scan the Item ID column once to find the target row.
+  var itemIdValues = inv.getRange(2, itemIdCol, lastRow - 1, 1).getValues();
+  var foundRow = -1;
+  for (var i = 0; i < itemIdValues.length; i++) {
+    if (String(itemIdValues[i][0] || "").trim() === rowId) {
+      foundRow = i + 2;
+      break;
+    }
+  }
+  if (foundRow < 0) {
+    throw new Error("__writeThroughReverseInventory_: Item ID '" + rowId + "' not found in Inventory sheet");
+  }
+
+  var newStatus = row.status != null ? String(row.status) : "";
+  var newReleaseDateStr = row.release_date != null ? String(row.release_date) : "";
+  if (!newStatus) throw new Error("__writeThroughReverseInventory_: row.status required");
+
+  // Parse YYYY-MM-DD safely. The Date constructor with a plain ISO
+  // date string treats it as UTC, which drops back to the previous
+  // calendar day in PT. Parse the components explicitly so a release
+  // dated 2026-05-12 stays 2026-05-12 in the sheet.
+  var parsedDate = null;
+  if (newReleaseDateStr) {
+    var dateOnly = newReleaseDateStr.slice(0, 10);
+    var dParts = dateOnly.split("-");
+    if (dParts.length === 3) {
+      var d = new Date(parseInt(dParts[0], 10), parseInt(dParts[1], 10) - 1, parseInt(dParts[2], 10));
+      if (!isNaN(d.getTime())) parsedDate = d;
+    }
+  }
+
+  // Idempotency — skip when the row already matches. Cheap two-cell
+  // read + compare avoids a redundant setValue round-trip on every
+  // retry from a flaky network / FailedOperationsDrawer replay.
+  var currentStatus = String(inv.getRange(foundRow, statusCol).getValue() || "").trim();
+  if (currentStatus === newStatus && parsedDate) {
+    var currentRelDate = inv.getRange(foundRow, relDateCol).getValue();
+    if (currentRelDate instanceof Date
+      && currentRelDate.getFullYear() === parsedDate.getFullYear()
+      && currentRelDate.getMonth() === parsedDate.getMonth()
+      && currentRelDate.getDate() === parsedDate.getDate()) {
+      return { rowNumber: foundRow, skipped: true, reason: "already-matches-target-state" };
+    }
+  }
+
+  inv.getRange(foundRow, statusCol).setValue(newStatus);
+  if (parsedDate) inv.getRange(foundRow, relDateCol).setValue(parsedDate);
+
+  // Slot-ledger update — matches the doPost releaseItems case (which
+  // also fires api_ledgerUpdateStatus_ after the sheet write). Marks
+  // the Item ID as "released" so it can't be reissued for a new
+  // inventory row. Best-effort: a ledger outage logs and continues.
+  if (newStatus === "Released") {
+    try { api_ledgerUpdateStatus_([rowId], "released", null); }
+    catch (lerr) { Logger.log("__writeThroughReverseInventory_ ledger update non-fatal: " + lerr); }
+  }
+
+  // Flush before returning so subsequent reads (e.g. by a chained
+  // resync caller) see committed values rather than batched writes.
+  SpreadsheetApp.flush();
+
+  return { rowNumber: foundRow, status: newStatus, releaseDate: newReleaseDateStr };
+}
+
 // Registry. Future per-table writers replace the stub. Keep this list
 // in sync with the parity_dryrun mirror set in
 // stride-gs-app/MIGRATION_STATUS.md "parity_dryrun schema-sync convention" —
 // every mirrored table corresponds to one entry here, since both sides
 // of the migration touch the same table set.
 var REVERSE_WRITETHROUGH_TABLES_ = {
-  "inventory":         __writeThroughReverseStub_,
+  "inventory":         __writeThroughReverseInventory_,
   "tasks":             __writeThroughReverseStub_,
   "repairs":           __writeThroughReverseStub_,
   "shipments":         __writeThroughReverseStub_,
@@ -2448,7 +2568,11 @@ function handleWriteThroughReverse_(payload, callerEmail) {
       action_type:  "writethrough_reverse",
       requested_by: callerEmail || "edge-function",
       request_id:   requestId,
-      payload:      { op: op, error: "openById failed" },
+      // v38.208.0 — store the full original payload (tenantId / table
+      // / op / row / rowId) so the FailedOperationsDrawer retry can
+      // reconstruct the call. Previously stored only {op, error}
+      // which would have failed retry validation with "rowId required".
+      payload:      payload,
       error_message: "Cannot open per-tenant spreadsheet: " + String(e)
     });
     return errorResponse_("writeThroughReverse: cannot open spreadsheet for tenant " + tenantId, "TENANT_OPEN_FAILED");
@@ -2476,7 +2600,9 @@ function handleWriteThroughReverse_(payload, callerEmail) {
       action_type:  "writethrough_reverse",
       requested_by: callerEmail || "edge-function",
       request_id:   requestId,
-      payload:      { op: op, table: table },
+      // v38.208.0 — see note on the openById branch above. Retry needs
+      // the full payload; previously stored only {op, table}.
+      payload:      payload,
       error_message: String(e)
     });
     return errorResponse_("writeThroughReverse failed for " + table + " " + op + ": " + String(e), "WRITETHROUGH_FAILED");
