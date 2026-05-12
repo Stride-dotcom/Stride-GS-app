@@ -85,6 +85,13 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
   const isStaffAdmin = userRole === 'admin' || userRole === 'staff';
   const canTransfer = isStaffAdmin || !!isParent;
 
+  // Mutation timestamp guard, same shape as TaskPage / RepairPage /
+  // WillCallPage / OrderPage. Declared early because both the inline-edit
+  // setter (`applyShipmentItemPatch`) and the realtime subscriber below
+  // reference it before the rest of the edit-mode state machine wires up.
+  const lastMutationAtRef = useRef<number>(0);
+  const OPTIMISTIC_GUARD_MS = 6000;
+
   // Lazy-load items: fetch kicked off once the Items tab becomes active OR
   // the Details tab's Quick Actions render (which also needs the list).
   const [items, setItems] = useState<ShipmentItem[]>(shipment.items || []);
@@ -146,6 +153,9 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
   // until the row is re-fetched.
   const [itemPatches, setItemPatches] = useState<Record<string, Partial<ShipmentItem>>>({});
   const applyShipmentItemPatch = (itemId: string, patch: Record<string, unknown>) => {
+    // Bump the mutation timestamp so the realtime listener below doesn't
+    // refetch+overwrite items during the GAS write-through window.
+    lastMutationAtRef.current = Date.now();
     setItemPatches(prev => ({
       ...prev,
       [itemId]: { ...(prev[itemId] ?? {}), ...(patch as Partial<ShipmentItem>) },
@@ -175,6 +185,12 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
     const ourItemIds = new Set(items.map(i => i.itemId));
     return entityEvents.subscribe(async (entityType, entityId) => {
       if (entityType !== 'inventory' || !ourItemIds.has(entityId)) return;
+      // Skip the refetch+overwrite if we recently fired a mutation —
+      // the GAS write-through can echo back before our optimistic patch
+      // has had a chance to surface to the user. The patch overlay keeps
+      // the cell looking correct; the server-authoritative refresh comes
+      // on the next event after the guard window expires.
+      if (Date.now() - lastMutationAtRef.current < OPTIMISTIC_GUARD_MS) return;
       try {
         const sbResult = await fetchShipmentItemsFromSupabase(shipment.clientSheetId!, shipment.shipmentNo);
         if (sbResult && sbResult.items.length > 0) {
@@ -234,6 +250,7 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
       lastShipmentNoRef.current = shipment.shipmentNo;
       setOptimistic(null);
       setIsEditing(false);
+      lastMutationAtRef.current = 0;
     }
   }, [shipment.shipmentNo]);
 
@@ -279,6 +296,7 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
     };
     setOptimistic(overrides);
 
+    lastMutationAtRef.current = Date.now();
     setSaving(true);
     setSaveError(null);
     try {
