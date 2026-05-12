@@ -53,6 +53,11 @@ export const ACTION_LABELS: Record<string, string> = {
   update_task_price:     'Update Task Price',
   release_items:         'Release Items',
   complete_shipment:     'Complete Shipment',
+  // P2 — Supabase-authoritative writes that mirror back to the
+  // per-tenant Google Sheet via handleWriteThroughReverse_. Failures
+  // hit this row when GAS is unreachable or the per-table writer
+  // throws.
+  writethrough_reverse:  'Sync to Sheet',
 };
 
 export const ENTITY_LABELS: Record<string, string> = {
@@ -156,6 +161,11 @@ export function useFailedOperations(): UseFailedOperationsResult {
       release_items:          'releaseItems',
       transfer_items:         'transferItems',
       update_client:          'updateClient',
+      // Retry re-fires the SAME handleWriteThroughReverse_ endpoint
+      // with the stored {tenantId, table, op, row, rowId} payload —
+      // it's idempotent by row identifier so a second attempt either
+      // succeeds or surfaces the same error (now actionable).
+      writethrough_reverse:   'writeThroughReverse',
     };
     const toCamel = (s: string) => s.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
     const action = ACTION_MAP[event.action_type] || toCamel(event.action_type);
