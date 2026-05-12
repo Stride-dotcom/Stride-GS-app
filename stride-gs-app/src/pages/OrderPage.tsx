@@ -5,7 +5,7 @@
  * Uses the EntityPage shell (locked design spec). Fetches the order via
  * useOrderDetail and renders Details / Items / Activity tabs.
  */
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   AlertCircle, Loader2, SearchX, Pencil, X,
@@ -1348,6 +1348,21 @@ export function OrderPage() {
     if (order && !editing) setEdit(orderToEdit(order));
   }, [order, editing]);
 
+  // Stable, sorted, comma-joined list of inventory_id values on this
+  // order. Used as the realtime-subscription dependency below so we
+  // only tear down + recreate the channel when the actual SET of
+  // linked inventory items changes — not on every refetch that
+  // produces a new array reference (which would orphan in-flight
+  // realtime updates during the 1-2s gap between unsubscribe and
+  // resubscribe).
+  const invIdsKey = useMemo(() => {
+    return (order?.items ?? [])
+      .map(it => it.inventoryId)
+      .filter((id): id is string => !!id)
+      .sort()
+      .join(',');
+  }, [order?.items]);
+
   // Fetch + subscribe to inventory statuses for every dt_order_items
   // row that has an inventory_id linkage. Drives both the Status
   // column on the items table and the "Release Items..." button
@@ -1360,13 +1375,11 @@ export function OrderPage() {
       setInventoryStatuses(new Map());
       return;
     }
-    const invIds = (order.items ?? [])
-      .map(it => it.inventoryId)
-      .filter((id): id is string => !!id);
-    if (invIds.length === 0) {
+    if (!invIdsKey) {
       setInventoryStatuses(new Map());
       return;
     }
+    const invIds = invIdsKey.split(',');
 
     let cancelled = false;
 
@@ -1413,7 +1426,7 @@ export function OrderPage() {
       cancelled = true;
       supabase.removeChannel(channel);
     };
-  }, [order?.id, order?.tenantId, order?.items]);
+  }, [order?.id, order?.tenantId, invIdsKey]);
 
   const setField = useCallback(<K extends keyof OrderEdit>(k: K, v: OrderEdit[K]) => {
     setEdit(prev => ({ ...prev, [k]: v }));

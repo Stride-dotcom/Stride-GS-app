@@ -76,12 +76,23 @@ export function DtOrderReleasePanel({
   const [error, setError] = useState<string | null>(null);
 
   const releaseDate = useMemo(() => {
+    // Local-date derivation — using `.toISOString().slice(0, 10)` would
+    // shift the date across a day boundary for late-evening PT times
+    // (e.g. a finishedAt of 2026-05-13T05:00:00Z stamped at 10 PM PT
+    // on 5/12 would come out as 2026-05-13). Storage billing reads
+    // release_date over a date range, so a UTC shift can swing a
+    // release into next month's bill.
+    const pickLocalDate = (d: Date): string => {
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${y}-${m}-${day}`;
+    };
     if (defaultReleaseDateSource) {
-      // Parse ISO timestamp / date to YYYY-MM-DD in local time.
       const d = new Date(defaultReleaseDateSource);
-      if (!Number.isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+      if (!Number.isNaN(d.getTime())) return pickLocalDate(d);
     }
-    return new Date().toISOString().slice(0, 10);
+    return pickLocalDate(new Date());
   }, [defaultReleaseDateSource]);
 
   const toggle = (inventoryId: string) => {
