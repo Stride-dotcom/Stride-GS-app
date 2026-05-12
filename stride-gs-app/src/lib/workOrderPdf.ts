@@ -324,7 +324,13 @@ function wcItemRowHtml(it: WillCallItemInput, idx: number): string {
  *  token is an empty string. */
 function codBannerHtml(cod: boolean, amount: number | string | null | undefined): string {
   if (!cod) return '';
-  const amt = amount == null || amount === '' ? '' : ` — $${esc(String(amount))}`;
+  let amt = '';
+  if (amount != null && amount !== '') {
+    const n = typeof amount === 'number' ? amount : parseFloat(String(amount));
+    if (Number.isFinite(n) && n > 0) {
+      amt = ` — $${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    }
+  }
   return (
     '<div style="background:#FEF2F2;border:2px solid #DC2626;padding:10px 14px;' +
     'margin-bottom:8px;text-align:center;">' +
