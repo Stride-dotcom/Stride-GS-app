@@ -4,10 +4,12 @@
 -- Background: api_nextShipmentNo_ in StrideAPI.gs calls a separate Apps
 -- Script project (Master Price List) with `action: "getNextShipmentId"`,
 -- which reads-then-writes a `GLOBAL_SHIPMENT_COUNTER` cell on the Master
--- Settings sheet WITHOUT a transaction lock. Two concurrent
--- handleCompleteShipment_ calls can both observe the same counter value,
--- both increment, both write back the SAME value — the exact same race
--- class as the INV-000131 invoice dup on 2026-05-03.
+-- Settings sheet inside a `LockService.getScriptLock().waitLock(30000)`.
+-- The lock serializes calls WITHIN the Master script's own execution,
+-- but real-world lock contention + timeout corner cases still allowed
+-- dup-number outcomes — the v38.182 INV-000131 invoice incident proved
+-- the same lock shape isn't actually race-free under load. Shipment
+-- numbering inherits the same risk class.
 --
 -- The invoice race got fixed in v38.182.0 (2026-05-04) by replacing
 -- the Master RPC with a Postgres SEQUENCE atomic counter. The shipment

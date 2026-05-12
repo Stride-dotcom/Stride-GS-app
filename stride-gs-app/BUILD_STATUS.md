@@ -17,7 +17,7 @@
 
 **Pins (do not regress):**
 - The `next_shipment_no()` SEQUENCE is now the only path the React-side receive-shipment flow uses for shipment numbering. Do NOT introduce a code path that reads back to the racy Master-RPC `getNextShipmentId` counter. The Master route is intentionally left in place for backward compat but is no longer called by StrideAPI.
-- The per-tenant client script `nextGlobalShipmentNumber_` (Client Inventory `Utils.gs`) still hits Master-RPC — this is by design for now (direct-sheet dock-form receiving is rare/admin-only and out of scope for this PR). Tagged `P7` in the function inventory so the per-tenant freeze rollout migrates it to Supabase too.
+- The per-tenant client script `nextGlobalShipmentNumber_` (Client Inventory `Shipments.gs:522`) still hits Master-RPC — this is by design for now (direct-sheet dock-form receiving is rare/admin-only and out of scope for this PR). Tagged `P7` in the function inventory so the per-tenant freeze rollout migrates it to Supabase too.
 
 **Verified post-apply:**
 - `peek_shipment_no_seq()` returns 999 (seeded).
