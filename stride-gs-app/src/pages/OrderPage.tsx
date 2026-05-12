@@ -5,7 +5,7 @@
  * Uses the EntityPage shell (locked design spec). Fetches the order via
  * useOrderDetail and renders Details / Items / Activity tabs.
  */
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   AlertCircle, Loader2, SearchX, Pencil, X,
@@ -1061,9 +1061,24 @@ export function OrderPage() {
 
   const { order: fetchedOrder, status, error, refetch } = useOrderDetail(orderId);
 
-  // Local copy for optimistic updates
+  // Local copy for optimistic updates.
+  //
+  // `lastMutationAtRef` matches the pattern in TaskPage/RepairPage/WillCallPage:
+  // any mutation handler bumps it to Date.now() so the realtime-driven refetch
+  // (via useOrderDetail → entityEvents subscription) can't clobber an
+  // in-progress edit during the 1-3s GAS write-through window. Without this,
+  // a user mid-edit who has been on the page for >0ms when their own optimistic
+  // save fires sees the sync effect at the bottom of this useEffect
+  // overwrite their local edits with the freshly-mirrored Supabase row.
+  // The 6000ms ceiling covers cold-GAS round trips (worst case ~4-5s).
   const [localOrder, setLocalOrder] = useState<DtOrderForUI | null>(null);
-  useEffect(() => { if (fetchedOrder) setLocalOrder(fetchedOrder); }, [fetchedOrder]);
+  const lastMutationAtRef = useRef<number>(0);
+  const OPTIMISTIC_GUARD_MS = 6000;
+  useEffect(() => {
+    if (!fetchedOrder) return;
+    if (Date.now() - lastMutationAtRef.current < OPTIMISTIC_GUARD_MS) return;
+    setLocalOrder(fetchedOrder);
+  }, [fetchedOrder]);
 
   const order = localOrder ?? fetchedOrder;
 
@@ -1140,6 +1155,7 @@ export function OrderPage() {
       : 'What revisions are needed? (will be emailed to the submitter):';
     const notes = window.prompt(promptLabel, order.reviewNotes || '');
     if (notes === null) return; // cancelled
+    lastMutationAtRef.current = Date.now();
     setSaving(true);
     setSaveError(null);
 
@@ -1305,6 +1321,7 @@ export function OrderPage() {
 
   const handleSave = useCallback(async () => {
     if (!order) return;
+    lastMutationAtRef.current = Date.now();
     setSaving(true);
     setSaveError(null);
 
@@ -1482,6 +1499,7 @@ export function OrderPage() {
     if (!order) return;
     await handleSave();
     try {
+      lastMutationAtRef.current = Date.now();
       setSaving(true);
       await pushOrderToDt();
       const fresh = await fetchDtOrderByIdFromSupabase(order.id);
@@ -1726,6 +1744,7 @@ export function OrderPage() {
 
   const handleDiscardDraft = async () => {
     if (!window.confirm("Discard this draft? This can't be undone.")) return;
+    lastMutationAtRef.current = Date.now();
     try {
       await supabase.from('dt_order_items').delete().eq('dt_order_id', order.id);
       const { error } = await supabase.from('dt_orders').delete().eq('id', order.id);
@@ -1743,6 +1762,7 @@ export function OrderPage() {
   // Approve — same logic as the inline EPFooterButton onClick below, but
   // pulled out so the FAB can call it identically on mobile.
   const handleApprove = async () => {
+    lastMutationAtRef.current = Date.now();
     // v2026-05-09 — Approve clears the client-resubmit diff snapshot so
     // the ResubmitBanner disappears and the next client edit's banner
     // starts fresh. last_resubmit_at = null is what hides the banner;
@@ -1810,6 +1830,7 @@ export function OrderPage() {
 
   const handlePushToDt = async () => {
     if (pushingDt) return;
+    lastMutationAtRef.current = Date.now();
     setPushingDt(true);
     setPushDtError(null);
     try {
@@ -2069,6 +2090,7 @@ export function OrderPage() {
             // Refetch the order so the page reflects whatever changed
             // in the modal (status flip, identifier replacement on
             // promote, fields, items, accessorials, coverage, etc.).
+            lastMutationAtRef.current = Date.now();
             const fresh = await fetchDtOrderByIdFromSupabase(order.id);
             if (fresh) setLocalOrder(fresh);
             refetch();
@@ -2097,6 +2119,7 @@ export function OrderPage() {
           onSuccess={async () => {
             // Refetch so the page reflects the released items (and any
             // dt_orders mirror columns that change as a side effect).
+            lastMutationAtRef.current = Date.now();
             const fresh = await fetchDtOrderByIdFromSupabase(order.id);
             if (fresh) setLocalOrder(fresh);
             refetch();
