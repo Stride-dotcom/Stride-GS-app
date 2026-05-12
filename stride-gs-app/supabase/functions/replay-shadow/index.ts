@@ -67,10 +67,21 @@ interface ReplayCallResult {
   duration_ms: number;
 }
 
-// Mapping of function_key → shadow Edge Function name. As P2/P3/P4 hand-by-
-// handler migrations ship their shadow Edge Function, add an entry here.
-const SHADOW_REGISTRY: Record<string, string> = {
-  updateInventoryItem: 'update-item-shadow',
+// Mapping of function_key → shadow Edge Function name + gas_call_log action
+// name. The feature_flags table uses the canonical "updateItem" form (per
+// the P1.1 seed), while gas_call_log captures the actual doPost action name
+// "updateInventoryItem". The harness reads the corpus by action_name and
+// writes parity_results.function_key with the canonical form, so the rollup
+// trigger lands on the right feature_flags row.
+//
+// As P2/P3/P4 ship shadow handlers, add an entry here. function_key MUST
+// match a feature_flags.function_key value.
+interface ShadowEntry {
+  shadow: string;       // Edge Function name
+  action: string;       // gas_call_log.action filter value
+}
+const SHADOW_REGISTRY: Record<string, ShadowEntry> = {
+  updateItem: { shadow: 'update-item-shadow', action: 'updateInventoryItem' },
 };
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -156,12 +167,27 @@ serve(async (req: Request): Promise<Response> => {
     );
   }
 
-  const functionKey = body.function_key ?? 'updateInventoryItem';
-  const since = body.since ?? new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+  const functionKey = body.function_key ?? 'updateItem';
+
+  // Validate body.since is parseable ISO (defends against
+  // `?since=garbage` producing PostgREST errors at .gte() time).
+  let since: string;
+  if (body.since) {
+    const parsed = Date.parse(body.since);
+    if (Number.isNaN(parsed)) {
+      return new Response(
+        JSON.stringify({ ok: false, error: `Invalid 'since' — must be parseable ISO datetime` }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
+    since = new Date(parsed).toISOString();
+  } else {
+    since = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+  }
   const limit = Math.min(Math.max(body.limit ?? 500, 1), 5000);
 
-  const shadowName = SHADOW_REGISTRY[functionKey];
-  if (!shadowName) {
+  const entry = SHADOW_REGISTRY[functionKey];
+  if (!entry) {
     return new Response(
       JSON.stringify({
         ok: false,
@@ -171,12 +197,8 @@ serve(async (req: Request): Promise<Response> => {
       { status: 400, headers: { 'Content-Type': 'application/json' } },
     );
   }
-
-  // Map gas_call_log action names to a function_key. Today this is 1:1 since
-  // we only handle updateInventoryItem, but the indirection lets P2+ add
-  // mappings (e.g. if an action's row says "updateInventoryItem" but we
-  // logically group it under a different function_key).
-  const actionFilter = functionKey; // For updateInventoryItem the action name matches the function_key.
+  const shadowName = entry.shadow;
+  const actionFilter = entry.action;
 
   const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
   const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
@@ -325,13 +347,23 @@ serve(async (req: Request): Promise<Response> => {
       continue;
     }
     if (!shadowJson.ok || !shadowJson.changes) {
-      errorCount++;
+      // Shadow rejected the input. Since gasChanges exists (we got here
+      // past the no_audit_row check), GAS accepted + audit-logged the
+      // same input. That's a REAL parity mismatch — shadow's validation
+      // is stricter than GAS's. Classify as `mismatch` rather than
+      // `shadow_error` so the rollup trigger counts it correctly.
+      mismatchCount++;
       results.push({
         call_id: callId,
         function_key: functionKey,
         tenant_id: tenantId,
-        status: 'shadow_error',
-        mismatch_details: { shadow_returned: shadowJson },
+        status: 'mismatch',
+        mismatch_details: {
+          reason: 'shadow_rejected_but_gas_accepted',
+          shadow_error: shadowJson.error,
+          shadow_returned: shadowJson,
+          gas_changes: gasChanges,
+        },
         duration_ms: Date.now() - startedAt,
       });
       continue;
@@ -381,9 +413,15 @@ serve(async (req: Request): Promise<Response> => {
     mismatch_details: r.mismatch_details ?? null,
   }));
 
+  // Upsert on (function_key, call_id) — the unique index from migration
+  // 20260511220000_parity_results_rollup_trigger.sql makes re-runs idempotent.
+  // A second replay of the same corpus refreshes the latest match result,
+  // hash, and details instead of piling up duplicate rows.
   let insertError: string | null = null;
   if (parityRows.length > 0) {
-    const { error: insErr } = await sb.from('parity_results').insert(parityRows);
+    const { error: insErr } = await sb
+      .from('parity_results')
+      .upsert(parityRows, { onConflict: 'function_key,call_id' });
     if (insErr) insertError = insErr.message;
   }
 

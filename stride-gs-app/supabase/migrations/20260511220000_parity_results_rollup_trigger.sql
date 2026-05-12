@@ -58,11 +58,15 @@ CREATE TRIGGER parity_results_rollup_to_feature_flags
   FOR EACH ROW
   EXECUTE FUNCTION public.rollup_parity_results_to_feature_flags();
 
--- Also bump our own function_key mapping: the call_log action
--- 'updateInventoryItem' maps to feature_flags.function_key='updateItem'.
--- The inventory only seeded 'updateItem' (P2 simple-writes group) per the
--- migration plan, so this is the row that needs to land. Re-seed defensively
--- in case the row was renamed.
-INSERT INTO public.feature_flags (function_key, active_backend, parity_enabled, notes)
-VALUES ('updateInventoryItem', 'gas', false, 'P2 — alias entry for the gas_call_log action name. Same handler as updateItem; harness writes parity_results under this key.')
-ON CONFLICT (function_key) DO NOTHING;
+-- Idempotency on re-runs: a UNIQUE constraint on (function_key, call_id)
+-- so the harness can re-replay the same corpus without piling up duplicate
+-- rows. Re-runs use INSERT … ON CONFLICT … DO UPDATE to refresh the latest
+-- match result, hash, and details — useful when a shadow handler is
+-- fixed and re-tested.
+--
+-- (call_id alone isn't unique because the same correlation_id could be
+-- replayed against multiple shadow handlers in theory; (function_key, call_id)
+-- captures the actual identity.)
+CREATE UNIQUE INDEX IF NOT EXISTS parity_results_function_call_unique
+  ON public.parity_results (function_key, call_id)
+  WHERE call_id IS NOT NULL;
