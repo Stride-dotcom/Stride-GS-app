@@ -357,7 +357,20 @@ export function Orders() {
       header: 'Order ID', size: 150,
       cell: info => <span style={{ fontFamily: 'monospace', fontSize: 12, fontWeight: 600, color: theme.colors.orange }}>{info.getValue()}</span>,
     }),
-    ...(user?.role !== 'client' ? [ch.accessor('clientName', { header: 'Client', size: 160 })] : []),
+    ...(user?.role !== 'client' ? [ch.accessor('clientName', {
+      header: 'Client', size: 160,
+      // Distinguish orders that aren't tied to a warehouse client (public
+      // form submissions + ad-hoc external-customer orders) so staff can
+      // tell at a glance which rows need a tenant assignment or are simply
+      // standalone delivery jobs.
+      cell: info => {
+        const v = info.getValue();
+        if (v) return <span>{v}</span>;
+        const row = info.row.original;
+        const label = row.source === 'public_form' ? 'Public Request' : 'External Customer';
+        return <span style={{ fontStyle: 'italic', color: theme.colors.textMuted, fontSize: 12 }}>{label}</span>;
+      },
+    })] : []),
     ch.accessor('statusCategory', {
       header: 'Status', size: 120,
       cell: info => <StatusChip order={info.row.original} />,

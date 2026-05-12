@@ -740,6 +740,12 @@ export function CreateDeliveryOrderModal({
     return '';
   }, [autoClient, isStaff, user?.accessibleClientNames]);
   const [clientName, setClientName] = useState(initialClientName);
+  // v2026-05-12 — External-customer mode: order isn't bound to a
+  // warehouse client. tenant_id is saved NULL; warehouse inventory +
+  // address book lookups are skipped. Toggle in the Client section
+  // is staff-only; clients can't create external orders for obvious
+  // reasons (no tenant scope to validate against).
+  const [externalCustomer, setExternalCustomer] = useState(false);
   useEffect(() => {
     if (!clientName && initialClientName) setClientName(initialClientName);
   }, [initialClientName, clientName]);
@@ -1686,7 +1692,10 @@ export function CreateDeliveryOrderModal({
 
   // ── Validation ─────────────────────────────────────────────────────────
   const canSubmit = useMemo(() => {
-    if (!clientSheetId) return false;
+    // External-customer mode bypasses the warehouse-client gate; otherwise
+    // a tenant is still required so RLS / fan-out / inventory lookups have
+    // something to anchor to.
+    if (!externalCustomer && !clientSheetId) return false;
     // serviceDate is intentionally NOT required at submit — operator
     // can save the order without nailing down the day, then schedule it
     // later from the order detail page.
@@ -1731,6 +1740,7 @@ export function CreateDeliveryOrderModal({
     }
     return true;
   }, [
+    externalCustomer,
     clientSheetId, serviceDate, mode,
     deliveryContactName, deliveryAddress, deliveryCity, deliveryZip, serviceDescription,
     pickupContactName, pickupAddress, pickupCity, pickupZip, pickupFreeItems,
@@ -1744,7 +1754,7 @@ export function CreateDeliveryOrderModal({
   const missingFields = useMemo(() => {
     if (canSubmit) return [];
     const out: string[] = [];
-    if (!clientSheetId) out.push('client');
+    if (!externalCustomer && !clientSheetId) out.push('client');
     // serviceDate omitted on purpose — not a hard requirement.
     if (mode === 'service_only') {
       if (!deliveryContactName.trim()) out.push('recipient name');
@@ -1785,7 +1795,7 @@ export function CreateDeliveryOrderModal({
     }
     return out;
   }, [
-    canSubmit, clientSheetId, serviceDate, mode,
+    canSubmit, externalCustomer, clientSheetId, serviceDate, mode,
     deliveryContactName, deliveryAddress, deliveryCity, deliveryZip, serviceDescription,
     pickupContactName, pickupAddress, pickupCity, pickupZip, pickupFreeItems,
     itemsSource, selectedInvItems, deliveryFreeItems, selectedCoverage, declaredValue,
@@ -2346,7 +2356,7 @@ export function CreateDeliveryOrderModal({
       // re-save, both refs are populated → UPDATE both rows in place.
       if (mode === 'pickup_and_delivery') {
         const commonDraft: Record<string, unknown> = {
-          tenant_id: clientSheetId,
+          tenant_id: clientSheetId || null,
           timezone: 'America/Los_Angeles',
           local_service_date: serviceDate || null,
           window_start_local: windowStart || null,
@@ -2488,7 +2498,7 @@ export function CreateDeliveryOrderModal({
       };
 
       const payload: Record<string, unknown> = {
-        tenant_id: clientSheetId,
+        tenant_id: clientSheetId || null,
         timezone: 'America/Los_Angeles',
         local_service_date: serviceDate || null,
         window_start_local: windowStart || null,
@@ -2675,7 +2685,7 @@ export function CreateDeliveryOrderModal({
           quotePending: !!a.quotePending,
         }));
         const commonEdit: Record<string, unknown> = {
-          tenant_id: clientSheetId,
+          tenant_id: clientSheetId || null,
           timezone: 'America/Los_Angeles',
           local_service_date: serviceDate || null,
           window_start_local: windowStart || null,
@@ -2868,7 +2878,7 @@ export function CreateDeliveryOrderModal({
           zip: deliveryZip, phone: deliveryPhone, phone2: deliveryPhone2, email: deliveryEmail,
         };
         const editPayload: Record<string, unknown> = {
-          tenant_id: clientSheetId,
+          tenant_id: clientSheetId || null,
           timezone: 'America/Los_Angeles',
           local_service_date: serviceDate || null,
           window_start_local: windowStart || null,
@@ -3105,7 +3115,7 @@ export function CreateDeliveryOrderModal({
         };
 
     const commonFields = {
-      tenant_id: clientSheetId,
+      tenant_id: clientSheetId || null,
       timezone: 'America/Los_Angeles',
       // dt_orders.local_service_date is a date column. An empty string
       // makes Postgres throw "invalid input syntax for type date" — has
@@ -3297,17 +3307,21 @@ export function CreateDeliveryOrderModal({
             setSubmitError(`Order created, but DT push failed: ${msg}. Retry from the Review Queue.`);
           }
         }
-        // Auto-save contacts to address book — best-effort
-        upsertAddressBookContact({
-          tenant_id: clientSheetId, contact_name: pickupContactName,
-          address: pickupAddress, city: pickupCity, state: pickupState, zip: pickupZip,
-          phone: pickupPhone, phone2: pickupPhone2, email: pickupEmail,
-        }).catch(() => {});
-        upsertAddressBookContact({
-          tenant_id: clientSheetId, contact_name: deliveryContactName,
-          address: deliveryAddress, city: deliveryCity, state: deliveryState, zip: deliveryZip,
-          phone: deliveryPhone, phone2: deliveryPhone2, email: deliveryEmail,
-        }).catch(() => {});
+        // Auto-save contacts to address book — best-effort. Skipped for
+        // external-customer orders since the address book is per-tenant
+        // and there's no tenant to scope contacts to.
+        if (clientSheetId) {
+          upsertAddressBookContact({
+            tenant_id: clientSheetId, contact_name: pickupContactName,
+            address: pickupAddress, city: pickupCity, state: pickupState, zip: pickupZip,
+            phone: pickupPhone, phone2: pickupPhone2, email: pickupEmail,
+          }).catch(() => {});
+          upsertAddressBookContact({
+            tenant_id: clientSheetId, contact_name: deliveryContactName,
+            address: deliveryAddress, city: deliveryCity, state: deliveryState, zip: deliveryZip,
+            phone: deliveryPhone, phone2: deliveryPhone2, email: deliveryEmail,
+          }).catch(() => {});
+        }
         // Notify staff — best-effort, never block submit success
         supabase.functions.invoke('notify-new-order', {
           body: { orderId: deliveryRow.id, submittedBy: user?.email ?? 'Unknown' },
@@ -3445,7 +3459,7 @@ export function CreateDeliveryOrderModal({
           const auditRows = selectedInvItems.map(i => ({
             entity_type: 'inventory',
             entity_id: i.itemId,
-            tenant_id: clientSheetId,
+            tenant_id: clientSheetId || null,
             action: 'delivery_order_created',
             changes: {
               dt_order_id: orderRow.id,
@@ -3506,8 +3520,9 @@ export function CreateDeliveryOrderModal({
             setSubmitError(`Order created, but DT push failed: ${msg}. Retry from the Review Queue.`);
           }
         }
-        // Auto-save contact to address book — best-effort
-        if (contactName.trim()) {
+        // Auto-save contact to address book — best-effort. Skipped for
+        // external-customer orders (no tenant to scope contacts to).
+        if (contactName.trim() && clientSheetId) {
           upsertAddressBookContact({
             tenant_id: clientSheetId, contact_name: contactName,
             address: contactAddress, city: contactCity, state: contactState, zip: contactZip,
@@ -3815,7 +3830,35 @@ export function CreateDeliveryOrderModal({
           {/* Client */}
           <div style={section}>
             <div style={sectionTitle}>Client</div>
-            {!isStaff && clientNames.length <= 1 ? (
+            {/* v2026-05-12 — External-customer mode lets staff create
+                delivery orders for customers who don't warehouse with us
+                (e.g. phone-in pickup/delivery). When checked, the warehouse
+                client picker is hidden, tenant_id is saved NULL, and the
+                Orders page surfaces the row under "External Customer". */}
+            {isStaff && (
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: theme.colors.textSecondary, marginBottom: 8, cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={externalCustomer}
+                  onChange={e => {
+                    const next = e.target.checked;
+                    setExternalCustomer(next);
+                    if (next) setClientName('');
+                  }}
+                  style={{ cursor: 'pointer', accentColor: '#E85D2D' }}
+                />
+                External customer (no warehouse account)
+              </label>
+            )}
+            {externalCustomer ? (
+              <div style={{
+                padding: '10px 12px', borderRadius: 8,
+                background: '#FEF3EE', border: '1px solid #FBD0B5',
+                fontSize: 13, color: '#9A3412',
+              }}>
+                External customer — order will be saved without a warehouse client. Warehouse inventory and address book lookups are unavailable.
+              </div>
+            ) : !isStaff && clientNames.length <= 1 ? (
               <div style={{
                 padding: '10px 12px', borderRadius: 8,
                 background: theme.colors.bgSubtle, border: `1px solid ${theme.colors.borderSubtle}`,
