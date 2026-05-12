@@ -83,6 +83,13 @@ function mapToAppTask(api: ApiTask): Task {
     location: api.location || undefined,
     sidemark: api.sidemark || undefined,
     reference: api.reference || undefined,
+    // v2026-05-12 — itemClass is overlaid from the inventory row by
+    // fetchTasksFromSupabase, but the previous mapper dropped it on the
+    // floor. Result: every BillingPreviewCard rendered with itemClass=null,
+    // which made AddTaskServiceModal's rateForClass(svc, null) return 0
+    // for every class-based service — catalog rates never pre-filled,
+    // operators submitted addons at $0, and the billing preview showed $0.
+    itemClass: api.itemClass || undefined,
     assignedTo: api.assignedTo || undefined,
     created: api.created,
     dueDate: api.dueDate || undefined,
@@ -228,6 +235,10 @@ export function useTasks(autoFetch = true, filterClientSheetId?: string | string
         location: b.location,
         sidemark: b.sidemark,
         reference: b.reference || '',
+        // Surface itemClass so the addon rate calculator can resolve
+        // class-based catalog rates on the batch path too. Falls back
+        // to '' when the batch payload predates the schema addition.
+        itemClass: b.itemClass || '',
         shipmentNumber: b.shipmentNumber,
         created: b.created,
         // v38.60.1 — batch now includes these (was hardcoded empty)
