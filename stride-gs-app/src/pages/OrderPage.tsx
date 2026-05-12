@@ -1074,11 +1074,6 @@ export function OrderPage() {
   const [localOrder, setLocalOrder] = useState<DtOrderForUI | null>(null);
   const lastMutationAtRef = useRef<number>(0);
   const OPTIMISTIC_GUARD_MS = 6000;
-  useEffect(() => {
-    if (!fetchedOrder) return;
-    if (Date.now() - lastMutationAtRef.current < OPTIMISTIC_GUARD_MS) return;
-    setLocalOrder(fetchedOrder);
-  }, [fetchedOrder]);
 
   const order = localOrder ?? fetchedOrder;
 
@@ -1112,6 +1107,20 @@ export function OrderPage() {
   const [edit, setEdit] = useState<OrderEdit>(() => order ? orderToEdit(order) : orderToEdit({} as DtOrderForUI));
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+
+  // Sync effect — copies the fresh Supabase row into local state UNLESS a
+  // recent mutation is still propagating. Mirrors TaskPage's pattern: gate
+  // on BOTH the 6000ms timer AND the saving flag, since a cold-GAS round
+  // trip can exceed the timer (worst case ~4-5s, occasionally longer) and
+  // we don't want a late-arriving realtime echo to clobber an in-flight
+  // optimistic edit. Deps list includes `saving` so the effect re-runs
+  // when saving flips false and the most-recent fetchedOrder lands clean.
+  useEffect(() => {
+    if (!fetchedOrder) return;
+    if (saving) return;
+    if (Date.now() - lastMutationAtRef.current < OPTIMISTIC_GUARD_MS) return;
+    setLocalOrder(fetchedOrder);
+  }, [fetchedOrder, saving]);
 
   // DT sync-back data — driver activity timeline + DT-side notes pulled
   // from the cache columns the dt-sync-statuses Edge Function writes.

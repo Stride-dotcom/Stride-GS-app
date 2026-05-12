@@ -85,6 +85,13 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
   const isStaffAdmin = userRole === 'admin' || userRole === 'staff';
   const canTransfer = isStaffAdmin || !!isParent;
 
+  // Mutation timestamp guard, same shape as TaskPage / RepairPage /
+  // WillCallPage / OrderPage. Declared early because both the inline-edit
+  // setter (`applyShipmentItemPatch`) and the realtime subscriber below
+  // reference it before the rest of the edit-mode state machine wires up.
+  const lastMutationAtRef = useRef<number>(0);
+  const OPTIMISTIC_GUARD_MS = 6000;
+
   // Lazy-load items: fetch kicked off once the Items tab becomes active OR
   // the Details tab's Quick Actions render (which also needs the list).
   const [items, setItems] = useState<ShipmentItem[]>(shipment.items || []);
@@ -234,14 +241,6 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [optimistic, setOptimistic] = useState<Partial<ShipmentDraft> | null>(null);
-
-  // Mutation timestamp guard, same shape as TaskPage / RepairPage / WillCallPage /
-  // OrderPage (PR #361). Bumped on every save/inline-edit; the realtime listener
-  // below skips the items refetch + setItems if a mutation just landed, so the
-  // user's in-progress patch isn't clobbered by their own realtime echo before
-  // the optimistic patch overlay has had a chance to clear naturally.
-  const lastMutationAtRef = useRef<number>(0);
-  const OPTIMISTIC_GUARD_MS = 6000;
 
   // Clear optimistic overrides when shipment id changes (panel re-used for
   // a different shipment) so the new shipment's prop values render clean.
