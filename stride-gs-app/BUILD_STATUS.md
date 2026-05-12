@@ -1,6 +1,64 @@
 # Stride GS App — Build Status
 
-> Last updated: 2026-05-09 ([MIGRATION] drift-check + 2 incident fixtures shipped — `parity_dryrun.check_drift()` SQL function + `001-dup-invoice-race` + `002-stale-void-row-rebill` as worked examples. Phase 1 substrate is now self-policing on schema sync; P1.7 inherits a 2-fixture regression bed when it lands).
+> Last updated: 2026-05-11 ([MIGRATION] **Full GAS function inventory shipped** — 1,196 functions across 30 files in 8 Apps Script projects, every function with a plain-English description + what-it-affects + migration-phase tag. New decision `MIG-011`. Surfaces 3 latent issues for follow-up: `getNextShipmentId` racy counter still in use, Task Board may be missing `processRepairDeclinedById_`, Master Price List source is missing email-template HTML).
+
+---
+
+## Recent Changes (2026-05-11, [MIGRATION] full GAS function inventory)
+
+**Trigger:** Justin asked for a complete review of every Apps Script function in every project, with plain-English descriptions, sortable/categorizable, saved where all builders can read it. Settings → Migration tab today shows only the 25-flag substrate; we needed the full coverage picture before scoping P2 onward.
+
+**What landed: `stride-gs-app/FUNCTION_INVENTORY.md`** — 1,196 functions across 30 files in 8 Apps Script projects, 2,300+ lines, 376 KB. Every function has:
+- **Name** (with `_` suffix preserved)
+- **Plain-English description** (one or two operator-readable sentences)
+- **What it affects** (which sheets, tables, external systems, entities)
+- **Migration phase tag** (`done` / `P2`–`P7` / `internal-helper` / `retiring` / `out-of-scope`)
+- **Grouped** by project → file → category for browsability
+
+Built via 5 parallel inventory subagents (one per project group), each writing a structured draft. Assembled into the master doc via `_assemble.py`. Drafts deleted (intermediate stage); the master doc is now self-contained.
+
+**Counts by project:**
+
+| Project | Files | Functions |
+|---|---|---|
+| StrideAPI | 1 | 556 |
+| Consolidated Billing | 10 | 158 |
+| Master Price List | 1 | 18 |
+| Client Inventory (per-tenant × 49) | 13 | 240 |
+| Stax Auto Pay | 1 | 76 |
+| QR Scanner | 2 | 35 |
+| Task Board | 1 | 56 |
+| Stride Designer Campaign | 1 | 57 |
+| **TOTAL** | **30** | **1,196** |
+
+**Approximate phase rollup** (table-cell occurrence counts; per-project sections have exact tagging): `done` 43, `P2` 12, `P3` 35, `P4a` 56, `P4b` 18, `P5` 77, `P6` 71, `P7` 78, `internal-helper` 572, `retiring` 175, `out-of-scope` 47.
+
+**3 latent issues surfaced for follow-up** (added to `MIGRATION_STATUS.md` Open questions):
+
+1. **`getNextShipmentId` is still using the racy Master-RPC `doPost` counter** — same pattern v38.182 fixed for invoice numbering, but shipment numbering still bypasses the SEQUENCE. The `doPost` route in `Master Price list script.txt` can't be fully retired until shipment numbering also moves to a Postgres SEQUENCE. Add to the per-function migration table (likely P5 alongside `receiveShipment`).
+2. **`processRepairDeclinedById_` may be missing from Task Board** — `TB_OnBoardEdit` calls it on Approved→Declined dropdown changes, but the function isn't defined in `task board script.txt`. Apps Script `.gs` files don't auto-import across projects, so operators picking Declined on the board may hit `ReferenceError`. Verify and either add the function or remove the menu option.
+3. **Master Price List `ensureEmailTemplatesSheet_` is missing template HTML in source** — the .txt file has a "templates omitted for brevity" comment in place of the actual HTML. Live deployments must have the full version somewhere; verify before any P6 work touches the template surface.
+
+**Other inventory findings worth carrying forward (captured in MIGRATION_STATUS.md "Function inventory" section):**
+
+- **Two parallel CB invoice flows** still wired (legacy Phase-2 + modern CB13_*); operator menu hits the modern one, Phase-2 helpers tagged `retiring`.
+- **Three parallel IIF export paths** all tagged P4b/P6 — `qboCreateInvoice` direct push will displace them.
+- **Two parallel email-send paths** in Client Inventory (`sendTemplateEmail_` in Emails.gs vs. `SH_sendTemplateEmail_` in Triggers.gs shared-handler block) diverge on cache + self-heal logic. P3's email migrations need to consolidate or document the divergence.
+- **23-function `SH_*` parity contract** between Client Inventory `Triggers.gs` and `task board script.txt` — must stay byte-identical. P3/P4a migrations need to coordinate the freeze.
+- **Dead-code candidates for P7 cleanup**: `StrideRequestInspection`, `buildWorkOrderHtml_`, `generateTaskWorkOrderPdf_`, `getImportInventoryDialogHtml_`, the 8-function `getEditableRanges_*` family + `clearAllProtections_`, `backfillImpShipmentFolderUrls_`.
+
+**New decision: `MIG-011`** — `FUNCTION_INVENTORY.md` is the canonical function-level reference; Settings → Migration tab extends to render all 1,196 functions in Layer 2. Layer 2 plan captured in `MIGRATION_STATUS.md` "Function inventory" section: new `migration_function_inventory` SQL table seeded from the doc + extended UI showing coverage stats per project + per phase. Scope estimate ~1 day across two PRs (migration + seed script + UI extension).
+
+**Operational rule (from MIG-011):** every PR that adds, renames, or deletes a GAS function MUST also update `FUNCTION_INVENTORY.md` in the same commit. Drift between source and the inventory breaks the dashboard's coverage stats once Layer 2 ships.
+
+**Files touched:**
+- `stride-gs-app/FUNCTION_INVENTORY.md` (new, 2,300+ lines, 376 KB)
+- `stride-gs-app/MIGRATION_STATUS.md` (new "Function inventory" section + MIG-011 + 2 new open questions + cross-reference)
+
+**Pending user action:**
+- [ ] Read the inventory (or grep for any function name you want to understand). Most useful sections for plain-English reading: `Project: StrideAPI` (most of the warehouse logic) and `Project: Client Inventory` (per-tenant operator workflows).
+- [ ] Confirm the 3 latent issues should be tracked as separate work items (or batched into specific phase PRs).
+- [ ] Approve the Layer 2 dashboard plan (~1 day of work to extend Settings → Migration tab to render the full 1,196-function coverage).
 
 ---
 
