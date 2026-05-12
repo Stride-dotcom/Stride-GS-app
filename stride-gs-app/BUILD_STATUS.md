@@ -1,6 +1,55 @@
 # Stride GS App — Build Status
 
-> Last updated: 2026-05-11 ([MIGRATION] **Shipment counter SEQUENCE shipped, StrideAPI v38.206.0**. Closes the dup-number race class for shipment numbering — mirror of v38.182's invoice fix. Migration: `public.shipment_no_seq` + `public.next_shipment_no()` SQL function. Verified post-apply: SHP-001000 → SHP-001001 strictly monotonic. Master-RPC `getNextShipmentId` route stays in place for backward compat; the per-tenant `nextGlobalShipmentNumber_` (direct-sheet receiving) still hits it — P7 cleanup.).
+> Last updated: 2026-05-12 ([MIGRATION-P1.7][MIGRATION-P2.1] **Replay harness MVP shipped, StrideAPI v38.207.0** (Web App v502). End-to-end parity-testing pipeline live: `replay-shadow` + `update-item-shadow` Edge Functions + parity_results rollup trigger + redaction-whitelist fix. DB pipeline smoke-verified. Phase 1 now **7/7 done**. Cron schedule + UI "Run replay now" button deferred to MIG-012 follow-ups.).
+
+---
+
+## Recent Changes (2026-05-12, [MIGRATION-P1.7][MIGRATION-P2.1] replay harness MVP)
+
+**Trigger:** P1.7 was the final remaining Phase 1 sub-task. Justin's standing instruction to continue, plus existing 196-row `gas_call_log` corpus including 102 `updateInventoryItem` calls, made this the natural next step. Co-shipped with the first SB-side shadow handler (`updateItem`) so the harness has something to invoke.
+
+**What landed:**
+
+1. **`update-item-shadow` Edge Function** (deployed v2, `verify_jwt=true`). Pure function: takes a doPost payload, returns `payload minus {itemId, requestId}` — the exact dict GAS writes to `entity_audit_log.changes` at `StrideAPI.gs:7871`. No validation / coercion on the parity path (would diverge from GAS's raw-payload audit log shape). Validation helper preserved as a separate exported function for P2.1's eventual SB-primary handler.
+2. **`replay-shadow` Edge Function** (deployed v2, `verify_jwt=true`). The P1.7 harness. Reads `gas_call_log` filtered by `SHADOW_REGISTRY[function_key].action`, invokes the matching shadow handler, diffs against `entity_audit_log.changes` via `correlation_id`, upserts `parity_results` on `(function_key, call_id)`. Classifications: `match` / `mismatch` / `skip_partial_input` / `shadow_error` / `no_audit_row`. ISO-validates `body.since`.
+3. **Migration `parity_results_rollup_trigger`**: AFTER-INSERT trigger `rollup_parity_results_to_feature_flags()` updates `feature_flags.mismatch_count_7d` (rolling 7-day count of match=false) + `last_parity_check` for the matching function_key. Plus a `parity_results_unique_index_unconditional` migration adding the unique index `(function_key, call_id)` so re-runs are idempotent.
+4. **StrideAPI v38.207.0** (Web App v502): expanded `api_redactPayloadForCorpus_` SAFE_FIELDS whitelist. Original P1.2 list stripped location/vendor/description/reference/room/itemClass/itemNotes from corpus — captured `{itemId, requestId}` only. New list covers all editable fields. Past corpus is partially blind (`replay-shadow.skip_partial_input` handles); future traffic has complete inputs.
+
+**Smoke verification (DB layer, 2026-05-12):**
+
+- Inserted 4 synthetic `parity_results` rows (3 matches + 1 mismatch) tied to real `correlation_id` values.
+- Verified `feature_flags.updateItem.mismatch_count_7d = 1` + `last_parity_check = 2026-05-12 14:22:09Z` — rollup trigger fired correctly.
+- Synthetic data cleaned up after verification (`mismatch_count_7d` reset to 0).
+
+**Edge Function full invocation pending operator-run with service_role key** — `verify_jwt=true` blocks Postgres-side test via `pg_net` (no vault-stored service_role JWT). Operators invoke manually per the smoke command in `MIGRATION_STATUS.md` MIG-012, or cron schedule lands as the next Layer-2 follow-up.
+
+**Code review (Opus subagent) caught + folded in:**
+
+- **Architectural finding:** GAS audit log records the RAW payload (not the validated dict). My initial shadow had validation/coercion that would diverge on `declaredValue:""` (GAS: `""`; shadow: `0`) and similar. Shadow rewritten to mirror GAS's exact audit-log shape.
+- **`shadow_rejected_but_gas_accepted`** is now classified as `mismatch` (real parity defect — shadow stricter than GAS) instead of `shadow_error` (infra glitch).
+- **`function_key` normalization** — harness writes the canonical `'updateItem'` (P1.1 seed key) and filters `gas_call_log` by `'updateInventoryItem'` (the actual action name). Earlier alias row in `feature_flags` removed.
+- **`body.since` ISO validation** added to defend against `?since=garbage` causing PostgREST 400.
+- **`parity_results` upsert on `(function_key, call_id)`** makes re-runs idempotent.
+- **Unique index** initially partial (`WHERE call_id IS NOT NULL`) — Postgres rejected as ON CONFLICT target. Reapplied unconditional. (Postgres treats NULLs as distinct in unique indexes anyway, so NULL-call_id fixture rows still coexist.)
+
+**Pins (do not regress):**
+- `replay-shadow.SHADOW_REGISTRY` is the single point of truth mapping `function_key` → shadow Edge Function + gas_call_log action name. Every P2/P3/P4 PR adding a shadow handler MUST add a registry entry.
+- Shadow Edge Functions deploy with `verify_jwt=true` and only `replay-shadow` (or a future operator-RPC wrapper) should invoke them.
+- Per MIG-008, stateful shadows must use placeholder external-service env vars. Today's pure shadow has no external calls.
+- The `parity_results_function_call_unique` index makes re-runs idempotent. Don't drop it.
+
+**Files touched:**
+- `stride-gs-app/supabase/functions/update-item-shadow/index.ts` (new, ~120 lines after refactor)
+- `stride-gs-app/supabase/functions/replay-shadow/index.ts` (new, ~330 lines)
+- `stride-gs-app/supabase/migrations/20260511220000_parity_results_rollup_trigger.sql` (new — trigger + unique index)
+- `AppScripts/stride-api/StrideAPI.gs` (v38.206.0 → v38.207.0; redaction whitelist expansion)
+- `stride-gs-app/MIGRATION_STATUS.md` (P1.7 → done, MIG-012 added)
+- `stride-gs-app/BUILD_STATUS.md` (this entry)
+
+**Pending user action:**
+- [ ] Run the smoke command in `MIGRATION_STATUS.md` MIG-012 once with the service_role key to confirm the Edge Function end-to-end. Expected output: JSON with `corpus_size: 102`, some `match` count, some `skip_partial_input` (pre-v38.207.0 corpus), zero or near-zero `mismatch`, all upserted into `parity_results`.
+- [ ] After running the smoke, check Settings → Migration tab — `updateItem` row should show non-zero `Mismatches (7d)` only if real divergences surfaced (the MVP shadow returns raw payload so expected mismatch rate is ~0%). `Last check` column should show a recent timestamp.
+- [ ] Schedule the cron (or build the "Run replay now" button) per MIG-012 follow-ups when convenient.
 
 ---
 
