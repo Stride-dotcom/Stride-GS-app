@@ -11,6 +11,19 @@
  * Required Edge Function secrets (Supabase Dashboard → Functions → Secrets):
  *   RESEND_API_KEY  — Resend "Sending access" API key (stride-gs-app-prod)
  *
+ * Auth: verify_jwt is intentionally DISABLED at the gateway. The Supabase
+ * gateway's verify_jwt=true silently rejects service-role JWTs from
+ * other Edge Functions (a Supabase platform quirk we hit 2026-05-12 —
+ * every server-to-server call from notify-* / cron functions was getting
+ * a gateway 401 before any send-email code could run, so NO email_sends
+ * row was ever inserted). Verifying only that *some* signed JWT is
+ * present didn't buy meaningful security here either: the anon key is
+ * publicly bundled in every browser build, so anyone holding it could
+ * already invoke send-email under the old setting. We rely on
+ * templateKey validation + RESEND_API_KEY (server-only env) for the
+ * actual permission gate, and on `triggeredBy` resolution below for
+ * audit attribution when the caller does present a user JWT.
+ *
  * Pipeline:
  *   1. Authenticate the caller (so we can attribute triggered_by).
  *   2. Idempotency check — if `idempotency_key` already has status='sent',
