@@ -1,6 +1,39 @@
 # Stride GS App — Build Status
 
-> Last updated: 2026-05-11 ([MIGRATION] Inventory corrections — Task Board confirmed decommissioned (replaced by React app), Master Price List email-template functions confirmed dead (templates moved to Supabase), shipment counter confirmed still on racy Master-RPC. Only one real follow-up survives: shipment counter needs v38.182-style SEQUENCE migration in P5.).
+> Last updated: 2026-05-11 ([MIGRATION] **Shipment counter SEQUENCE shipped, StrideAPI v38.206.0**. Closes the dup-number race class for shipment numbering — mirror of v38.182's invoice fix. Migration: `public.shipment_no_seq` + `public.next_shipment_no()` SQL function. Verified post-apply: SHP-001000 → SHP-001001 strictly monotonic. Master-RPC `getNextShipmentId` route stays in place for backward compat; the per-tenant `nextGlobalShipmentNumber_` (direct-sheet receiving) still hits it — P7 cleanup.).
+
+---
+
+## Recent Changes (2026-05-11, [MIGRATION] shipment counter SEQUENCE migration)
+
+**Trigger:** The 2026-05-11 function inventory surfaced that `api_nextShipmentNo_` (StrideAPI.gs:14803) was still hitting the racy Master-RPC `getNextShipmentId` counter — same read-then-write-without-lock pattern that caused the INV-000131 dup-number incident on 2026-05-03. The v38.182.0 invoice-counter fix didn't cover shipments. Justin recalled the migration as already done but code inspection confirmed it wasn't.
+
+**What landed (StrideAPI v38.205.0 → v38.206.0):**
+
+- **Migration `20260511190000_shipment_no_atomic_counter.sql`** (applied via MCP). Mirror of the invoice-counter migration: creates `public.shipment_no_seq` SEQUENCE seeded at 1000 (max production shipment_number was 358; 640+ rows of headroom over the legacy counter); creates `public.next_shipment_no()` SQL function returning `'SHP-' || LPAD(nextval(seq), 6, '0')`; creates `public.peek_shipment_no_seq()` diagnostic. SECURITY DEFINER + `SET search_path = public` + GRANT to authenticated + service_role.
+- **`api_nextShipmentNo_(rpcUrl, rpcToken)`** rewritten as a thin wrapper around the new `api_nextShipmentNoSupabase_` helper — exact same shape as `api_nextInvoiceNo_` → `api_nextInvoiceNoSupabase_` (v38.178.0). Legacy `rpcUrl/rpcToken` params kept for signature compat but ignored. Atomic by Postgres design; no retries needed.
+- **`api_nextShipmentNoSupabase_()`** new helper. Calls `public.next_shipment_no()` via Supabase REST; format-validates the response against `/^SHP-\d{6,}$/`. Mirror of `api_nextInvoiceNoSupabase_`.
+- **`handleCompleteShipment_`** call site (line 15462) gains a clarifying comment that the counter is now the SEQUENCE, not the Master-RPC.
+
+**Pins (do not regress):**
+- The `next_shipment_no()` SEQUENCE is now the only path the React-side receive-shipment flow uses for shipment numbering. Do NOT introduce a code path that reads back to the racy Master-RPC `getNextShipmentId` counter. The Master route is intentionally left in place for backward compat but is no longer called by StrideAPI.
+- The per-tenant client script `nextGlobalShipmentNumber_` (Client Inventory `Shipments.gs:522`) still hits Master-RPC — this is by design for now (direct-sheet dock-form receiving is rare/admin-only and out of scope for this PR). Tagged `P7` in the function inventory so the per-tenant freeze rollout migrates it to Supabase too.
+
+**Verified post-apply:**
+- `peek_shipment_no_seq()` returns 999 (seeded).
+- `next_shipment_no()` first call returns `SHP-001000`.
+- Second call returns `SHP-001001` — strictly monotonic, atomic. Sequence consumed 2 values during smoke; first production call will return `SHP-001002`.
+
+**Files touched:**
+- `stride-gs-app/supabase/migrations/20260511190000_shipment_no_atomic_counter.sql` (new)
+- `AppScripts/stride-api/StrideAPI.gs` (v38.205.0 → v38.206.0)
+- `stride-gs-app/MIGRATION_STATUS.md` (closed open question)
+- `stride-gs-app/FUNCTION_INVENTORY.md` (3 row updates: `handleCompleteShipment_`, Master `doPost`, per-tenant `nextGlobalShipmentNumber_`)
+- `stride-gs-app/BUILD_STATUS.md` (this entry)
+
+**Pending user action:**
+- [ ] Deploy GAS: `npm run push-api && npm run deploy-api` from `AppScripts/stride-client-inventory/` after merge. (Builder will run this directly.)
+- [ ] Smoke check after deploy: have a warehouse operator receive a shipment via the React app and confirm the new Shipment # is `SHP-001002` or higher and is unique. The existing handleCompleteShipment_ lock + the new SEQUENCE atomic counter together make a dup-number outcome physically impossible — this is a sanity check, not a real risk.
 
 ---
 
