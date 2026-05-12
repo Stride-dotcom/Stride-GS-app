@@ -65,8 +65,10 @@
  */
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { releaseInventoryOnDtFinished } from '../_shared/release-on-dt-finished.ts';
 
 const STATUS_COLLECTED = 22;
+const STATUS_COMPLETED = 3;
 
 interface SyncBody {
   scope?: 'active' | 'all';
@@ -105,7 +107,7 @@ Deno.serve(async (req) => {
   // legacy reconciled rows (source='reconcile') also pull statuses.
   let query = supabase
     .from('dt_orders')
-    .select('id, dt_identifier, dt_dispatch_id, status_id, last_synced_at, tenant_id, paid_at')
+    .select('id, dt_identifier, dt_dispatch_id, status_id, last_synced_at, tenant_id, paid_at, order_type')
     .not('dt_identifier', 'is', null);
 
   if (singleOrderId) {
@@ -209,6 +211,22 @@ Deno.serve(async (req) => {
       const { error: updErr } = await supabase.from('dt_orders').update(patch).eq('id', o.id);
       if (updErr) { result.errors.push(`${o.dt_identifier}: ${updErr.message}`); continue; }
       result.updated += 1;
+
+      // "Is finished now" signal for the post-reconcile auto-release.
+      // We DON'T require a transition (was-not-3, now-3) because the
+      // common webhook→sync handoff is:
+      //   1. Webhook arrives → updates o.status_id=3 directly
+      //   2. Webhook fire-and-forgets dt-sync-statuses({orderId})
+      //   3. Sync runs: DT confirms Finished, but o.status_id is
+      //      already 3 in our DB → transition check would fail
+      // Firing on "is Finished or Collected" (whether or not we
+      // transitioned this poll) handles that handoff. Idempotency in
+      // the helper (`.neq('status','Released')`) prevents double-
+      // releases when the periodic sync re-encounters the same order.
+      const orderIsFinishedAfterPoll =
+        finalStatusId === STATUS_COMPLETED || finalStatusId === STATUS_COLLECTED ||
+        (finalStatusId == null && (o.status_id === STATUS_COMPLETED || o.status_id === STATUS_COLLECTED));
+      const orderTypeIsRelease = (o as { order_type?: string | null }).order_type !== 'pickup';
 
       // ── dt_order_items reconcile ─────────────────────────────────────
       // Three-way merge keyed on dt_item_code:
@@ -411,6 +429,37 @@ Deno.serve(async (req) => {
         });
         if (photoErr) result.errors.push(`${o.dt_identifier} photo ${img.id}: ${photoErr.message}`);
         else if (fetchError) result.errors.push(`${o.dt_identifier} photo ${img.id}: ${fetchError}`);
+      }
+
+      // ── Auto-release inventory on the Completed-status transition ────
+      // Fires only when this poll DETECTED the transition (was not 3,
+      // now is 3) and only for non-pickup orders. dt_order_items has
+      // just been reconciled above, so `delivered=true` flags are
+      // freshly upserted before the helper reads them. Mirrors the
+      // dt-webhook-ingest trigger; if a webhook already fired the
+      // helper, the .neq('status','Released') guard makes this a
+      // clean no-op. Failures are internal to the helper (land in
+      // gs_sync_events for FailedOperationsDrawer); the status update
+      // is independent of the release-mirror.
+      if (orderIsFinishedAfterPoll && orderTypeIsRelease) {
+        const releaseResult = await releaseInventoryOnDtFinished({
+          supabase,
+          gasUrl:    Deno.env.get('GAS_API_URL'),
+          gasToken:  Deno.env.get('GAS_API_TOKEN'),
+          dtOrderId: o.id,
+          source:    'dt_sync',
+        });
+        if (releaseResult.fired) {
+          console.log(
+            `[dt-sync-statuses] auto-release order=${o.dt_identifier} ` +
+            `released=${releaseResult.itemsReleased} ` +
+            `skipped_already=${releaseResult.itemsAlreadyReleased} ` +
+            `skipped_not_delivered=${releaseResult.itemsSkippedNotDelivered} ` +
+            `mirror_ok=${releaseResult.mirrorOk}`
+          );
+        } else if (releaseResult.skippedReason) {
+          console.log(`[dt-sync-statuses] auto-release order=${o.dt_identifier} skipped: ${releaseResult.skippedReason}`);
+        }
       }
     } catch (e) {
       result.errors.push(`${o.dt_identifier}: ${e instanceof Error ? e.message : String(e)}`);
