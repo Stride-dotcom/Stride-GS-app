@@ -37,6 +37,7 @@ import { ClientIntake } from './pages/ClientIntake';
 import { PublicPhotoGallery } from './pages/PublicPhotoGallery';
 import { PublicServiceRequest } from './pages/PublicServiceRequest';
 import { PublicOrderView } from './pages/PublicOrderView';
+import { PublicOrderLookup } from './pages/PublicOrderLookup';
 import { MessagesPage } from './components/messages/MessagesPage';
 
 /** Route guard — redirects to dashboard if user's role is not in the allowed list */
@@ -84,6 +85,14 @@ export default function App() {
   // Anonymous public-form submitters don't have accounts, so the route
   // sits OUTSIDE the auth wall. Two-factor lookup (order UUID + matching
   // contact_email) is enforced server-side by public.get_public_order.
+  // v2026-05-12 — Public lookup at /#/p/orders/lookup. Must be checked
+  // BEFORE the /#/p/order/:id route below — the more specific path wins
+  // and the UUID regex would otherwise swallow the literal word "lookup".
+  const publicLookupMatch = typeof window !== 'undefined'
+    ? window.location.hash.match(/^#\/p\/orders\/lookup/)
+    : null;
+  if (publicLookupMatch) return <PublicOrderLookup />;
+
   const publicOrderMatch = typeof window !== 'undefined'
     ? window.location.hash.match(/^#\/p\/order\/([0-9a-fA-F-]+)/)
     : null;
