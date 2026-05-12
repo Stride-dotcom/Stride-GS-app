@@ -66,6 +66,30 @@ export interface RepairWorkOrderInput {
   approved?: boolean;
 }
 
+export interface WillCallItemInput {
+  itemId?: string;
+  qty?: number | string;
+  vendor?: string;
+  description?: string;
+  itemClass?: string;
+  location?: string;
+  sidemark?: string;
+}
+
+export interface WillCallReleaseInput {
+  wcNumber: string;
+  clientName?: string;
+  pickupParty?: string;
+  pickupPartyPhone?: string;
+  scheduledDate?: string;
+  requestedBy?: string;
+  createdBy?: string;
+  notes?: string;
+  cod?: boolean;
+  codAmount?: number | string | null;
+  items?: WillCallItemInput[];
+}
+
 // Same Wix-hosted logo used by the Apps Script generator's default
 // branch. Keeps the printed PDF visually identical regardless of which
 // path produced it.
@@ -263,4 +287,113 @@ export async function generateRepairWorkOrderPdf(repair: RepairWorkOrderInput): 
 
   const html = applyTokens(template, tokens);
   openPrintWindow(html, `Repair Work Order — ${repair.repairId}`);
+}
+
+// ─── Will Call Release ───────────────────────────────────────────────────────
+//
+// Replaces the two-button GAS flow ("Pickup Doc" + "Release Doc") with a
+// single client-side render: fetch DOC_WILL_CALL_RELEASE from email_templates,
+// substitute every token from the WillCall object, open a popup, print.
+// Token vocabulary matches the seeded template (see migration history under
+// AppScripts/.../email_templates and the live row in `email_templates`).
+
+/** Build one <tr> for the items table at the bottom of the release doc.
+ *  Columns: #, Item ID, Qty, Vendor, Description, Class, Location, Sidemark —
+ *  in the same order the orange table header in the template declares. */
+function wcItemRowHtml(it: WillCallItemInput, idx: number): string {
+  const cell =
+    'padding:4px 6px;font-size:10px;color:#1E293B;border-bottom:1px solid #E2E8F0;';
+  const cellCenter = cell + 'text-align:center;';
+  const qty = it.qty == null || it.qty === '' ? 1 : it.qty;
+  return (
+    '<tr>' +
+    `<td style="${cellCenter}width:24px;">${idx + 1}</td>` +
+    `<td style="${cell}font-weight:600;font-family:monospace;">${esc(it.itemId || '')}</td>` +
+    `<td style="${cellCenter}width:30px;">${esc(String(qty))}</td>` +
+    `<td style="${cell}">${esc(it.vendor || '')}</td>` +
+    `<td style="${cell}">${esc(it.description || '')}</td>` +
+    `<td style="${cellCenter}width:38px;">${esc(it.itemClass || '')}</td>` +
+    `<td style="${cell}font-family:monospace;">${esc(it.location || '')}</td>` +
+    `<td style="${cell}">${esc(it.sidemark || '')}</td>` +
+    '</tr>'
+  );
+}
+
+/** Bold red callout that prints above the order/release blocks. Only rendered
+ *  when the WC carries a COD flag — the rest of the template assumes the
+ *  token is an empty string. */
+function codBannerHtml(cod: boolean, amount: number | string | null | undefined): string {
+  if (!cod) return '';
+  const amt = amount == null || amount === '' ? '' : ` — $${esc(String(amount))}`;
+  return (
+    '<div style="background:#FEF2F2;border:2px solid #DC2626;padding:10px 14px;' +
+    'margin-bottom:8px;text-align:center;">' +
+    '<span style="font-size:13px;font-weight:bold;color:#991B1B;letter-spacing:0.04em;">' +
+    'COLLECT ON DELIVERY' + amt + '</span></div>'
+  );
+}
+
+/** Single-row helper for the ORDER DETAILS card. Builds a label/value `<tr>`
+ *  that matches the surrounding column widths/styles set by the template. */
+function detailRowHtml(label: string, value: string): string {
+  return (
+    '<tr>' +
+    `<td style="font-size:10px;color:#64748B;padding:2px 0;width:90px;">${esc(label)}</td>` +
+    `<td style="font-size:12px;font-weight:bold;">${esc(value)}</td>` +
+    '</tr>'
+  );
+}
+
+export async function generateWillCallReleasePdf(wc: WillCallReleaseInput): Promise<void> {
+  const template = await fetchTemplate('DOC_WILL_CALL_RELEASE');
+  if (!template) {
+    alert('Will Call Release template (DOC_WILL_CALL_RELEASE) not found in Supabase.');
+    return;
+  }
+
+  const items = wc.items || [];
+  const itemCount = items.length;
+  const pickupParty = (wc.pickupParty || '').trim();
+  const pickupPhone = (wc.pickupPartyPhone || '').trim();
+  const notes = (wc.notes || '').trim();
+  const requestedBy = (wc.requestedBy || wc.createdBy || '').trim();
+
+  const itemsHtml = items.map((it, idx) => wcItemRowHtml(it, idx)).join('');
+
+  // Conditional pieces — the template renders each as an empty token when
+  // its source field is blank, mirroring how the GAS generator handled them.
+  const estPickupRow = wc.scheduledDate
+    ? detailRowHtml('Est. Pickup', fmtDateMMDDYYYY(wc.scheduledDate))
+    : '';
+  const requestedByRow = requestedBy
+    ? detailRowHtml('Requested By', requestedBy)
+    : '';
+  const pickupPhoneHtml = pickupPhone
+    ? `<div style="font-size:11px;color:#64748B;margin-top:2px;">${esc(pickupPhone)}</div>`
+    : '';
+  const notesHtml = notes
+    ? '<div style="background:#FFFBEB;border:1px solid #FDE68A;padding:10px 12px;' +
+      'margin-bottom:10px;"><div style="font-size:9px;color:#92400E;font-weight:bold;' +
+      'margin-bottom:4px;">NOTES</div><div style="font-size:11px;color:#78350F;' +
+      'line-height:1.5;">' + notesToHtml(notes) + '</div></div>'
+    : '';
+
+  const tokens: Record<string, string> = {
+    '{{LOGO_URL}}': esc(DEFAULT_LOGO_URL),
+    '{{WC_NUMBER}}': esc(wc.wcNumber),
+    '{{CLIENT_NAME}}': esc(wc.clientName || ''),
+    '{{DATE}}': esc(fmtDateMMDDYYYY(new Date().toISOString())),
+    '{{ITEM_COUNT}}': esc(String(itemCount)),
+    '{{TOTAL_ITEMS}}': esc(String(itemCount)),
+    '{{PICKUP_PARTY}}': esc(pickupParty || '—'),
+    '{{PICKUP_PHONE_HTML}}': pickupPhoneHtml,
+    '{{EST_PICKUP_ROW}}': estPickupRow,
+    '{{REQUESTED_BY_ROW}}': requestedByRow,
+    '{{NOTES_HTML}}': notesHtml,
+    '{{COD_BANNER_HTML}}': codBannerHtml(!!wc.cod, wc.codAmount),
+    '{{ITEMS_TABLE_ROWS}}': itemsHtml,
+  };
+
+  const html = applyTokens(template, tokens);
+  openPrintWindow(html, `Will Call Release — ${wc.wcNumber}`);
 }
