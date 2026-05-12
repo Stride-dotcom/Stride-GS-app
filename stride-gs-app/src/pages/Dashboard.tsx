@@ -15,6 +15,7 @@ import { useItemIndicators } from '../hooks/useItemIndicators';
 import { ItemIdBadges } from '../components/shared/ItemIdBadges';
 import { isApiConfigured, postUpdateTaskPriority } from '../lib/api';
 import { useDashboardSummary } from '../hooks/useDashboardSummary';
+import { useEntityCompleters, shortEmail } from '../hooks/useEntityCompleters';
 import type { SummaryTask, SummaryRepair, SummaryWillCall } from '../hooks/useDashboardSummary';
 import { entityEvents } from '../lib/entityEvents';
 import { useTablePreferences } from '../hooks/useTablePreferences';
@@ -175,6 +176,11 @@ const TASK_COL_LABELS: Record<string, string> = { taskId: 'Task ID', taskType: '
 
 function TasksTab({ tasks, onNavigate, indicators, canEditPriority }: { tasks: SummaryTask[]; onNavigate: (task: SummaryTask) => void; indicators?: { inspOpenItems: Set<string>; inspDoneItems: Set<string>; inspFailedItems: Set<string>; asmOpenItems: Set<string>; asmDoneItems: Set<string>; repairOpenItems: Set<string>; repairDoneItems: Set<string>; wcOpenItems: Set<string>; wcDoneItems: Set<string> }; canEditPriority: boolean }) {
   const colT = createColumnHelper<SummaryTask>();
+  // v2026-05-04: who-completed-it lookup for terminal tasks. Drives the
+  // Assigned-column override below — Completed/Cancelled tasks show the
+  // actor instead of the (now-irrelevant) assignee.
+  const dashTaskIds = useMemo(() => tasks.map(t => t.taskId).filter(Boolean), [tasks]);
+  const { completerMap: dashTaskCompleterMap } = useEntityCompleters('task', dashTaskIds);
   const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder } = useTablePreferences('dashboard-tasks', [{ id: 'taskCreated', desc: true }], {}, TASK_DEFAULT_ORDER);
   const [statusFilters, setStatusFilters] = useState<string[]>(DEFAULT_TASK_STATUSES);
   const [showCols, setShowCols] = useState(false);
@@ -272,12 +278,28 @@ function TasksTab({ tasks, onNavigate, indicators, canEditPriority }: { tasks: S
     colT.accessor('description', { id: 'taskDesc', header: 'Description', size: 200, cell: i => <span style={{ fontSize: 12, maxWidth: 190, overflow: 'hidden', textOverflow: 'ellipsis', display: 'block', color: theme.colors.textSecondary }}>{i.getValue() || '—'}</span> }),
     colT.accessor('location', { id: 'taskLocation', header: 'Location', size: 90, cell: i => <span style={{ fontSize: 12, fontFamily: 'monospace', color: theme.colors.textSecondary }}>{i.getValue() || '—'}</span> }),
     colT.accessor('vendor', { id: 'taskVendor', header: 'Vendor', size: 120, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{i.getValue() || '—'}</span> }),
-    colT.accessor('assignedTo', { id: 'taskAssigned', header: 'Assigned', size: 110, cell: i => <span style={{ fontSize: 12, color: i.getValue() ? theme.colors.text : theme.colors.textMuted }}>{i.getValue() || '—'}</span> }),
+    colT.accessor('assignedTo', { id: 'taskAssigned', header: 'Assigned', size: 110, cell: i => {
+      const assigned = i.getValue() as string | undefined;
+      const status = (i.row.original.status || '').toLowerCase();
+      const terminal = status === 'completed' || status === 'cancelled';
+      const c = terminal ? dashTaskCompleterMap.get(i.row.original.taskId) : undefined;
+      if (c?.performedBy) {
+        return (
+          <span
+            style={{ fontSize: 12, color: theme.colors.text, fontStyle: 'italic' }}
+            title={`${c.action === 'cancel' ? 'Cancelled' : 'Completed'} by ${c.performedBy} on ${new Date(c.performedAt).toLocaleString()}`}
+          >
+            {shortEmail(c.performedBy)}
+          </span>
+        );
+      }
+      return <span style={{ fontSize: 12, color: assigned ? theme.colors.text : theme.colors.textMuted }}>{assigned || '—'}</span>;
+    } }),
     colT.accessor('clientName', { id: 'taskClient', header: 'Client', size: 140, cell: i => <span style={{ fontSize: 12, fontWeight: 500 }}>{i.getValue()}</span> }),
     colT.accessor('sidemark', { id: 'taskSidemark', header: 'Sidemark', size: 120, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{i.getValue() || '—'}</span> }),
     colT.accessor('created', { id: 'taskCreated', header: 'Created', size: 90, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{fmtDate(i.getValue())}</span> }),
     colT.display({ id: 'taskFolder', header: 'Folder', size: 90, cell: i => <FolderButton label="Task" url={i.row.original.taskFolderUrl} disabledTooltip="Start task to create folder" /> }),
-  ], [colT, indicators, canEditPriority, priorityOverrides, prioritySaving, togglePriority]);
+  ], [colT, indicators, canEditPriority, priorityOverrides, prioritySaving, togglePriority, dashTaskCompleterMap]);
 
   const table = useReactTable({
     data: filtered, columns,
