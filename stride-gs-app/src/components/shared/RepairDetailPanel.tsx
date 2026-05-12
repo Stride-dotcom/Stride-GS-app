@@ -278,6 +278,27 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitResult, setSubmitResult] = useState<SendRepairQuoteResponse | null>(null);
 
+  // Print Work Order state — client-side render via DOC_REPAIR_WORK_ORDER
+  // template + browser print dialog. Separate from submitting/startResult so
+  // the WO regenerate path doesn't compete with the Approve/Start/Complete
+  // state machine and so the visible spinner is on the actual print action
+  // rather than a stale GAS-status-flip.
+  const [printLoading, setPrintLoading] = useState(false);
+  const [printError, setPrintError] = useState<string | null>(null);
+
+  const handlePrintWorkOrder = async () => {
+    if (printLoading) return; // re-entry guard
+    setPrintError(null);
+    setPrintLoading(true);
+    try {
+      await generateRepairWorkOrderPdf(repair);
+    } catch (err) {
+      setPrintError(err instanceof Error ? err.message : 'Work Order generation failed');
+    } finally {
+      setPrintLoading(false);
+    }
+  };
+
   // Approve / Decline state
   const [respondResult, setRespondResult] = useState<RespondToRepairQuoteResponse | null>(null);
 
@@ -690,7 +711,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
         const resp = await postStartRepair({ repairId: repair.repairId }, clientSheetId);
         if (!resp.ok || !resp.data?.success) {
           const errMsg = resp.error || resp.data?.error || 'Work order generation failed.';
-          setSubmitError(errMsg + ' You can retry from the Regenerate Work Order button.');
+          setSubmitError(errMsg + ' Start Repair status flip already applied — you can print the Work Order from the button below.');
           void writeSyncFailed({ tenant_id: clientSheetId, entity_type: 'repair', entity_id: repair.repairId, action_type: 'start_repair', requested_by: user?.email ?? '', request_id: resp.requestId, payload: { repairId: repair.repairId, clientName: repair.clientName, description: repair.description }, error_message: errMsg });
         } else {
           // Refresh server-shaped data (URL, skipped flag, etc.) into the banner.
@@ -700,7 +721,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
       } catch (err) {
         setSubmitError(
           (err instanceof Error ? err.message : 'Network error')
-          + ' while generating work order — you can retry from the Regenerate Work Order button.'
+          + ' while starting repair — print the Work Order from the button below if the status flip succeeded.'
         );
       }
     })();
@@ -858,13 +879,14 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
                   {(user?.role === 'admin' || user?.role === 'staff') &&
                     (repair.status === 'Approved' || repair.status === 'In Progress' || repair.status === 'Complete') && (
                     <WriteButton
-                      label="Work Order"
+                      label={printLoading ? 'Generating…' : 'Print Work Order'}
                       variant="secondary"
                       size="sm"
-                      icon={<FileText size={13} />}
-                      onClick={async () => {
-                        await generateRepairWorkOrderPdf(repair);
-                      }}
+                      icon={printLoading
+                        ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />
+                        : <FileText size={13} />}
+                      disabled={printLoading}
+                      onClick={handlePrintWorkOrder}
                     />
                   )}
                 </div>
@@ -1104,11 +1126,13 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
           </div>
         )}
 
-        {/* Start Repair / Regenerate Work Order — available on Approved, In Progress, Complete.
-            Keep the button visible after success so the user can re-run regenerate as many
-            times as they want without having to dismiss the confirmation first.
-            Stage A: hidden for client role — clients don't start repairs or regenerate
-            work orders; that's a staff action. */}
+        {/* Start Repair / Print Work Order — available on Approved, In Progress,
+            Complete. On Approved the button fires the GAS state transition
+            (status flip + first PDF generation server-side). On In Progress /
+            Complete it collapses to client-side render of the Work Order PDF
+            (sub-second, no GAS) — operators can print again any time without
+            waiting on a 30-60s round trip. Stage A: hidden for client role —
+            clients don't start repairs or reprint warehouse forms. */}
         {(user?.role === 'admin' || user?.role === 'staff') &&
          (effectiveStatus === 'Approved' || effectiveStatus === 'In Progress' || effectiveStatus === 'Complete') && (
           <div style={{ padding: '14px 20px', borderTop: `1px solid ${theme.colors.border}`, flexShrink: 0 }}>
@@ -1118,16 +1142,36 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
                 <span>{submitError}</span>
               </div>
             )}
-            <WriteButton
-              label={submitting
-                ? (effectiveStatus === 'Approved' ? 'Starting...' : 'Regenerating...')
-                : (effectiveStatus === 'Approved' ? 'Start Repair' : 'Regenerate Work Order')}
-              variant="primary"
-              icon={submitting ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <Play size={16} />}
-              style={{ width: '100%', background: '#7C3AED', padding: '10px', fontSize: 13, opacity: submitting ? 0.7 : 1 }}
-              disabled={submitting}
-              onClick={handleStartRepair}
-            />
+            {printError && (
+              <div style={{ marginBottom: 10, padding: '8px 12px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8, fontSize: 12, color: '#DC2626', display: 'flex', alignItems: 'flex-start', gap: 6 }}>
+                <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                <span>{printError}</span>
+              </div>
+            )}
+            {/* Approved → Start Repair (GAS — legit state transition). Once
+                In Progress / Complete the button purpose collapses to "print
+                the Work Order again" — that goes through the same instant
+                client-side render path as the inline Print Work Order button
+                above. No GAS round-trip; no 30-60s wait. */}
+            {effectiveStatus === 'Approved' ? (
+              <WriteButton
+                label={submitting ? 'Starting...' : 'Start Repair'}
+                variant="primary"
+                icon={submitting ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <Play size={16} />}
+                style={{ width: '100%', background: '#7C3AED', padding: '10px', fontSize: 13, opacity: submitting ? 0.7 : 1 }}
+                disabled={submitting}
+                onClick={handleStartRepair}
+              />
+            ) : (
+              <WriteButton
+                label={printLoading ? 'Generating…' : 'Print Work Order'}
+                variant="primary"
+                icon={printLoading ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <FileText size={16} />}
+                style={{ width: '100%', background: '#7C3AED', padding: '10px', fontSize: 13, opacity: printLoading ? 0.7 : 1 }}
+                disabled={printLoading}
+                onClick={handlePrintWorkOrder}
+              />
+            )}
           </div>
         )}
 
@@ -1801,7 +1845,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
       { label: 'Failed', icon: <XCircle size={16} />, onClick: async () => handleResult('fail'), color: '#B91C1C' },
       { label: 'Complete', icon: <CheckCircle2 size={16} />, onClick: async () => handleResult('pass'), color: '#15803D' },
     ] : []),
-    ...((s === 'In Progress' || s === 'Complete') && canStaffEdit ? [{ label: 'Regenerate WO', icon: <Wrench size={16} />, onClick: handleStartRepair }] : []),
+    ...((s === 'In Progress' || s === 'Complete') && canStaffEdit ? [{ label: printLoading ? 'Generating…' : 'Print Work Order', icon: printLoading ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <FileText size={16} />, onClick: handlePrintWorkOrder }] : []),
   ];
 
   const pageFooter = isCompactViewport ? null : (
@@ -1870,10 +1914,13 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
           </button>
         </>
       )}
-      {/* Regenerate Work Order — In Progress / Complete */}
+      {/* Print Work Order — In Progress / Complete (client-side, sub-second) */}
       {(s === 'In Progress' || s === 'Complete') && canStaffEdit && (
-        <button onClick={handleStartRepair} disabled={submitting} style={rpDark}>
-          Regenerate WO
+        <button onClick={handlePrintWorkOrder} disabled={printLoading} style={rpDark}>
+          {printLoading
+            ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />
+            : <FileText size={13} />}
+          {printLoading ? 'Generating…' : 'Print Work Order'}
         </button>
       )}
     </>
