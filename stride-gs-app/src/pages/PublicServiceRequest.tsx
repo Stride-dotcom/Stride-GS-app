@@ -269,6 +269,13 @@ export function PublicServiceRequest() {
   // ── Extra-piece config (XTRA_PC service_catalog row) ────────────────
   const [extraPieceConfig, setExtraPieceConfig] = useState<{ included: number; rate: number }>({ included: 3, rate: 25 });
 
+  // ── P+D bundle discount (PD_DISCOUNT service_catalog row) ───────────
+  // Flat amount subtracted from a pickup_and_delivery subtotal so the
+  // bundled fare is cheaper than two separate orders. Mirrors the modal
+  // (CreateDeliveryOrderModal.tsx ~line 1367) — public form must apply
+  // the same discount or estimates diverge between surfaces.
+  const [pdDiscount, setPdDiscount] = useState<number>(0);
+
   // ── Zone lookups ────────────────────────────────────────────────────
   const [deliveryZone, setDeliveryZone] = useState<DeliveryZone | null>(null);
   const [pickupZone, setPickupZone] = useState<DeliveryZone | null>(null);
@@ -276,19 +283,34 @@ export function PublicServiceRequest() {
   const [pickupZoneLoading, setPickupZoneLoading] = useState(false);
 
   // ── Bill-To ─────────────────────────────────────────────────────────
-  // Radio mode is a one-shot "copy from" trigger — selecting one populates
-  // the bill-to fields from the source contact; the fields remain editable
-  // afterwards. The radio value is NOT persisted, only the resulting field
-  // values are submitted.
+  // Radio mode is a "copy from" trigger — selecting one populates the
+  // bill-to fields from the source contact; the fields remain editable
+  // afterwards. `billToDirty` flips to true on the first manual edit
+  // and blocks the auto-copy effect, so a typo-correction to the
+  // source contact does NOT overwrite a customised bill-to value.
+  // Picking the radio again resets dirty + re-copies.
   const [billToMode, setBillToMode] = useState<BillToMode>('delivery');
-  const [billToName, setBillToName] = useState('');
-  const [billToCompany, setBillToCompany] = useState('');
-  const [billToEmail, setBillToEmail] = useState('');
-  const [billToPhone, setBillToPhone] = useState('');
-  const [billToAddress, setBillToAddress] = useState('');
-  const [billToCity, setBillToCity] = useState('');
-  const [billToState, setBillToState] = useState('');
-  const [billToZip, setBillToZip] = useState('');
+  const [billToDirty, setBillToDirty] = useState(false);
+  const [billToName, setBillToNameRaw] = useState('');
+  const [billToCompany, setBillToCompanyRaw] = useState('');
+  const [billToEmail, setBillToEmailRaw] = useState('');
+  const [billToPhone, setBillToPhoneRaw] = useState('');
+  const [billToAddress, setBillToAddressRaw] = useState('');
+  const [billToCity, setBillToCityRaw] = useState('');
+  const [billToState, setBillToStateRaw] = useState('');
+  const [billToZip, setBillToZipRaw] = useState('');
+
+  // Wrapped setters used by the bill-to inputs. Every manual keystroke
+  // flips dirty so the auto-copy effect stops overwriting the user's
+  // edits. The auto-copy effect itself uses the Raw setters directly.
+  const setBillToName    = (v: string) => { setBillToDirty(true); setBillToNameRaw(v);    };
+  const setBillToCompany = (v: string) => { setBillToDirty(true); setBillToCompanyRaw(v); };
+  const setBillToEmail   = (v: string) => { setBillToDirty(true); setBillToEmailRaw(v);   };
+  const setBillToPhone   = (v: string) => { setBillToDirty(true); setBillToPhoneRaw(v);   };
+  const setBillToAddress = (v: string) => { setBillToDirty(true); setBillToAddressRaw(v); };
+  const setBillToCity    = (v: string) => { setBillToDirty(true); setBillToCityRaw(v);    };
+  const setBillToState   = (v: string) => { setBillToDirty(true); setBillToStateRaw(v);   };
+  const setBillToZip     = (v: string) => { setBillToDirty(true); setBillToZipRaw(v);     };
 
   // ── Driver notes ────────────────────────────────────────────────────
   const [driverNotes, setDriverNotes] = useState('');
@@ -407,21 +429,29 @@ export function PublicServiceRequest() {
     return () => { cancelled = true; };
   }, []);
 
-  // ── Fetch XTRA_PC config (extras threshold + per-piece rate) ────────
+  // ── Fetch XTRA_PC + PD_DISCOUNT config ──────────────────────────────
+  // One round-trip pulls both pricing controls so the public form's
+  // subtotal math has the same inputs the modal uses.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       const { data, error } = await supabase
         .from('service_catalog')
-        .select('flat_rate, included_quantity')
-        .eq('code', EXTRA_PIECE_CODE)
-        .eq('active', true)
-        .maybeSingle();
+        .select('code, flat_rate, included_quantity')
+        .in('code', [EXTRA_PIECE_CODE, 'PD_DISCOUNT'])
+        .eq('active', true);
       if (cancelled || error || !data) return;
-      const r = data as { flat_rate: number | string | null; included_quantity: number | null };
-      const rate = r.flat_rate == null ? 25 : (typeof r.flat_rate === 'number' ? r.flat_rate : parseFloat(String(r.flat_rate)));
-      const included = r.included_quantity ?? 3;
-      setExtraPieceConfig({ included, rate: Number.isFinite(rate) ? rate : 25 });
+      for (const row of data as Array<{ code: string; flat_rate: number | string | null; included_quantity: number | null }>) {
+        const rate = row.flat_rate == null ? null : (typeof row.flat_rate === 'number' ? row.flat_rate : parseFloat(String(row.flat_rate)));
+        if (row.code === EXTRA_PIECE_CODE) {
+          setExtraPieceConfig({
+            included: row.included_quantity ?? 3,
+            rate: Number.isFinite(rate as number) ? (rate as number) : 25,
+          });
+        } else if (row.code === 'PD_DISCOUNT') {
+          setPdDiscount(Number.isFinite(rate as number) ? (rate as number) : 0);
+        }
+      }
     })();
     return () => { cancelled = true; };
   }, []);
@@ -518,6 +548,10 @@ export function PublicServiceRequest() {
     return pickupZone.baseRate ?? 0;
   }, [mode, pickupZone]);
 
+  // PD_DISCOUNT only applies to pickup_and_delivery. Other modes get 0
+  // regardless of the catalog row's value.
+  const bundleDiscount = mode === 'pickup_and_delivery' ? pdDiscount : 0;
+
   const extraItemsCount = Math.max(0, itemCount - extraPieceConfig.included);
   const extraItemsLegMultiplier = mode === 'pickup_and_delivery' ? 2 : 1;
   const extraItemsFee = extraItemsCount * extraPieceConfig.rate * extraItemsLegMultiplier;
@@ -534,8 +568,8 @@ export function PublicServiceRequest() {
   const subtotalBeforeTax = useMemo<number | null>(() => {
     if (baseFee == null) return null;
     if (mode === 'service_only') return baseFee + accessorialsTotal;
-    return baseFee + pickupLegFee + extraItemsFee + accessorialsTotal + coverageCharge;
-  }, [mode, baseFee, pickupLegFee, extraItemsFee, accessorialsTotal, coverageCharge]);
+    return baseFee + pickupLegFee - bundleDiscount + extraItemsFee + accessorialsTotal + coverageCharge;
+  }, [mode, baseFee, pickupLegFee, bundleDiscount, extraItemsFee, accessorialsTotal, coverageCharge]);
 
   const taxAmount = useMemo(() => {
     if (subtotalBeforeTax == null) return 0;
@@ -609,38 +643,48 @@ export function PublicServiceRequest() {
   const isAccessorialSelected = (code: string) => selectedAccessorials.has(code);
 
   // ── Bill-To: auto-populate when mode is "Same as X" ─────────────────
-  // The radio is a "copy from" trigger; fields remain editable afterwards.
-  // We re-copy whenever the source contact changes AND the radio is still
-  // pointing at it, so a typo correction on a pickup-contact field flows
-  // through into the bill-to inputs without the user re-clicking the
-  // radio. "other" never auto-copies.
+  // Re-copies whenever the source contact fields change AND the user
+  // hasn't manually edited bill-to (billToDirty=false). The pickup /
+  // delivery contact's COMPANY is intentionally not copied — the
+  // submitter's "Your contact info > Company" is a different field
+  // and leaking it into the bill-to row mis-tags the billable party
+  // when the on-site contact is a different organisation. Users who
+  // need a bill-to company type it explicitly. "other" never auto-
+  // copies.
   useEffect(() => {
+    if (billToDirty) return;
     if (billToMode === 'pickup') {
-      setBillToName(pickupContactName || contactName);
-      setBillToCompany(contactCompany);
-      setBillToEmail(pickupEmail || contactEmail);
-      setBillToPhone(pickupPhone || contactPhone);
-      setBillToAddress(pickupAddress);
-      setBillToCity(pickupCity);
-      setBillToState(pickupState);
-      setBillToZip(pickupZip);
+      setBillToNameRaw(pickupContactName || contactName);
+      setBillToEmailRaw(pickupEmail || contactEmail);
+      setBillToPhoneRaw(pickupPhone || contactPhone);
+      setBillToAddressRaw(pickupAddress);
+      setBillToCityRaw(pickupCity);
+      setBillToStateRaw(pickupState);
+      setBillToZipRaw(pickupZip);
     } else if (billToMode === 'delivery' || billToMode === 'service') {
-      setBillToName(deliveryContactName || contactName);
-      setBillToCompany(contactCompany);
-      setBillToEmail(deliveryEmail || contactEmail);
-      setBillToPhone(deliveryPhone || contactPhone);
-      setBillToAddress(deliveryAddress);
-      setBillToCity(deliveryCity);
-      setBillToState(deliveryState);
-      setBillToZip(deliveryZip);
+      setBillToNameRaw(deliveryContactName || contactName);
+      setBillToEmailRaw(deliveryEmail || contactEmail);
+      setBillToPhoneRaw(deliveryPhone || contactPhone);
+      setBillToAddressRaw(deliveryAddress);
+      setBillToCityRaw(deliveryCity);
+      setBillToStateRaw(deliveryState);
+      setBillToZipRaw(deliveryZip);
     }
-    // 'other' deliberately does nothing — fields stay whatever they were.
   }, [
-    billToMode,
+    billToMode, billToDirty,
     pickupContactName, pickupEmail, pickupPhone, pickupAddress, pickupCity, pickupState, pickupZip,
     deliveryContactName, deliveryEmail, deliveryPhone, deliveryAddress, deliveryCity, deliveryState, deliveryZip,
-    contactName, contactCompany, contactEmail, contactPhone,
+    contactName, contactEmail, contactPhone,
   ]);
+
+  // Picking a radio is a fresh "copy from" intent — clear the dirty
+  // flag so the auto-copy effect above can re-seed the bill-to fields
+  // from the new source. Manual edits made before the radio change are
+  // intentionally discarded since the user is explicitly switching
+  // source.
+  useEffect(() => {
+    setBillToDirty(false);
+  }, [billToMode]);
 
   // When the order mode changes, snap bill-to mode to the new mode's
   // default so the radio isn't stuck on an option that no longer
@@ -757,6 +801,11 @@ export function PublicServiceRequest() {
 
       const pricingNotes = [
         'Submitted via public form — estimate only, staff confirms pricing on review.',
+        // Tax snapshot is the Kent-WA default; the real client tax_exempt
+        // status is unknown until staff promotes this row to a client_id.
+        // tax_amount / tax_rate_pct on this row reflect what the
+        // submitter SAW; staff must reconcile on promotion.
+        `Tax snapshot assumes Kent WA non-exempt (${TAX_RATE_PCT}%) — verify on review.`,
         isPieceCountOverLimit ? `Item count ${itemCount} exceeds ${MAX_PIECES}-piece auto-pricing limit — custom quote required.` : null,
         isCallForQuote ? 'ZIP marked Call for Quote — base fee TBD on review.' : null,
         deliveryOutOfArea ? 'Delivery ZIP not in zone table — quote required.' : null,
@@ -817,9 +866,15 @@ export function PublicServiceRequest() {
         coverage_option_id: mode === 'service_only' ? null : (selectedCoverage?.id ?? null),
         declared_value:     selectedCoverage?.calcType === 'percent_declared' ? (parseFloat(declaredValue) || null) : null,
         coverage_charge:    mode === 'service_only' ? 0 : (coverageCharge || 0),
+        // Tax snapshot — `tax_amount` and `order_total` reflect what
+        // the submitter saw on the form, so staff can reconcile with
+        // what was promised. `customer_tax_exempt` is null because the
+        // public-form submitter has no client_id yet; once staff
+        // promotes this row to a client they'll reconcile the
+        // exemption + recompute. tax_rate_pct stays informational.
         tax_amount:         taxAmount || 0,
         tax_rate_pct:       TAX_RATE_PCT,
-        customer_tax_exempt: false,
+        customer_tax_exempt: null,
         order_total:        orderTotal,
 
         // Always override on public submissions — staff confirms rates
@@ -907,8 +962,9 @@ export function PublicServiceRequest() {
     setSelectedAccessorials(new Map());
     setAddonsExpanded(false);
     setBillToMode('delivery');
-    setBillToName(''); setBillToCompany(''); setBillToEmail(''); setBillToPhone('');
-    setBillToAddress(''); setBillToCity(''); setBillToState(''); setBillToZip('');
+    setBillToDirty(false);
+    setBillToNameRaw(''); setBillToCompanyRaw(''); setBillToEmailRaw(''); setBillToPhoneRaw('');
+    setBillToAddressRaw(''); setBillToCityRaw(''); setBillToStateRaw(''); setBillToZipRaw('');
     setDriverNotes('');
     setPriceAcknowledged(false);
     setSubmitError(null);
@@ -1600,6 +1656,12 @@ export function PublicServiceRequest() {
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
                     <span>Pickup Fee{pickupZone ? ` (Zone ${pickupZone.zone})` : ''}</span>
                     <span style={{ fontWeight: 500 }}>${pickupLegFee.toFixed(2)}</span>
+                  </div>
+                )}
+                {bundleDiscount > 0 && (
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4, color: '#047857' }}>
+                    <span>Bundle Discount</span>
+                    <span style={{ fontWeight: 500 }}>-${bundleDiscount.toFixed(2)}</span>
                   </div>
                 )}
               </>

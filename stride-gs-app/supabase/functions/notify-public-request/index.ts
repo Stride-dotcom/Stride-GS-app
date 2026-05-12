@@ -163,7 +163,10 @@ Deno.serve(async (req: Request) => {
       ESTIMATED_COVERAGE:          fmtUsd(order.coverage_charge, { zeroIsBlank: true }),
       ESTIMATED_TAX:               fmtUsd(order.tax_amount, { zeroIsBlank: true }),
       ESTIMATED_TAX_RATE:          order.tax_rate_pct != null ? `${Number(order.tax_rate_pct).toFixed(1)}%` : '—',
-      ESTIMATED_TOTAL:             fmtUsd(order.order_total),
+      // ESTIMATED_TOTAL: zeroIsBlank=true so a $0 total (e.g. service-only
+      // with no zone match) renders as "—" rather than a literal "$0.00"
+      // headline that reads broken in the email.
+      ESTIMATED_TOTAL:             fmtUsd(order.order_total, { zeroIsBlank: true }),
 
       // Disclaimer — used by the customer-facing template so the
       // estimate is never mistaken for a confirmed price. The internal
