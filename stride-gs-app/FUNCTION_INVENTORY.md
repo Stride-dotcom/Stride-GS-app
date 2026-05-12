@@ -43,17 +43,17 @@ The function inventory is part of the standard end-of-session doc updates per `C
 
 Function counts (verified against per-agent extraction; the migration-phase rollup is approximate, based on table-cell occurrences across the full doc — read the per-project sections for exact phase tagging):
 
-| Project | Files | Functions |
-|---|---|---|
-| StrideAPI | 1 | 556 |
-| Consolidated Billing | 10 | 158 |
-| Master Price List | 1 | 18 |
-| Client Inventory (per-tenant, deployed × 49) | 13 | 240 |
-| Stax Auto Pay | 1 | 76 |
-| QR Scanner | 2 | 35 |
-| Task Board | 1 | 56 |
-| Stride Designer Campaign | 1 | 57 |
-| **TOTAL** | **30** | **1196** |
+| Project | Files | Functions | Status |
+|---|---|---|---|
+| StrideAPI | 1 | 556 | Active — primary migration target |
+| Consolidated Billing | 10 | 158 | Active — P4a/P4b targets |
+| Master Price List | 1 | 18 | Active (limited use). Email-template functions are dead code; templates moved to Supabase. Counter `getNextShipmentId` doPost route still in use (see Open questions in MIGRATION_STATUS) |
+| Client Inventory (per-tenant, deployed × 49) | 13 | 240 | Active — P7 freeze target |
+| Stax Auto Pay | 1 | 76 | Active — P6 target |
+| QR Scanner | 2 | 35 | Active — out-of-scope (operator UI) |
+| Task Board | 1 | 56 | **DECOMMISSIONED** — replaced by React app's task views. Code remains as historical reference + frozen copy of the SH_* shared-handler block |
+| Stride Designer Campaign | 1 | 57 | Active — migrate last per project owner |
+| **TOTAL** | **30** | **1,196** | 7 active projects + 1 decommissioned |
 
 ### Approximate migration-phase rollup across all projects
 
@@ -1459,7 +1459,7 @@ These are not call-targets; they're load-time constants. I left them out of the 
 
 | Function | What it does (plain English) | What it affects | Migration |
 |---|---|---|---|
-| `ensureEmailTemplatesSheet_` | Ensures the Email_Templates tab has the standard 4-column header (Template Key, Subject, HTML Body, Notes). If the tab is empty, seeds default HTML email templates (note: the actual template HTML bodies are in the approved chat version and not embedded in this file — see source comment). | Writes Email_Templates header. | internal-helper |
+| `ensureEmailTemplatesSheet_` | Ensures the Email_Templates tab has the standard 4-column header (Template Key, Subject, HTML Body, Notes). **Effectively dead code** — email templates were moved to Supabase `email_templates` and no longer called from Master Price List (confirmed by Justin 2026-05-11). The "templates omitted from source" concern flagged in the previous inventory pass is moot. | Writes Email_Templates header (no longer read by anything). | retiring |
 | `ensureInvoiceTemplatesSheet_` | Ensures the Invoice_Templates tab has the standard header and, if empty, seeds one default HTML invoice template keyed `INVOICE_HTML` with tokens `{{INVOICE_NO}}`, `{{CLIENT_NAME}}`, `{{INVOICE_DATE}}`, `{{DUE_DATE}}`, `{{LINE_ITEMS_HTML}}`, `{{TOTAL}}`, `{{LOGO_URL}}`. | Writes Invoice_Templates. | internal-helper |
 | `exportMasterData_` | Router for the `doGet` Web App endpoint. Given an `action` string, returns the corresponding payload: exportAll (everything), exportPriceList, exportClassMap, exportEmailTemplates, exportInvoiceTemplates. Throws on unknown action. | Reads Master tabs. | retiring (P6) |
 | `exportSheetAsRows_` | Helper. Reads a sheet and returns `{headers:[...], rows:[[...],...]}` trimmed to the last non-empty header column and trimmed at the bottom to the last non-empty row. Used to export Price_List and Class_Map cleanly as JSON. | Reads one Master sheet. | retiring (P6) |
@@ -2059,18 +2059,14 @@ This project is **standalone / out-of-scope for near-term migration** — it's a
 
 ---
 
-## Project: Task Board
+## Project: Task Board (DECOMMISSIONED)
 
-> Source: `AppScripts/task board script.txt` (2,569 lines, single file)
-> Deployment: standalone Apps Script — kanban-style board view of open tasks/repairs/will-calls aggregated from every client every 5 minutes via time-driven trigger.
-> Migration role: **out-of-scope** for current migration. Contains a 23-function `SH_*` "shared handler" block that must stay **byte-identical** to the same block in client-side `Triggers.gs` — same task/repair/billing logic. Once P3/P4a graduate the SB-side equivalents, Task Board could fold into the React app (P7) or remain as a thin sheet view reading from Supabase.
-> Function count: **56**.
+> **Status: DECOMMISSIONED** — replaced by the React app's task views when the React app was created. Operators no longer use the Task Board sheet; the time-driven `TB_RefreshNow` and `TB_OnBoardEdit` triggers should be considered dormant. (Confirmed by Justin 2026-05-11.)
+> Source: `AppScripts/task board script.txt` (2,569 lines, single file). Kept in the repo as historical reference + because the 23-function `SH_*` shared-handler block is still byte-identical to the same block in Client Inventory `Triggers.gs`. The parity contract is now one-way: Client Inventory IS the canonical SH_* source; the copy here is frozen.
+> Migration role: **decommissioned** — no migration work needed for this project specifically. Will be deleted from the repo as part of P7 cleanup. The `processRepairDeclinedById_` "missing function" concern flagged in the previous inventory pass is moot — no one uses Task Board.
+> Function count: **56** (all `decommissioned`).
 
-Task Board is a standalone Apps Script project bound to its own Google Sheet (`Task Board` spreadsheet). A time-driven trigger fires `TB_RefreshNow` every 5 minutes (configurable) which pulls all Open Tasks, Open Repairs, and Open Will Calls from every active client's Tasks/Repairs/Will_Calls tabs into three mirror tabs on the Task Board (`Open_Tasks`, `Open_Repairs`, `Open_Will_Calls`). Operators work directly on the board — edits propagate back via `TB_OnBoardEdit` (a per-spreadsheet onEdit trigger) which writes the edited field back to the source client sheet and, for certain trigger fields (Start Task checkbox, Result, Repair Result, Quote Amount, Approved, WC Status), calls the SHARED HANDLER functions (`SH_*`, `startTask_`, `processTaskCompletionById_`, `processRepairCompletionById_`, `processRepairQuoteById_`, `processRepairApprovalById_`) which create Drive folders, generate Work Order PDFs, write Billing_Ledger rows on the source client sheet, and send template emails to the client.
-
-The `SH_*` block in this file is a **parity-controlled duplicated block** — the exact same code must exist verbatim in the client-side Inventory Code.gs, governed by `SHARED_HANDLER_VERSION`. Changes require lockstep updates in both files.
-
-Task Board is **standalone / out-of-scope for near-term migration** — it's an operator UI for warehouse staff. The shared-handler functions ARE the same business logic the main migration is rewriting (task completion, repair quote/approval/completion, billing-row writes, template emails), so once P3/P4a graduate the equivalent functions to Supabase, Task Board itself could either be folded into the React app's task views (P7) or kept as a thin sheet view that reads from Supabase. The Will Call cancellation path is unique to Task Board (not in the main app) and would need to be moved into P3/P4a coverage if Task Board retires.
+The Will Call cancellation path that was unique to Task Board has either been moved into the React app already (verify when picking up P3/P4a coverage) or is also decommissioned along with Task Board itself.
 
 ### File: `AppScripts/task board script.txt`
 
