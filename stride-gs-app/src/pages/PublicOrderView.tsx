@@ -163,7 +163,18 @@ export function PublicOrderView({ orderId }: { orderId: string }) {
             border: `1px solid ${theme.colors.border}`,
           }}>
             <div style={{ fontSize: 18, fontWeight: 600, marginBottom: 8 }}>We couldn't open this order</div>
-            <div style={{ fontSize: 14, color: theme.colors.textMuted }}>{error}</div>
+            <div style={{ fontSize: 14, color: theme.colors.textMuted, marginBottom: 20 }}>{error}</div>
+            <a
+              href="#/p/orders/lookup"
+              style={{
+                display: 'inline-block', padding: '10px 20px', borderRadius: 100,
+                background: theme.colors.orange, color: '#fff',
+                fontSize: 13, fontWeight: 600, textDecoration: 'none',
+                fontFamily: 'inherit',
+              }}
+            >
+              Find your order by reference + email
+            </a>
           </div>
         )}
 
