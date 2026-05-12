@@ -4,6 +4,31 @@
 
 ---
 
+## Recent Changes (2026-05-12, [MIGRATION-P2] DT order release flips Supabase-authoritative)
+
+**Trigger:** User flagged that the "Release Items" buttons disappeared from the DT order detail page + asked to automate release on DT-Finished. Investigation revealed (a) the missing button was a strict `statusCategory === 'completed'` gate, and (b) Justin wants the new flow as the start of the GAS → Supabase migration: writes go to Supabase as authoritative, with a fire-and-forget mirror to the legacy per-tenant Google Sheet via the P1.4 framework.
+
+**What landed (PR #1 — manual release UX + architecture flip):**
+
+1. **`DtOrderReleasePanel.tsx`** — new inline "Select items to release" panel matching the WC release UX exactly. Click "Release Items..." in the order footer → panel expands above the items table. No modal, no optimistic patches.
+2. **OrderPage.tsx items table** — adds a **Status** column showing each linked inventory row's status (Active / Released / On Hold / Transferred) via color-matched chips. Subscribes via supabase.channel realtime keyed by tenant_id + filtered to inventory_ids on this order.
+3. **Button gate fix** — `canReleaseItems` no longer requires `statusCategory === 'completed'`. Shows whenever ≥1 Active item exists; hides when all linked items are Released.
+4. **Write path flipped to Supabase-authoritative** — panel does `supabase.from('inventory').update({status, release_date})` directly. `.neq('status', 'Released')` clause guards against double-fire. `entity_audit_log` row written for the Activity tab.
+5. **Edge Function `push-inventory-release-to-sheet`** (v1) — fire-and-forget mirror to the per-tenant Inventory sheet via `reverseWritethrough()`. On any failure, lands in `gs_sync_events` for the Failed Operations drawer.
+6. **GAS `__writeThroughReverseInventory_`** (StrideAPI.gs v38.208.0, Web App v503) — first real per-table writer against the P1.4 reverse-writethrough framework. Finds row by Item ID, idempotently writes Status + Release Date, fires `api_ledgerUpdateStatus_` for slot tracking.
+7. **`handleWriteThroughReverse_` payload-storage hardening** — failure paths now store the FULL incoming payload (was storing only `{op, table}`, which would have failed retry validation).
+8. **FailedOps wiring** — `useFailedOperations.ts` adds `'writethrough_reverse' → 'Sync to Sheet' / 'writeThroughReverse'`. Retry button works end-to-end.
+9. **Local-date release stamp** — releaseDate uses local `Date` components, not `toISOString().slice(0,10)`, avoiding UTC drift that would shift late-evening PT releases into the next calendar day.
+
+**Architectural notes:**
+- This is the FIRST production-deployed Supabase-authoritative write path. Supabase realtime is the update mechanism: no optimistic patches, no manual refetch.
+- The GAS sheet stays current as a legacy read-only mirror until invoice generation flips to Supabase-primary in P4a.
+- WC release + Inventory page release stay on the legacy GAS-authoritative path; separate migrations.
+
+**Pending PR #2 — auto-release on DT-Finished:** dt-webhook-ingest + dt-sync-statuses will invoke `push-inventory-release-to-sheet` after a delivery (non-pickup) order flips to status_id=3, filtering items by `delivered=true`. Activity-tab entry tagged source='dt_finished'.
+
+---
+
 ## Recent Changes (2026-05-12, public service-request form — pricing parity with internal modal)
 
 **Trigger:** Justin wanted `/public/service-request` to work like the authenticated `CreateDeliveryOrderModal` minus the client-account selector and inventory picker. The pre-existing public form collected contact + items only and submitted as "unpriced — staff confirms on review"; the rebuild adds full pricing, valuation coverage, add-ons, a bill-to section, and an estimated total — all still pending-review so staff push to DT.
