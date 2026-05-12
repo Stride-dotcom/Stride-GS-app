@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.205.0 — 2026-05-11 PST — handleAddItemAddon_ / handleRemoveItemAddon_ / handleAddManualCharge_ were calling `LockService.getDocumentLock()` instead of `getScriptLock()`. StrideAPI is a standalone web-app script with no bound document, so getDocumentLock() returns null. The next line — `lock.waitLock(15000)` — then threw `TypeError: Cannot read properties of null (reading 'waitLock')` and the doPost wrapper bubbled the error back to React as a failed toast on every receiving-addon checkbox tap (and similar on every manual-charge add). The manual-charge handler had a try/catch around tryLock() that absorbed the TypeError and surfaced the misleading "Sheet busy — try again" message instead — same root cause, different symptom. All three call sites flipped to getScriptLock(), matching every other lock in this file. The error never surfaced in dev because LockService is only fully enforced server-side and the symptom was 100% reproducible only against the deployed web app. Companion: no React change; no schema change.
+   StrideAPI.gs — v38.206.0 — 2026-05-11 PST — Atomic shipment-counter SEQUENCE retires the Master sheet RPC race for shipment numbering. Mirror of v38.182.0's invoice-counter fix. Surfaced by the 2026-05-11 function inventory: `api_nextShipmentNo_` was still hitting Master-RPC with `action: "getNextShipmentId"` against a sheet-backed counter (`GLOBAL_SHIPMENT_COUNTER` cell, read-then-write without a transaction lock). Two concurrent `handleCompleteShipment_` calls could both grab the same number — same race class as the INV-000131 dup on 2026-05-03, just on shipments. Companion migration `shipment_no_atomic_counter` creates `public.shipment_no_seq` Postgres SEQUENCE seeded at 1000 (640+ rows of headroom over max production shipment_number 358) + `public.next_shipment_no()` SQL function returning `'SHP-' || LPAD(nextval(seq), 6, '0')` + `public.peek_shipment_no_seq()` diagnostic. `api_nextShipmentNo_` becomes a thin wrapper around the new `api_nextShipmentNoSupabase_` helper, exact same shape as `api_nextInvoiceNo_` → `api_nextInvoiceNoSupabase_`. Legacy `rpcUrl/rpcToken` parameters kept for signature compat but ignored. Atomic by Postgres design — no retries needed. The Master RPC `getNextShipmentId` action is left in place for backward compat but is no longer called by StrideAPI; can be retired in P7 alongside the rest of Master.
+   v38.205.0 — 2026-05-11 PST — handleAddItemAddon_ / handleRemoveItemAddon_ / handleAddManualCharge_ were calling `LockService.getDocumentLock()` instead of `getScriptLock()`. StrideAPI is a standalone web-app script with no bound document, so getDocumentLock() returns null. The next line — `lock.waitLock(15000)` — then threw `TypeError: Cannot read properties of null (reading 'waitLock')` and the doPost wrapper bubbled the error back to React as a failed toast on every receiving-addon checkbox tap (and similar on every manual-charge add). The manual-charge handler had a try/catch around tryLock() that absorbed the TypeError and surfaced the misleading "Sheet busy — try again" message instead — same root cause, different symptom. All three call sites flipped to getScriptLock(), matching every other lock in this file. The error never surfaced in dev because LockService is only fully enforced server-side and the symptom was 100% reproducible only against the deployed web app. Companion: no React change; no schema change.
    v38.202.1 — 2026-05-11 PST — CRITICAL fix for v38.202.0 STOR summarization. The React-side summarizer (Billing.tsx summarizeStorageRowsForInvoice) ships ONE synthetic STOR-SUMMARY-<uuid> row in rows[] as the customer-facing line on the invoice + Consolidated_Ledger. That synthetic ID does NOT exist on the client's Billing_Ledger sheet — api_markClientLedgerInvoiced_ silently skips IDs not on the sheet (line 23966 — "ID not on sheet — silent skip"), so the returned `marked` count comes back short by exactly one. The pre-v38.202.1 partial-flip check at handleCreateInvoice_ compared `marked < ledgerRowIds.length` (which INCLUDED the synthetic), saw the off-by-one gap, assumed corruption, and rolled back EVERY storage-summarized invoice. Net effect: zero STOR-summarized invoices could commit since v38.202.0 / React #328 shipped — the LEDGER_PARTIAL_FLIP error fired 100% of the time and rolled the CB insert back. Caught by an independent post-merge Opus code review (the build-process step that v38.202.0 skipped). Fix: new local `sheetMarkableLedgerRowIds = ledgerRowIds.filter(id => !id.startsWith("STOR-SUMMARY-"))` used for both the api_markClientLedgerInvoiced_ call AND the partial-flip count check. The unfiltered `ledgerRowIds` is still used for the CB write + the idempotency CB-rows-already-present lookup (those genuinely want the synthetic ID there — it's the canonical Ledger Row ID of the customer-facing summary line in Consolidated_Ledger). The api_verifyClientLedgerFlipped_ call inside the idempotent-retry path is also switched to sheetMarkableLedgerRowIds so a legitimate retry doesn't false-positive HALF_WRITE_DETECTED on the synthetic. Tested by tracing the failure manually against api_markClientLedgerInvoiced_ at line 23966 (silent skip) → line 24028 (returns changedRows.length, not ledgerRowIds.length passed-in) → handleCreateInvoice_ partial-flip rollback at 24756. No companion React change — the summary row's ledger_row_id format and the extraSheetLedgerRowIdsToMark plumbing both stay as-is.
    v38.202.0 — 2026-05-11 PST — handleCreateInvoice_ now accepts an optional extraSheetLedgerRowIdsToMark: string[] payload param. The React-side STOR-summarization path collapses N per-item storage charges into ONE summary line for the invoice (so a 150-item monthly storage bill prints as one line on the PDF + lands as one row in Consolidated_Ledger instead of 150), then passes the ORIGINAL per-item Ledger Row IDs via this param so GAS still flips those rows to Invoiced in the client Billing_Ledger sheet — critical because the storage-charge dedup logic on the next run reads the Status column from the sheet, not Supabase. Best-effort marking: api_markClientLedgerInvoiced_ is called for the extras AFTER the standard rows[] flip succeeds; a partial flip or throw is LOGGED but does NOT roll back the invoice (the invoice + the primary rows are already committed and the extras are a hygiene pass on top). Telemetry: response now carries extraSheetMarked count when the param was supplied. Companion React change: Billing.tsx adds summarizeStorageRowsForInvoice helper + a post-success Supabase UPDATE on the collapsed STOR ledger_row_ids so the Billing report shows them Invoiced immediately (independent of the syncClientBilling pass that follows). Individual per-item STOR rows remain visible in both the sheet's Billing_Ledger (status=Invoiced) and Supabase (status=Invoiced) for audit; the summary line is the only one that appears on the customer-facing invoice PDF + Consolidated_Ledger.
    v38.201.1 — 2026-05-09 PST — Column-presence guard on the v38.201.0 Billing_Ledger fan-out. The earlier version called api_ensureColumn_(billSheet, "Sidemark") which AUTO-APPENDS the column when missing — meaning the first time anyone reset a sidemark on a default-schema client, my fan-out would silently add a Sidemark column to that client's Billing_Ledger. Across 49 client sheets, that's quiet schema drift. The actual bug only exists on customized-schema clients (the subset that added Sidemark / Reference columns to Billing_Ledger after the fact, per Decision #18); default-schema clients route through CB13 Unbilled Reports' Inventory fallback (sidemarkByItemId at CB13 Unbilled Reports.js:153-203) which already reads the current per-tenant Inventory value at invoice-generation time. Refactored the fan-out body into a new helper api_propagateInvFieldsToBilling_(ss, itemId, fieldUpdates) that uses api_getHeaderMap_ presence detection: writes only when the header already exists, no-ops otherwise. The helper is reusable from the per-client onEdit handler (which now also propagates direct sheet edits to Sidemark / Reference columns when those columns exist). Behavioural diff vs. v38.201.0 — default-schema clients now correctly no-op (was: silently appended columns); customized-schema clients still get the propagation they need. Telemetry billingFanOutCount unchanged.
@@ -14799,17 +14800,79 @@ function api_readSettings_(ss) {
   return map;
 }
 
-/** Calls Master RPC for next Shipment #. */
+/**
+ * Returns the next Shipment # as a formatted string "SHP-XXXXXX".
+ *
+ * v38.206.0 — Atomic Postgres counter retires the Master sheet RPC race.
+ *
+ * The legacy Master RPC (separate Apps Script project, sheet-backed
+ * counter on `GLOBAL_SHIPMENT_COUNTER`) was read-then-write without a
+ * transaction lock — concurrent receiveShipment calls could grab the
+ * same number, exact same race class as the INV-000131 invoice dup on
+ * 2026-05-03 (fixed for invoices in v38.182.0). The function inventory
+ * pass on 2026-05-11 surfaced that this cousin race was never closed.
+ *
+ * The Postgres SEQUENCE behind public.next_shipment_no() is atomic by
+ * design (nextval() is concurrency-safe). With this in place,
+ * handleCompleteShipment_ is race-free on shipment numbering.
+ *
+ * The legacy rpcUrl/rpcToken parameters are kept for signature
+ * compatibility but ignored — every call routes through Supabase. The
+ * Master RPC `getNextShipmentId` action is left in place for backward
+ * compat but is no longer called by StrideAPI; will retire alongside
+ * the rest of Master in P7.
+ */
 function api_nextShipmentNo_(rpcUrl, rpcToken) {
+  return api_nextShipmentNoSupabase_();
+}
+
+/**
+ * v38.206.0 — Calls public.next_shipment_no() via Supabase REST. Returns
+ * the formatted shipment number string (e.g. "SHP-001000"). Atomic — no
+ * retries needed (Postgres nextval cannot fail mid-flight; only transport
+ * errors are possible, and those bubble up as thrown errors for the caller
+ * to surface).
+ *
+ * Mirror of api_nextInvoiceNoSupabase_ (v38.178.0). Identical shape; only
+ * the RPC name and the regex differ.
+ */
+function api_nextShipmentNoSupabase_() {
+  var url = prop_("SUPABASE_URL");
+  var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !key) {
+    throw new Error("SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not configured");
+  }
+
+  var rpcUrl = url + "/rest/v1/rpc/next_shipment_no";
   var resp = UrlFetchApp.fetch(rpcUrl, {
     method: "post",
     contentType: "application/json",
-    payload: JSON.stringify({ token: rpcToken, action: "getNextShipmentId" }),
+    headers: {
+      "Authorization": "Bearer " + key,
+      "apikey": key
+    },
+    payload: "{}",
     muteHttpExceptions: true
   });
-  var json = JSON.parse(resp.getContentText());
-  if (json && json.success && json.shipmentNo) return json.shipmentNo;
-  return null;
+
+  var code = resp.getResponseCode();
+  var body = resp.getContentText() || "";
+  if (code < 200 || code >= 300) {
+    throw new Error("next_shipment_no RPC HTTP " + code + ": " + body.substring(0, 300));
+  }
+
+  // Postgres scalar functions return the value JSON-encoded — strip quotes.
+  var ship;
+  try {
+    var parsed = JSON.parse(body);
+    ship = (typeof parsed === 'string') ? parsed : String(parsed || '');
+  } catch (_) {
+    ship = body.replace(/^"|"$/g, '').trim();
+  }
+  if (!ship || !/^SHP-\d{6,}$/.test(ship)) {
+    throw new Error("next_shipment_no returned unexpected value: " + body.substring(0, 300));
+  }
+  return ship;
 }
 
 /**
@@ -15457,7 +15520,12 @@ function handleCompleteShipment_(clientSheetId, payload) {
   if (!rpcUrl) return errorResponse_("Client missing MASTER_RPC_URL setting", "CONFIG_ERROR");
   if (!rpcToken) return errorResponse_("Client missing MASTER_RPC_TOKEN setting", "CONFIG_ERROR");
 
-  // Generate Shipment # via Master RPC (before lock — idempotent counter)
+  // Generate Shipment # via atomic Postgres SEQUENCE.
+  // v38.206.0: api_nextShipmentNo_ ignores rpcUrl/rpcToken and routes through
+  // public.next_shipment_no() — the Master RPC counter race is retired (same
+  // pattern as the v38.182 invoice counter fix). Legacy params kept for
+  // signature compat; the upstream rpcUrl/rpcToken validation above stays
+  // for now since other handlers may still use Master RPC for other actions.
   var shipmentNo;
   try { shipmentNo = api_nextShipmentNo_(rpcUrl, rpcToken); }
   catch (e) { return errorResponse_("Failed to generate Shipment #: " + e.message, "RPC_ERROR"); }
