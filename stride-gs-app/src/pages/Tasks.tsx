@@ -43,6 +43,7 @@ import { SyncBanner } from '../components/shared/SyncBanner';
 import { useClients } from '../hooks/useClients';
 import { useTablePreferences } from '../hooks/useTablePreferences';
 import { SERVICE_CODES } from '../lib/constants';
+import { useServiceCatalog } from '../hooks/useServiceCatalog';
 import type { Task } from '../lib/types';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { mobileChipsRow } from '../styles/mobileTable';
@@ -115,7 +116,14 @@ function toCSV(rows: Task[], fn: string) {
 
 const col = createColumnHelper<Task>();
 
-function cols(navigate: (path: string) => void) {
+function cols(
+  navigate: (path: string) => void,
+  // Live svc_code → svc_name from the Master Price List service_catalog.
+  // Passed in as a Map so the Type cell renders the actual service name
+  // an admin has configured (e.g. "Inspection" / "Pickup & Delivery" /
+  // "Furniture Assembly") instead of a hardcoded SERVICE_CODES fallback.
+  svcNameByCode: Map<string, string>,
+) {
   return [
     col.display({ id: 'select', header: ({ table }) => <input type="checkbox" checked={table.getIsAllPageRowsSelected()} onChange={table.getToggleAllPageRowsSelectedHandler()} style={{ cursor: 'pointer', accentColor: theme.colors.orange }} />, cell: ({ row }) => <input type="checkbox" checked={row.getIsSelected()} onChange={row.getToggleSelectedHandler()} style={{ cursor: 'pointer', accentColor: theme.colors.orange }} />, size: 40, enableSorting: false }),
     col.accessor('taskId', { header: 'Task ID', size: 100, cell: i => {
@@ -128,19 +136,16 @@ function cols(navigate: (path: string) => void) {
         onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
       >{val}</span>;
     } }),
-    col.accessor('type', { header: 'Type', size: 100, filterFn: multiFilter, cell: i => {
-      // The legacy `type` column on the warehouse sheet stores values like
-      // "INSPECTION" / "ASSEMBLY" / "OTHER" — uppercase full words that
-      // don't appear in SERVICE_CODES (which is keyed on short codes:
-      // INSP / ASM / etc.). svcCode carries the canonical code on every
-      // task. Display rules:
-      //   1. Prefer svcCode → SERVICE_CODES friendly label ("Inspection",
-      //      "Palletize", etc.) — covers every modern task.
-      //   2. Fall back to the legacy-type → code alias map so older rows
-      //      where svcCode was never populated still resolve to a real
-      //      service name.
-      //   3. Last resort: title-case the raw type so the column never
-      //      shows ALL-CAPS GIBBERISH.
+    col.accessor('type', { header: 'Type', size: 130, filterFn: multiFilter, cell: i => {
+      // Display rules — Master Price List service_catalog is the source of
+      // truth for the user-visible name. Resolution order:
+      //   1. svcCode → svcNameByCode (live catalog name, admin-editable
+      //      from /price-list). Covers every modern task.
+      //   2. Fall back to the legacy-type alias map (INSPECTION → INSP →
+      //      catalog lookup) for older rows where svcCode was never set.
+      //   3. SERVICE_CODES static fallback if the catalog hasn't loaded.
+      //   4. Title-case the raw code/type so the column never shows
+      //      uppercase gibberish.
       const LEGACY_TYPE_TO_CODE: Record<string, string> = {
         INSPECTION: 'INSP',
         ASSEMBLY:   'ASM',
@@ -160,7 +165,8 @@ function cols(navigate: (path: string) => void) {
       };
       const row = i.row.original as { type: string; svcCode?: string };
       const code = row.svcCode || LEGACY_TYPE_TO_CODE[(row.type || '').toUpperCase()] || row.type;
-      const label = SERVICE_CODES[code as keyof typeof SERVICE_CODES]
+      const label = svcNameByCode.get(code)
+        || SERVICE_CODES[code as keyof typeof SERVICE_CODES]
         || (code ? code.charAt(0) + code.slice(1).toLowerCase() : '—');
       return <Badge t={label} c={TYPE_CFG[row.type]} />;
     } }),
@@ -277,7 +283,18 @@ export function Tasks() {
   (window as any).__itemIndicators = itemIndicators.loaded ? itemIndicators : null;
   const ALL_ASSIGNED = useMemo(() => [...new Set(tasks.map(t => t.assignedTo).filter(Boolean))].sort(), [tasks]);
 
-  const columns = useMemo(() => cols(navigate), [navigate]);
+  // Live Master Price List catalog — Type column resolves svc_code to the
+  // admin-editable svc_name (e.g. "Inspection", "Furniture Assembly") instead
+  // of a hardcoded label. useServiceCatalog already memoizes + subscribes to
+  // Realtime, so a Price List edit reflects on the Tasks page within ~1s.
+  const { services: catalogServices } = useServiceCatalog();
+  const svcNameByCode = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const s of catalogServices) if (s.code && s.name) m.set(s.code, s.name);
+    return m;
+  }, [catalogServices]);
+
+  const columns = useMemo(() => cols(navigate, svcNameByCode), [navigate, svcNameByCode]);
   (window as any).__openTaskDetail = (task: Task) => navigate(`/tasks/${encodeURIComponent(task.taskId)}${task.clientSheetId ? `?client=${encodeURIComponent(task.clientSheetId)}` : ''}`);
   (window as any).__toggleTaskPriority = async (taskId: string, clientSheetId: string, currentPriority: string) => {
     if (!apiConfigured || !clientSheetId || user?.role === 'client') return;
