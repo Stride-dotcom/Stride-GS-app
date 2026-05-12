@@ -1754,13 +1754,17 @@ export function Billing() {
           }
         };
         const handleReissue = async () => {
+          const cbNote = isVoid
+            ? '' // CB rows were already removed when the invoice was voided.
+            : ' and removes the invoice from CB';
+          const precondition = isVoid
+            ? `Note: original Stax/QBO records (if any) still exist externally — this only re-opens internal rows for re-billing under a new invoice number.`
+            : `Pre-condition: void the invoice in Stax/QBO FIRST if it was already pushed there. This action only fixes internal ledger state.`;
           const ok = window.confirm(
             `Re-issue invoice ${inv.invoiceNo}?\n\n` +
             `Releases ${inv.lineItems.length} line item(s) ($${inv.total.toFixed(2)}) ` +
-            `back to Unbilled and removes the invoice from CB. Run Create ` +
-            `Invoices afterwards to re-bill.\n\n` +
-            `Pre-condition: void the invoice in Stax/QBO FIRST if it was ` +
-            `already pushed there. This action only fixes internal ledger state.`
+            `back to Unbilled${cbNote}. Run Create Invoices afterwards to re-bill.\n\n` +
+            precondition
           );
           if (!ok) return;
           const reason = window.prompt('Optional reason (appended to Item Notes):', '');
