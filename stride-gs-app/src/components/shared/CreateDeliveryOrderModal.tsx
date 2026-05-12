@@ -1240,12 +1240,13 @@ export function CreateDeliveryOrderModal({
         return n;
       }
       const rate = acc.rate ?? 0;
-      // Default qty depends on mode. per_qty + per-item services are most
-      // useful with qty seeded from itemCount so the operator doesn't have
-      // to manually count pieces — they can override if needed.
-      const defaultQty = acc.billingMode === 'per_qty' && (acc.rateUnit === 'per_item' || acc.rateUnit === 'flat')
-        ? Math.max(1, itemCount || quantity)
-        : quantity;
+      // v2026-05-04: Always default qty to 1. The previous auto-fill from
+      // itemCount was wrong more than it was right — services like Art
+      // Installation and Stair Charge are classified as rateUnit='flat'
+      // (one-time fee, the operator decides how many to apply) and were
+      // getting auto-filled to itemCount, which is the wrong default for
+      // an installation-style add-on. Operators can bump qty manually.
+      const defaultQty = Math.max(1, quantity);
       // Client-submitted accessorials are quote-pending: rate/subtotal
       // forced to 0, staff price the line during review.
       if (!isStaff) {
