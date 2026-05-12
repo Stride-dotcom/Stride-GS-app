@@ -1809,7 +1809,17 @@ export function OrderPage() {
         const pricingNote = hasPricedExtras
           ? "We've added pricing for the services you requested. You can view the updated total on your order."
           : '';
-        const appDeepLink = `https://www.mystridehub.com/#/orders/${encodeURIComponent(order.id)}`;
+        // Anonymous public_form submitters don't have an account, so the
+        // normal /orders/:id route bounces them to login. Route those
+        // recipients to the public /p/order/:id viewer instead — a
+        // SECURITY DEFINER RPC enforces a two-factor lookup using the
+        // emailed-to address (passed back as a ?email= query param). All
+        // other recipients (warehouse client / staff) keep the
+        // authenticated link as before.
+        const isPublicSubmitter = order.source === 'public_form' || !order.tenantId;
+        const appDeepLink = isPublicSubmitter
+          ? `https://www.mystridehub.com/#/p/order/${encodeURIComponent(order.id)}?email=${encodeURIComponent(to)}`
+          : `https://www.mystridehub.com/#/orders/${encodeURIComponent(order.id)}`;
         const approverCc =
           user?.email && user.email.toLowerCase() !== to.toLowerCase()
             ? [user.email]

@@ -80,9 +80,14 @@ Deno.serve(async (req: Request) => {
       .from('dt_orders')
       .select([
         'id', 'dt_identifier', 'order_type', 'tenant_id', 'linked_order_id',
-        'contact_name', 'contact_address', 'contact_city', 'contact_state', 'contact_zip',
+        'contact_name', 'contact_email',
+        'contact_address', 'contact_city', 'contact_state', 'contact_zip',
         'local_service_date', 'order_total', 'pricing_override',
         'created_by_user', 'review_notes',
+        // v7 2026-05-12 — source + contact_email feed the public-order
+        // link branch in orderLink so public_form submitters get the
+        // /p/order/:id route instead of the auth-walled /orders/:id.
+        'source',
         // v6 — client-resubmit diff snapshot powers {{CHANGES_LIST}}.
         'last_resubmit_diff',
       ].join(', '))
@@ -161,9 +166,17 @@ Deno.serve(async (req: Request) => {
     // rather than the dt_identifier (which would need a side-channel
     // lookup). `&client=` is included so RLS/client-scope hooks resolve
     // identically to email-deep-link clicks elsewhere.
-    const orderLink = order.tenant_id
-      ? `https://www.mystridehub.com/#/orders/${order.id}?client=${order.tenant_id}`
-      : `https://www.mystridehub.com/#/orders/${order.id}`;
+    // Anonymous public-form submitters (no tenant) don't have an account
+    // and would bounce off the auth wall on /orders/:id. Route them to
+    // the public /p/order/:id viewer instead — gated by the
+    // get_public_order RPC's (id, email) two-factor check.
+    const isPublicSubmitter = order.source === 'public_form' || !order.tenant_id;
+    const recipientEmail = String(order.contact_email ?? '').trim();
+    const orderLink = isPublicSubmitter && recipientEmail
+      ? `https://www.mystridehub.com/#/p/order/${order.id}?email=${encodeURIComponent(recipientEmail)}`
+      : order.tenant_id
+        ? `https://www.mystridehub.com/#/orders/${order.id}?client=${order.tenant_id}`
+        : `https://www.mystridehub.com/#/orders/${order.id}`;
 
     // Reviewer notes fallback. The migration's HTML uses white-space:
     // pre-wrap so multi-line notes render correctly; we just emit "—"
