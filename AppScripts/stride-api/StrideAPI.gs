@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.209.0 — 2026-05-12 PST — handleQboSyncCatalogItem_ now supplies IncomeAccountRef on Service item creates. QBO's /v3/.../item endpoint requires either IncomeAccountRef (sale-able) or ExpenseAccountRef (purchase-only); without it the API rejects the create with HTTP 400 "Required parameter ExpenseAccountRef or IncomeAccountRef is missing in the request". Surfaced by Justin's attempt to add a new FELT service in Price List Settings — the Stax mirror succeeded but the QBO mirror failed and the React layer raised a "Catalog sync failed for FELT — QBO: ..." banner with the full QBO error text. Fix is a new helper qbo_resolveIncomeAccount_(token, realmId, opts, watchdog_) that (1) checks Script Property QBO_INCOME_ACCOUNT_ID for an admin-configured override, (2) falls back to a one-shot QBO query (`SELECT * FROM Account WHERE AccountType='Income' MAXRESULTS 50`) that prefers obvious names (Services / Sales / Income / Sales of Product Income) and caches the resolved ID in Script Properties so subsequent item creates skip the round-trip entirely. handleQboSyncCatalogItem_'s create branch calls the helper inside the existing watchdog before issuing the create. Update + dup-name-update branches are untouched (QBO's update endpoint doesn't require IncomeAccountRef when the field is already set on the existing item). Admins can override the auto-resolved account by setting QBO_INCOME_ACCOUNT_ID directly in Apps Script → Project Settings → Script Properties (useful when Stride services should book to a specific GL line distinct from other income). No schema change, no React change.
+   StrideAPI.gs — v38.210.0 — 2026-05-12 PST — [MIGRATION-P2 backfill] Bulk-write endpoint for the DT-Finished release backfill. New doPost case "mirrorInventoryReleaseBulk" routes to `handleMirrorInventoryReleaseBulk_`, which opens the per-tenant Inventory sheet ONCE per tenant and bulk-writes Status='Released' + Release Date for an array of {itemId, releaseDate} tuples via setValues (vs. the per-row reverseWritethrough path that round-trips once per item). Used by the new `backfill-dt-finished-releases` Edge Function to mirror Supabase-authoritative release writes into the legacy sheet at ~150 items/tenant in <2s instead of ~150s. Idempotent: rows already at Status='Released' are skipped without overwriting their existing release_date; not-found Item IDs surface in the response for operator review. Calls `api_ledgerUpdateStatus_` once per tenant with the actually-released IDs so the slot ledger stays in sync. NOT part of the P1.4 reverse-writethrough framework — that framework is single-row-per-call by design and the bulk path needed its own GAS endpoint for the throughput; per-row writes continue to use `__writeThroughReverseInventory_` via `handleWriteThroughReverse_`.
+   v38.209.0 — 2026-05-12 PST — handleQboSyncCatalogItem_ now supplies IncomeAccountRef on Service item creates. QBO's /v3/.../item endpoint requires either IncomeAccountRef (sale-able) or ExpenseAccountRef (purchase-only); without it the API rejects the create with HTTP 400 "Required parameter ExpenseAccountRef or IncomeAccountRef is missing in the request". Surfaced by Justin's attempt to add a new FELT service in Price List Settings — the Stax mirror succeeded but the QBO mirror failed and the React layer raised a "Catalog sync failed for FELT — QBO: ..." banner with the full QBO error text. Fix is a new helper qbo_resolveIncomeAccount_(token, realmId, opts, watchdog_) that (1) checks Script Property QBO_INCOME_ACCOUNT_ID for an admin-configured override, (2) falls back to a one-shot QBO query (`SELECT * FROM Account WHERE AccountType='Income' MAXRESULTS 50`) that prefers obvious names (Services / Sales / Income / Sales of Product Income) and caches the resolved ID in Script Properties so subsequent item creates skip the round-trip entirely. handleQboSyncCatalogItem_'s create branch calls the helper inside the existing watchdog before issuing the create. Update + dup-name-update branches are untouched (QBO's update endpoint doesn't require IncomeAccountRef when the field is already set on the existing item). Admins can override the auto-resolved account by setting QBO_INCOME_ACCOUNT_ID directly in Apps Script → Project Settings → Script Properties (useful when Stride services should book to a specific GL line distinct from other income). No schema change, no React change.
    v38.208.0 — 2026-05-12 PST — [MIGRATION-P2 inventory release] First per-table writer registered against the P1.4 reverse-writethrough framework. Replaces `__writeThroughReverseStub_` for the `inventory` table in `REVERSE_WRITETHROUGH_TABLES_` with `__writeThroughReverseInventory_` — finds the row by Item ID, idempotently writes Status + Release Date columns, calls `api_ledgerUpdateStatus_` for slot tracking when flipping to Released. Companion Edge Function `push-inventory-release-to-sheet` fires this after the React OrderPage release flow commits the Supabase-authoritative inventory.status='Released' + release_date write. Sheet stays current as the legacy-readers' read-only mirror until invoice generation flips to Supabase-primary in P4a. Hardening: handleWriteThroughReverse_ now stores the FULL incoming payload in the gs_sync_events row on writer failure (previously only stored {op, table}) so the FailedOperationsDrawer retry — which calls back into this endpoint with the stored payload — has all the fields needed for the second attempt. The earlier shape would have failed retry with "rowId required" on every failed reverse-writethrough.
    v38.207.0 — 2026-05-11 PST — [MIGRATION-P1.7] Expanded `api_redactPayloadForCorpus_` SAFE_FIELDS whitelist for the replay-harness corpus. The original P1.2 list (only sidemark/status/qty/rate/total/amount among the editable fields) was too narrow: every `updateInventoryItem` call that changed `location`/`vendor`/`description`/`reference`/`room`/`itemClass`/`itemNotes`/`declaredValue` got captured with `input_redacted={itemId, requestId}` only — the actual field change got stripped. Replay harness couldn't reconstruct what those calls did. Expanded to cover every field in handleUpdateInventoryItem_'s FIELD_MAP, the Tasks/Repairs SYNC_FIELDS fan-out, the will-call fields, and a few more billing/flag fields commonly seen across migration-target handlers. PII risk stays minimal — these are operator-entered short strings about furniture pieces. Past corpus is partially blind to those fields; replay-harness MVP filters to calls whose changed fields ARE in the original whitelist (so it can be tested today). Future post-deploy traffic will have complete inputs.
    v38.206.0 — 2026-05-11 PST — Atomic shipment-counter SEQUENCE retires the Master sheet RPC race for shipment numbering. Mirror of v38.182.0's invoice-counter fix. Surfaced by the 2026-05-11 function inventory: `api_nextShipmentNo_` was still hitting Master-RPC with `action: "getNextShipmentId"` against a sheet-backed counter (`GLOBAL_SHIPMENT_COUNTER` cell, read-then-write without a transaction lock). Two concurrent `handleCompleteShipment_` calls could both grab the same number — same race class as the INV-000131 dup on 2026-05-03, just on shipments. Companion migration `shipment_no_atomic_counter` creates `public.shipment_no_seq` Postgres SEQUENCE seeded at 1000 (640+ rows of headroom over max production shipment_number 358) + `public.next_shipment_no()` SQL function returning `'SHP-' || LPAD(nextval(seq), 6, '0')` + `public.peek_shipment_no_seq()` diagnostic. `api_nextShipmentNo_` becomes a thin wrapper around the new `api_nextShipmentNoSupabase_` helper, exact same shape as `api_nextInvoiceNo_` → `api_nextInvoiceNoSupabase_`. Legacy `rpcUrl/rpcToken` parameters kept for signature compat but ignored. Atomic by Postgres design — no retries needed. The Master RPC `getNextShipmentId` action is left in place for backward compat but is no longer called by StrideAPI; can be retired in P7 alongside the rest of Master.
@@ -2451,6 +2452,166 @@ function __writeThroughReverseInventory_(ss, payload) {
 // stride-gs-app/MIGRATION_STATUS.md "parity_dryrun schema-sync convention" —
 // every mirrored table corresponds to one entry here, since both sides
 // of the migration touch the same table set.
+/**
+ * v38.210.0 — Bulk inventory-release sheet mirror. Sibling to the
+ * single-row __writeThroughReverseInventory_ writer; used by the
+ * backfill Edge Function (`backfill-dt-finished-releases`) to apply
+ * dozens of release writes to a tenant's Inventory sheet in a single
+ * setValues call instead of N reverseWritethrough round-trips.
+ *
+ * Payload: { tenantId, items: [{ itemId, releaseDate }, ...] }
+ *   • tenantId    — per-tenant spreadsheet ID (validated upstream)
+ *   • items       — array of {itemId, releaseDate} tuples. releaseDate
+ *                   may be YYYY-MM-DD or a full ISO timestamp; the
+ *                   YYYY-MM-DD slice is parsed in local time to dodge
+ *                   the UTC-shift bug that hits naive Date(iso)
+ *                   construction at PT evenings.
+ *
+ * Idempotent: rows already at Status='Released' are skipped without
+ * overwriting their existing release_date or Item Notes. Not-found
+ * Item IDs are returned in the response under `notFound` so the
+ * operator can investigate (typically means the inventory row was
+ * archived/transferred before the backfill ran).
+ *
+ * Caller's expected auth: the doPost API_TOKEN check above. Tenant
+ * validation via api_isKnownTenantId_ inside the handler. No
+ * per-tenant role guard — backfill runs from staff/admin context.
+ */
+function handleMirrorInventoryReleaseBulk_(payload, callerEmail) {
+  var tenantId = payload && payload.tenantId ? String(payload.tenantId).trim() : "";
+  var items    = (payload && Array.isArray(payload.items)) ? payload.items : [];
+  var requestId = payload && payload.requestId ? String(payload.requestId) : Utilities.getUuid();
+
+  if (!tenantId) return errorResponse_("mirrorInventoryReleaseBulk: tenantId required", "INVALID_PAYLOAD");
+  if (items.length === 0) {
+    return jsonResponse_({ success: true, updatedCount: 0, alreadyReleased: [], notFound: [] });
+  }
+
+  // Same defense as handleWriteThroughReverse_: reject unknown tenants.
+  if (!api_isKnownTenantId_(tenantId)) {
+    return errorResponse_("mirrorInventoryReleaseBulk: unknown tenantId '" + tenantId + "'", "UNKNOWN_TENANT");
+  }
+
+  var ss;
+  try { ss = SpreadsheetApp.openById(tenantId); }
+  catch (e) {
+    notifySupabaseFailed_({
+      tenant_id: tenantId, entity_type: "inventory", entity_id: "",
+      action_type: "mirror_inventory_release_bulk",
+      requested_by: callerEmail || "edge-function", request_id: requestId,
+      payload: payload, error_message: "openById failed: " + String(e)
+    });
+    return errorResponse_("mirrorInventoryReleaseBulk: cannot open spreadsheet: " + String(e), "TENANT_OPEN_FAILED");
+  }
+
+  var inv = ss.getSheetByName("Inventory");
+  if (!inv) return errorResponse_("mirrorInventoryReleaseBulk: Inventory sheet not found", "SHEET_MISSING");
+
+  var invMap = api_getHeaderMap_(inv);
+  var itemIdCol  = invMap["Item ID"];
+  var statusCol  = invMap["Status"];
+  var relDateCol = invMap["Release Date"];
+  if (!itemIdCol || !statusCol || !relDateCol) {
+    return errorResponse_("mirrorInventoryReleaseBulk: missing required columns (Item ID, Status, Release Date)", "COLUMNS_MISSING");
+  }
+
+  var lastRow = api_getLastDataRow_(inv);
+  if (lastRow < 2) return jsonResponse_({ success: true, updatedCount: 0, alreadyReleased: [], notFound: items.map(function(it) { return String(it.itemId || ""); }) });
+
+  // Build itemId → sheet row map once. ~O(N) scan, then O(1) per lookup.
+  var idColValues = inv.getRange(2, itemIdCol, lastRow - 1, 1).getValues();
+  var rowByItemId = {};
+  for (var i = 0; i < idColValues.length; i++) {
+    var id = String(idColValues[i][0] || "").trim();
+    if (id) rowByItemId[id] = i + 2;
+  }
+
+  // Resolve requested items to (rowNum, releaseDate Date) tuples.
+  var resolved = [];   // { rowNum, itemId, releaseDate }
+  var notFound = [];
+  for (var j = 0; j < items.length; j++) {
+    var it = items[j] || {};
+    var itemId = String(it.itemId || "").trim();
+    var releaseDateStr = String(it.releaseDate || "").trim();
+    if (!itemId || !releaseDateStr) continue;
+
+    var rowNum = rowByItemId[itemId];
+    if (!rowNum) { notFound.push(itemId); continue; }
+
+    // Local-date parse — mirrors __writeThroughReverseInventory_ to
+    // avoid the UTC drift on YYYY-MM-DD-only inputs.
+    var dateOnly = releaseDateStr.slice(0, 10);
+    var dParts = dateOnly.split("-");
+    if (dParts.length !== 3) continue;
+    var d = new Date(parseInt(dParts[0], 10), parseInt(dParts[1], 10) - 1, parseInt(dParts[2], 10));
+    if (isNaN(d.getTime())) continue;
+
+    resolved.push({ rowNum: rowNum, itemId: itemId, releaseDate: d });
+  }
+
+  if (resolved.length === 0) {
+    return jsonResponse_({ success: true, updatedCount: 0, alreadyReleased: [], notFound: notFound });
+  }
+
+  // Find contiguous range covering all touched rows; read current
+  // Status + Release Date once over that range; apply mutations in
+  // memory; one setValues per column. Three round-trips total, not 2N.
+  var minRow = resolved[0].rowNum, maxRow = resolved[0].rowNum;
+  for (var k = 1; k < resolved.length; k++) {
+    if (resolved[k].rowNum < minRow) minRow = resolved[k].rowNum;
+    if (resolved[k].rowNum > maxRow) maxRow = resolved[k].rowNum;
+  }
+  var height = maxRow - minRow + 1;
+
+  var statusBefore = inv.getRange(minRow, statusCol, height, 1).getValues();
+  var dateBefore   = inv.getRange(minRow, relDateCol, height, 1).getValues();
+
+  // Initialize write arrays from current values so untouched rows in
+  // the range keep their existing values.
+  var statusWrites = new Array(height);
+  var dateWrites   = new Array(height);
+  for (var m = 0; m < height; m++) {
+    statusWrites[m] = [statusBefore[m][0]];
+    dateWrites[m]   = [dateBefore[m][0]];
+  }
+
+  var releasedIds = [];
+  var alreadyReleased = [];
+  for (var n = 0; n < resolved.length; n++) {
+    var r = resolved[n];
+    var idx = r.rowNum - minRow;
+    var curStatus = String(statusWrites[idx][0] || "").trim();
+    if (curStatus === "Released") {
+      alreadyReleased.push(r.itemId);
+      continue;
+    }
+    statusWrites[idx] = ["Released"];
+    dateWrites[idx]   = [r.releaseDate];
+    releasedIds.push(r.itemId);
+  }
+
+  if (releasedIds.length > 0) {
+    inv.getRange(minRow, statusCol,  height, 1).setValues(statusWrites);
+    inv.getRange(minRow, relDateCol, height, 1).setValues(dateWrites);
+    SpreadsheetApp.flush();
+
+    // Slot ledger — same pattern as releaseItems doPost case + the
+    // single-row reverse-writethrough writer.
+    try { api_ledgerUpdateStatus_(releasedIds, "released", null); }
+    catch (lerr) { Logger.log("mirrorInventoryReleaseBulk ledger update non-fatal: " + lerr); }
+  }
+
+  return jsonResponse_({
+    success:          true,
+    tenantId:         tenantId,
+    updatedCount:     releasedIds.length,
+    releasedItemIds:  releasedIds,
+    alreadyReleased:  alreadyReleased,
+    notFound:         notFound,
+    requestId:        requestId
+  });
+}
+
 var REVERSE_WRITETHROUGH_TABLES_ = {
   "inventory":         __writeThroughReverseInventory_,
   "tasks":             __writeThroughReverseStub_,
@@ -8514,6 +8675,15 @@ function doPost(e) {
       // substrate — every per-table writer is a stub today.
       case "writeThroughReverse":
         return handleWriteThroughReverse_(payload, callerEmail);
+
+      // [MIGRATION-P2 backfill] v38.210.0 — bulk Inventory-sheet mirror.
+      // Per-row writes still use the writeThroughReverse framework above;
+      // this endpoint exists for the throughput path: backfill of dozens
+      // of Finished orders' inventory rows. Opens the per-tenant
+      // Inventory sheet once, bulk-writes Status + Release Date via
+      // setValues, returns a counts breakdown.
+      case "mirrorInventoryReleaseBulk":
+        return handleMirrorInventoryReleaseBulk_(payload, callerEmail);
 
       default:
         return errorResponse_("Unknown POST action: " + action, "INVALID_ACTION");
