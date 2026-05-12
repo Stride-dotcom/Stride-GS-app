@@ -1,6 +1,40 @@
 # Stride GS App — Build Status
 
-> Last updated: 2026-05-11 ([MIGRATION] **Full GAS function inventory shipped** — 1,196 functions across 30 files in 8 Apps Script projects, every function with a plain-English description + what-it-affects + migration-phase tag. New decision `MIG-011`. Surfaces 3 latent issues for follow-up: `getNextShipmentId` racy counter still in use, Task Board may be missing `processRepairDeclinedById_`, Master Price List source is missing email-template HTML).
+> Last updated: 2026-05-11 ([MIGRATION] Inventory corrections — Task Board confirmed decommissioned (replaced by React app), Master Price List email-template functions confirmed dead (templates moved to Supabase), shipment counter confirmed still on racy Master-RPC. Only one real follow-up survives: shipment counter needs v38.182-style SEQUENCE migration in P5.).
+
+---
+
+## Recent Changes (2026-05-11, [MIGRATION] inventory corrections per project-owner review)
+
+**Trigger:** Justin reviewed yesterday's function inventory and corrected three items I'd flagged as open questions. Verified each:
+
+1. **Task Board** — **DECOMMISSIONED**, confirmed by Justin. Was replaced by the React app's task views when the React app was created. The Apps Script project is no longer used by operators; the time-driven `TB_RefreshNow` and `TB_OnBoardEdit` triggers should be considered dormant. Code stays in repo as historical reference + as the frozen copy of the SH_* shared-handler block. The `processRepairDeclinedById_` "missing function" concern is moot — no one uses Task Board.
+2. **Master Price List email-template functions** — **dead code**, confirmed by Justin. Email templates were moved to Supabase `email_templates`. The `ensureEmailTemplatesSheet_` / `exportTemplatesAsMap_` / `exportEmailTemplates` doGet route are no longer called from anywhere. The "templates omitted from source" concern is moot.
+3. **Shipment counter `getNextShipmentId`** — **still racy**, verified by code inspection. Justin's recollection ("I think it may have been moved") doesn't match the code:
+   - `api_nextShipmentNo_` at `StrideAPI.gs:14803` still hits Master-RPC with `action: "getNextShipmentId"`.
+   - No `next_shipment_no()` SEQUENCE exists in Supabase (verified via `information_schema.routines`).
+   - The v38.182 atomic SEQUENCE migration was invoice-only.
+   - Same dup-number-race risk class as the old invoice counter.
+
+**Documentation impact:**
+- `FUNCTION_INVENTORY.md` — Task Board section header tagged `(DECOMMISSIONED)`, project description updated, Master Index gains a Status column. `ensureEmailTemplatesSheet_` row updated to note dead-code status.
+- `MIGRATION_STATUS.md` — "Findings worth carrying forward" section: items #4, #7, #8 marked moot (Task Board, parity contract, template HTML); the shipment-counter question stays open. The open-questions list at the bottom has the resolved items marked `[x]` with rationale; the shipment-counter item updated with verification details + recommended action.
+
+**Recommended next action for the shipment counter** (per MIG-005-style pattern):
+- New migration `next_shipment_no_atomic_counter.sql`: creates `public.shipment_no_seq` SEQUENCE seeded above today's max + `public.next_shipment_no()` SQL function returning `'SH-' || LPAD(nextval(seq), 6, '0')` (or whatever the current format is — verify).
+- StrideAPI `api_nextShipmentNo_` rewritten as a thin wrapper around the new SQL function, mirroring v38.182's pattern. Legacy `rpcUrl`/`rpcToken` parameters kept for signature compat.
+- React-side `handleCompleteShipment_` runBatchLoop concurrency can stay where it is.
+- Add `getNextShipmentId` to the per-function migration table in MIGRATION_STATUS as a P5 item (or its own mini-phase before P5).
+
+Scope: ~2 hours for the migration + GAS rewrite + smoke test, ideally bundled with the P5 receiveShipment work so it's exercised on real new-shipment traffic immediately.
+
+**Files touched:**
+- `stride-gs-app/FUNCTION_INVENTORY.md` (Task Board section, master index, email-template row)
+- `stride-gs-app/MIGRATION_STATUS.md` (3 open questions resolved or refined, top header)
+- `stride-gs-app/BUILD_STATUS.md` (this entry)
+
+**Pending user action:**
+- [ ] Decide whether to schedule the shipment-counter migration as its own mini-phase (now) or roll it into P5's `receiveShipment` work (later).
 
 ---
 
