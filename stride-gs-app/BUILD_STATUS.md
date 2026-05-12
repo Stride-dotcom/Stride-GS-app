@@ -4,6 +4,27 @@
 
 ---
 
+## Recent Changes (2026-05-12, public service-request form — pricing parity with internal modal)
+
+**Trigger:** Justin wanted `/public/service-request` to work like the authenticated `CreateDeliveryOrderModal` minus the client-account selector and inventory picker. The pre-existing public form collected contact + items only and submitted as "unpriced — staff confirms on review"; the rebuild adds full pricing, valuation coverage, add-ons, a bill-to section, and an estimated total — all still pending-review so staff push to DT.
+
+**What landed:**
+
+1. **Migration `20260512120000_dt_orders_bill_to_columns.sql`** — adds eight nullable `bill_to_*` text columns (`name`, `company`, `email`, `phone`, `address`, `city`, `state`, `zip`) to `dt_orders` for the billable-party-distinct-from-on-site-contact pattern. Applied to Supabase; anon INSERT policy from `20260426220000` unchanged (still locks `source`/`review_status`/`tenant_id`/`created_by_user`, permits any other column).
+2. **`src/pages/PublicServiceRequest.tsx`** — full rewrite. New sections in order: Your contact info → mode cards → schedule → pickup (if applicable) → delivery/service → Valuation Coverage (mirror of modal's Quote-Tool-equivalent selector + declared-value input) → Add-Ons (filtered to `visible_to_client=true`, all client-added entries forced quote-pending with rate/subtotal=0) → Bill-To (radio "Same as pickup/delivery/service contact" or "Other" — auto-copies fields, dirty-flag prevents source-typo overwrites of manual bill-to edits) → Driver notes → Pricing Summary (base fee + extras + add-ons + coverage + subtotal + Kent-WA 10.4% tax + total) → Order summary → estimated-price acknowledgment checkbox → submit. ZIP-not-in-zone and >20 pieces flip a "may require quote review" banner; submit still proceeds, `pricing_override=true` + `pricing_notes` flags it for staff. Tax snapshot stores `customer_tax_exempt=null` (unknown until staff promotes to client_id), `tax_rate_pct=10.4`, `tax_amount` and `order_total` as the figures the submitter saw.
+3. **`supabase/functions/notify-public-request/index.ts`** (v6) — SELECT now pulls `bill_to_*` + pricing columns; exposes new tokens `BILL_TO_NAME/COMPANY/EMAIL/PHONE`, `ESTIMATED_BASE_FEE`, `ESTIMATED_EXTRA_ITEMS_FEE/COUNT`, `ESTIMATED_ACCESSORIALS`, `ESTIMATED_COVERAGE`, `ESTIMATED_TAX/TAX_RATE`, `ESTIMATED_TOTAL`, `ESTIMATE_DISCLAIMER`. `verify_jwt=false` preserved.
+
+**Pricing parity vs `CreateDeliveryOrderModal`:** matches `baseFee`/`pickupLegFee`/`extraItemsFee`/`accessorialsTotal`/`coverageCharge`/`bundleDiscount` (PD_DISCOUNT) / `subtotalBeforeTax` / `taxAmount` / `orderTotal`. XTRA_PC threshold + rate + PD_DISCOUNT pulled from `service_catalog` so changes flow through without code edits.
+
+**Pending user action — email template:** `PUBLIC_REQUEST_CONFIRMATION` template needs to be updated in Settings → Templates to render the new pricing tokens + disclaimer. Edge function exposes them; template body still needs to use them.
+
+**Files touched:**
+- `supabase/migrations/20260512120000_dt_orders_bill_to_columns.sql` (new)
+- `src/pages/PublicServiceRequest.tsx` (rewrite, ~980 → ~1700 lines)
+- `supabase/functions/notify-public-request/index.ts` (expanded SELECT + tokens)
+
+---
+
 ## Recent Changes (2026-05-12, [MIGRATION-P1.7][MIGRATION-P2.1] replay harness MVP)
 
 **Trigger:** P1.7 was the final remaining Phase 1 sub-task. Justin's standing instruction to continue, plus existing 196-row `gas_call_log` corpus including 102 `updateInventoryItem` calls, made this the natural next step. Co-shipped with the first SB-side shadow handler (`updateItem`) so the harness has something to invoke.
