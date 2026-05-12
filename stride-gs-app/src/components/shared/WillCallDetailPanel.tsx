@@ -20,7 +20,8 @@ import { WriteButton } from './WriteButton';
 import { ProcessingOverlay } from './ProcessingOverlay';
 import { BillingPreviewCard } from './BillingPreviewCard';
 import { useEntityAddons } from '../../hooks/useEntityAddons';
-import { postProcessWcRelease, postCancelWillCall, postRemoveItemsFromWillCall, postUpdateWillCall, postGenerateWcDoc, postReopenWillCall, fetchWcDocUrl, fetchWillCallById, isApiConfigured } from '../../lib/api';
+import { postProcessWcRelease, postCancelWillCall, postRemoveItemsFromWillCall, postUpdateWillCall, postReopenWillCall, fetchWillCallById, isApiConfigured } from '../../lib/api';
+import { generateWillCallReleasePdf } from '../../lib/workOrderPdf';
 import { fetchWcItemsFromSupabase } from '../../lib/supabaseQueries';
 import { useClients } from '../../hooks/useClients';
 import { writeSyncFailed } from '../../lib/syncEvents';
@@ -407,95 +408,44 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
     }
   };
 
-  // Print Release Doc state
-  const [printLoading, setPrintLoading] = useState(false);
-  const [printError, setPrintError] = useState<string | null>(null);
-  const [printPdfUrl, setPrintPdfUrl] = useState<string | null>(null);
+  // Single-button document flow. Fetches DOC_WILL_CALL_RELEASE from
+  // public.email_templates, substitutes WC tokens client-side, opens a
+  // popup with the rendered HTML, fires the print dialog. No GAS round
+  // trip — completes in under a second on a warm connection.
+  const [printDocLoading, setPrintDocLoading] = useState(false);
+  const [printDocError, setPrintDocError] = useState<string | null>(null);
 
-  const handlePrintRelease = async () => {
-    setPrintError(null);
-    setPrintPdfUrl(null);
-    if (!apiConfigured || !clientSheetId) {
-      setPrintError('API not configured');
-      return;
-    }
-    setPrintLoading(true);
+  const handlePrintDocument = useCallback(async () => {
+    if (printDocLoading) return;
+    setPrintDocError(null);
+    setPrintDocLoading(true);
     try {
-      const resp = await fetchWcDocUrl(wc.wcNumber, clientSheetId);
-      if (!resp.ok || !resp.data) {
-        setPrintError(resp.error || 'Failed to fetch document URL');
-        return;
-      }
-      if (resp.data.error && !resp.data.pdfUrl) {
-        setPrintError(resp.data.error);
-        return;
-      }
-      if (!resp.data.pdfUrl) {
-        setPrintError('No PDF found in will call folder');
-        return;
-      }
-      setPrintPdfUrl(resp.data.pdfUrl);
-      const win = window.open(resp.data.pdfUrl, '_blank');
-      if (!win) {
-        setPrintError('Popup blocked — use the link below to open the PDF');
-      } else {
-        // Trigger print dialog once PDF loads in the new tab
-        win.addEventListener('load', () => { try { win.print(); } catch (_) {} });
-        // Fallback: some PDF viewers don't fire load — try after delay
-        setTimeout(() => { try { win.print(); } catch (_) {} }, 2000);
-      }
+      await generateWillCallReleasePdf({
+        wcNumber: wc.wcNumber,
+        clientName: wc.clientName,
+        pickupParty: wc.pickupParty,
+        pickupPartyPhone: wc.pickupPartyPhone,
+        scheduledDate: wc.scheduledDate,
+        requestedBy: (wc as any).requestedBy || (wc as any).createdBy || (wc as any).createdByUser,
+        notes: wc.notes,
+        cod: wc.cod,
+        codAmount: wc.codAmount,
+        items: (wc.items || []).map((it: any) => ({
+          itemId: it.itemId,
+          qty: it.qty,
+          vendor: it.vendor,
+          description: it.description,
+          itemClass: it.itemClass || it.class,
+          location: it.location,
+          sidemark: it.sidemark,
+        })),
+      });
     } catch (err) {
-      setPrintError(err instanceof Error ? err.message : 'Network error');
+      setPrintDocError(err instanceof Error ? err.message : 'Document generation failed');
     } finally {
-      setPrintLoading(false);
+      setPrintDocLoading(false);
     }
-  };
-
-  // Generate WC Doc state
-  const [genDocLoading, setGenDocLoading] = useState(false);
-  const [genDocResult, setGenDocResult] = useState<string | null>(null);
-  const [genDocError, setGenDocError] = useState<string | null>(null);
-
-  // Session 74 optimistic-first: hide the Start button + show success
-  // banner instantly. GAS runs in the background. If the PDF generation
-  // fails, we surface an error banner without forcing the button to
-  // reappear — the user can click Regenerate from the banner.
-  const handleGenerateWcDoc = async () => {
-    setGenDocError(null);
-    if (!apiConfigured || !clientSheetId) { setGenDocError('API not configured'); return; }
-
-    // 1. OPTIMISTIC: flip to success state immediately so the primary
-    //    purple button is replaced by the green banner.
-    setGenDocResult('Pickup document generated in Will Call folder');
-    entityEvents.emit('will_call', wc.wcNumber);
-
-    // 2. Background GAS — refresh the banner with the real folder URL on
-    //    success; surface a non-blocking error banner on failure.
-    void (async () => {
-      setGenDocLoading(true);
-      try {
-        const resp = await postGenerateWcDoc(wc.wcNumber, clientSheetId);
-        if (!resp.ok || !resp.data?.success) {
-          setGenDocError(
-            (resp.error || resp.data?.error || 'Pickup document generation failed')
-            + ' — click Regenerate to retry.'
-          );
-        } else {
-          const url = resp.data?.folderUrl || '';
-          setGenDocResult(url
-            ? `Pickup document generated — ${url}`
-            : 'Pickup document generated in Will Call folder');
-        }
-      } catch (err) {
-        setGenDocError(
-          (err instanceof Error ? err.message : 'Network error')
-          + ' — click Regenerate to retry.'
-        );
-      } finally {
-        setGenDocLoading(false);
-      }
-    })();
-  };
+  }, [printDocLoading, wc]);
 
   const handleCancelWC = async () => {
     setCancelError(null);
@@ -881,43 +831,19 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
               </>
             )}
             {isActive && !cancelResult && !removeMode && <WriteButton label={cancelling ? 'Cancelling...' : 'Cancel WC'} variant="danger" size="sm" disabled={cancelling} onClick={handleCancelWC} />}
-            {!removeMode && <WriteButton label={printLoading ? 'Loading...' : 'Print Release Doc'} variant="secondary" size="sm" icon={printLoading ? <Loader2 size={11} className="animate-spin" /> : <FileText size={11} />} disabled={printLoading} onClick={handlePrintRelease} />}
-            {/* Always-available regenerate — needed after released WCs so a broken/old PDF can be rebuilt */}
-            {!removeMode && <WriteButton label={genDocLoading ? 'Regenerating...' : 'Regenerate Pickup Document'} variant="secondary" size="sm" icon={genDocLoading ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> : <Play size={11} />} disabled={genDocLoading} onClick={handleGenerateWcDoc} />}
+            {/* Single document button — replaces the legacy two-button flow
+                ("Pickup Doc" + "Release Doc") that round-tripped GAS for 30-60s
+                each. Renders DOC_WILL_CALL_RELEASE client-side from the
+                Supabase email_templates row and prints in <1s. */}
+            {!removeMode && <WriteButton label={printDocLoading ? 'Generating…' : 'Print Document'} variant="secondary" size="sm" icon={printDocLoading ? <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> : <FileText size={11} />} disabled={printDocLoading} onClick={handlePrintDocument} />}
           </div>
           )}
-          {genDocResult && (
-            <div style={{ padding: '8px 12px', background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 8, marginTop: 6, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1, minWidth: 0 }}>
-                <CheckCircle2 size={14} color="#15803D" style={{ flexShrink: 0 }} />
-                <span style={{ fontSize: 12, color: '#15803D', fontWeight: 500 }}>Pickup document generated</span>
-              </div>
-              <button onClick={() => setGenDocResult(null)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#15803D', fontSize: 11, padding: 0 }}>Dismiss</button>
-            </div>
-          )}
-          {genDocError && (
+          {printDocError && (
             <div style={{ padding: '6px 10px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8, marginTop: 6 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <AlertTriangle size={13} color="#DC2626" />
-                <span style={{ fontSize: 12, color: '#DC2626' }}>{genDocError}</span>
+                <span style={{ fontSize: 12, color: '#DC2626' }}>{printDocError}</span>
               </div>
-            </div>
-          )}
-          {printPdfUrl && !printError && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 10px', background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: 8, marginTop: 6 }}>
-              <FileText size={13} color="#15803D" />
-              <a href={printPdfUrl} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: '#15803D', fontWeight: 500 }}>Open Release Document</a>
-            </div>
-          )}
-          {printError && (
-            <div style={{ padding: '6px 10px', background: '#FEF3C7', border: '1px solid #FDE68A', borderRadius: 8, marginTop: 6 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <AlertTriangle size={13} color="#B45309" />
-                <span style={{ fontSize: 12, color: '#92400E' }}>{printError}</span>
-              </div>
-              {printPdfUrl && (
-                <a href={printPdfUrl} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: '#B45309', fontWeight: 500, marginTop: 4, display: 'inline-block' }}>Open PDF directly</a>
-              )}
             </div>
           )}
 
@@ -1058,24 +984,6 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
       {editSaveSuccess && (
         <div style={{ padding: '6px 20px', background: '#F0FDF4', color: '#15803D', fontSize: 12, fontWeight: 500, borderBottom: `1px solid #BBF7D0` }}>Changes saved successfully</div>
       )}
-      {genDocResult && (
-        <div style={{ padding: '10px 20px', background: '#F0FDF4', borderBottom: '1px solid #BBF7D0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <CheckCircle2 size={16} color="#15803D" />
-            <span style={{ fontSize: 13, color: '#15803D', fontWeight: 600 }}>Pickup document generated in Will Call folder</span>
-          </div>
-          <button onClick={() => setGenDocResult(null)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#15803D', fontSize: 11, padding: 0, fontWeight: 600 }}>Dismiss</button>
-        </div>
-      )}
-      {genDocError && (
-        <div style={{ padding: '10px 20px', background: '#FEF2F2', borderBottom: '1px solid #FECACA', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <AlertTriangle size={16} color="#DC2626" />
-            <span style={{ fontSize: 13, color: '#DC2626', fontWeight: 600 }}>{genDocError}</span>
-          </div>
-          <button onClick={() => setGenDocError(null)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: '#DC2626', fontSize: 11, padding: 0, fontWeight: 600 }}>Dismiss</button>
-        </div>
-      )}
     </>
   );
 
@@ -1112,27 +1020,12 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
               <span>{releaseError || cancelError}</span>
             </div>
           )}
-          {/* Start Will Call — generates the pickup document (same backend as Start Repair's PDF generation).
-              Session 74: after a successful start, the primary purple
-              "Start Will Call" button is hidden and replaced by a compact
-              green success banner so the user sees the state transition.
-              A small text-link "Regenerate" still lets them re-run the
-              generation if items change. Previously the button stayed
-              visible as "Regenerate Pickup Document" which made it look
-              like the Start action hadn't completed. */}
-          {/* Stage A: hidden for client role — clients don't start will calls */}
-          {isActive && !releaseResult && !genDocResult && (user?.role === 'admin' || user?.role === 'staff') && (
-            <div style={{ marginBottom: 10 }}>
-              <WriteButton
-                label={genDocLoading ? 'Starting...' : 'Start Will Call'}
-                variant="primary"
-                icon={genDocLoading ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <Play size={16} />}
-                disabled={genDocLoading}
-                style={{ width: '100%', padding: '10px', fontSize: 13, background: '#7C3AED', opacity: genDocLoading ? 0.7 : 1 }}
-                onClick={handleGenerateWcDoc}
-              />
-            </div>
-          )}
+          {/* "Start Will Call" + "Regenerate" banner removed 2026-05-12 alongside
+              the single-Print-Document migration. With the document now rendered
+              client-side from email_templates in <1s on demand, there's no
+              persistent doc-on-Drive to mark as "started" — every print is fresh.
+              Status transition (Pending → Scheduled) is no longer tied to a
+              doc-generation event. Reopen link below is unchanged. */}
           {/* Stage B: Reopen link (admin/staff only, visible on Scheduled/Partial/Released) */}
           {canRelease && (effectiveStatus === 'Released' || effectiveStatus === 'Partial' || effectiveStatus === 'Scheduled') && (
             <div style={{ marginBottom: 10, textAlign: 'center' }}>
@@ -1145,35 +1038,6 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
                 style={{ fontSize: 11, color: '#DC2626', background: 'none', border: 'none', cursor: reopenLoading ? 'wait' : 'pointer', textDecoration: 'underline', padding: '2px 0', fontFamily: 'inherit' }}
               >
                 {reopenLoading ? 'Reopening…' : (effectiveStatus === 'Scheduled' ? 'Reopen will call (undo Start)...' : 'Reopen will call (undo Release)...')}
-              </button>
-            </div>
-          )}
-          {isActive && !releaseResult && genDocResult && (
-            <div style={{
-              marginBottom: 10, padding: '8px 12px',
-              background: '#ECFDF5', border: '1px solid #A7F3D0', borderRadius: 8,
-              display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8,
-              fontSize: 12, color: '#065F46',
-            }}>
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
-                <CheckCircle2 size={14} style={{ flexShrink: 0 }} />
-                <span style={{ fontWeight: 600 }}>Will Call started</span>
-                <span style={{ color: '#047857', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  — pickup document generated
-                </span>
-              </span>
-              <button
-                onClick={handleGenerateWcDoc}
-                disabled={genDocLoading}
-                title="Regenerate pickup document"
-                style={{
-                  background: 'transparent', border: 'none', padding: '2px 6px',
-                  color: '#047857', fontSize: 11, fontWeight: 600, cursor: 'pointer',
-                  fontFamily: 'inherit', textDecoration: 'underline', flexShrink: 0,
-                  opacity: genDocLoading ? 0.5 : 1,
-                }}
-              >
-                {genDocLoading ? 'Regenerating…' : 'Regenerate'}
               </button>
             </div>
           )}
@@ -1289,13 +1153,15 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
             {releasing ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <CheckCircle2 size={16} />}
             {releasing ? 'Releasing...' : 'Release All'}
           </button>
-        ) : !genDocResult ? (
-          <button onClick={() => void handleGenerateWcDoc()} disabled={genDocLoading} style={{ ...btnBase, background: '#7C3AED', color: '#fff', cursor: genDocLoading ? 'wait' : 'pointer' }}>
-            {genDocLoading ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <Play size={16} />}
-            {genDocLoading ? 'Starting...' : 'Start Will Call'}
-          </button>
         ) : (
-          <button onClick={onClose} style={{ ...btnBase, background: '#F1F5F9', color: '#475569' }}>Done</button>
+          // No releasable items (Released / Partial / Cancelled / etc.) — the
+          // mobile footer's secondary primary action collapses to Print Document.
+          // Replaces the legacy "Start Will Call" path which was removed when
+          // doc generation moved to client-side render-on-demand.
+          <button onClick={() => void handlePrintDocument()} disabled={printDocLoading} style={{ ...btnBase, background: '#1C1C1C', color: '#fff', cursor: printDocLoading ? 'wait' : 'pointer' }}>
+            {printDocLoading ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <FileText size={16} />}
+            {printDocLoading ? 'Generating…' : 'Print Document'}
+          </button>
         )}
         <button onClick={() => setOverflowOpen(v => !v)} style={{ ...btnBase, flex: '0 0 auto', width: 48, padding: 0, background: '#F1F5F9', color: '#475569' }}>
           <MoreHorizontal size={20} />
@@ -1424,8 +1290,7 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
   // UI state with its own Cancel/Confirm pills; we keep those inline so
   // the operator doesn't have to re-open the FAB to confirm.
   const fabActions: FABAction[] = removeMode ? [] : [
-    { label: genDocLoading ? 'Regenerating…' : 'Pickup Doc', icon: <Play size={16} />, onClick: handleGenerateWcDoc },
-    { label: printLoading ? 'Loading…' : 'Release Doc', icon: <FileText size={16} />, onClick: handlePrintRelease },
+    { label: printDocLoading ? 'Generating…' : 'Print Document', icon: <FileText size={16} />, onClick: handlePrintDocument },
     ...(isActive && !cancelResult ? [{ label: cancelling ? 'Cancelling…' : 'Cancel WC', icon: <AlertTriangle size={16} />, onClick: handleCancelWC, color: '#B91C1C' }] : []),
     ...(isActive && !releaseResult && !removeResult ? [{ label: 'Remove Items…', icon: <Package size={16} />, onClick: () => { setRemoveMode(true); setRemoveSelected(new Set()); setRemoveError(null); } }] : []),
     ...(!isActive && (user?.role === 'admin' || user?.role === 'staff') ? [{ label: 'Reopen WC', icon: <Play size={16} />, onClick: handleReopenWc }] : []),
@@ -1435,13 +1300,9 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
   const pageFooter = isCompactViewport && !removeMode ? null : (
     <>
       {!removeMode && (
-        <button onClick={handleGenerateWcDoc} disabled={genDocLoading} style={wcDark}>
-          <Play size={13} /> {genDocLoading ? 'Regenerating…' : 'Pickup Doc'}
-        </button>
-      )}
-      {!removeMode && (
-        <button onClick={handlePrintRelease} disabled={printLoading} style={wcDark}>
-          <FileText size={13} /> {printLoading ? 'Loading…' : 'Release Doc'}
+        <button onClick={handlePrintDocument} disabled={printDocLoading} style={wcDark}>
+          {printDocLoading ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> : <FileText size={13} />}
+          {printDocLoading ? 'Generating…' : 'Print Document'}
         </button>
       )}
       {isActive && !cancelResult && !removeMode && (
