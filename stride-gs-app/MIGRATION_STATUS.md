@@ -1,22 +1,30 @@
 # GAS → Supabase Migration — Living Status
 
-> Last updated: 2026-05-12 — **P1.7 + P2.1 MVP shipped**: replay-shadow Edge Function + update-item-shadow + parity_results rollup trigger + StrideAPI v38.207.0 redaction-whitelist fix. End-to-end pipeline plumbing for parity testing is live. DB pipeline smoke-verified (rollup trigger correctly updates `feature_flags.mismatch_count_7d` on parity_results INSERT). Real Edge Function invocation pending cron schedule or operator-driven smoke run with service_role key. **Phase 1 now 7/7 done.** Next: enhance the Settings → Migration UI with a "Run replay now" button (a Layer 2 improvement), or move into broader P2.x function migrations.
+> Last updated: 2026-05-12 — **P1.7 + P2.1 MVP shipped**. Phase 1 now **7/7 done**. End-to-end parity-testing pipeline live; DB layer smoke-verified. Full Edge Function invocation pending operator-run with service_role key (smoke command in MIG-012). Slash command `/sb` documented in "Start here" block — use it on every migration-focused session start.
 > This file is **authoritative for execution**. The v1.1 docx in `Dropbox\Apps\GS Inventory\` is a stakeholder snapshot.
 
 ---
 
 ## Start here for new builder sessions
 
+**Shortcut: run `/sb` in Claude Code.** The user-scoped slash command orchestrates the whole flow below — reads the docs in order, runs the git/gh status commands, surfaces critical invariants, then waits for your direction before proposing work. Lives at `~/.claude/commands/sb.md`. Use it on every migration-focused session start.
+
+The manual checklist behind `/sb`:
+
 1. Read `CLAUDE.md` (always).
-2. Read `BUILD_STATUS.md` "Recent Changes" (always).
+2. Read `BUILD_STATUS.md` "Recent Changes" (always — top 2-3 entries).
 3. **Read this file cover to cover** before doing any migration work.
-4. Open `FUNCTION_INVENTORY.md` when you need to know "what does X do?" or "how many functions are in P4a?" — 1,196 functions across all 8 GAS projects with plain-English descriptions, what-it-affects notes, and migration-phase tags.
+4. Open `FUNCTION_INVENTORY.md` when you need to know "what does X do?" or "how many functions are in P4a?" — 1,198 functions across all 8 GAS projects with plain-English descriptions, what-it-affects notes, and migration-phase tags. Don't read cover-to-cover; grep for the function or capability you care about.
 5. Skim `supabase/parity-fixtures/README.md` if touching fixtures.
 6. Check **Currently in flight** below — do not collide with another active worktree.
 7. Check **Open questions / blockers** — do not start work that's gated on user input.
 8. `git log --grep='\[MIGRATION' -n 10` for recent migration PRs.
+9. `git worktree list` to see active sibling worktrees.
+10. `gh pr list --search '[MIGRATION' --state open` for in-flight PRs.
 
 If you only have time for one section: read **Architectural Decisions** in full. Those choices are append-only and not up for re-litigation without explicit user sign-off.
+
+> **For non-Claude-Code builders** (or environments where the slash command doesn't load): the `/sb` source at `~/.claude/commands/sb.md` is a self-contained markdown file you can read as a checklist — same content, no shortcut required.
 
 ---
 
