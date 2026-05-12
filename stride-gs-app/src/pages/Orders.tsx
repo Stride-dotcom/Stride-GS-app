@@ -136,7 +136,17 @@ export function Orders() {
   // pending_review or revision_requested. Toggled via the "Needs
   // Review · N" pill in the tab bar. Auto-enabled when arriving via
   // a legacy ?tab=review URL.
-  const [needsActionOnly, setNeedsActionOnly] = useState<boolean>(isLegacyReviewUrl);
+  //
+  // v2026-05-12 — persisted in the URL ('na' = needsAction) so
+  // back-from-detail preserves the toggle state. Boolean serialized
+  // as '1' / empty ('?na=1' vs an absent param when off — keeps the
+  // URL clean for the default-off case).
+  const [needsActionRaw, setNeedsActionRaw] = useUrlState('na', isLegacyReviewUrl ? '1' : '');
+  const needsActionOnly = needsActionRaw === '1';
+  const setNeedsActionOnly = useCallback(
+    (next: boolean) => setNeedsActionRaw(next ? '1' : ''),
+    [setNeedsActionRaw]
+  );
   // Once we redirect, rewrite the URL so the operator's bookmarks +
   // back-button history reflect the actual view (orders + filter).
   useEffect(() => {
@@ -144,13 +154,34 @@ export function Orders() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isLegacyReviewUrl]);
   const { orders, loading, error, refetch, lastFetched } = useOrders();
-  const [globalFilter, setGlobalFilter] = useState('');
+  // v2026-05-12 — filters now live in the URL via useUrlState. Pre-fix
+  // they were plain useState which meant the back button from OrderPage
+  // landed on a fully-reset Orders list (operator had to re-apply
+  // "Allison Lind Design" + category + search every time). URL-backed
+  // state pairs naturally with react-router's history stack: navigating
+  // away pushes the filter state into the entry, back navigation
+  // restores it.
+  //   • globalFilter uses replace:true so typing doesn't pollute the
+  //     history with a stack entry per keystroke. The current value is
+  //     still preserved on back from a detail page.
+  //   • clientFilter / statusFilter are arrays serialized as
+  //     comma-separated strings; empty string ⇒ default initial state.
+  //   • needsActionOnly is bool serialized as 'true' / 'false'.
+  const [globalFilter, setGlobalFilter] = useUrlState('q', '', { replace: true });
   // Default sort: newest-created first. Drafts have no service_date so
   // sorting by createdAt makes them surface alongside everything else
   // instead of clumping at the bottom.
   const [sorting, setSorting] = useState<SortingState>([{ id: 'createdAt', desc: true }]);
-  const [categoryFilter, setCategoryFilter] = useState<string>('');
-  const [statusFilter, setStatusFilter] = useState<string[]>([]);
+  const [categoryFilter, setCategoryFilter] = useUrlState('cat', '');
+  const [statusFilterRaw, setStatusFilterRaw] = useUrlState('status', '');
+  const statusFilter = useMemo(
+    () => (statusFilterRaw ? statusFilterRaw.split(',').filter(Boolean) : []),
+    [statusFilterRaw]
+  );
+  const setStatusFilter = useCallback(
+    (next: string[]) => setStatusFilterRaw(next.join(',')),
+    [setStatusFilterRaw]
+  );
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [shareDialog, setShareDialog] = useState<null | 'orders' | 'availability'>(null);
   // When set, the create modal opens in edit-existing-draft mode and
@@ -165,30 +196,72 @@ export function Orders() {
   // Client filter — multi-select (single source of truth for what rows are visible)
   const { clients } = useClients();
   const clientNames = useMemo(() => clients.map(c => c.name).sort(), [clients]);
+
+  // v2026-05-12 — sentinel pseudo-client for untenanted rows. Pre-fix
+  // the client-filter pipeline had a hardcoded "always show untenanted
+  // to staff/admin" bypass, which leaked public-form submissions and
+  // external-customer rows into a "Allison Lind Design"-narrowed view
+  // (the operator's screenshot showed REQ-* rows appearing on a
+  // single-client filter). Now untenanted rows are gated by this
+  // sentinel being present in the filter set — staff/admin still
+  // default to having it selected (so the orphan-surfacing intent is
+  // intact unless they explicitly deselect it), but operators can now
+  // exclude it to focus on one real client.
+  const PUBLIC_FILTER_VALUE = '__public_external__';
+  const PUBLIC_FILTER_LABEL = 'Public / External Customers';
+  // Stable identity for the MultiSelectFilter labelMap so its useMemo
+  // dependencies don't re-fire on every Orders re-render.
+  const clientLabelMap = useMemo(
+    () => ({ [PUBLIC_FILTER_VALUE]: PUBLIC_FILTER_LABEL }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
+  );
+
   const dropdownClientNames = useMemo(() => {
     if (user?.role === 'client' && user.accessibleClientNames?.length) {
       const allowed = new Set(user.accessibleClientNames);
       return clientNames.filter(n => allowed.has(n));
     }
-    return clientNames;
+    // Staff/admin see the sentinel as a selectable option alongside
+    // real clients. Render label uses PUBLIC_FILTER_LABEL via the
+    // MultiSelectFilter labelMap below.
+    return [...clientNames, PUBLIC_FILTER_VALUE];
   }, [clientNames, user?.role, user?.accessibleClientNames]);
 
-  const [clientFilter, setClientFilter] = useState<string[]>([]);
+  // clientFilter persisted in the URL so back-from-detail preserves
+  // it (the 2026-05-12 incident: filter "Allison Lind Design", click a
+  // row, click back → unfiltered list). Comma-separated string;
+  // empty ⇒ initial state, applied by the role-default effect below.
+  const [clientFilterRaw, setClientFilterRaw] = useUrlState('clients', '');
+  const clientFilter = useMemo(
+    () => (clientFilterRaw ? clientFilterRaw.split(',').filter(Boolean) : []),
+    [clientFilterRaw]
+  );
+  const setClientFilter = useCallback(
+    (next: string[]) => setClientFilterRaw(next.join(',')),
+    [setClientFilterRaw]
+  );
   // ONE-TIME init via a ref so subsequent user changes
   // (clearing/narrowing the dropdown) are never overwritten.
   //   - client role: ALWAYS force to accessibleClientNames once user loads
   //     to defend against a stale persisted filter from a prior staff session.
-  //   - admin/staff: select all clientNames only if filter is empty.
+  //   - admin/staff: select all clientNames + the Public sentinel only
+  //     if no URL filter is already in effect.
+  // v2026-05-12 — the init write uses replace:true so first navigation to
+  // /orders doesn't push a fat ?clients=AUB,DIGS,... history entry. Only
+  // deliberate operator interactions push (the wrapper-default push mode).
   const filterInitRef = useRef(false);
   useEffect(() => {
     if (filterInitRef.current) return;
     if (!user?.role) return;
     if (user.role === 'client' && user.accessibleClientNames?.length) {
-      setClientFilter(user.accessibleClientNames);
+      setClientFilterRaw(user.accessibleClientNames.join(','), { replace: true });
       filterInitRef.current = true;
     } else if (user.role === 'admin' || user.role === 'staff') {
       if (clientNames.length === 0) return;
-      if (clientFilter.length === 0) setClientFilter(clientNames);
+      if (clientFilter.length === 0) {
+        setClientFilterRaw([...clientNames, PUBLIC_FILTER_VALUE].join(','), { replace: true });
+      }
       filterInitRef.current = true;
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -246,13 +319,22 @@ export function Orders() {
   useEffect(() => {
     const tid = deepLinkPendingTenantRef.current;
     if (!tid || clients.length === 0) return;
+    // v2026-05-12 — skip the deep-link single-client filter when the URL
+    // already carries an explicit `clients=` (operator returning from
+    // a detail page, or the email link itself included both). Without
+    // this guard, a back-navigation into the list would stomp the
+    // operator's restored multi-client filter back to a single client.
+    if (clientFilterRaw) {
+      deepLinkPendingTenantRef.current = null;
+      return;
+    }
     const match = clients.find(c => c.id === tid);
     if (match) {
       setClientFilter([match.name]);
       deepLinkPendingTenantRef.current = null;
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [clients.length]);
+  }, [clients.length, clientFilterRaw]);
 
   // Counts orders that need an admin to do something next: rows
   // awaiting review (pending_review / revision_requested) AND rows
@@ -292,11 +374,15 @@ export function Orders() {
   const clientFilteredOrders = useMemo(() => {
     if (clientFilter.length === 0) return [] as DtOrderForUI[];
     const set = new Set(clientFilter);
+    const includesPublic = set.has(PUBLIC_FILTER_VALUE);
     return orders.filter(o => {
-      // Untenanted orders (e.g. public_form orphans awaiting client
-      // assignment) always show for staff/admin regardless of the
-      // client filter, so they can be reviewed and tenanted.
-      if (isStaffOrAdmin && !o.tenantId) return true;
+      // v2026-05-12 — untenanted orders (public_form orphans + external
+      // customers awaiting client assignment) now gate on the
+      // PUBLIC_FILTER_VALUE sentinel being in the filter set. Pre-fix
+      // they always appeared for staff/admin, polluting a single-client
+      // view (the AUB-narrowed view incident: REQ-* rows showing up
+      // alongside Allison Lind orders).
+      if (!o.tenantId) return isStaffOrAdmin && includesPublic;
       return set.has(o.clientName);
     });
   }, [orders, clientFilter, isStaffOrAdmin]);
@@ -315,12 +401,15 @@ export function Orders() {
   }, [filteredByCategory]);
 
   // Drop any selected statuses no longer present in the available pool (e.g. after category change).
+  // v2026-05-12 — uses replace:true on the URL write since this is an
+  // automatic cleanup, not a deliberate operator change; we don't want
+  // a category-switch to push a history entry for the prune followup.
   useEffect(() => {
     if (statusFilter.length === 0) return;
     const valid = new Set(availableStatuses);
     const next = statusFilter.filter(s => valid.has(s));
-    if (next.length !== statusFilter.length) setStatusFilter(next);
-  }, [availableStatuses, statusFilter]);
+    if (next.length !== statusFilter.length) setStatusFilterRaw(next.join(','), { replace: true });
+  }, [availableStatuses, statusFilter, setStatusFilterRaw]);
 
   // Apply needs-action filter on top of the category/status chain.
   // Done after categoryFilter so the operator can stack: e.g. "show
@@ -377,7 +466,33 @@ export function Orders() {
     }),
     ch.accessor('localServiceDate', {
       header: 'Service Date', size: 120,
-      cell: info => fmtDate(info.getValue()),
+      cell: info => {
+        // v2026-05-12 — fall back to scheduledAt when local_service_date
+        // wasn't set at create time (DT scheduled the order itself).
+        // local_service_date is the operator-picked target date; once
+        // DT routes the order, dt-sync-statuses populates scheduled_at
+        // with the actual slotted timestamp. We prefer the operator's
+        // picked date when set, then DT's scheduled_at, then "—".
+        const localDate = info.getValue() as string;
+        if (localDate) return fmtDate(localDate);
+        const sched = info.row.original.scheduledAt;
+        if (sched) {
+          try {
+            // scheduledAt is an ISO timestamp; render just the date in
+            // Pacific local so an order DT scheduled for "5/14 1:41pm
+            // PDT" shows as "May 14, 2026" even when the browser is in
+            // another zone.
+            const d = new Date(sched);
+            if (!isNaN(d.getTime())) {
+              return d.toLocaleDateString('en-US', {
+                month: 'short', day: 'numeric', year: 'numeric',
+                timeZone: 'America/Los_Angeles',
+              });
+            }
+          } catch { /* fall through to dash */ }
+        }
+        return '—';
+      },
     }),
     // Date Created — when the row was first written to dt_orders.
     // Sortable; default sort newest-first. Shows the date + a faint
@@ -588,7 +703,7 @@ export function Orders() {
               (Approve, Reject, Edit Full Order, Push to DT) lives. */}
           {canReview && needsActionCount > 0 && activeTab === 'orders' && (
             <button
-              onClick={() => setNeedsActionOnly(v => !v)}
+              onClick={() => setNeedsActionOnly(!needsActionOnly)}
               title={needsActionOnly
                 ? 'Showing only orders that need action. Click to clear.'
                 : 'Filter the list to orders that need an admin action: review pending, revision requested, or approved + waiting on a push to DT.'}
@@ -671,14 +786,21 @@ export function Orders() {
       {activeTab === 'orders' && canViewOrders && (
         <div style={{ background: '#FFFFFF', borderRadius: 20, padding: 24, border: '1px solid rgba(0,0,0,0.04)' }}>
 
-          <SyncBanner syncing={refreshing} label={clientFilter.length === 1 ? clientFilter[0] : clientFilter.length > 1 ? `${clientFilter.length} clients` : undefined} />
+          <SyncBanner syncing={refreshing} label={clientFilter.length === 1 ? (clientFilter[0] === PUBLIC_FILTER_VALUE ? PUBLIC_FILTER_LABEL : clientFilter[0]) : clientFilter.length > 1 ? `${clientFilter.length} clients` : undefined} />
 
           {/* Client filter — staff/admin only. Client-role users have a
               single tenant scope; the selector would expose the count of
               other tenants. */}
           {user?.role !== 'client' && (
             <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end', marginBottom: 12, flexWrap: 'wrap' }}>
-              <MultiSelectFilter label="Client" options={dropdownClientNames} selected={clientFilter} onChange={setClientFilter} placeholder="Select client(s)..." />
+              <MultiSelectFilter
+                label="Client"
+                options={dropdownClientNames}
+                selected={clientFilter}
+                onChange={setClientFilter}
+                placeholder="Select client(s)..."
+                labelMap={clientLabelMap}
+              />
             </div>
           )}
 

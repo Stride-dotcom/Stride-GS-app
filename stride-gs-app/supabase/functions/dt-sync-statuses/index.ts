@@ -1,5 +1,23 @@
 /**
- * dt-sync-statuses — Supabase Edge Function — v10 2026-04-28 PST
+ * dt-sync-statuses — Supabase Edge Function — v11 2026-05-12 PST
+ *
+ * v11: Fixed toIso parser. DT exports timestamps as "YYYY-MM-DD HH:MM:SS
+ *      ±HHMM" (e.g. "2026-05-14 13:41:00 -0700"). Pre-v11's normalize
+ *      step replaced ONLY the first space with T → "YYYY-MM-DDTHH:MM:SS
+ *      ±HHMM", a form V8 rejects because the space before the timezone
+ *      breaks ISO. Result: scheduled_at / started_at / finished_at /
+ *      signature_captured_at silently became NULL across the fleet,
+ *      surfacing as empty Service Date columns on the Digs Furniture
+ *      orders list. The status_id update kept working because it
+ *      doesn't go through toIso, so the bug was masked from headline
+ *      "Sync to DT" testing.
+ *
+ *      v11 tries Date.parse on the raw input first (DT's space-separated
+ *      form parses natively in V8) and keeps the normalize step as a
+ *      fallback — now also stripping the space before the timezone offset
+ *      so the output is actually valid ISO.
+ *
+ * v10 2026-04-28 PST
  *
  * v10: POD photo ingestion. Parses the new <images count="N"> block
  *      DT now includes in export.xml (admin enabled it via support
@@ -687,11 +705,28 @@ function toIso(s: string | null | undefined): string | null {
   if (!s) return null;
   const trimmed = String(s).trim();
   if (!trimmed) return null;
-  // "YYYY-MM-DD HH:MM:SS" → "YYYY-MM-DDTHH:MM:SS"
-  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(trimmed)
-    ? trimmed.replace(' ', 'T')
-    : trimmed;
-  const t = Date.parse(normalized);
+  // v2026-05-12 — DT export format is "YYYY-MM-DD HH:MM:SS ±HHMM" (e.g.
+  // "2026-05-14 13:41:00 -0700"). Date.parse accepts that natively, but
+  // the previous normalization step rewrote it to "YYYY-MM-DDTHH:MM:SS
+  // ±HHMM" (only the FIRST space was replaced with T) — and *that* form
+  // is rejected by V8/Node/Deno because the space before the timezone
+  // breaks ISO. Result: every scheduled_at / started_at / finished_at /
+  // signature_captured_at silently became NULL across the fleet. The
+  // status_id update kept working because it doesn't go through toIso,
+  // so the bug was masked except in date-display columns (the
+  // 2026-05-12 service-date-column-empty incident on Digs orders).
+  //
+  // Fix: try Date.parse on the raw input first. The original normalize
+  // step is kept as a fallback for any future DT format change — but
+  // now also strips the space before the timezone offset so the output
+  // is valid ISO.
+  let t = Date.parse(trimmed);
+  if (!Number.isFinite(t)) {
+    const normalized = trimmed
+      .replace(/^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}(?::\d{2})?)/, '$1T$2')
+      .replace(/ ([+-]\d{2}:?\d{2})$/, '$1');
+    t = Date.parse(normalized);
+  }
   return Number.isFinite(t) ? new Date(t).toISOString() : null;
 }
 

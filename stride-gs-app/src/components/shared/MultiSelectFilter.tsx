@@ -9,6 +9,13 @@ interface Props {
   onChange: (selected: string[]) => void;
   placeholder?: string;
   disabled?: boolean;
+  /**
+   * Optional value → display-label map. When an option is a sentinel
+   * (e.g. `'__public_external__'`) we want the dropdown row + the
+   * collapsed-state display to read a human-friendly label instead.
+   * Missing keys fall through to the raw option string.
+   */
+  labelMap?: Record<string, string>;
 }
 
 /**
@@ -23,7 +30,8 @@ interface Props {
  * "Clear" sets onChange([]) — nothing selected.
  * Unchecking the last item stays [] — does NOT auto-reselect all.
  */
-export function MultiSelectFilter({ label, options, selected, onChange, placeholder, disabled }: Props) {
+export function MultiSelectFilter({ label, options, selected, onChange, placeholder, disabled, labelMap }: Props) {
+  const display = (v: string) => labelMap?.[v] ?? v;
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
   const ref = useRef<HTMLDivElement>(null);
@@ -41,8 +49,11 @@ export function MultiSelectFilter({ label, options, selected, onChange, placehol
   const filtered = useMemo(() => {
     if (!search) return options;
     const q = search.toLowerCase();
-    return options.filter(o => o.toLowerCase().includes(q));
-  }, [options, search]);
+    // Search against the displayed label so a sentinel like
+    // `__public_external__` is findable by typing "public" or
+    // "external". The original raw value still matches too.
+    return options.filter(o => o.toLowerCase().includes(q) || display(o).toLowerCase().includes(q));
+  }, [options, search, labelMap]);
 
   // Display logic
   const noneSelected = selected.length === 0;
@@ -52,7 +63,7 @@ export function MultiSelectFilter({ label, options, selected, onChange, placehol
     : allSelected
       ? 'All'
       : selected.length === 1
-        ? selected[0]
+        ? display(selected[0])
         : `${selected.length} selected`;
 
   const toggleItem = (item: string) => {
@@ -146,7 +157,7 @@ export function MultiSelectFilter({ label, options, selected, onChange, placehol
                     readOnly
                     style={{ accentColor: theme.colors.orange, flexShrink: 0, pointerEvents: 'none' }}
                   />
-                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{opt}</span>
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{display(opt)}</span>
                 </div>
               );
             })}

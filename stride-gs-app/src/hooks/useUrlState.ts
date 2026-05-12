@@ -53,7 +53,7 @@ export function useUrlState(
   key: string,
   defaultValue: string,
   opts: UseUrlStateOptions = {}
-): [string, (next: string) => void] {
+): [string, (next: string, callOpts?: { replace?: boolean }) => void] {
   const [searchParams, setSearchParams] = useSearchParams();
   const replace = opts.replace === true;
 
@@ -64,10 +64,14 @@ export function useUrlState(
   const value = raw == null || raw === '' ? defaultValue : raw;
 
   const setValue = useCallback(
-    (next: string) => {
+    (next: string, callOpts?: { replace?: boolean }) => {
       // Read fresh — don't close over stale searchParams from this render. The
       // updater form of setSearchParams gives us the current params at apply
       // time, so concurrent updates to other keys don't get clobbered.
+      // callOpts.replace overrides the hook-level option per-call — useful for
+      // initialization writes (role-default population) that shouldn't push a
+      // history entry, while still letting deliberate user changes push.
+      const useReplace = callOpts?.replace ?? replace;
       setSearchParams(
         (prev) => {
           const params = new URLSearchParams(prev);
@@ -78,7 +82,7 @@ export function useUrlState(
           }
           return params;
         },
-        { replace }
+        { replace: useReplace }
       );
     },
     [key, replace, setSearchParams]
