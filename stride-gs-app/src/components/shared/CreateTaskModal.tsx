@@ -3,6 +3,7 @@ import { X, Check, ClipboardList, Loader2, AlertTriangle } from 'lucide-react';
 import { postBatchCreateTasks } from '../../lib/api';
 import type { InventoryItem, Task } from '../../lib/types';
 import { usePricing } from '../../hooks/usePricing';
+import { useServiceCatalog } from '../../hooks/useServiceCatalog';
 import { theme } from '../../styles/theme';
 import { ProcessingOverlay } from './ProcessingOverlay';
 import { entityEvents } from '../../lib/entityEvents';
@@ -38,6 +39,23 @@ const EXCLUDE_CODES = new Set(['STOR', 'RCVG', 'REPAIR', 'RPR', 'WC', 'WCPU']);
 
 export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addOptimisticTask, removeOptimisticTask, clientName, existingTasks }: Props) {
   const { priceList } = usePricing(true);
+  // Service catalog provides default_sla_hours per svcCode — used to
+  // pre-stamp Due Date on the new task rows so they show up correctly
+  // in the "sort by due date" dashboard view. Pre-2026-05-13 the field
+  // existed in the catalog (Settings → Price List → Services) but was
+  // never read at task creation, so every new task had Due Date = blank
+  // regardless of what the operator set.
+  const { services: serviceCatalog } = useServiceCatalog();
+  const slaHoursBySvcCode = useMemo<Record<string, number>>(() => {
+    const map: Record<string, number> = {};
+    for (const row of serviceCatalog) {
+      const code = String(row.code || '').trim().toUpperCase();
+      if (code && row.defaultSlaHours != null && row.defaultSlaHours > 0) {
+        map[code] = row.defaultSlaHours;
+      }
+    }
+    return map;
+  }, [serviceCatalog]);
   const [selectedCodes, setSelectedCodes] = useState<Set<string>>(new Set(['INSP']));
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<{ created: number; skippedCount: number; taskIds: string[] } | null>(null);
@@ -132,6 +150,10 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
             shipmentNo:  i.shipmentNumber,
           })),
           svcCodes: Array.from(selectedCodes),
+          // Per-svcCode default SLA hours from the service catalog —
+          // GAS handleBatchCreateTasks_ stamps Due Date = now() + N hours
+          // on each new task row when the svcCode has a value here.
+          slaHoursBySvcCode,
         },
         clientSheetId
       );

@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.213.0 — 2026-05-13 PST — [MIGRATION-P2 will-calls COD] Second per-table writer registered against the P1.4 reverse-writethrough framework. Replaces `__writeThroughReverseStub_` for the `will_calls` table in `REVERSE_WRITETHROUGH_TABLES_` with `__writeThroughReverseWillCalls_` — finds the row by WC Number, idempotently writes the COD + COD Amount columns. Companion Edge Function `push-will-call-cod-to-sheet` fires this after the React WillCallDetailPanel commits a Supabase-authoritative will_calls.cod / cod_amount write directly to Supabase. Sheet stays current as the legacy-readers' read-only mirror (PDF release doc generator, full client sync, COD payment page launcher). Scope is COD fields only — every other Will_Calls field still flows through the legacy GAS-authoritative `handleUpdateWillCall_` path until they migrate. Adding fields later is a one-line registry extension.
+   StrideAPI.gs — v38.214.0 — 2026-05-13 PST — handleBatchCreateTasks_ now honors `slaHoursBySvcCode` from the React payload. The service catalog's `default_sla_hours` field has existed since the catalog migrated from the Master Price List, but the create-task flow never read it — every new task landed with Due Date = blank regardless of what the operator configured. CreateTaskModal now reads `useServiceCatalog().catalog` and passes a `{svcCode: hours}` map; this handler stamps `Due Date = now() + (hours * 3600 * 1000)` per task whose svcCode is in the map. Legacy `payload.dueDate` (single value, all tasks) still wins if explicitly set, preserving any caller that relied on it. SvcCodes without a configured SLA leave Due Date blank, exactly like before.
+   v38.213.0 — 2026-05-13 PST — [MIGRATION-P2 will-calls COD] Second per-table writer registered against the P1.4 reverse-writethrough framework. Replaces `__writeThroughReverseStub_` for the `will_calls` table in `REVERSE_WRITETHROUGH_TABLES_` with `__writeThroughReverseWillCalls_` — finds the row by WC Number, idempotently writes the COD + COD Amount columns. Companion Edge Function `push-will-call-cod-to-sheet` fires this after the React WillCallDetailPanel commits a Supabase-authoritative will_calls.cod / cod_amount write directly to Supabase. Sheet stays current as the legacy-readers' read-only mirror (PDF release doc generator, full client sync, COD payment page launcher). Scope is COD fields only — every other Will_Calls field still flows through the legacy GAS-authoritative `handleUpdateWillCall_` path until they migrate. Adding fields later is a one-line registry extension.
    v38.212.0 — 2026-05-13 PST — Defense-in-depth for the task-addon $0-rate bug. The React-side fix (#360 on 2026-05-12) only covered the list path (useTasks → fetchTasksFromSupabase, which overlays itemClass from inventory). The single-task by-id path (useTaskDetail → fetchTaskByIdFromSupabase, used by TaskPage / standalone deep links) bypassed that overlay because public.tasks has no item_class column. Result: when a task panel was opened via deep link, AddTaskServiceModal received itemClass=undefined and pre-filled $0 on class-based services (MULTI_INS, ASM, INSP …); operators submitted the addon as-is and it landed on Billing_Ledger with rate=0. React side is fixed in useTaskDetail.ts (now overlays itemClass from inventory matching the list path). This GAS-side complement: api_writeAddonsToLedger_'s rate fallback now treats rate=0 the same as rate=null/NaN — the prior guard (`if (adRate == null || isNaN(adRate))`) let through a snapshot of 0 untouched, so the catalog fallback never fired and the row went to the sheet at $0. New guard `if (adRate == null || isNaN(adRate) || adRate === 0)` always re-resolves via api_lookupRate_ so the catalog gets a shot regardless of how the addon was saved. Operators who want a legitimate $0 charge can set rate>0 then override; the lookup is harmless when no catalog row exists (returns 0 and the row gets the existing "Missing Rate" flag). One-shot cleanup of the pre-fix INSP-63255-1-MULTI_INS-ADDON-1 row (Unbilled, rate=0, qty=4, class=S → catalog $15) was performed manually via SQL during the same session. No companion migration; no schema change.
    v38.211.0 — 2026-05-13 PST — Auto-cancel of open Tasks and Repairs when an item flips to Released. Pre-fix only the Transfer flow cancelled downstream work; the three other release paths (will-call release via `handleProcessWcRelease_`, manual bulk release via `handleReleaseItems_`, manual single-item Status→Released flip via `handleUpdateInventoryItem_`, plus the SB-primary reverse-writethrough release via `__writeThroughReverseInventory_` and the DT-Finished bulk backfill via `handleMirrorInventoryReleaseBulk_`) all left orphaned Open/In-Progress tasks + Pending-Quote/Quote-Sent/Approved/In-Progress repairs on the books with no item present to perform the work on. New helper `api_cancelOpenWorkOnRelease_(ss, itemIds, releaseSource, callerEmail)` opens the per-tenant Tasks and Repairs sheets via header maps (no positional indexes), filters to rows whose Item ID is in the released set AND whose Status is NOT already a terminal state (Tasks: Completed/Cancelled; Repairs: Complete/Completed/Failed/Cancelled/Declined), and bulk-writes Status="Cancelled" + Cancelled At=now() + appends "Auto-cancelled: item released via {source}" to the notes column. Writes one entity_audit_log row per cancellation via api_auditLog_ with action="cancel" and changes={reason:"item_released", source}. Finishes with a best-effort api_fullClientSync_(ss, ["tasks", "repairs"]) so the React side picks up the cancellations within ~1-2s. Wired into 5 release sites with the appropriate releaseSource string ("Will Call <wcNumber>", "Bulk Release", "Reverse Writethrough", "DT Finished Backfill", "Manual Status Edit"). The manual-edit site reads prevStatus before the write so it only fires on a true Released-transition, not on re-saves of an already-Released row. Each wire-in surfaces tasksCancelled/repairsCancelled counters + any warnings in the response payload. Per Justin: repairs DO get cancelled on release because the item is no longer present to perform the repair on; failed inspections do NOT auto-create repair jobs (current behavior preserved).
    v38.210.0 — 2026-05-12 PST — [MIGRATION-P2 backfill] Bulk-write endpoint for the DT-Finished release backfill. New doPost case "mirrorInventoryReleaseBulk" routes to `handleMirrorInventoryReleaseBulk_`, which opens the per-tenant Inventory sheet ONCE per tenant and bulk-writes Status='Released' + Release Date for an array of {itemId, releaseDate} tuples via setValues (vs. the per-row reverseWritethrough path that round-trips once per item). Used by the new `backfill-dt-finished-releases` Edge Function to mirror Supabase-authoritative release writes into the legacy sheet at ~150 items/tenant in <2s instead of ~150s. Idempotent: rows already at Status='Released' are skipped without overwriting their existing release_date; not-found Item IDs surface in the response for operator review. Calls `api_ledgerUpdateStatus_` once per tenant with the actually-released IDs so the slot ledger stays in sync. NOT part of the P1.4 reverse-writethrough framework — that framework is single-row-per-call by design and the bulk path needed its own GAS endpoint for the throughput; per-row writes continue to use `__writeThroughReverseInventory_` via `handleWriteThroughReverse_`.
@@ -27817,6 +27818,16 @@ function api_updateClientRow_(clientsSh, hMap, rowNum, payload) {
 function handleBatchCreateTasks_(clientSheetId, payload) {
   var svcCodes = payload.svcCodes || [];
   var items = payload.items || [];
+  // v38.214.0 — per-svcCode default SLA hours from the React-side
+  // service catalog. When present, this map overrides the legacy
+  // payload.dueDate single-value (which only handled the single-svc
+  // case anyway). Each task's Due Date = now + (hours * 3600 * 1000)
+  // where hours = slaHoursBySvcCode[svcCode]. Empty / missing entries
+  // leave Due Date blank, preserving pre-fix behavior for codes
+  // without a configured SLA.
+  var slaHoursBySvcCode = (payload.slaHoursBySvcCode && typeof payload.slaHoursBySvcCode === "object")
+    ? payload.slaHoursBySvcCode
+    : {};
 
   if (!Array.isArray(svcCodes) || svcCodes.length === 0) {
     return errorResponse_("svcCodes array is required and must not be empty", "MISSING_PARAM");
@@ -27873,10 +27884,23 @@ function handleBatchCreateTasks_(clientSheetId, payload) {
       var taskId = svcCode + "-" + itemId + "-" + counter;
       pendingIds.push(taskId);
 
-      // Calculate due date from payload or default to blank
+      // Due Date precedence:
+      //   1. payload.dueDate (legacy single-value, applies to every task)
+      //   2. slaHoursBySvcCode[svcCode] from the service catalog
+      //      (now + hours)
+      //   3. blank (no SLA configured for this svcCode)
+      // Sanity cap on slaHours = 720 (30 days). The catalog field is
+      // operator-editable in the React Price List page, so a fat-finger
+      // could push due dates years out and pollute the dashboard sort.
       var taskDueDate = "";
       if (payload.dueDate) {
         try { taskDueDate = new Date(payload.dueDate + "T00:00:00"); } catch (_) {}
+      } else if (slaHoursBySvcCode[svcCode] != null) {
+        var slaHours = Number(slaHoursBySvcCode[svcCode]);
+        if (isFinite(slaHours) && slaHours > 0) {
+          slaHours = Math.min(slaHours, 720);
+          taskDueDate = new Date(now.getTime() + (slaHours * 3600 * 1000));
+        }
       }
       var taskPriority = String(payload.priority || "Normal").trim() || "Normal";
 

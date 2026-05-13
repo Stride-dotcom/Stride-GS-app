@@ -2977,6 +2977,13 @@ export interface BatchCreateTasksPayload {
   svcCodes: string[];
   dueDate?: string | null;
   priority?: string;
+  /** Optional per-svcCode default SLA hours from the service catalog
+   *  (Settings → Price List → Services). When present, GAS
+   *  handleBatchCreateTasks_ stamps each new task's Due Date as
+   *  now() + (hours * 3600 * 1000) for any svcCode in the map.
+   *  payload.dueDate (single value, all tasks) takes precedence if set.
+   */
+  slaHoursBySvcCode?: Record<string, number>;
 }
 
 export interface BatchCreateTasksResponse {
