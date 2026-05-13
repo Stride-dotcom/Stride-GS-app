@@ -1,5 +1,12 @@
 /**
- * dt-sync-statuses — Supabase Edge Function — v12 2026-05-13 PST
+ * dt-sync-statuses — Supabase Edge Function — v13 2026-05-13 PST
+ *
+ * v13: PU→Delivery item-sync engine (Tier B). After the v12 pickup-stamp
+ *      pass, when one or more delivery items were propagated (quantity
+ *      from delivered_quantity, item_note merged with PU note + return
+ *      codes via sentinel marker), fire-and-forget invoke dt-push-order
+ *      so the DT delivery manifest reflects the post-PU reality before
+ *      the delivery driver sees it.
  *
  * v12: Pickup-stamp pass at end of per-order loop. When a pickup-leg
  *      reaches Completed/Collected status, invoke the new shared helper
@@ -505,16 +512,56 @@ Deno.serve(async (req) => {
           supabase,
           pickupOrderId: o.id,
           source: 'sync',
+          // Tier B: the dt_order_items reconcile block above has just
+          // refreshed PU items from export.xml, so delivered_quantity /
+          // item_note / return_codes are export-fresh. Safe to propagate.
+          propagateItemFields: true,
         });
         if (stampResult.fired) {
           console.log(
             `[dt-sync-statuses] pickup-stamp order=${o.dt_identifier} ` +
             `linked=${stampResult.linkedDeliveryId} ` +
             `order_level=${stampResult.orderLevelStamped} ` +
-            `items_stamped=${stampResult.itemsStamped}/${stampResult.itemsEligibleOnPickup}`
+            `items_stamped=${stampResult.itemsStamped}/${stampResult.itemsEligibleOnPickup} ` +
+            `items_propagated=${stampResult.itemsPropagated.length}`
           );
         } else if (stampResult.skippedReason && stampResult.skippedReason !== 'no_linked_delivery') {
           console.log(`[dt-sync-statuses] pickup-stamp order=${o.dt_identifier} skipped: ${stampResult.skippedReason}`);
+        }
+
+        // ── Push-back: re-push the linked delivery to DT ──────────────────
+        // When Tier-B propagation modified one or more delivery items, the
+        // DT delivery manifest needs to reflect the reality (qty + notes)
+        // so the eventual delivery driver sees what's actually coming.
+        // dt-push-order rebuilds the order's manifest from current Supabase
+        // state, so a single invocation suffices regardless of how many
+        // items changed. Fire-and-forget — failures land in
+        // dt_orders.push_error / sync_events for FailedOperationsDrawer.
+        if (stampResult.fired && stampResult.itemsPropagated.length > 0 && stampResult.linkedDeliveryId) {
+          const pushUrl = `${Deno.env.get('SUPABASE_URL')}/functions/v1/dt-push-order`;
+          const svcKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+          const pushPromise = fetch(pushUrl, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${svcKey}`,
+              'apikey': svcKey,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ orderId: stampResult.linkedDeliveryId }),
+          }).then(async (resp) => {
+            const txt = await resp.text().catch(() => '');
+            if (!resp.ok) {
+              console.warn(`[dt-sync-statuses] dt-push-order returned ${resp.status} for delivery=${stampResult.linkedDeliveryId}: ${txt.slice(0, 200)}`);
+            } else {
+              console.log(`[dt-sync-statuses] dt-push-order dispatched for delivery=${stampResult.linkedDeliveryId} (${stampResult.itemsPropagated.length} items propagated)`);
+            }
+          }).catch((err) => {
+            console.warn(`[dt-sync-statuses] dt-push-order dispatch failed for delivery=${stampResult.linkedDeliveryId}:`, (err as Error).message);
+          });
+          const edgeRuntime = (globalThis as unknown as { EdgeRuntime?: { waitUntil(p: Promise<unknown>): void } }).EdgeRuntime;
+          if (edgeRuntime && typeof edgeRuntime.waitUntil === 'function') {
+            edgeRuntime.waitUntil(pushPromise);
+          }
         }
       }
     } catch (e) {
