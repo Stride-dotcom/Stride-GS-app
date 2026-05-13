@@ -77,11 +77,22 @@ export function useRepairDetail(repairId: string | undefined): UseRepairDetailRe
         setSource('supabase');
         setStatus('loaded');
 
+        // v2026-05-13 — multi-item guard. Supabase is the source of truth
+        // for multi-item repairs (it has repair_items + inventory overlay
+        // that GAS doesn't know about). Skip both enrichment paths when
+        // the repair has >1 item — otherwise GAS / inventory would clobber
+        // the intentionally-blank top-level description / vendor / sidemark
+        // / location with the primary item's values (the bug that surfaced:
+        // multi-item repair Description field showed
+        // "TOP W DRAWER 40 BIRCH BLACK RAW BIRCH" because GAS returned that
+        // for the first item and the background merge overwrote our blank).
+        const isMultiItem = (sbRepair.items?.length ?? 0) > 1;
+
         // Background GAS enrichment: Supabase repair rows are often sparse
         // (missing vendor, description, notes from the sheet), so we fetch
         // the full row from GAS and merge into state when it arrives. If it
         // fails or never arrives, the user still sees Supabase data.
-        if (sbRepair.clientSheetId) {
+        if (sbRepair.clientSheetId && !isMultiItem) {
           fetchRepairById(repairId, sbRepair.clientSheetId, controller.signal)
             .then(gasResp => {
               if (fetchId !== fetchCountRef.current) return;
@@ -92,6 +103,9 @@ export function useRepairDetail(repairId: string | undefined): UseRepairDetailRe
                   ...gasRepair,
                   clientSheetId: sbRepair.clientSheetId,
                   clientName: gasRepair.clientName || prev.clientName,
+                  // Preserve the Supabase-loaded items[] — GAS path doesn't
+                  // return repair_items and a naive spread wipes it.
+                  items: prev.items,
                 } : prev);
                 setSource('legacy');
               }
@@ -99,7 +113,9 @@ export function useRepairDetail(repairId: string | undefined): UseRepairDetailRe
             .catch(() => { /* best-effort */ });
         }
         // Also kick off inventory enrichment in parallel (independent of GAS).
-        maybeEnrichFromInventory(sbRepair, fetchId, fetchCountRef, setRepair, clientNameMapRef.current);
+        if (!isMultiItem) {
+          maybeEnrichFromInventory(sbRepair, fetchId, fetchCountRef, setRepair, clientNameMapRef.current);
+        }
         return;
       }
 
