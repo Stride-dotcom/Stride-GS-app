@@ -1,0 +1,53 @@
+-- Migration: schedule dt-sync-statuses to run every 5 minutes for non-
+-- terminal orders.
+--
+-- Why: DispatchTrack's webhook layer (dt-webhook-ingest) covers the
+-- happy-path status transitions — Started, Unable_To_Start,
+-- Unable_To_Finish, In_Transit, Service_Route_Finished, Notes, Pictures.
+-- It does NOT push a webhook when DT-side staff cancel an order in the
+-- DT UI. Until 2026-05-13 the only way to surface a DT-side cancel into
+-- the app was for an operator to click the manual "Sync from DT" button
+-- on the Orders page. This cron closes that gap: every 5 min, dt-sync-
+-- statuses pulls the latest status for every order whose status_id is
+-- NULL or non-terminal, mirrors back the DT-reported status (cancelled
+-- → status_id 32, category 'cancelled'), which automatically clears the
+-- "D" inventory badge (Inventory.tsx filters cancelled-category orders
+-- out of dtOpenItems / dtDoneItems on next render).
+--
+-- Cost: each tick fetches every active order from Supabase, then makes
+-- one DT API call per order. With ~30-50 active orders in flight at any
+-- time and 12 ticks/hr, that's ~360-600 DT API calls/hr — well within
+-- DT's documented 1000/hr rate limit. If the active-order count grows
+-- materially, dial the schedule down to */10 or */15.
+--
+-- Pattern follows 20260504250000_intake_reminder_cron_schedule.sql:
+-- the migration ensures pg_cron + pg_net are installed; the actual
+-- cron.schedule() call is run separately via the SQL editor (or MCP
+-- execute_sql) because it embeds the project URL + service-role JWT,
+-- both of which are environment-specific and shouldn't live in source.
+--
+-- After this migration runs, set up the schedule with this SQL
+-- (replace <project-ref> + <service-role-key> for the env):
+--
+--     SELECT cron.schedule(
+--       'dt-sync-statuses-active-every-5min',
+--       '*/5 * * * *',
+--       $$
+--       SELECT net.http_post(
+--         url := 'https://<project-ref>.supabase.co/functions/v1/dt-sync-statuses',
+--         headers := jsonb_build_object(
+--           'Authorization', 'Bearer <service-role-key>',
+--           'Content-Type',  'application/json'
+--         ),
+--         body := '{"scope":"active"}'::jsonb
+--       );
+--       $$
+--     );
+--
+-- Verify with: SELECT * FROM cron.job WHERE jobname = 'dt-sync-statuses-active-every-5min';
+-- Inspect run history: SELECT * FROM cron.job_run_details WHERE jobid = (SELECT jobid FROM cron.job WHERE jobname = 'dt-sync-statuses-active-every-5min') ORDER BY start_time DESC LIMIT 20;
+-- Manually fire for testing: POST {"scope":"active"} to /functions/v1/dt-sync-statuses.
+-- Pause if needed: SELECT cron.alter_job((SELECT jobid FROM cron.job WHERE jobname = 'dt-sync-statuses-active-every-5min'), active := false);
+
+CREATE EXTENSION IF NOT EXISTS pg_cron;
+CREATE EXTENSION IF NOT EXISTS pg_net;
