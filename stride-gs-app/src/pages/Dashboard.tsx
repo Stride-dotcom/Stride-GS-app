@@ -286,7 +286,7 @@ function TasksTab({ tasks, onNavigate, indicators, canEditPriority }: { tasks: S
       void postUpdateTaskDueDate({ taskId, dueDate: TODAY_DASH }, sheetId)
         .then(resp => {
           if (!resp.ok || !resp.data?.success) {
-            console.warn('[dashboard] auto-set due date on High failed:', resp.error || resp.data?.error);
+            console.warn('[dashboard] auto-set due date on High failed:', resp.error);
           } else {
             entityEvents.emit('task', taskId);
           }

@@ -45,7 +45,7 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
   // existed in the catalog (Settings → Price List → Services) but was
   // never read at task creation, so every new task had Due Date = blank
   // regardless of what the operator set.
-  const { catalog: serviceCatalog } = useServiceCatalog();
+  const { services: serviceCatalog } = useServiceCatalog();
   const slaHoursBySvcCode = useMemo<Record<string, number>>(() => {
     const map: Record<string, number> = {};
     for (const row of serviceCatalog) {
