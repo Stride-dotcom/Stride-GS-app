@@ -40,3 +40,7 @@ _backups/
 **/*.backup.*.ts
 **/*.backup.*.tsx
 **/*.tmp.*
+
+# Supabase CLI transient state — gets recreated on every CLI run, must not
+# be committed (otherwise `npm run deploy`'s `git add -A` sweeps it into source).
+supabase/.temp/
