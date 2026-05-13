@@ -803,8 +803,65 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   const renderDetailsTab = () => (
     <div style={{ padding: 20 }}>
 
-          {/* Item Info — uses repair's own fields from API */}
-          {repair.itemId && (
+          {/* v2026-05-13 — Multi-item items table. Shown when a repair
+              has more than one item (created via the SB-authoritative
+              bulk path from the Inventory bulk-quote action). Single-
+              item repairs (legacy + new) keep the existing Item Info
+              card below — switching them to a 1-row table would just
+              duplicate that info without adding value. The table reads
+              from repair.items[] populated by fetchRepairByIdFromSupabase
+              with the inventory overlay applied. */}
+          {repair.items && repair.items.length > 1 && (
+            <div style={{ background: theme.colors.bgSubtle, border: `1px solid ${theme.colors.border}`, borderRadius: 10, padding: 14, marginBottom: 16 }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <Package size={14} color={theme.colors.orange} />
+                  <span style={{ fontSize: 12, fontWeight: 600 }}>Items</span>
+                </div>
+                <span style={{ fontSize: 11, color: theme.colors.textMuted }}>
+                  {repair.items.length} items
+                </span>
+              </div>
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                  <thead>
+                    <tr style={{ textAlign: 'left', background: theme.colors.bgCard }}>
+                      <th style={{ padding: '6px 10px', fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, color: theme.colors.textMuted, borderBottom: `1px solid ${theme.colors.border}` }}>Item ID</th>
+                      <th style={{ padding: '6px 10px', fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, color: theme.colors.textMuted, borderBottom: `1px solid ${theme.colors.border}` }}>Description</th>
+                      <th style={{ padding: '6px 10px', fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, color: theme.colors.textMuted, borderBottom: `1px solid ${theme.colors.border}` }}>Vendor</th>
+                      <th style={{ padding: '6px 10px', fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, color: theme.colors.textMuted, borderBottom: `1px solid ${theme.colors.border}` }}>Sidemark</th>
+                      <th style={{ padding: '6px 10px', fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, color: theme.colors.textMuted, borderBottom: `1px solid ${theme.colors.border}` }}>Location</th>
+                      <th style={{ padding: '6px 10px', fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, color: theme.colors.textMuted, borderBottom: `1px solid ${theme.colors.border}`, textAlign: 'center' }}>Result</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {repair.items.map((it, idx) => (
+                      <tr key={it.itemId || idx} style={{ borderBottom: `1px solid ${theme.colors.borderLight || '#f0f0f0'}`, background: idx % 2 === 0 ? 'transparent' : theme.colors.bgCard }}>
+                        <td style={{ padding: '6px 10px', fontFamily: 'monospace', fontSize: 11 }}>
+                          <DeepLink kind="inventory" id={it.itemId} clientSheetId={repair.clientSheetId} />
+                        </td>
+                        <td style={{ padding: '6px 10px' }}>{it.description || '—'}</td>
+                        <td style={{ padding: '6px 10px' }}>{it.vendor || '—'}</td>
+                        <td style={{ padding: '6px 10px' }}>{it.sidemark || '—'}</td>
+                        <td style={{ padding: '6px 10px' }}>{it.location || '—'}</td>
+                        <td style={{ padding: '6px 10px', textAlign: 'center', fontSize: 11, color: it.itemResult === 'passed' ? '#15803D' : it.itemResult === 'failed' ? '#B91C1C' : theme.colors.textMuted }}>
+                          {it.itemResult === 'passed' ? '✓ Passed' : it.itemResult === 'failed' ? '✗ Failed' : '—'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 8 }}>
+                Quote and pricing apply to the repair as a whole — per-item pass/fail is informational only and doesn't affect billing.
+              </div>
+            </div>
+          )}
+
+          {/* Item Info — uses repair's own fields from API. For multi-item
+              repairs we skip this card (the items table above covers it);
+              for single-item repairs this is the primary item view. */}
+          {repair.itemId && (!repair.items || repair.items.length <= 1) && (
             <div style={{ background: theme.colors.bgSubtle, border: `1px solid ${theme.colors.border}`, borderRadius: 10, padding: 14, marginBottom: 16 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}><Package size={14} color={theme.colors.orange} /><span style={{ fontSize: 12, fontWeight: 600 }}>Item</span></div>
               <div style={{ fontSize: 13, fontWeight: 600, display: 'inline-flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
