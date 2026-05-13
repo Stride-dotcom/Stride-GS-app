@@ -51,7 +51,7 @@ import type { InventoryItem, InventoryStatus } from '../lib/types';
 import { WriteButton } from '../components/shared/WriteButton';
 import { BatchGuard, checkBatchClientGuard } from '../components/shared/BatchGuard';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { isApiConfigured, postBatchRequestRepairQuote, type BatchMutationResult } from '../lib/api';
+import { isApiConfigured, postRequestRepairQuoteSb, type BatchMutationResult } from '../lib/api';
 import { useInventory } from '../hooks/useInventory';
 import { useClients } from '../hooks/useClients';
 import { useItemNotes } from '../hooks/useItemNotes';
@@ -1016,52 +1016,70 @@ export function Inventory() {
     }
     if (!eligible.length) { setRepairQuoteBulkResult({ success: true, processed: preflightSkipped.length, succeeded: 0, failed: 0, skipped: preflightSkipped, errors: [], message: 'All items skipped' }); return; }
 
-    // Optimistic: add a temp Pending Quote repair row per item so Inventory / Repairs views see it immediately.
-    // TEMP- prefix is required so useRepairs auto-reconcile drops them once
-    // the real rows land via refetch (matched by sourceTaskId|itemId|
-    // clientSheetId). The legacy REPAIR-TEMP- prefix didn't match the
-    // auto-reconcile filter, which forced an eager manual remove and caused
-    // (R) badge flicker on inventory rows.
+    // v2026-05-13 — SB-authoritative multi-item repair create.
+    // Replaces the legacy GAS batchRequestRepairQuote loop (which produced
+    // N separate repair rows, one per item) with ONE repair holding N items
+    // via the new request-repair-quote-sb edge function. Mirrors the
+    // will_calls/will_call_items shape — single quote + status, multiple
+    // items underneath.
+    //
+    // Optimistic: ONE temp repair (not N). The auto-reconcile in useRepairs
+    // matches on (sourceTaskId, itemId, clientSheetId) — for the bulk path
+    // we use the first item as the optimistic key, and once the real row
+    // lands with its actual repair_id the temp drops on the next refetch.
     const now = Date.now();
-    const tempIds: string[] = [];
-    for (const it of eligible) {
-      const tempId = `TEMP-REPAIR-${it.itemId}-${now}`;
-      tempIds.push(tempId);
-      addOptimisticRepair({
-        repairId: tempId,
-        sourceTaskId: '', // bulk path — no source task
-        itemId: it.itemId,
-        clientId: csId,
-        clientSheetId: csId,
-        clientName: '',
-        description: '',
-        status: 'Pending Quote',
-        created: new Date().toISOString(),
-      } as any);
-    }
+    const firstItem = eligible[0];
+    const tempRepairId = `TEMP-REPAIR-${firstItem.itemId}-${now}`;
+    addOptimisticRepair({
+      repairId: tempRepairId,
+      sourceTaskId: '',
+      itemId: firstItem.itemId,
+      clientId: csId,
+      clientSheetId: csId,
+      clientName: '',
+      description: eligible.length > 1 ? `${eligible.length} items` : '',
+      status: 'Pending Quote',
+      created: new Date().toISOString(),
+    } as any);
 
     try {
-      const resp = await postBatchRequestRepairQuote({ itemIds: eligible.map(i => i.itemId) }, csId);
-      const serverResult: BatchMutationResult = resp.ok && resp.data ? resp.data : {
-        success: false, processed: eligible.length, succeeded: 0, failed: eligible.length,
-        skipped: [], errors: eligible.map(i => ({ id: i.itemId, reason: resp.error || 'Request failed' })),
-        message: resp.error || 'Batch request failed',
-      };
-      // On batch failure, drop every temp; on partial / full success, let
-      // useRepairs auto-reconcile drop temps as their real twins arrive so
-      // the (R) badge stays lit through the GAS → Supabase propagation gap.
-      const allFailed = !resp.ok || (serverResult.succeeded === 0 && serverResult.failed > 0);
-      if (allFailed) for (const tid of tempIds) removeOptimisticRepair(tid);
+      const resp = await postRequestRepairQuoteSb({
+        tenantId: csId,
+        itemIds: eligible.map(i => i.itemId),
+      });
+      // Map the SB response into the existing BatchMutationResult shape so
+      // the BulkResultSummary modal renders without a separate code path.
+      const serverResult: BatchMutationResult = resp.ok
+        ? {
+            success: true,
+            processed: eligible.length,
+            succeeded: eligible.length,
+            failed: 0,
+            skipped: [],
+            errors: resp.emailFailed ? [{ id: resp.repairId ?? '', reason: `Repair created, but email failed: ${resp.emailError ?? 'unknown'}` }] : [],
+            message: eligible.length > 1
+              ? `Created repair ${resp.repairId} with ${resp.itemCount ?? eligible.length} items`
+              : `Created repair ${resp.repairId}`,
+          }
+        : {
+            success: false,
+            processed: eligible.length,
+            succeeded: 0,
+            failed: eligible.length,
+            skipped: [],
+            errors: eligible.map(i => ({ id: i.itemId, reason: resp.error || 'Request failed' })),
+            message: resp.error || 'Request failed',
+          };
+      if (!resp.ok) removeOptimisticRepair(tempRepairId);
       setRepairQuoteBulkResult(mergePreflightSkips(serverResult, preflightSkipped));
       refetch();
-      // Session 74: emit a repair entity event per affected item so the
-      // Repairs page's useRepairs hook force-refetches from GAS (bypassing
-      // stale Supabase cache) on its next mount/subscriber tick. Without
-      // this, newly-created repairs didn't show on /repairs until manual
-      // refresh.
+      // Emit a repair entity event per affected item so the Repairs page's
+      // useRepairs hook refetches. Even though we only created ONE repair,
+      // ALL selected items are now associated with it (via repair_items),
+      // so any per-item subscriber on the Repairs page needs to know.
       for (const it of eligible) entityEvents.emit('repair', it.itemId);
     } catch (err) {
-      for (const tid of tempIds) removeOptimisticRepair(tid);
+      removeOptimisticRepair(tempRepairId);
       throw err;
     }
   }, [apiConfigured, showToast, refetch, addOptimisticRepair, removeOptimisticRepair]);

@@ -3343,6 +3343,40 @@ export function postBatchRequestRepairQuote(
   );
 }
 
+// SB-authoritative path — replaces the legacy GAS batchRequestRepairQuote
+// loop-create-N-repairs behavior with ONE repair that holds N items
+// (mirroring the will_calls/will_call_items pattern). Calls the
+// request-repair-quote-sb Edge Function which atomically writes the
+// parent repair + items via SECURITY DEFINER RPC and dispatches the
+// REPAIR_QUOTE_REQUEST email via Resend through send-email.
+export interface RequestRepairQuoteSbPayload {
+  tenantId: string;
+  itemIds: string[];
+  repairVendor?: string | null;
+  repairNotes?: string | null;
+  itemNotes?: string | null;
+  createdBy?: string | null;
+}
+export interface RequestRepairQuoteSbResponse {
+  ok: boolean;
+  repairId?: string;
+  itemCount?: number;
+  emailFailed?: boolean;
+  emailError?: string;
+  error?: string;
+}
+export async function postRequestRepairQuoteSb(
+  payload: RequestRepairQuoteSbPayload
+): Promise<RequestRepairQuoteSbResponse> {
+  const { supabase } = await import('./supabase');
+  const { data, error } = await supabase.functions.invoke<RequestRepairQuoteSbResponse>(
+    'request-repair-quote-sb',
+    { body: payload },
+  );
+  if (error) return { ok: false, error: error.message };
+  return data ?? { ok: false, error: 'no response body' };
+}
+
 export interface BatchStaxInvoicePayload { qbInvoiceNos: string[] }
 export function postBatchVoidStaxInvoices(payload: BatchStaxInvoicePayload, signal?: AbortSignal) {
   return apiPost<BatchMutationResult>(
