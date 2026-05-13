@@ -540,6 +540,8 @@ Deno.serve(async (req) => {
         if (stampResult.fired && stampResult.itemsPropagated.length > 0 && stampResult.linkedDeliveryId) {
           const pushUrl = `${Deno.env.get('SUPABASE_URL')}/functions/v1/dt-push-order`;
           const svcKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+          const linkedDeliveryId = stampResult.linkedDeliveryId;
+          const propagatedCount = stampResult.itemsPropagated.length;
           const pushPromise = fetch(pushUrl, {
             method: 'POST',
             headers: {
@@ -547,16 +549,45 @@ Deno.serve(async (req) => {
               'apikey': svcKey,
               'Content-Type': 'application/json',
             },
-            body: JSON.stringify({ orderId: stampResult.linkedDeliveryId }),
+            body: JSON.stringify({ orderId: linkedDeliveryId }),
           }).then(async (resp) => {
             const txt = await resp.text().catch(() => '');
             if (!resp.ok) {
-              console.warn(`[dt-sync-statuses] dt-push-order returned ${resp.status} for delivery=${stampResult.linkedDeliveryId}: ${txt.slice(0, 200)}`);
+              console.warn(`[dt-sync-statuses] dt-push-order returned ${resp.status} for delivery=${linkedDeliveryId}: ${txt.slice(0, 200)}`);
+              // Surface dispatch failure to FailedOperationsDrawer.
+              // dt-push-order itself may write its own push_error
+              // when reached, but a transient network/TLS failure
+              // before the function runs would otherwise be silent.
+              await supabase.from('gs_sync_events').insert({
+                tenant_id:     o.tenant_id,
+                entity_type:   'dt_order',
+                entity_id:     linkedDeliveryId,
+                action_type:   'dt_push_order_after_pu_sync',
+                sync_status:   'sync_failed',
+                requested_by:  'dt-sync-statuses:pu_propagate',
+                request_id:    crypto.randomUUID(),
+                payload:       { items_propagated: propagatedCount },
+                error_message: `HTTP ${resp.status}: ${txt.slice(0, 500)}`,
+              });
             } else {
-              console.log(`[dt-sync-statuses] dt-push-order dispatched for delivery=${stampResult.linkedDeliveryId} (${stampResult.itemsPropagated.length} items propagated)`);
+              console.log(`[dt-sync-statuses] dt-push-order dispatched for delivery=${linkedDeliveryId} (${propagatedCount} items propagated)`);
             }
-          }).catch((err) => {
-            console.warn(`[dt-sync-statuses] dt-push-order dispatch failed for delivery=${stampResult.linkedDeliveryId}:`, (err as Error).message);
+          }).catch(async (err) => {
+            const msg = (err as Error).message;
+            console.warn(`[dt-sync-statuses] dt-push-order dispatch failed for delivery=${linkedDeliveryId}: ${msg}`);
+            // Network / TLS / fetch-level failure — record so it
+            // doesn't disappear.
+            await supabase.from('gs_sync_events').insert({
+              tenant_id:     o.tenant_id,
+              entity_type:   'dt_order',
+              entity_id:     linkedDeliveryId,
+              action_type:   'dt_push_order_after_pu_sync',
+              sync_status:   'sync_failed',
+              requested_by:  'dt-sync-statuses:pu_propagate',
+              request_id:    crypto.randomUUID(),
+              payload:       { items_propagated: propagatedCount },
+              error_message: `dispatch failed: ${msg.slice(0, 500)}`,
+            }).then(() => {}, () => {});
           });
           const edgeRuntime = (globalThis as unknown as { EdgeRuntime?: { waitUntil(p: Promise<unknown>): void } }).EdgeRuntime;
           if (edgeRuntime && typeof edgeRuntime.waitUntil === 'function') {

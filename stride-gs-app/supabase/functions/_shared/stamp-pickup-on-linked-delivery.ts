@@ -42,7 +42,6 @@ import type { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 type SBClient = ReturnType<typeof createClient>;
 
 const DT_COMPLETED_STATUS_ID = 3;
-const PU_NOTE_MARKER_RE = /^\[FROM PICKUP\][\s\S]*?\n---\n/;
 
 export interface StampPickupOptions {
   supabase: SBClient;
@@ -87,8 +86,12 @@ interface DeliveryItemRow {
   parent_pickup_item_id: string | null;
   dt_item_code: string | null;
   quantity: number | null;
+  original_quantity: number | null;
   item_note: string | null;
   picked_up_at: string | null;
+  pickup_item_note: string | null;
+  pickup_return_codes: unknown;
+  pickup_delivered_quantity: number | null;
 }
 
 export async function stampPickupOnLinkedDelivery(
@@ -165,7 +168,7 @@ export async function stampPickupOnLinkedDelivery(
       .is('removed_at', null),
     supabase
       .from('dt_order_items')
-      .select('id, parent_pickup_item_id, dt_item_code, quantity, item_note, picked_up_at')
+      .select('id, parent_pickup_item_id, dt_item_code, quantity, original_quantity, item_note, picked_up_at, pickup_item_note, pickup_return_codes, pickup_delivered_quantity')
       .eq('dt_order_id', d.id)
       .is('removed_at', null),
   ]);
@@ -249,14 +252,29 @@ export async function stampPickupOnLinkedDelivery(
 
 /**
  * Compute the per-item patch when propagating PU → Delivery. Returns
- * null when no field needs updating (skip the write). Three rules:
+ * null when nothing actually changed (skip the no-op write).
  *
- *   1. quantity ← pickup.delivered_quantity (when non-null and different)
- *   2. item_note: strip any prior "[FROM PICKUP] …\n---\n" sentinel
- *      block, then prepend a fresh one if the PU has note or return
- *      codes. If PU has neither, just strip (heals stale markers).
- *   3. Only return a patch when at least one of (1) or (2) changes the
- *      stored value — otherwise we'd write a no-op every sync cycle.
+ * Three independent fields are propagated. The delivery's own
+ * `item_note` and `return_codes` are NEVER touched — those belong
+ * to the delivery leg driver, and the merged-via-sentinel approach
+ * in the first cut was brittle against user edits. Instead, the PU
+ * values land in dedicated audit columns the UI can render as a
+ * "From pickup" sub-row.
+ *
+ *   1. pickup_delivered_quantity ← pu.delivered_quantity
+ *      (always overwrite; converges and is audit-only).
+ *
+ *   2. pickup_item_note          ← pu.item_note
+ *      pickup_return_codes       ← pu.return_codes
+ *      (always overwrite; mirror columns, no user edits expected).
+ *
+ *   3. quantity                  ← pu.delivered_quantity, but ONLY
+ *      when the delivery item has not been manually edited. Heuristic:
+ *      dit.quantity === dit.original_quantity. If staff has changed
+ *      quantity post-creation, we leave it alone (their value wins)
+ *      and only record the PU count in the audit column above. This
+ *      prevents the "staff corrects qty, next sync silently reverts"
+ *      footgun the code review flagged.
  */
 function buildItemPropagationPatch(
   pu: PickupItemRow,
@@ -265,30 +283,52 @@ function buildItemPropagationPatch(
   const patch: Record<string, unknown> = {};
   let dirty = false;
 
-  // Rule 1 — quantity reflects PU reality
-  if (pu.delivered_quantity != null && Number(pu.delivered_quantity) !== Number(dit.quantity ?? -1)) {
-    patch.quantity = pu.delivered_quantity;
+  // (1) audit-column quantity mirror
+  if (pu.delivered_quantity != null) {
+    const puQty = Number(pu.delivered_quantity);
+    if (puQty !== Number(dit.pickup_delivered_quantity ?? -1)) {
+      patch.pickup_delivered_quantity = puQty;
+      dirty = true;
+    }
+  }
+
+  // (2) audit-column notes + return codes mirror
+  const puNoteRaw = (pu.item_note ?? '').trim() || null;
+  if (puNoteRaw !== (dit.pickup_item_note ?? '').trim() && (puNoteRaw || dit.pickup_item_note)) {
+    patch.pickup_item_note = puNoteRaw;
+    dirty = true;
+  }
+  const puCodes = normalizeReturnCodes(pu.return_codes);
+  const ditCodes = normalizeReturnCodes(dit.pickup_return_codes);
+  if (codesDiffer(puCodes, ditCodes)) {
+    patch.pickup_return_codes = puCodes.length > 0 ? puCodes : null;
     dirty = true;
   }
 
-  // Rule 2 — sentinel-marker item_note merge
-  const existing = dit.item_note ?? '';
-  const stripped = existing.replace(PU_NOTE_MARKER_RE, '');
-  const puReturnCodes = normalizeReturnCodes(pu.return_codes);
-  const puNoteRaw = (pu.item_note ?? '').trim();
-  let newNote = stripped;
-  if (puNoteRaw || puReturnCodes.length > 0) {
-    const parts: string[] = [];
-    if (puNoteRaw) parts.push(puNoteRaw);
-    if (puReturnCodes.length > 0) parts.push(`Return codes: ${puReturnCodes.join(', ')}`);
-    newNote = `[FROM PICKUP] ${parts.join(' | ')}\n---\n${stripped}`;
-  }
-  if (newNote !== existing) {
-    patch.item_note = newNote;
-    dirty = true;
+  // (3) authoritative quantity overwrite — only when unedited.
+  // Compare against original_quantity which is set at row creation
+  // (CreateDeliveryOrderModal at L1485 / L1499) and never mutated by
+  // staff edits. delivery.quantity === original_quantity ⇒ staff has
+  // not touched it ⇒ safe to update to PU reality.
+  if (pu.delivered_quantity != null && dit.quantity != null && dit.original_quantity != null) {
+    const puQty = Number(pu.delivered_quantity);
+    const curQty = Number(dit.quantity);
+    const origQty = Number(dit.original_quantity);
+    if (curQty === origQty && puQty !== curQty) {
+      patch.quantity = puQty;
+      dirty = true;
+    }
   }
 
   return dirty ? patch : null;
+}
+
+function codesDiffer(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return true;
+  const aSorted = [...a].sort();
+  const bSorted = [...b].sort();
+  for (let i = 0; i < aSorted.length; i++) if (aSorted[i] !== bSorted[i]) return true;
+  return false;
 }
 
 function normalizeReturnCodes(raw: unknown): string[] {
