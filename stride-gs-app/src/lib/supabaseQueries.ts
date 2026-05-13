@@ -1719,6 +1719,12 @@ export interface SupabaseDtOrderRow {
   internal_notes: string | null;
   latest_note_preview: string | null;
   linked_order_id: string | null;
+  // Pickup→Delivery propagation (2026-05-13). Populated by
+  // stamp-pickup-on-linked-delivery helper when the linked PU completes.
+  // NULL on standalone deliveries + on deliveries whose linked PU has not
+  // completed yet. Drives the "Picked up" banner on OrderPage.
+  linked_pickup_finished_at: string | null;
+  linked_pickup_driver_name: string | null;
   source: string | null;
   last_synced_at: string | null;
   created_at: string;
@@ -1792,6 +1798,12 @@ export interface DtOrderItemForUI {
   checkedQuantity: number | null;
   dtLocation: string;
   returnCodes: string[] | null;
+  // Pickup→Delivery propagation (2026-05-13). Set on delivery items
+  // (the items belonging to dt_orders rows where order_type !== 'pickup')
+  // by stamp-pickup-on-linked-delivery when the linked PU leg completes.
+  // Matched by dt_item_code. NULL for items not picked up yet or not on
+  // a P+D pair.
+  pickedUpAt: string | null;
 }
 
 export interface DtOrderForUI {
@@ -1870,6 +1882,10 @@ export interface DtOrderForUI {
   // Phase 2c — order type + linked pickup/delivery pair
   orderType: 'delivery' | 'pickup' | 'pickup_and_delivery' | 'service_only' | 'transfer';
   linkedOrderId: string | null;
+  // Pickup→Delivery propagation (2026-05-13). Populated on the delivery
+  // row when its linked PU leg completes. Drives the "Picked up" banner.
+  linkedPickupFinishedAt: string | null;
+  linkedPickupDriverName: string | null;
   // DT sync-back (export.xml mirror) — see SupabaseDtOrderRow for source.
   scheduledAt: string | null;
   startedAt: string | null;
@@ -2106,6 +2122,7 @@ export async function fetchDtOrdersFromSupabase(
             checkedQuantity: item.checked_quantity != null ? Number(item.checked_quantity) : null,
             dtLocation: String(item.location ?? ''),
             returnCodes,
+            pickedUpAt: item.picked_up_at ? String(item.picked_up_at) : null,
           };
         }),
         // Pricing
@@ -2140,6 +2157,8 @@ export async function fetchDtOrdersFromSupabase(
         // Phase 2c — order type + linked pickup/delivery
         orderType: (row.order_type as DtOrderForUI['orderType']) ?? (row.is_pickup ? 'pickup' : 'delivery'),
         linkedOrderId: row.linked_order_id,
+        linkedPickupFinishedAt: row.linked_pickup_finished_at,
+        linkedPickupDriverName: row.linked_pickup_driver_name,
         createdAt: row.created_at ?? '',
         // DT sync-back
         scheduledAt: row.scheduled_at,
@@ -2262,6 +2281,7 @@ export async function fetchDtOrderByIdFromSupabase(
           checkedQuantity: item.checked_quantity != null ? Number(item.checked_quantity) : null,
           dtLocation: String(item.location ?? ''),
           returnCodes,
+          pickedUpAt: item.picked_up_at ? String(item.picked_up_at) : null,
         };
       }),
       baseDeliveryFee: row.base_delivery_fee != null ? Number(row.base_delivery_fee) : null,
@@ -2292,6 +2312,8 @@ export async function fetchDtOrderByIdFromSupabase(
       paymentNotes: row.payment_notes ?? '',
       orderType: (row.order_type as DtOrderForUI['orderType']) ?? (row.is_pickup ? 'pickup' : 'delivery'),
       linkedOrderId: row.linked_order_id,
+      linkedPickupFinishedAt: row.linked_pickup_finished_at,
+      linkedPickupDriverName: row.linked_pickup_driver_name,
       createdAt: row.created_at ?? '',
       // DT sync-back
       scheduledAt: row.scheduled_at,
