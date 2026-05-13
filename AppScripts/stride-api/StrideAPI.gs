@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.212.0 — 2026-05-13 PST — Defense-in-depth for the task-addon $0-rate bug. The React-side fix (#360 on 2026-05-12) only covered the list path (useTasks → fetchTasksFromSupabase, which overlays itemClass from inventory). The single-task by-id path (useTaskDetail → fetchTaskByIdFromSupabase, used by TaskPage / standalone deep links) bypassed that overlay because public.tasks has no item_class column. Result: when a task panel was opened via deep link, AddTaskServiceModal received itemClass=undefined and pre-filled $0 on class-based services (MULTI_INS, ASM, INSP …); operators submitted the addon as-is and it landed on Billing_Ledger with rate=0. React side is fixed in useTaskDetail.ts (now overlays itemClass from inventory matching the list path). This GAS-side complement: api_writeAddonsToLedger_'s rate fallback now treats rate=0 the same as rate=null/NaN — the prior guard (`if (adRate == null || isNaN(adRate))`) let through a snapshot of 0 untouched, so the catalog fallback never fired and the row went to the sheet at $0. New guard `if (adRate == null || isNaN(adRate) || adRate === 0)` always re-resolves via api_lookupRate_ so the catalog gets a shot regardless of how the addon was saved. Operators who want a legitimate $0 charge can set rate>0 then override; the lookup is harmless when no catalog row exists (returns 0 and the row gets the existing "Missing Rate" flag). One-shot cleanup of the pre-fix INSP-63255-1-MULTI_INS-ADDON-1 row (Unbilled, rate=0, qty=4, class=S → catalog $15) was performed manually via SQL during the same session. No companion migration; no schema change.
+   StrideAPI.gs — v38.213.0 — 2026-05-13 PST — [MIGRATION-P2 will-calls COD] Second per-table writer registered against the P1.4 reverse-writethrough framework. Replaces `__writeThroughReverseStub_` for the `will_calls` table in `REVERSE_WRITETHROUGH_TABLES_` with `__writeThroughReverseWillCalls_` — finds the row by WC Number, idempotently writes the COD + COD Amount columns. Companion Edge Function `push-will-call-cod-to-sheet` fires this after the React WillCallDetailPanel commits a Supabase-authoritative will_calls.cod / cod_amount write directly to Supabase. Sheet stays current as the legacy-readers' read-only mirror (PDF release doc generator, full client sync, COD payment page launcher). Scope is COD fields only — every other Will_Calls field still flows through the legacy GAS-authoritative `handleUpdateWillCall_` path until they migrate. Adding fields later is a one-line registry extension.
+   v38.212.0 — 2026-05-13 PST — Defense-in-depth for the task-addon $0-rate bug. The React-side fix (#360 on 2026-05-12) only covered the list path (useTasks → fetchTasksFromSupabase, which overlays itemClass from inventory). The single-task by-id path (useTaskDetail → fetchTaskByIdFromSupabase, used by TaskPage / standalone deep links) bypassed that overlay because public.tasks has no item_class column. Result: when a task panel was opened via deep link, AddTaskServiceModal received itemClass=undefined and pre-filled $0 on class-based services (MULTI_INS, ASM, INSP …); operators submitted the addon as-is and it landed on Billing_Ledger with rate=0. React side is fixed in useTaskDetail.ts (now overlays itemClass from inventory matching the list path). This GAS-side complement: api_writeAddonsToLedger_'s rate fallback now treats rate=0 the same as rate=null/NaN — the prior guard (`if (adRate == null || isNaN(adRate))`) let through a snapshot of 0 untouched, so the catalog fallback never fired and the row went to the sheet at $0. New guard `if (adRate == null || isNaN(adRate) || adRate === 0)` always re-resolves via api_lookupRate_ so the catalog gets a shot regardless of how the addon was saved. Operators who want a legitimate $0 charge can set rate>0 then override; the lookup is harmless when no catalog row exists (returns 0 and the row gets the existing "Missing Rate" flag). One-shot cleanup of the pre-fix INSP-63255-1-MULTI_INS-ADDON-1 row (Unbilled, rate=0, qty=4, class=S → catalog $15) was performed manually via SQL during the same session. No companion migration; no schema change.
    v38.211.0 — 2026-05-13 PST — Auto-cancel of open Tasks and Repairs when an item flips to Released. Pre-fix only the Transfer flow cancelled downstream work; the three other release paths (will-call release via `handleProcessWcRelease_`, manual bulk release via `handleReleaseItems_`, manual single-item Status→Released flip via `handleUpdateInventoryItem_`, plus the SB-primary reverse-writethrough release via `__writeThroughReverseInventory_` and the DT-Finished bulk backfill via `handleMirrorInventoryReleaseBulk_`) all left orphaned Open/In-Progress tasks + Pending-Quote/Quote-Sent/Approved/In-Progress repairs on the books with no item present to perform the work on. New helper `api_cancelOpenWorkOnRelease_(ss, itemIds, releaseSource, callerEmail)` opens the per-tenant Tasks and Repairs sheets via header maps (no positional indexes), filters to rows whose Item ID is in the released set AND whose Status is NOT already a terminal state (Tasks: Completed/Cancelled; Repairs: Complete/Completed/Failed/Cancelled/Declined), and bulk-writes Status="Cancelled" + Cancelled At=now() + appends "Auto-cancelled: item released via {source}" to the notes column. Writes one entity_audit_log row per cancellation via api_auditLog_ with action="cancel" and changes={reason:"item_released", source}. Finishes with a best-effort api_fullClientSync_(ss, ["tasks", "repairs"]) so the React side picks up the cancellations within ~1-2s. Wired into 5 release sites with the appropriate releaseSource string ("Will Call <wcNumber>", "Bulk Release", "Reverse Writethrough", "DT Finished Backfill", "Manual Status Edit"). The manual-edit site reads prevStatus before the write so it only fires on a true Released-transition, not on re-saves of an already-Released row. Each wire-in surfaces tasksCancelled/repairsCancelled counters + any warnings in the response payload. Per Justin: repairs DO get cancelled on release because the item is no longer present to perform the repair on; failed inspections do NOT auto-create repair jobs (current behavior preserved).
    v38.210.0 — 2026-05-12 PST — [MIGRATION-P2 backfill] Bulk-write endpoint for the DT-Finished release backfill. New doPost case "mirrorInventoryReleaseBulk" routes to `handleMirrorInventoryReleaseBulk_`, which opens the per-tenant Inventory sheet ONCE per tenant and bulk-writes Status='Released' + Release Date for an array of {itemId, releaseDate} tuples via setValues (vs. the per-row reverseWritethrough path that round-trips once per item). Used by the new `backfill-dt-finished-releases` Edge Function to mirror Supabase-authoritative release writes into the legacy sheet at ~150 items/tenant in <2s instead of ~150s. Idempotent: rows already at Status='Released' are skipped without overwriting their existing release_date; not-found Item IDs surface in the response for operator review. Calls `api_ledgerUpdateStatus_` once per tenant with the actually-released IDs so the slot ledger stays in sync. NOT part of the P1.4 reverse-writethrough framework — that framework is single-row-per-call by design and the bulk path needed its own GAS endpoint for the throughput; per-row writes continue to use `__writeThroughReverseInventory_` via `handleWriteThroughReverse_`.
    v38.209.0 — 2026-05-12 PST — handleQboSyncCatalogItem_ now supplies IncomeAccountRef on Service item creates. QBO's /v3/.../item endpoint requires either IncomeAccountRef (sale-able) or ExpenseAccountRef (purchase-only); without it the API rejects the create with HTTP 400 "Required parameter ExpenseAccountRef or IncomeAccountRef is missing in the request". Surfaced by Justin's attempt to add a new FELT service in Price List Settings — the Stax mirror succeeded but the QBO mirror failed and the React layer raised a "Catalog sync failed for FELT — QBO: ..." banner with the full QBO error text. Fix is a new helper qbo_resolveIncomeAccount_(token, realmId, opts, watchdog_) that (1) checks Script Property QBO_INCOME_ACCOUNT_ID for an admin-configured override, (2) falls back to a one-shot QBO query (`SELECT * FROM Account WHERE AccountType='Income' MAXRESULTS 50`) that prefers obvious names (Services / Sales / Income / Sales of Product Income) and caches the resolved ID in Script Properties so subsequent item creates skip the round-trip entirely. handleQboSyncCatalogItem_'s create branch calls the helper inside the existing watchdog before issuing the create. Update + dup-name-update branches are untouched (QBO's update endpoint doesn't require IncomeAccountRef when the field is already set on the existing item). Admins can override the auto-resolved account by setting QBO_INCOME_ACCOUNT_ID directly in Apps Script → Project Settings → Script Properties (useful when Stride services should book to a specific GL line distinct from other income). No schema change, no React change.
@@ -2641,7 +2642,7 @@ var REVERSE_WRITETHROUGH_TABLES_ = {
   "tasks":             __writeThroughReverseStub_,
   "repairs":           __writeThroughReverseStub_,
   "shipments":         __writeThroughReverseStub_,
-  "will_calls":        __writeThroughReverseStub_,
+  "will_calls":        __writeThroughReverseWillCalls_,
   "will_call_items":   __writeThroughReverseStub_,
   "billing":           __writeThroughReverseStub_,
   "addons":            __writeThroughReverseStub_,
@@ -2652,6 +2653,118 @@ var REVERSE_WRITETHROUGH_TABLES_ = {
   "stax_invoices":     __writeThroughReverseStub_,
   "stax_charges":      __writeThroughReverseStub_
 };
+
+/**
+ * v38.212.0 — Will Calls reverse-writethrough writer. Second per-table
+ * writer against the P1.4 framework (inventory was first in v38.208.0).
+ * Fires from the Edge Function `push-will-call-cod-to-sheet` after the
+ * React WillCallDetailPanel commits a Supabase-authoritative
+ * will_calls.cod / cod_amount write directly to Supabase. This writer
+ * mirrors that single-row change into the per-tenant Will_Calls sheet
+ * so legacy readers (PDF release doc generator, full-client-sync, the
+ * COD payment page launcher, etc.) see the same state.
+ *
+ * Scope: COD fields only (cod, cod_amount). Other Will_Calls fields
+ * still flow through the legacy GAS-authoritative `handleUpdateWillCall_`
+ * path until they migrate. Adding fields here is a one-line registry
+ * extension at COD_REVERSE_WC_FIELDS_.
+ *
+ * Contract — receives (ss, payload):
+ *   ss      — SpreadsheetApp.openById(tenantId), already validated +
+ *             opened by handleWriteThroughReverse_
+ *   payload — { tenantId, table:'will_calls', op:'update',
+ *               row:{cod, cod_amount}, rowId:<WC Number>,
+ *               requestId?, correlationId? }
+ *
+ * Idempotent by WC Number: looks up the row, no-ops when the row
+ * already matches the target cod + cod_amount. Throws on any
+ * unrecoverable error so handleWriteThroughReverse_ catches it and
+ * writes gs_sync_events for the FailedOperationsDrawer.
+ *
+ * Op support: only 'update' for now. Will_Calls inserts and deletes
+ * are not yet on the SB-primary path (creation still flows through
+ * the GAS-side StrideCreateWillCallCallback dialog; cancellation
+ * flows through handleCancelWillCall_).
+ */
+function __writeThroughReverseWillCalls_(ss, payload) {
+  var rowId = payload && payload.rowId ? String(payload.rowId).trim() : "";
+  var row   = (payload && payload.row) || {};
+  var op    = payload && payload.op ? String(payload.op) : "";
+
+  if (op !== "update") {
+    throw new Error(
+      "__writeThroughReverseWillCalls_: op '" + op + "' not supported " +
+      "(only 'update' is implemented; insert/delete still on GAS-authoritative path)."
+    );
+  }
+  if (!rowId) throw new Error("__writeThroughReverseWillCalls_: rowId (WC Number) required");
+
+  var wcSheet = ss.getSheetByName("Will_Calls");
+  if (!wcSheet) throw new Error("__writeThroughReverseWillCalls_: Will_Calls sheet not found on this tenant");
+
+  var wcMap = api_getHeaderMap_(wcSheet);
+  var wcNumCol  = wcMap["WC Number"];
+  var codCol    = wcMap["COD"];
+  var amtCol    = wcMap["COD Amount"];
+  if (!wcNumCol) throw new Error("__writeThroughReverseWillCalls_: 'WC Number' column not found");
+  if (!codCol)   throw new Error("__writeThroughReverseWillCalls_: 'COD' column not found");
+  if (!amtCol)   throw new Error("__writeThroughReverseWillCalls_: 'COD Amount' column not found");
+
+  // api_getLastDataRow_ guards against trailing-blank-row pollution.
+  var lastRow = api_getLastDataRow_(wcSheet);
+  if (lastRow < 2) throw new Error("__writeThroughReverseWillCalls_: Will_Calls sheet has no data rows");
+
+  // Scan WC Number column once.
+  var wcNumValues = wcSheet.getRange(2, wcNumCol, lastRow - 1, 1).getValues();
+  var foundRow = -1;
+  for (var i = 0; i < wcNumValues.length; i++) {
+    if (String(wcNumValues[i][0] || "").trim() === rowId) {
+      foundRow = i + 2;
+      break;
+    }
+  }
+  if (foundRow < 0) {
+    throw new Error("__writeThroughReverseWillCalls_: WC Number '" + rowId + "' not found in Will_Calls sheet");
+  }
+
+  // Coerce inputs. row.cod is the SB boolean column; absence is treated
+  // as "no change to that field" so a future caller can update only one
+  // of {cod, cod_amount}. row.cod_amount of null clears the cell.
+  var hasCod      = row.hasOwnProperty("cod");
+  var hasAmount   = row.hasOwnProperty("cod_amount");
+  if (!hasCod && !hasAmount) {
+    throw new Error("__writeThroughReverseWillCalls_: row must include at least one of {cod, cod_amount}");
+  }
+  var newCod    = hasCod    ? !!row.cod                              : null;
+  var newAmount = hasAmount ? (row.cod_amount == null ? "" : Number(row.cod_amount)) : null;
+
+  // Idempotency — skip when both fields already match the target. Cheap
+  // 2-cell read avoids redundant setValue round-trips on FailedOps retry.
+  var currentCod    = !!wcSheet.getRange(foundRow, codCol).getValue();
+  var currentAmount = wcSheet.getRange(foundRow, amtCol).getValue();
+  var currentAmountNum = currentAmount === "" || currentAmount == null ? null : Number(currentAmount);
+  var codMatches    = !hasCod    || currentCod === newCod;
+  var amountMatches = !hasAmount || (
+    (newAmount === "" && (currentAmountNum == null || currentAmountNum === 0))
+    || (newAmount !== "" && currentAmountNum === newAmount)
+  );
+  if (codMatches && amountMatches) {
+    return { rowNumber: foundRow, skipped: true, reason: "already-matches-target-state" };
+  }
+
+  if (hasCod)    wcSheet.getRange(foundRow, codCol).setValue(newCod);
+  if (hasAmount) wcSheet.getRange(foundRow, amtCol).setValue(newAmount);
+
+  // Flush so a chained reader (e.g. PDF doc generator running in the
+  // same execution) sees committed values.
+  SpreadsheetApp.flush();
+
+  return {
+    rowNumber:  foundRow,
+    cod:        hasCod    ? newCod    : currentCod,
+    codAmount:  hasAmount ? newAmount : currentAmountNum
+  };
+}
 
 /**
  * v38.200.0 — [MIGRATION-P1.4] Validate that a spreadsheet_id is one of
