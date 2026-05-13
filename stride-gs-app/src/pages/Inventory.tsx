@@ -1046,6 +1046,12 @@ export function Inventory() {
       const resp = await postRequestRepairQuoteSb({
         tenantId: csId,
         itemIds: eligible.map(i => i.itemId),
+        // v2026-05-13 — surface the actual operator on the repairs row.
+        // Previously the RPC defaulted to 'system' when the React side
+        // didn't pass createdBy. user.email is canonical (matches the
+        // displayName fallback the rest of the app uses) and survives
+        // the JWT round-trip cleanly.
+        createdBy: user?.email ?? null,
       });
       // Map the SB response into the existing BatchMutationResult shape so
       // the BulkResultSummary modal renders without a separate code path.
@@ -1082,7 +1088,7 @@ export function Inventory() {
       removeOptimisticRepair(tempRepairId);
       throw err;
     }
-  }, [apiConfigured, showToast, refetch, addOptimisticRepair, removeOptimisticRepair]);
+  }, [apiConfigured, showToast, refetch, addOptimisticRepair, removeOptimisticRepair, user?.email]);
 
   // Session 71+: Build item-level task/repair/WC/DT indicator sets from already-loaded data.
   // Cancelled tasks / repairs / will-calls and Cancelled DT orders produce NO badge —
