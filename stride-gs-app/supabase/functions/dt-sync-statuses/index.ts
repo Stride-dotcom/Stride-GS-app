@@ -1,5 +1,14 @@
 /**
- * dt-sync-statuses — Supabase Edge Function — v11 2026-05-12 PST
+ * dt-sync-statuses — Supabase Edge Function — v12 2026-05-13 PST
+ *
+ * v12: Pickup-stamp pass at end of per-order loop. When a pickup-leg
+ *      reaches Completed/Collected status, invoke the new shared helper
+ *      stampPickupOnLinkedDelivery so the linked delivery row's
+ *      linked_pickup_finished_at + linked_pickup_driver_name fields and
+ *      the delivery items' picked_up_at flags get the real export.xml
+ *      values (corrects the now()/null placeholder the webhook path
+ *      stamps). Mirrors the v11 auto-release block; helper is
+ *      idempotent + filters out orders without linked_order_id.
  *
  * v11: Fixed toIso parser. DT exports timestamps as "YYYY-MM-DD HH:MM:SS
  *      ±HHMM" (e.g. "2026-05-14 13:41:00 -0700"). Pre-v11's normalize
@@ -84,6 +93,7 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { releaseInventoryOnDtFinished } from '../_shared/release-on-dt-finished.ts';
+import { stampPickupOnLinkedDelivery } from '../_shared/stamp-pickup-on-linked-delivery.ts';
 
 const STATUS_COLLECTED = 22;
 const STATUS_COMPLETED = 3;
@@ -477,6 +487,34 @@ Deno.serve(async (req) => {
           );
         } else if (releaseResult.skippedReason) {
           console.log(`[dt-sync-statuses] auto-release order=${o.dt_identifier} skipped: ${releaseResult.skippedReason}`);
+        }
+      }
+
+      // ── Pickup-leg completion → stamp linked delivery row ────────────
+      // Mirror of the auto-release block above, but for the PU side of
+      // a P+D pair. The webhook path (notify-pickup-completed) stamps
+      // linked_pickup_finished_at = now() and driver_name = null because
+      // DT export.xml lags the Service_Route_Finished webhook by a poll
+      // cycle. By the time this sync re-encounters the pickup, the row
+      // has real finished_at + driver_name from export.xml, so the
+      // helper overwrites the placeholder with the accurate values.
+      // Helper short-circuits on orders without linked_order_id, so
+      // standalone pickups are cheap no-ops.
+      if (orderIsFinishedAfterPoll && !orderTypeIsRelease) {
+        const stampResult = await stampPickupOnLinkedDelivery({
+          supabase,
+          pickupOrderId: o.id,
+          source: 'sync',
+        });
+        if (stampResult.fired) {
+          console.log(
+            `[dt-sync-statuses] pickup-stamp order=${o.dt_identifier} ` +
+            `linked=${stampResult.linkedDeliveryId} ` +
+            `order_level=${stampResult.orderLevelStamped} ` +
+            `items_stamped=${stampResult.itemsStamped}/${stampResult.itemsEligibleOnPickup}`
+          );
+        } else if (stampResult.skippedReason && stampResult.skippedReason !== 'no_linked_delivery') {
+          console.log(`[dt-sync-statuses] pickup-stamp order=${o.dt_identifier} skipped: ${stampResult.skippedReason}`);
         }
       }
     } catch (e) {
