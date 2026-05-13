@@ -154,7 +154,7 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
           // GAS handleBatchCreateTasks_ stamps Due Date = now() + N hours
           // on each new task row when the svcCode has a value here.
           slaHoursBySvcCode,
-        } as any,
+        },
         clientSheetId
       );
       if (res.data?.success) {

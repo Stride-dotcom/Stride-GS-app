@@ -27889,12 +27889,16 @@ function handleBatchCreateTasks_(clientSheetId, payload) {
       //   2. slaHoursBySvcCode[svcCode] from the service catalog
       //      (now + hours)
       //   3. blank (no SLA configured for this svcCode)
+      // Sanity cap on slaHours = 720 (30 days). The catalog field is
+      // operator-editable in the React Price List page, so a fat-finger
+      // could push due dates years out and pollute the dashboard sort.
       var taskDueDate = "";
       if (payload.dueDate) {
         try { taskDueDate = new Date(payload.dueDate + "T00:00:00"); } catch (_) {}
       } else if (slaHoursBySvcCode[svcCode] != null) {
         var slaHours = Number(slaHoursBySvcCode[svcCode]);
         if (isFinite(slaHours) && slaHours > 0) {
+          slaHours = Math.min(slaHours, 720);
           taskDueDate = new Date(now.getTime() + (slaHours * 3600 * 1000));
         }
       }

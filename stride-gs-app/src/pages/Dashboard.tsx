@@ -170,7 +170,17 @@ function DragHeader({ h, dragColId, dragOverColId, onDragStart, onDragOver, onDr
 
 // ─── Tasks Tab ───────────────────────────────────────────────────────────────
 
-const TODAY_DASH = new Date().toISOString().slice(0, 10);
+// TZ-stable today-as-YYYY-MM-DD anchored to America/Los_Angeles (Stride's
+// operating timezone). Pre-2026-05-13 used new Date().toISOString().slice(0,10)
+// which is UTC — after 5pm PT that returned tomorrow's date, which made
+// "due today" highlighting and the High auto-stamp land on the wrong day.
+// `en-CA` locale formats as YYYY-MM-DD; the timeZone option pins it to PT.
+const TODAY_DASH = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'America/Los_Angeles',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+}).format(new Date());
 const TASK_DEFAULT_ORDER = ['taskId', 'taskType', 'taskStatus', 'taskPriority', 'taskDueDate', 'taskItem', 'taskDesc', 'taskLocation', 'taskVendor', 'taskAssigned', 'taskClient', 'taskSidemark', 'taskCreated', 'taskFolder'];
 const TASK_COL_LABELS: Record<string, string> = { taskId: 'Task ID', taskType: 'Type', taskStatus: 'Status', taskPriority: 'Priority', taskDueDate: 'Due Date', taskItem: 'Item', taskDesc: 'Description', taskLocation: 'Location', taskVendor: 'Vendor', taskAssigned: 'Assigned', taskClient: 'Client', taskSidemark: 'Sidemark', taskCreated: 'Created', taskFolder: 'Folder' };
 
@@ -214,6 +224,14 @@ function TasksTab({ tasks, onNavigate, indicators, canEditPriority }: { tasks: S
   // resolved (10-20s on a slow GAS round-trip), which was the root cause
   // of Justin's "click priority, can't revert for 10 seconds" complaint.
   const [prioritySaving, setPrioritySaving] = useState<Set<string>>(new Set());
+  // Per-taskId AbortControllers so a rapid Normal→High→Normal sequence
+  // aborts the in-flight first request before its (slow, possibly-out-
+  // of-order) response can land canonical state on the wrong value.
+  // Each click cancels the previous in-flight write for the same taskId
+  // and records a fresh controller. Abort is silent — the .catch in the
+  // fire-and-forget block ignores AbortError and the state stays at the
+  // user's most-recent intent.
+  const priorityAbortRef = useRef<Record<string, AbortController>>({});
   useEffect(() => {
     // Drop overrides whose value matches the canonical row value — keeps
     // the map small and avoids stale flashes if a value flips back.
@@ -265,9 +283,20 @@ function TasksTab({ tasks, onNavigate, indicators, canEditPriority }: { tasks: S
       setPrioritySaving(prev => { const s = new Set(prev); s.delete(taskId); return s; });
     }, 400);
 
+    // Abort any in-flight write for this taskId before issuing the new
+    // one. Without this, a rapid Normal→High→Normal could land canonical
+    // on the wrong value (slow first call returns AFTER fast second
+    // call), and the override-clear-on-canonical-match logic would never
+    // fire because the override matches the user's last click but
+    // canonical matches the stale first call.
+    priorityAbortRef.current[taskId]?.abort();
+    const controller = new AbortController();
+    priorityAbortRef.current[taskId] = controller;
+
     // Fire-and-forget: priority write. On failure, revert the override
     // so the canonical state is restored (next refetch matches anyway).
-    void postUpdateTaskPriority({ taskId, priority: next }, sheetId)
+    // AbortError silently ignored — the latest click's controller wins.
+    void postUpdateTaskPriority({ taskId, priority: next }, sheetId, controller.signal)
       .then(resp => {
         if (!resp.ok || !resp.data?.success) {
           setPriorityOverrides(prev => ({ ...prev, [taskId]: current }));
@@ -275,15 +304,19 @@ function TasksTab({ tasks, onNavigate, indicators, canEditPriority }: { tasks: S
           entityEvents.emit('task', taskId);
         }
       })
-      .catch(() => setPriorityOverrides(prev => ({ ...prev, [taskId]: current })));
+      .catch(err => {
+        if (err?.name === 'AbortError') return;  // superseded by a newer click
+        setPriorityOverrides(prev => ({ ...prev, [taskId]: current }));
+      });
 
     // Auto-set due_date = today on the High transition. Separate fire-
-    // and-forget call (no atomic batch endpoint exists today). On
-    // failure: leave the optimistic override + log; the priority change
-    // still succeeded so the user-visible "I set it to High" intent
-    // landed at least partially.
+    // and-forget call (no atomic batch endpoint exists today). Shares
+    // the same AbortController as the priority write — if a later click
+    // supersedes this one, both writes for this click cancel together.
+    // Note: this OVERWRITES any existing due_date (e.g. an SLA-stamped
+    // 3-days-out date) — intended per Justin's spec ("High = today").
     if (next === 'High') {
-      void postUpdateTaskDueDate({ taskId, dueDate: TODAY_DASH }, sheetId)
+      void postUpdateTaskDueDate({ taskId, dueDate: TODAY_DASH }, sheetId, controller.signal)
         .then(resp => {
           if (!resp.ok || !resp.data?.success) {
             console.warn('[dashboard] auto-set due date on High failed:', resp.error);
@@ -291,7 +324,9 @@ function TasksTab({ tasks, onNavigate, indicators, canEditPriority }: { tasks: S
             entityEvents.emit('task', taskId);
           }
         })
-        .catch(err => console.warn('[dashboard] auto-set due date on High failed:', err));
+        .catch(err => {
+          if (err?.name !== 'AbortError') console.warn('[dashboard] auto-set due date on High failed:', err);
+        });
     }
   }, [canEditPriority, priorityOverrides, prioritySaving]);
 
