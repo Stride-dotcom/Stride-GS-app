@@ -2922,21 +2922,21 @@ export function CreateDeliveryOrderModal({
 
         // v2026-05-13 — auto re-push to DT after a successful edit-save on
         // ALREADY-PUSHED orders. Closes the "saved but forgot to Republish"
-        // footgun. Drafts and pending-review orders are excluded (the helper
-        // checks pushed_to_dt_at). Both legs go in parallel; failures surface
-        // as a warning but don't block the save (the Supabase write already
-        // succeeded — operator can retry from each order page).
+        // footgun. Drafts and pending-review orders short-circuit naturally
+        // via the helper's `pushed_to_dt_at IS NULL` filter — that path is
+        // intentional, not a missed case (those orders haven't been
+        // approved yet, so there's no DT-side counterpart to update).
+        //
+        // On failure: keep the modal OPEN with an inline error so the
+        // operator sees the push didn't go through. Closing the modal
+        // would have swallowed the error (caught in code review — the
+        // setSubmitError-then-onClose pattern doesn't render anything
+        // because the modal unmounts before the error renders). The
+        // parent still gets onSubmit so it refetches the order data.
         const legsToPush: string[] = [];
         if (editingPickupRowIdRef.current) legsToPush.push(editingPickupRowIdRef.current);
         if (editingDraftRowIdRef.current) legsToPush.push(editingDraftRowIdRef.current);
         const { failures: pdPushFailures } = await repushOrdersAfterEdit(supabase, legsToPush);
-        if (pdPushFailures.length > 0) {
-          const summary = pdPushFailures.map(f => `${f.identifier}: ${f.error}`).join('; ');
-          setSubmitError(
-            `Saved, but auto-republish to DT failed for ${pdPushFailures.length} leg(s): ${summary}. ` +
-            `Open the affected order(s) and click Republish to DT manually.`,
-          );
-        }
 
         onSubmit?.({
           dtOrderId: savedDelivery.id,
@@ -2944,6 +2944,17 @@ export function CreateDeliveryOrderModal({
           reviewStatus: savedDelivery.review_status,
           clientResubmit: isClientResubmittingPD,
         });
+
+        if (pdPushFailures.length > 0) {
+          const summary = pdPushFailures.map(f => `${f.identifier}: ${f.error}`).join('; ');
+          setSubmitError(
+            `Saved, but auto-republish to DT failed for ${pdPushFailures.length} leg(s): ${summary}. ` +
+            `Close this dialog and click Republish to DT manually on the affected order(s).`,
+          );
+          setSubmitting(false);
+          return;  // keep modal open so the error renders
+        }
+
         onClose();
         return;
       } catch (e) {
@@ -3171,20 +3182,11 @@ export function CreateDeliveryOrderModal({
         });
 
         // v2026-05-13 — auto re-push to DT after a successful single-leg
-        // edit-save on an ALREADY-PUSHED order. Same rationale as the P+D
-        // block: closes the "saved but forgot to Republish" footgun. The
-        // helper short-circuits when pushed_to_dt_at is null (drafts /
-        // pending-review).
+        // edit-save on an ALREADY-PUSHED order. Same rationale + same
+        // keep-modal-open-on-failure pattern as the P+D block above.
         const { failures: singleLegPushFailures } = await repushOrdersAfterEdit(
           supabase, [savedRow.id],
         );
-        if (singleLegPushFailures.length > 0) {
-          const f = singleLegPushFailures[0];
-          setSubmitError(
-            `Saved, but auto-republish to DT failed for ${f.identifier}: ${f.error}. ` +
-            `Open the order and click Republish to DT manually.`,
-          );
-        }
 
         onSubmit?.({
           dtOrderId: savedRow.id,
@@ -3192,6 +3194,17 @@ export function CreateDeliveryOrderModal({
           reviewStatus: savedRow.review_status,
           clientResubmit: isClientResubmittingSingle,
         });
+
+        if (singleLegPushFailures.length > 0) {
+          const f = singleLegPushFailures[0];
+          setSubmitError(
+            `Saved, but auto-republish to DT failed for ${f.identifier}: ${f.error}. ` +
+            `Close this dialog and click Republish to DT manually.`,
+          );
+          setSubmitting(false);
+          return;  // keep modal open so the error renders
+        }
+
         onClose();
         return;
       } catch (e) {

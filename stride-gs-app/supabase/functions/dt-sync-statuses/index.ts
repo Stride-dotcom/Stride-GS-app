@@ -1,5 +1,11 @@
 /**
- * dt-sync-statuses — Supabase Edge Function — v14 2026-05-13 PST
+ * dt-sync-statuses — Supabase Edge Function — v15 2026-05-13 PST
+ *
+ * v15: P+D mirror idempotency. The v14 INSERT-branch mirror could leave a
+ *      PU line without a delivery counterpart if the mirror INSERT failed
+ *      on first sync (PU line exists → next sync hits UPDATE branch, never
+ *      retries). v15 adds a missing-counterpart check to the UPDATE branch
+ *      so the mirror is back-filled on subsequent runs.
  *
  * v14: P+D mirror for driver-added PU lines. When the item-reconcile
  *      block INSERTs a new PU item (DT introduced a line outside our
@@ -306,6 +312,33 @@ Deno.serve(async (req) => {
           if (r.dt_item_code) localByCode.set(r.dt_item_code, { id: r.id, extras: r.extras });
         }
 
+        // Helper for the P+D mirror branch (used by both INSERT-new and
+        // UPDATE-existing paths). Strips the "PICK UP: PU:" prefix DT
+        // adds to pickup-leg descriptions so the delivery row reads
+        // clean — matches the convention used by CreateDeliveryOrderModal
+        // at L1459 ("Description format is stored CLEAN ... on either leg").
+        const stripPuPrefix = (raw: string | null | undefined): string => {
+          return (raw ?? '').replace(/^\s*(PICK\s*UP:\s*)?(PU:\s*)?/i, '').replace(/\s+/g, ' ').trim();
+        };
+        const createMirrorOnDelivery = async (puItemId: string, puIt: typeof parsed.items[number]) => {
+          const cleanDesc = stripPuPrefix(puIt.description) || (puIt.description ?? '');
+          const mirrorRes = await supabase.from('dt_order_items').insert({
+            dt_order_id:           o.linked_order_id,
+            dt_item_code:          null,  // delivery doesn't have a DT-side id yet; dt-push-order will assign on next push
+            description:           cleanDesc,
+            quantity:              puIt.quantity,
+            original_quantity:     puIt.quantity,
+            parent_pickup_item_id: puItemId,
+            extras:                { source: 'pickup_added_in_dt_mirrored', added_at: new Date().toISOString() },
+            last_synced_at:        new Date().toISOString(),
+          });
+          if (mirrorRes.error) {
+            result.errors.push(`${o.dt_identifier} P+D mirror insert for new PU item ${puIt.item_id}: ${mirrorRes.error.message}`);
+          } else {
+            console.log(`[dt-sync-statuses] P+D mirror — created delivery counterpart for new PU item ${puIt.item_id} on order=${o.dt_identifier}`);
+          }
+        };
+
         // UPDATE matching + INSERT new
         for (const it of parsed.items) {
           if (!it.item_id) continue;
@@ -320,6 +353,29 @@ Deno.serve(async (req) => {
               return_codes:       it.return_codes,
               last_synced_at:     new Date().toISOString(),
             }).eq('id', local.id);
+            // Idempotency: if a prior sync run inserted the PU line but
+            // the mirror INSERT failed, the PU line is now in the UPDATE
+            // branch and would never get its delivery counterpart created.
+            // Detect missing counterparts here and back-fill. Only runs
+            // for P+D pairs where the PU line was added by dt_sync (not
+            // by the app's CreateDeliveryOrderModal — those already have
+            // mirrors created at the modal save).
+            if (o.order_type === 'pickup' && o.linked_order_id) {
+              const addedByDtSync = (local.extras as Record<string, unknown> | null)?.added_by === 'dt_sync';
+              if (addedByDtSync) {
+                const { data: existingMirror } = await supabase
+                  .from('dt_order_items')
+                  .select('id')
+                  .eq('dt_order_id', o.linked_order_id)
+                  .eq('parent_pickup_item_id', local.id)
+                  .is('removed_at', null)
+                  .limit(1)
+                  .maybeSingle();
+                if (!existingMirror) {
+                  await createMirrorOnDelivery(local.id, it);
+                }
+              }
+            }
           } else {
             // Insert: DT introduced this line outside our app. Stamp
             // extras.added_by so downstream surfaces (Order page badges,
@@ -358,25 +414,11 @@ Deno.serve(async (req) => {
               //   (b) Tier-B propagation at end of loop will stamp
               //       picked_up_at + audit columns on the new delivery
               //       item (if the PU item is already delivered=true).
-              // Description is stored CLEAN on the delivery side (no
-              // "PICK UP: PU:" prefix) to match the existing convention
-              // from CreateDeliveryOrderModal at L1459.
-              const cleanDesc = (it.description ?? '').replace(/^\s*(PICK\s*UP:\s*)?(PU:\s*)?/i, '').replace(/\s+/g, ' ').trim();
-              const mirrorErr = (await supabase.from('dt_order_items').insert({
-                dt_order_id:           o.linked_order_id,
-                dt_item_code:          null,  // delivery doesn't have a DT-side id yet; dt-push-order will assign on next push
-                description:           cleanDesc || it.description,
-                quantity:              it.quantity,
-                original_quantity:     it.quantity,
-                parent_pickup_item_id: (insRes.data as { id: string }).id,
-                extras:                { source: 'pickup_added_in_dt_mirrored', added_at: new Date().toISOString() },
-                last_synced_at:        new Date().toISOString(),
-              })).error;
-              if (mirrorErr) {
-                result.errors.push(`${o.dt_identifier} P+D mirror insert for new PU item ${it.item_id}: ${mirrorErr.message}`);
-              } else {
-                console.log(`[dt-sync-statuses] P+D mirror — created delivery counterpart for new PU item ${it.item_id} on order=${o.dt_identifier}`);
-              }
+              // Retry path: if this mirror INSERT fails, the next sync
+              // run will hit the UPDATE branch above (the PU item now
+              // exists locally) and will back-fill the mirror via the
+              // existing-counterpart check.
+              await createMirrorOnDelivery((insRes.data as { id: string }).id, it);
             }
           }
         }
