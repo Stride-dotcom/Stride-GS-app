@@ -88,15 +88,16 @@ Operational tasks (Inspect, Assemble, Move, etc.) per inventory item.
 
 ## Repairs
 
-Repair quotes → approve/decline → execute → bill.
+Repair quotes → approve/decline → execute → bill. Supports multi-item jobs (PR #397) — one repair can carry N items via `repair_items`, one quote/status/billing event at the parent level.
 
 | Layer | Files |
 |---|---|
 | Pages | `src/pages/Repairs.tsx`, `src/pages/RepairPage.tsx`, `src/pages/RepairJobPage.tsx` (legacy) |
 | Hooks | `src/hooks/useRepairs.ts`, `src/hooks/useRepairDetail.ts` |
-| Components | `src/components/shared/RepairDetailPanel.tsx` |
-| Migrations | `20260417020000_add_repair_date_columns.sql` (quote_date, completed_date) |
-| Apps Script | `AppScripts/stride-client-inventory/src/Repairs.gs` (quote request, approval, billing) |
+| Components | `src/components/shared/RepairDetailPanel.tsx` (items table renders when `items.length > 1`) |
+| Edge Functions | `supabase/functions/request-repair-quote-sb/index.ts` v1 (SB-authoritative create — RPC + REPAIR_QUOTE_REQUEST email via Resend; replaces GAS bulk-quote for multi-item path) |
+| Migrations | `20260417020000_add_repair_date_columns.sql` (quote_date, completed_date), `20260513160000_repair_items_table.sql` (PR #397 — `public.repair_items` join table + backfill from existing single-item repairs), `20260513170000_create_repair_quote_request_rpc.sql` (PR #397 — `next_repair_id` helper + `create_repair_quote_request` SECURITY DEFINER RPC) |
+| Apps Script | `AppScripts/stride-client-inventory/src/Repairs.gs` (single-item quote request — used by TaskDetailPanel / ItemDetailPanel; legacy path until SB cutover. Multi-item path goes through `request-repair-quote-sb` edge function.) |
 
 ---
 

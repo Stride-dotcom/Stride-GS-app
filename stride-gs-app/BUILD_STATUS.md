@@ -1,10 +1,52 @@
 # Stride GS App — Build Status
 
-> Last updated: 2026-05-13 ([feat/delivery/pu-delivery-item-sync, PRs #388 + #389] PU→Delivery sync engine. When a DT pickup leg completes, the linked delivery order now (a) shows a green "Picked up [time] by [driver]" banner, (b) shows a per-item "From pickup" sub-row when the PU driver counted differently / added notes / flagged return codes, and (c) gets re-pushed to DT so the delivery driver's manifest reflects the post-PU reality. Two-tier helper `stamp-pickup-on-linked-delivery.ts`: Tier A (order-level stamps + picked_up_at) fires from both the webhook and the sync path; Tier B (per-item field propagation via `parent_pickup_item_id` FK match + DT push-back) fires only from the sync path where DT export.xml data is fresh. Quantity overwrite gated behind `quantity === original_quantity` so staff edits aren't reverted. Audit columns `pickup_item_note` / `pickup_return_codes` / `pickup_delivered_quantity` keep the PU mirror separate from the delivery's own driver-side fields, eliminating the brittle sentinel-marker concatenation that the first cut used.).
+> Last updated: 2026-05-13 ([feat/repair/multi-item-select, PR #397] Multi-item repair jobs — mirrors the will_calls/will_call_items pattern. Select N inventory items → bulk Request Repair Quote → ONE repair with N items underneath (was: N separate repairs). New `public.repair_items` join table + `create_repair_quote_request` SECURITY DEFINER RPC. New `request-repair-quote-sb` Edge Function calls the RPC then dispatches REPAIR_QUOTE_REQUEST email via Resend with server-rendered `{{ITEM_TABLE_HTML}}` token — zero GAS interaction in the create flow. RepairDetailPanel renders an items table when items.length > 1; legacy single-item view preserved for back-compat. Quote/pricing/status/completion-billing all stay at the parent level: one quote per job, per-item pass/fail informational only. Backfill on the migration gave every existing repair (33 rows) one matching repair_items row so the data model is uniform from day one. Legacy single-item path (Tasks/ItemDetailPanel) keeps using GAS — cutover to SB is a separate Migration phase.).
+
+> Earlier 2026-05-13 ([feat/delivery/pu-delivery-item-sync, PRs #388 + #389] PU→Delivery sync engine. When a DT pickup leg completes, the linked delivery order now (a) shows a green "Picked up [time] by [driver]" banner, (b) shows a per-item "From pickup" sub-row when the PU driver counted differently / added notes / flagged return codes, and (c) gets re-pushed to DT so the delivery driver's manifest reflects the post-PU reality. Two-tier helper `stamp-pickup-on-linked-delivery.ts`: Tier A (order-level stamps + picked_up_at) fires from both the webhook and the sync path; Tier B (per-item field propagation via `parent_pickup_item_id` FK match + DT push-back) fires only from the sync path where DT export.xml data is fresh. Quantity overwrite gated behind `quantity === original_quantity` so staff edits aren't reverted. Audit columns `pickup_item_note` / `pickup_return_codes` / `pickup_delivered_quantity` keep the PU mirror separate from the delivery's own driver-side fields, eliminating the brittle sentinel-marker concatenation that the first cut used.).
 
 > Earlier 2026-05-13 ([feat/delivery/dt-sync-cron] `dt-sync-statuses` now runs every 5 min via pg_cron for non-terminal orders. DT-side cancellations no longer require an operator to manually click "Sync from DT" — the polling cron catches them within ~5 min and flips `dt_orders.status_id` to CANCELED, which auto-clears the "D" inventory badge via Inventory.tsx's existing cancelled-category filter. Background: investigation showed DT's API has no documented cancel endpoint AND DT doesn't fire a webhook on cancel — but we already had all the cancel-handling logic in dt-sync-statuses; the only missing piece was triggering it without operator action. Job name: `dt-sync-statuses-active-every-5min`, schedule `*/5 * * * *`, body `{"scope":"active"}`.).
 
 > Earlier 2026-05-13 ([feat/fix/public-form] Public service-request form was 100% broken — every customer submission failed with the generic "We could not submit your request" error since at least 2026-04-27 (last successful submission in `dt_orders` source=public_form). Root cause: the supabase-js `.insert(...).select(...).single()` chain on `PublicServiceRequest.tsx:908` adds `Prefer: return=representation` which makes PostgREST emit `INSERT ... RETURNING id, dt_identifier`. RETURNING needs anon SELECT permission via RLS, but anon had only an INSERT policy on `dt_orders`. PostgREST surfaced this as the misleading `42501: new row violates row-level security policy` instead of a SELECT-side error. Fix: tightly-scoped anon SELECT policy in migration `20260513124647_dt_orders_anon_select_just_inserted.sql` — matches `source='public_form' AND review_status='pending_review' AND tenant_id IS NULL AND created_at > now() - interval '30 seconds'`. 30s window prevents enumeration of older submissions; everything else mirrors the existing INSERT WITH CHECK. Verified live via curl: anon REST POST with `Prefer: return=representation` now returns 201.).
+
+---
+
+## Recent Changes (2026-05-13, multi-item repair jobs — PR #397)
+
+**Trigger:** Justin asked whether multiple inventory items could be added to a single repair job/quote (like Will Calls). Audit found N-to-1 was structurally unsupported — `repairs.item_id` was a single column, no join table, and bulk-quote operations looped to create N separate repairs. Built the join table + SB-authoritative create path mirroring the WC pattern.
+
+**Design constraints (Justin):**
+- Treat the quote/billing as one charge **per job**, not per item. Pass/fail per item doesn't affect billing.
+- Existing details page, quote, and pricing fields stay exactly as they are — repair just holds more items now.
+- All in Supabase. No GAS/sheet writes except strictly as needed (only the billing-ledger write on completion stays in GAS for now).
+- Email via Resend (`send-email` edge function), not GAS Drive doc generator.
+- Add/remove items after creation: NOT supported — would invalidate the quote, so cancel-and-rebuild OR a future re-quote flow is the correct UX.
+
+**What landed:**
+
+- Migration [`20260513160000_repair_items_table.sql`](stride-gs-app/supabase/migrations/20260513160000_repair_items_table.sql) — new `public.repair_items` join table (id, tenant_id, repair_id, item_id, qty, item_result, item_notes). RLS mirrors `public.repairs` (service_role full, staff/admin SELECT, client SELECT scoped by tenant). Realtime enabled. **Backfill: 33 existing repairs → 33 repair_items rows** so legacy single-item repairs and new multi-item repairs have identical data shape.
+- Migration [`20260513170000_create_repair_quote_request_rpc.sql`](stride-gs-app/supabase/migrations/20260513170000_create_repair_quote_request_rpc.sql) — `next_repair_id(first_item_id)` helper (keeps the existing `RPR-{item_id}-{millis}` format) + `create_repair_quote_request(tenant_id, item_ids[], ...)` SECURITY DEFINER RPC. Atomic parent + items insert. Inventory-membership validation per tenant (`EXCEPT` query → 23503 with the missing IDs). Auth check uses three-case logic documented inline: service_role bypass via `v_caller_uid IS NULL`, staff/admin pass, client raises 42501.
+- Edge function [`request-repair-quote-sb`](stride-gs-app/supabase/functions/request-repair-quote-sb/index.ts) v1 — calls the RPC, resolves client name/email + inventory descriptions/vendors/sidemarks for the email tokens, renders `{{ITEM_TABLE_HTML}}` server-side, dispatches via `send-email` with template `REPAIR_QUOTE_REQUEST`. The template already had the `{{ITEM_TABLE_HTML}}` token — just needed populating (no template edit). Email failure logs to `gs_sync_events` for FailedOperationsDrawer; repair stays committed (success from caller's POV).
+- API helper [`postRequestRepairQuoteSb`](stride-gs-app/src/lib/api.ts) — calls the edge function via `supabase.functions.invoke`.
+- Fetcher: [`fetchRepairByIdFromSupabase`](stride-gs-app/src/lib/supabaseQueries.ts) eagerly joins `repair_items` + inventory overlay → exposes `items[]` on `ApiRepair`. New `ApiRepairItem` type.
+- UI: [Inventory.tsx](stride-gs-app/src/pages/Inventory.tsx) bulk-quote handler swapped from `postBatchRequestRepairQuote` (N repairs) to `postRequestRepairQuoteSb` (1 repair with N items). Optimistic temp count drops from N to 1.
+- UI: [RepairDetailPanel.tsx](stride-gs-app/src/components/shared/RepairDetailPanel.tsx) renders an items table when `repair.items.length > 1` — Item ID, Description, Vendor, Sidemark, Location, Result columns. Legacy single-item view preserved for `items.length <= 1` so existing repairs don't visually change.
+
+**Code review fixes applied before merge:**
+- Branch was rebased onto current `origin/source` (had forked off pre-PR-#395/#396 base; would have reverted both)
+- `APP_URL` trailing `#` removed (token was double-prefixing)
+- `gs_sync_events` audit-insert errors now log loudly (no silent swallow)
+- RPC auth-check comment expanded to document the three caller paths
+
+**Out of scope / deferred (each clean follow-up):**
+- Add/Remove item after creation — requote-or-rebuild is the design call; no incremental editing
+- Per-item pass/fail toggle UI — column + display exist (read-only), staff edit UI is future
+- Legacy single-item GAS path → SB cutover — single-item still routes through GAS for folder/email; that's a separate Migration phase
+- Multi-item handling in REPAIR_QUOTE / REPAIR_APPROVED / REPAIR_DECLINED / REPAIR_COMPLETE email templates — currently use single-item tokens for the primary item; multi-item versions can lean on the same `{{ITEM_TABLE_HTML}}` pattern
+
+**Versions deployed live:**
+| Function | Version |
+|---|---|
+| `request-repair-quote-sb` | v1 |
 
 ---
 
