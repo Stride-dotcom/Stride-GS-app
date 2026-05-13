@@ -104,7 +104,7 @@ C:\dev\Stride-GS-app\
 ├── AppScripts\        ← Google Apps Script tooling + rollout scripts
 ├── _archive\          ← Docs, design specs, session history
 ├── CLAUDE.md          ← THIS FILE — canonical builder guide
-└── stride-gs-app\CLAUDE.md  ← same content, kept for IDE subdir opens
+└── stride-gs-app\CLAUDE.md  ← pointer to this file (do not edit)
 ```
 
 ## New machine setup
@@ -140,8 +140,8 @@ Dropbox\Apps\GS Inventory\credentials\.sync-config.json  →  AppScripts\stride-
 - **TypeScript must stay clean** — run `npx tsc --noEmit` (or `node node_modules/typescript/lib/tsc.js --noEmit`) before finishing.
 - **Version header on every `.gs`/`.js` edit.** Patch bump for fixes, minor for features. PST timestamps.
 - **Header-based column mapping.** Use `getHeaderMap_()` / `headerMapFromRow_()`. Never positional indexes.
-- **Use existing components** — check `src/components/shared/` (60 components) before creating new ones.
-- **Use existing hooks** — check `src/hooks/` (61 hooks) before creating new ones.
+- **Use existing components** — check `src/components/shared/` (65 components) before creating new ones.
+- **Use existing hooks** — check `src/hooks/` (71 hooks) before creating new ones.
 - **Follow the design system** — Stride orange (#E85D2D), Inter font, `theme.v2` tokens. See `_archive/Docs/Entity_Page_Design_Spec.md` for entity page design.
 - **Update BUILD_STATUS.md at end of session.**
 
@@ -191,10 +191,10 @@ Do not skip steps. `tsc --noEmit` passing is not sufficient — always run `npm 
 
 ## Tech Stack
 
-- **Build:** Vite + React 18 + TypeScript
-- **Tables:** TanStack Table v8
+- **Build:** Vite 8 + React 19 + TypeScript 5.9
+- **Tables:** TanStack Table v8 + TanStack Virtual v3
 - **Icons:** Lucide React
-- **Router:** HashRouter (GitHub Pages SPA compatibility)
+- **Router:** React Router v7 with HashRouter (GitHub Pages SPA compatibility)
 - **State:** React hooks + TanStack Query patterns (useApiData)
 - **Supabase:** Read cache mirror of all entities + auth + DT integration + messaging + audit log
 
@@ -204,14 +204,14 @@ Do not skip steps. `tsc --noEmit` passing is not sufficient — always run `npm 
 stride-gs-app/src/
 ├── components/
 │   ├── layout/          ← Sidebar, Header, AppLayout
-│   ├── shared/          ← 60 reusable components (detail panels, modals, etc.)
+│   ├── shared/          ← 65 reusable components (detail panels, modals, etc.)
 │   └── ui/              ← Base UI primitives
-├── hooks/               ← 61 hooks (data, UI, billing, messaging, etc.)
+├── hooks/               ← 71 hooks (data, UI, billing, messaging, etc.)
 ├── lib/
 │   ├── api.ts           ← apiFetch<T>(), typed API functions
 │   ├── supabase.ts      ← Supabase client
 │   └── supabaseQueries.ts ← Read query helpers
-├── pages/               ← 33 page files (14 main + entity detail pages + job pages)
+├── pages/               ← 39 page files (entity list pages + entity detail pages + job pages + public pages)
 └── types/               ← TypeScript type definitions
 ```
 
@@ -225,10 +225,10 @@ stride-gs-app/src/
 
 ## Supabase
 
-- **Migration files:** `stride-gs-app/supabase/migrations/YYYYMMDDHHMMSS_name.sql` (57 migrations applied)
+- **Migration files:** `stride-gs-app/supabase/migrations/YYYYMMDDHHMMSS_name.sql` (~140 migrations applied — `ls supabase/migrations/*.sql | wc -l` for exact)
 - **Apply migrations:** MCP tool `apply_migration(project_id='uqplppugeickmamycpuz', name, query)`. Write the SQL file first (git source of truth), then apply via MCP.
 - **Client:** `stride-gs-app/src/lib/supabase.ts` — anon key in `.env` as `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY`
-- **Edge Functions (6 deployed):** dt-backfill-orders, dt-push-order, dt-sync-statuses, dt-webhook-ingest, notify-new-order, stax-catalog-sync
+- **Edge Functions (~19 deployed in `supabase/functions/`):** DispatchTrack (dt-*), Stax (stax-*), notification (notify-*, send-*), and shadow/replay helpers. `ls supabase/functions/` for the current list.
 
 ## Role-based access
 
