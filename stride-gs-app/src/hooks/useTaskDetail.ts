@@ -85,7 +85,16 @@ export function useTaskDetail(taskId: string | undefined, clientSheetIdHint?: st
         // Session 70 fix #9: if sidemark / clientName still empty, fall back to
         // inventory for the same itemId. Many historical task rows have null
         // sidemark / client_name on the Supabase side.
-        const needsFallback = !sbTask.sidemark || !sbTask.clientName || !sbTask.vendor || !sbTask.description;
+        //
+        // v2026-05-13: also overlay itemClass. The public.tasks table has no
+        // item_class column, so mapSupabaseTaskRow returns an empty string;
+        // the list path (fetchTasksFromSupabase) overlays from inventory, but
+        // the single-task by-id path bypassed that overlay. Result: when
+        // TaskPage / standalone deep links open a panel, AddTaskServiceModal
+        // got itemClass=undefined → rateForClass(svc, null) returned 0 for
+        // every class-based service → addon saved at $0. PR #360 fixed the
+        // list path; this fix closes the gap on the single-task path.
+        const needsFallback = !sbTask.sidemark || !sbTask.clientName || !sbTask.vendor || !sbTask.description || !sbTask.itemClass;
         if (needsFallback && sbTask.itemId) {
           fetchItemsByIdsFromSupabase([sbTask.itemId], clientNameMapRef.current)
             .then(items => {
@@ -99,6 +108,7 @@ export function useTaskDetail(taskId: string | undefined, clientSheetIdHint?: st
                 vendor: prev.vendor || inv.vendor || '',
                 description: prev.description || inv.description || '',
                 location: prev.location || inv.location || '',
+                itemClass: prev.itemClass || inv.itemClass || '',
               } : prev);
             })
             .catch(() => {}); // best-effort
