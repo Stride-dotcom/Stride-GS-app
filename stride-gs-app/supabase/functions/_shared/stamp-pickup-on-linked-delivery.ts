@@ -69,7 +69,10 @@ export interface StampPickupResult {
 export async function stampPickupOnLinkedDelivery(
   opts: StampPickupOptions,
 ): Promise<StampPickupResult> {
-  const { supabase, pickupOrderId, source: _source } = opts;
+  const { supabase, pickupOrderId } = opts;
+  // `source` is reserved for future telemetry (entity_audit_log etc.);
+  // intentionally not consumed yet — the helper has no audit row today
+  // since the change is a derived-cache update, not an action.
 
   const skip = (reason: string): StampPickupResult => ({
     fired: false,
@@ -129,20 +132,34 @@ export async function stampPickupOnLinkedDelivery(
   const patch: Record<string, string> = { linked_pickup_finished_at: finishedAt };
   if (driverName) patch.linked_pickup_driver_name = driverName;
 
+  // Belt-and-suspenders: scope the UPDATE by tenant_id too. The
+  // d.tenant_id !== p.tenant_id early-return above already prevents
+  // cross-tenant writes, but a future refactor of that guard
+  // shouldn't be able to silently regress data isolation. Mirrors
+  // the auto-release helper's defensive style.
   const { error: updErr } = await supabase
     .from('dt_orders')
     .update(patch)
-    .eq('id', d.id);
+    .eq('id', d.id)
+    .eq('tenant_id', p.tenant_id);
   const orderLevelStamped = !updErr;
 
   // ── 4. Per-item stamp on the linked delivery's items ─────────────
   // Match by (linked_delivery_id, dt_item_code) and only stamp where
   // picked_up_at is still NULL. The eligible set on the pickup is
   // items with delivered=true + non-blank dt_item_code.
+  // Filter out soft-removed pickup lines (removed_at IS NOT NULL). If
+  // an earlier dt-sync-statuses pass retracted a pickup item via the
+  // "Stride has it, DT doesn't" branch, the row stays in the table
+  // with its pre-removal `delivered` value preserved — which could
+  // be `true`, and would otherwise cause us to stamp picked_up_at on
+  // the delivery item for a line that no longer exists on the PU
+  // side. Matches notify-pickup-completed's count query (index.ts L143).
   const { data: pickupItems } = await supabase
     .from('dt_order_items')
     .select('dt_item_code, delivered')
-    .eq('dt_order_id', p.id);
+    .eq('dt_order_id', p.id)
+    .is('removed_at', null);
 
   type ItemRow = { dt_item_code: string | null; delivered: boolean | null };
   const eligibleCodes = ((pickupItems ?? []) as ItemRow[])
