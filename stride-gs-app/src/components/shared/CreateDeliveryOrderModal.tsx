@@ -1477,7 +1477,16 @@ export function CreateDeliveryOrderModal({
       const desc = i.description.trim();
       if (!desc) continue;
       const qty = Math.max(1, Number(i.quantity) || 1);
+      // v2026-05-13 — client-side UUID for the pickup row so we can
+      // stamp it as parent_pickup_item_id on the mirrored delivery row.
+      // This gives every new P+D pair a deterministic cross-order
+      // item link, which the PU→Delivery item-sync engine
+      // (stamp-pickup-on-linked-delivery + propagation helpers) uses
+      // to match counterparts. Without this, the only key is
+      // dt_item_code, which DT regenerates per order — unreliable.
+      const pickupRowId = crypto.randomUUID();
       rows.push({
+        id: pickupRowId,
         dt_order_id: pickupId,
         dt_item_code: null,
         description: desc,
@@ -1491,6 +1500,7 @@ export function CreateDeliveryOrderModal({
         description: desc,
         quantity: qty,
         original_quantity: qty,
+        parent_pickup_item_id: pickupRowId,
         extras: { source: 'pickup_free_text_delivered' },
       });
     }
