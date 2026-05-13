@@ -23,6 +23,7 @@ import { useEntityAddons } from '../../hooks/useEntityAddons';
 import { postProcessWcRelease, postCancelWillCall, postRemoveItemsFromWillCall, postUpdateWillCall, postReopenWillCall, fetchWillCallById, isApiConfigured } from '../../lib/api';
 import { generateWillCallReleasePdf } from '../../lib/workOrderPdf';
 import { fetchWcItemsFromSupabase } from '../../lib/supabaseQueries';
+import { supabase } from '../../lib/supabase';
 import { useClients } from '../../hooks/useClients';
 import { writeSyncFailed } from '../../lib/syncEvents';
 import { entityEvents } from '../../lib/entityEvents';
@@ -257,6 +258,27 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
   const [editCod, setEditCod] = useState(false);
   const [editCodAmount, setEditCodAmount] = useState('');
 
+  // ── COD inline-edit state (view mode, separate from full-panel edit) ──
+  // Lets staff/admin toggle COD + edit the amount directly from the
+  // view-mode pickup-details cluster without entering the full Edit
+  // mode. SB-authoritative path: writes public.will_calls directly,
+  // then fire-and-forgets push-will-call-cod-to-sheet to mirror to
+  // the per-tenant Will_Calls sheet (P2 reverse-writethrough).
+  const [codSaving, setCodSaving] = useState(false);
+  const [codSaveError, setCodSaveError] = useState<string | null>(null);
+  const [codSaveJustSucceeded, setCodSaveJustSucceeded] = useState(false);
+  const [codAmountDraft, setCodAmountDraft] = useState('');
+  const [isCodAmountFocused, setIsCodAmountFocused] = useState(false);
+  // Keep the amount draft in sync with prop changes (e.g. realtime
+  // echo from another tab, or a parent refetch). Skip the resync
+  // while the user has the input focused — otherwise an echo
+  // arriving mid-keystroke (own optimistic patch, another tab's
+  // edit, etc.) would clobber what they're typing.
+  useEffect(() => {
+    if (isCodAmountFocused) return;
+    setCodAmountDraft(wc.codAmount != null ? String(wc.codAmount) : '');
+  }, [wc.codAmount, isCodAmountFocused]);
+
   const handleEditStart = useCallback(() => {
     setEditPickupParty(wc.pickupParty || '');
     setEditPhone(wc.pickupPartyPhone || '');
@@ -353,6 +375,66 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
     }
     setEditSaving(false);
   }, [apiConfigured, clientSheetId, wc, editPickupParty, editPhone, editDate, editNotes, editCod, editCodAmount, onWcUpdated, mergeWcPatch, clearWcPatch]);
+
+  // ── COD inline-edit handler ──
+  // SB-authoritative path: writes public.will_calls directly with the
+  // anon JWT (RLS allows admin/staff via existing tenant-access policy
+  // since Justin's auth context puts user_metadata.role + clientSheetId
+  // on the JWT). Then fire-and-forgets push-will-call-cod-to-sheet to
+  // mirror to the per-tenant Will_Calls sheet via the P1.4
+  // reverse-writethrough framework. Sheet-mirror failures don't unwind
+  // the SB commit — they land in gs_sync_events for the
+  // FailedOperationsDrawer retry, mirroring the
+  // push-inventory-release-to-sheet pattern from PR #378.
+  const handleCodInlineSave = useCallback(async (newCod: boolean, newAmount: number | null) => {
+    if (!clientSheetId || !wc.wcNumber) return;
+    setCodSaving(true);
+    setCodSaveError(null);
+
+    // Optimistic local patch so the UI reflects the change before the
+    // round-trip. Reverted below on failure. mergeWcPatch is the
+    // existing Phase 2C entry-point for this kind of overlay.
+    mergeWcPatch?.(wc.wcNumber, { cod: newCod, codAmount: newAmount ?? undefined } as Partial<WillCall>);
+
+    try {
+      const { error: sbErr } = await supabase
+        .from('will_calls')
+        .update({ cod: newCod, cod_amount: newAmount })
+        .eq('tenant_id', clientSheetId)
+        .eq('wc_number', wc.wcNumber);
+      if (sbErr) throw sbErr;
+
+      // Fire-and-forget the sheet mirror. Failure surfaces in
+      // gs_sync_events / FailedOperationsDrawer — the SB write already
+      // committed so the user-visible change is durable regardless.
+      void supabase.functions
+        .invoke('push-will-call-cod-to-sheet', {
+          body: {
+            tenantId:    clientSheetId,
+            wcNumber:    wc.wcNumber,
+            cod:         newCod,
+            codAmount:   newAmount,
+            requestedBy: user?.email ?? '',
+          },
+        })
+        .catch(err => console.warn('[wc-cod] sheet mirror invoke failed:', err));
+
+      entityEvents.emit('will_call', wc.wcNumber);
+      onWcUpdated?.();
+      setCodSaveJustSucceeded(true);
+      setTimeout(() => setCodSaveJustSucceeded(false), 2000);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error('[wc-cod] supabase write failed:', msg);
+      setCodSaveError(msg);
+      // Revert the optimistic patch so the UI snaps back to the
+      // server-known state. Parent's next refetch (via realtime
+      // echo) restores the canonical row anyway.
+      clearWcPatch?.(wc.wcNumber);
+    } finally {
+      setCodSaving(false);
+    }
+  }, [clientSheetId, wc.wcNumber, user?.email, onWcUpdated, mergeWcPatch, clearWcPatch]);
 
   const inputStyle: React.CSSProperties = { width: '100%', padding: '6px 10px', fontSize: 13, border: `1px solid ${theme.colors.border}`, borderRadius: 6, outline: 'none', fontFamily: 'inherit' };
 
@@ -593,10 +675,81 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
                     <DollarSign size={14} color={theme.colors.textMuted} style={{ marginTop: 2 }} />
                     <div>
                       <div style={{ fontSize: 10, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 3 }}>COD</div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <input type="checkbox" checked={!!wc.cod} readOnly style={{ accentColor: theme.colors.orange, pointerEvents: 'none', width: 16, height: 16 }} />
-                        {wc.cod && wc.codAmount ? <span style={{ fontSize: 13, fontWeight: 600 }}>${Number(wc.codAmount).toFixed(2)}</span> : null}
-                      </div>
+                      {/* Inline-editable COD for staff/admin on active WCs. SB-authoritative
+                          path: writes public.will_calls directly, then fire-and-forgets the
+                          sheet mirror via push-will-call-cod-to-sheet. Released/Cancelled
+                          WCs and non-staff users get the read-only fallback. */}
+                      {(isActive && canRelease) ? (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <input
+                            type="checkbox"
+                            checked={!!wc.cod}
+                            disabled={codSaving}
+                            onChange={e => {
+                              const newCod = e.target.checked;
+                              // Turning ON: keep existing amount or default to 0 so the
+                              // user can edit immediately. Turning OFF: clear the amount
+                              // (null) so the sheet cell empties and the COD Payment
+                              // banner below disappears.
+                              const newAmount = newCod
+                                ? (wc.codAmount != null ? Number(wc.codAmount) : 0)
+                                : null;
+                              void handleCodInlineSave(newCod, newAmount);
+                            }}
+                            style={{ accentColor: theme.colors.orange, cursor: codSaving ? 'wait' : 'pointer', width: 16, height: 16 }}
+                            title="Click to toggle COD"
+                          />
+                          {wc.cod && (
+                            <input
+                              type="number"
+                              step="0.01"
+                              min="0"
+                              value={codAmountDraft}
+                              disabled={codSaving}
+                              onChange={e => setCodAmountDraft(e.target.value)}
+                              onFocus={() => setIsCodAmountFocused(true)}
+                              onBlur={() => {
+                                setIsCodAmountFocused(false);
+                                const parsed = codAmountDraft.trim() === '' ? 0 : parseFloat(codAmountDraft);
+                                if (!Number.isFinite(parsed) || parsed < 0) {
+                                  // Bad input — snap back to the saved value.
+                                  setCodAmountDraft(wc.codAmount != null ? String(wc.codAmount) : '');
+                                  return;
+                                }
+                                if (parsed === Number(wc.codAmount || 0)) return;  // no change
+                                void handleCodInlineSave(true, parsed);
+                              }}
+                              onKeyDown={e => {
+                                if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                                if (e.key === 'Escape') {
+                                  setCodAmountDraft(wc.codAmount != null ? String(wc.codAmount) : '');
+                                  (e.target as HTMLInputElement).blur();
+                                }
+                              }}
+                              placeholder="0.00"
+                              style={{
+                                width: 80, fontSize: 13, fontWeight: 600,
+                                padding: '2px 6px',
+                                border: `1px solid ${theme.colors.border}`,
+                                borderRadius: 4,
+                                fontFamily: 'inherit',
+                                outline: 'none',
+                              }}
+                              title="Edit COD amount (Enter to save, Esc to cancel)"
+                            />
+                          )}
+                          {codSaving && <Loader2 size={12} style={{ animation: 'spin 1s linear infinite', color: theme.colors.textMuted }} />}
+                          {codSaveJustSucceeded && !codSaving && <CheckCircle2 size={12} color="#10B981" />}
+                        </div>
+                      ) : (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <input type="checkbox" checked={!!wc.cod} readOnly style={{ accentColor: theme.colors.orange, pointerEvents: 'none', width: 16, height: 16 }} />
+                          {wc.cod && wc.codAmount ? <span style={{ fontSize: 13, fontWeight: 600 }}>${Number(wc.codAmount).toFixed(2)}</span> : null}
+                        </div>
+                      )}
+                      {codSaveError && (
+                        <div style={{ fontSize: 11, color: '#DC2626', marginTop: 4 }}>{codSaveError}</div>
+                      )}
                     </div>
                   </div>
                 </div>
