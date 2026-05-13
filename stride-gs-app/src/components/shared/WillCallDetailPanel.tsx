@@ -419,8 +419,14 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
         })
         .catch(err => console.warn('[wc-cod] sheet mirror invoke failed:', err));
 
-      entityEvents.emit('will_call', wc.wcNumber);
-      onWcUpdated?.();
+      // NOTE: do NOT call entityEvents.emit('will_call') or onWcUpdated()
+      // here. Both would trigger a parent refetch (which fetches the WC
+      // + items + addons), and combined with the SB realtime echo that
+      // fires automatically on .update(), the panel was re-rendering 3-4
+      // times per click — Justin saw it as the page flashing / refreshing.
+      // The optimistic mergeWcPatch above paints the change immediately,
+      // and the realtime echo overwrites the patch with the canonical row
+      // (matching values, no visible change). That's enough.
       setCodSaveJustSucceeded(true);
       setTimeout(() => setCodSaveJustSucceeded(false), 2000);
     } catch (e) {
@@ -434,7 +440,7 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
     } finally {
       setCodSaving(false);
     }
-  }, [clientSheetId, wc.wcNumber, user?.email, onWcUpdated, mergeWcPatch, clearWcPatch]);
+  }, [clientSheetId, wc.wcNumber, user?.email, mergeWcPatch, clearWcPatch]);
 
   const inputStyle: React.CSSProperties = { width: '100%', padding: '6px 10px', fontSize: 13, border: `1px solid ${theme.colors.border}`, borderRadius: 6, outline: 'none', fontFamily: 'inherit' };
 
