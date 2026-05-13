@@ -1458,18 +1458,46 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
 
   const pageFooter = isCompactViewport && !removeMode ? null : (
     <>
-      {!removeMode && (
+      {!removeMode && !isEditing && (
         <button onClick={handlePrintDocument} disabled={printDocLoading} style={wcDark}>
           {printDocLoading ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> : <FileText size={13} />}
           {printDocLoading ? 'Generating…' : 'Print Document'}
         </button>
       )}
-      {isActive && !cancelResult && !removeMode && (
+      {/* Edit / Save / Cancel — admin/staff on active WCs. Mirrors the
+          slide-out drawer's Edit row (the `footer` var below) which has
+          existed since session 91 but was never wired into pageFooter,
+          so anyone viewing the WC at /will-calls/<id> couldn't get into
+          edit mode to change pickup date / contacts / notes. Reuses the
+          same handleEditStart / handleEditSave / handleEditCancel +
+          isEditing state — toggling Edit reveals input fields for every
+          editable Pickup Details field at once. The other utility
+          buttons (Cancel WC, Remove Items, Print Document, Release Some)
+          hide while isEditing so the footer stays focused on Save/Cancel
+          during the edit. */}
+      {canRelease && isActive && !cancelResult && !removeMode && !releaseResult && releaseMode === 'none' && (
+        isEditing ? (
+          <>
+            <button onClick={handleEditCancel} disabled={editSaving} style={wcLight}>
+              <X size={13} /> Cancel Edit
+            </button>
+            <button onClick={handleEditSave} disabled={editSaving} style={wcOrange}>
+              {editSaving ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> : <Save size={13} />}
+              {editSaving ? 'Saving…' : 'Save'}
+            </button>
+          </>
+        ) : (
+          <button onClick={handleEditStart} style={wcLight}>
+            <Pencil size={13} /> Edit
+          </button>
+        )
+      )}
+      {isActive && !cancelResult && !removeMode && !isEditing && (
         <button onClick={handleCancelWC} disabled={cancelling} style={wcRed}>
           {cancelling ? 'Cancelling…' : 'Cancel WC'}
         </button>
       )}
-      {isActive && !releaseResult && !removeResult && !removeMode && (
+      {isActive && !releaseResult && !removeResult && !removeMode && !isEditing && (
         <button onClick={() => { setRemoveMode(true); setRemoveSelected(new Set()); setRemoveError(null); }} style={wcLight}>
           Remove Items…
         </button>
@@ -1489,7 +1517,7 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
         <button onClick={handleReopenWc} style={wcLight}>Reopen WC</button>
       )}
       {/* Primary release button — orange */}
-      {canRelease && isActive && !releaseResult && !removeResult && releaseMode === 'none' && allItemIds.length > 1 && (
+      {canRelease && isActive && !releaseResult && !removeResult && releaseMode === 'none' && allItemIds.length > 1 && !isEditing && (
         <button onClick={() => { setPartialSelected(new Set(allItemIds)); setReleaseMode('partial'); }} style={wcOrange}>
           Release Some…
         </button>
