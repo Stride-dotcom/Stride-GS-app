@@ -470,25 +470,33 @@ export function BillingPreviewCard({
                     />
                   );
                 })}
-                {/* "+ Add Service" — staff/admin only, lives inside the
-                    projected section so all addon controls are in one place.
-                    v38.177.0: shown for any entity type (was task-only). */}
+                {/* "+ Add Service" — staff/admin only. Pill button so
+                    tablet users get an obvious, tappable target (the
+                    previous full-width dashed-top link was easy to miss
+                    on a touch screen). v38.177.0: shown for any entity
+                    type (was task-only). */}
                 {editable && onAddAddon && (
-                  <button
-                    onClick={() => setShowAddModal(true)}
-                    style={{
-                      width: '100%',
-                      padding: '8px 12px', fontSize: 12, fontWeight: 600,
-                      border: 'none', borderTop: `1px dashed ${theme.colors.border}`,
-                      background: '#fff', color: theme.colors.orange,
-                      cursor: 'pointer', fontFamily: 'inherit',
-                      display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-                    }}
-                    onMouseEnter={e => { e.currentTarget.style.background = theme.colors.bgSubtle; }}
-                    onMouseLeave={e => { e.currentTarget.style.background = '#fff'; }}
-                  >
-                    <Plus size={13} /> Add Service
-                  </button>
+                  <div style={{
+                    padding: '10px 12px',
+                    borderTop: `1px solid ${theme.colors.border}`,
+                    display: 'flex', justifyContent: 'center',
+                  }}>
+                    <button
+                      onClick={() => setShowAddModal(true)}
+                      style={{
+                        padding: '8px 18px', fontSize: 13, fontWeight: 600,
+                        border: 'none', borderRadius: 999,
+                        background: theme.colors.orange, color: '#fff',
+                        cursor: 'pointer', fontFamily: 'inherit',
+                        display: 'inline-flex', alignItems: 'center', gap: 6,
+                        boxShadow: '0 1px 3px rgba(0,0,0,0.12)',
+                      }}
+                      onMouseEnter={e => { e.currentTarget.style.filter = 'brightness(0.92)'; }}
+                      onMouseLeave={e => { e.currentTarget.style.filter = 'none'; }}
+                    >
+                      <Plus size={14} /> Add Service
+                    </button>
+                  </div>
                 )}
                 <SubtotalRow
                   label={`Projected subtotal · ${(primary ? 1 : 0) + projectedAddons.length} ${(primary ? 1 : 0) + projectedAddons.length === 1 ? 'line' : 'lines'}`}
