@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.210.0 — 2026-05-12 PST — [MIGRATION-P2 backfill] Bulk-write endpoint for the DT-Finished release backfill. New doPost case "mirrorInventoryReleaseBulk" routes to `handleMirrorInventoryReleaseBulk_`, which opens the per-tenant Inventory sheet ONCE per tenant and bulk-writes Status='Released' + Release Date for an array of {itemId, releaseDate} tuples via setValues (vs. the per-row reverseWritethrough path that round-trips once per item). Used by the new `backfill-dt-finished-releases` Edge Function to mirror Supabase-authoritative release writes into the legacy sheet at ~150 items/tenant in <2s instead of ~150s. Idempotent: rows already at Status='Released' are skipped without overwriting their existing release_date; not-found Item IDs surface in the response for operator review. Calls `api_ledgerUpdateStatus_` once per tenant with the actually-released IDs so the slot ledger stays in sync. NOT part of the P1.4 reverse-writethrough framework — that framework is single-row-per-call by design and the bulk path needed its own GAS endpoint for the throughput; per-row writes continue to use `__writeThroughReverseInventory_` via `handleWriteThroughReverse_`.
+   StrideAPI.gs — v38.211.0 — 2026-05-13 PST — Auto-cancel of open Tasks and Repairs when an item flips to Released. Pre-fix only the Transfer flow cancelled downstream work; the three other release paths (will-call release via `handleProcessWcRelease_`, manual bulk release via `handleReleaseItems_`, manual single-item Status→Released flip via `handleUpdateInventoryItem_`, plus the SB-primary reverse-writethrough release via `__writeThroughReverseInventory_` and the DT-Finished bulk backfill via `handleMirrorInventoryReleaseBulk_`) all left orphaned Open/In-Progress tasks + Pending-Quote/Quote-Sent/Approved/In-Progress repairs on the books with no item present to perform the work on. New helper `api_cancelOpenWorkOnRelease_(ss, itemIds, releaseSource, callerEmail)` opens the per-tenant Tasks and Repairs sheets via header maps (no positional indexes), filters to rows whose Item ID is in the released set AND whose Status is NOT already a terminal state (Tasks: Completed/Cancelled; Repairs: Complete/Completed/Failed/Cancelled/Declined), and bulk-writes Status="Cancelled" + Cancelled At=now() + appends "Auto-cancelled: item released via {source}" to the notes column. Writes one entity_audit_log row per cancellation via api_auditLog_ with action="cancel" and changes={reason:"item_released", source}. Finishes with a best-effort api_fullClientSync_(ss, ["tasks", "repairs"]) so the React side picks up the cancellations within ~1-2s. Wired into 5 release sites with the appropriate releaseSource string ("Will Call <wcNumber>", "Bulk Release", "Reverse Writethrough", "DT Finished Backfill", "Manual Status Edit"). The manual-edit site reads prevStatus before the write so it only fires on a true Released-transition, not on re-saves of an already-Released row. Each wire-in surfaces tasksCancelled/repairsCancelled counters + any warnings in the response payload. Per Justin: repairs DO get cancelled on release because the item is no longer present to perform the repair on; failed inspections do NOT auto-create repair jobs (current behavior preserved).
+   v38.210.0 — 2026-05-12 PST — [MIGRATION-P2 backfill] Bulk-write endpoint for the DT-Finished release backfill. New doPost case "mirrorInventoryReleaseBulk" routes to `handleMirrorInventoryReleaseBulk_`, which opens the per-tenant Inventory sheet ONCE per tenant and bulk-writes Status='Released' + Release Date for an array of {itemId, releaseDate} tuples via setValues (vs. the per-row reverseWritethrough path that round-trips once per item). Used by the new `backfill-dt-finished-releases` Edge Function to mirror Supabase-authoritative release writes into the legacy sheet at ~150 items/tenant in <2s instead of ~150s. Idempotent: rows already at Status='Released' are skipped without overwriting their existing release_date; not-found Item IDs surface in the response for operator review. Calls `api_ledgerUpdateStatus_` once per tenant with the actually-released IDs so the slot ledger stays in sync. NOT part of the P1.4 reverse-writethrough framework — that framework is single-row-per-call by design and the bulk path needed its own GAS endpoint for the throughput; per-row writes continue to use `__writeThroughReverseInventory_` via `handleWriteThroughReverse_`.
    v38.209.0 — 2026-05-12 PST — handleQboSyncCatalogItem_ now supplies IncomeAccountRef on Service item creates. QBO's /v3/.../item endpoint requires either IncomeAccountRef (sale-able) or ExpenseAccountRef (purchase-only); without it the API rejects the create with HTTP 400 "Required parameter ExpenseAccountRef or IncomeAccountRef is missing in the request". Surfaced by Justin's attempt to add a new FELT service in Price List Settings — the Stax mirror succeeded but the QBO mirror failed and the React layer raised a "Catalog sync failed for FELT — QBO: ..." banner with the full QBO error text. Fix is a new helper qbo_resolveIncomeAccount_(token, realmId, opts, watchdog_) that (1) checks Script Property QBO_INCOME_ACCOUNT_ID for an admin-configured override, (2) falls back to a one-shot QBO query (`SELECT * FROM Account WHERE AccountType='Income' MAXRESULTS 50`) that prefers obvious names (Services / Sales / Income / Sales of Product Income) and caches the resolved ID in Script Properties so subsequent item creates skip the round-trip entirely. handleQboSyncCatalogItem_'s create branch calls the helper inside the existing watchdog before issuing the create. Update + dup-name-update branches are untouched (QBO's update endpoint doesn't require IncomeAccountRef when the field is already set on the existing item). Admins can override the auto-resolved account by setting QBO_INCOME_ACCOUNT_ID directly in Apps Script → Project Settings → Script Properties (useful when Stride services should book to a specific GL line distinct from other income). No schema change, no React change.
    v38.208.0 — 2026-05-12 PST — [MIGRATION-P2 inventory release] First per-table writer registered against the P1.4 reverse-writethrough framework. Replaces `__writeThroughReverseStub_` for the `inventory` table in `REVERSE_WRITETHROUGH_TABLES_` with `__writeThroughReverseInventory_` — finds the row by Item ID, idempotently writes Status + Release Date columns, calls `api_ledgerUpdateStatus_` for slot tracking when flipping to Released. Companion Edge Function `push-inventory-release-to-sheet` fires this after the React OrderPage release flow commits the Supabase-authoritative inventory.status='Released' + release_date write. Sheet stays current as the legacy-readers' read-only mirror until invoice generation flips to Supabase-primary in P4a. Hardening: handleWriteThroughReverse_ now stores the FULL incoming payload in the gs_sync_events row on writer failure (previously only stored {op, table}) so the FailedOperationsDrawer retry — which calls back into this endpoint with the stored payload — has all the fields needed for the second attempt. The earlier shape would have failed retry with "rowId required" on every failed reverse-writethrough.
    v38.207.0 — 2026-05-11 PST — [MIGRATION-P1.7] Expanded `api_redactPayloadForCorpus_` SAFE_FIELDS whitelist for the replay-harness corpus. The original P1.2 list (only sidemark/status/qty/rate/total/amount among the editable fields) was too narrow: every `updateInventoryItem` call that changed `location`/`vendor`/`description`/`reference`/`room`/`itemClass`/`itemNotes`/`declaredValue` got captured with `input_redacted={itemId, requestId}` only — the actual field change got stripped. Replay harness couldn't reconstruct what those calls did. Expanded to cover every field in handleUpdateInventoryItem_'s FIELD_MAP, the Tasks/Repairs SYNC_FIELDS fan-out, the will-call fields, and a few more billing/flag fields commonly seen across migration-target handlers. PII risk stays minimal — these are operator-entered short strings about furniture pieces. Past corpus is partially blind to those fields; replay-harness MVP filters to calls whose changed fields ARE in the original whitelist (so it can be tested today). Future post-deploy traffic will have complete inputs.
@@ -2438,6 +2439,19 @@ function __writeThroughReverseInventory_(ss, payload) {
   if (newStatus === "Released") {
     try { api_ledgerUpdateStatus_([rowId], "released", null); }
     catch (lerr) { Logger.log("__writeThroughReverseInventory_ ledger update non-fatal: " + lerr); }
+
+    // v38.211.0 — Auto-cancel open Tasks / Repairs for this item. DT-Finished
+    // release means the piece left the warehouse on a delivery; whatever
+    // INSP / ASM / repair was queued can't happen anymore.
+    try {
+      var dtCancel = api_cancelOpenWorkOnRelease_(ss, [rowId], "Delivery", "");
+      if (dtCancel.tasksCancelled > 0 || dtCancel.repairsCancelled > 0) {
+        Logger.log("__writeThroughReverseInventory_ auto-cancelled tasks=" +
+          dtCancel.tasksCancelled + " repairs=" + dtCancel.repairsCancelled + " for " + rowId);
+      }
+    } catch (cerr) {
+      Logger.log("__writeThroughReverseInventory_ auto-cancel non-fatal: " + cerr);
+    }
   }
 
   // Flush before returning so subsequent reads (e.g. by a chained
@@ -2599,6 +2613,15 @@ function handleMirrorInventoryReleaseBulk_(payload, callerEmail) {
     // single-row reverse-writethrough writer.
     try { api_ledgerUpdateStatus_(releasedIds, "released", null); }
     catch (lerr) { Logger.log("mirrorInventoryReleaseBulk ledger update non-fatal: " + lerr); }
+
+    // v38.211.0 — Auto-cancel open Tasks / Repairs for every newly-released
+    // item. DT-Finished bulk backfill / push reaches here too; the items
+    // physically left the warehouse and queued work can't be performed.
+    try {
+      api_cancelOpenWorkOnRelease_(ss, releasedIds, "Delivery (bulk)", callerEmail || "");
+    } catch (cerr) {
+      Logger.log("mirrorInventoryReleaseBulk auto-cancel non-fatal: " + cerr);
+    }
   }
 
   return jsonResponse_({
@@ -19439,6 +19462,159 @@ function handleCreateWillCall_(clientSheetId, payload) {
 // ─── Phase 7B #7: Process WC Release ────────────────────────────────────────
 
 /**
+ * api_cancelOpenWorkOnRelease_ — v38.211.0.
+ *
+ * Sweeps Tasks + Repairs for the given itemIds and cancels every row
+ * still in an open state. Called from each item-release path so that
+ * once a piece is gone (will-called, delivered, manually flipped to
+ * Released), the work it had queued up doesn't linger in the operator's
+ * queue.
+ *
+ * "Open" definition:
+ *   • Tasks    — any status NOT in {Completed, Cancelled}
+ *   • Repairs  — any status NOT in {Complete, Completed, Failed,
+ *                Cancelled, Declined}
+ *
+ * Side effects:
+ *   • Status = "Cancelled" on the sheet row
+ *   • Cancelled At = now (when the column exists)
+ *   • Notes column gets the auto-cancel reason appended (delimited
+ *     with " | " if there's existing text)
+ *   • Audit log row written per cancellation
+ *   • Best-effort Supabase mirror of tasks + repairs after the writes
+ *     so the React Tasks / Repairs pages reflect within ~1-2s
+ *
+ * Idempotent — items already in a closed state are skipped silently.
+ *
+ * @param {Spreadsheet} ss            — open client spreadsheet
+ * @param {string[]}    itemIds       — item IDs being released
+ * @param {string}      releaseSource — "Will Call" | "Delivery" | "Manual Status Change"
+ * @param {string}      callerEmail   — for audit attribution
+ * @returns {{ tasksCancelled:number, repairsCancelled:number, warnings:string[] }}
+ */
+function api_cancelOpenWorkOnRelease_(ss, itemIds, releaseSource, callerEmail) {
+  var result = { tasksCancelled: 0, repairsCancelled: 0, warnings: [] };
+  if (!itemIds || !itemIds.length) return result;
+
+  var idSet = {};
+  for (var idi = 0; idi < itemIds.length; idi++) {
+    var iid = String(itemIds[idi] || "").trim();
+    if (iid) idSet[iid] = true;
+  }
+
+  var note = "Auto-cancelled: item released via " + releaseSource;
+  var nowDate = new Date();
+  var ssId = ss.getId();
+  var actor = callerEmail || "";
+
+  var TASK_CLOSED   = { "Completed": true, "Cancelled": true };
+  var REPAIR_CLOSED = { "Complete": true, "Completed": true, "Failed": true, "Cancelled": true, "Declined": true };
+
+  // ── Tasks sweep ──
+  try {
+    var taskSh = ss.getSheetByName("Tasks");
+    if (taskSh) {
+      var thmap = api_getHeaderMap_(taskSh);
+      var tIdCol     = thmap["Task ID"];
+      var tItemCol   = thmap["Item ID"];
+      var tStatusCol = thmap["Status"];
+      var tCancelAtCol = thmap["Cancelled At"];
+      var tNotesCol  = thmap["Task Notes"] || thmap["Item Notes"];
+      var tLast = api_getLastDataRow_(taskSh);
+
+      if (tIdCol && tItemCol && tStatusCol && tLast >= 2) {
+        var tData = taskSh.getRange(2, 1, tLast - 1, taskSh.getLastColumn()).getValues();
+        for (var tri = 0; tri < tData.length; tri++) {
+          var trow = tData[tri];
+          var titem = String(trow[tItemCol - 1] || "").trim();
+          if (!titem || !idSet[titem]) continue;
+          var tstatus = String(trow[tStatusCol - 1] || "").trim();
+          if (TASK_CLOSED[tstatus]) continue;
+
+          var taskId = String(trow[tIdCol - 1] || "").trim();
+          var sheetRow = tri + 2;
+
+          taskSh.getRange(sheetRow, tStatusCol).setValue("Cancelled");
+          if (tCancelAtCol) taskSh.getRange(sheetRow, tCancelAtCol).setValue(nowDate);
+          if (tNotesCol) {
+            var texist = String(trow[tNotesCol - 1] || "").trim();
+            taskSh.getRange(sheetRow, tNotesCol).setValue((texist ? texist + " | " : "") + note);
+          }
+
+          try {
+            api_auditLog_("task", taskId, ssId, "cancel",
+              { status: { old: tstatus, new: "Cancelled" }, reason: note },
+              actor);
+          } catch (auditErr) { /* non-fatal */ }
+
+          result.tasksCancelled++;
+        }
+      }
+    }
+  } catch (terr) {
+    result.warnings.push("Task auto-cancel sweep failed: " + terr);
+  }
+
+  // ── Repairs sweep ──
+  try {
+    var repSh = ss.getSheetByName("Repairs");
+    if (repSh) {
+      var rhmap = api_getHeaderMap_(repSh);
+      var rIdCol     = rhmap["Repair ID"];
+      var rItemCol   = rhmap["Item ID"];
+      var rStatusCol = rhmap["Status"];
+      var rCancelAtCol = rhmap["Cancelled At"];
+      var rNotesCol  = rhmap["Repair Notes"] || rhmap["Item Notes"];
+      var rLast = api_getLastDataRow_(repSh);
+
+      if (rIdCol && rItemCol && rStatusCol && rLast >= 2) {
+        var rData = repSh.getRange(2, 1, rLast - 1, repSh.getLastColumn()).getValues();
+        for (var rri = 0; rri < rData.length; rri++) {
+          var rrow = rData[rri];
+          var ritem = String(rrow[rItemCol - 1] || "").trim();
+          if (!ritem || !idSet[ritem]) continue;
+          var rstatus = String(rrow[rStatusCol - 1] || "").trim();
+          if (REPAIR_CLOSED[rstatus]) continue;
+
+          var repairId = String(rrow[rIdCol - 1] || "").trim();
+          var rSheetRow = rri + 2;
+
+          repSh.getRange(rSheetRow, rStatusCol).setValue("Cancelled");
+          if (rCancelAtCol) repSh.getRange(rSheetRow, rCancelAtCol).setValue(nowDate);
+          if (rNotesCol) {
+            var rexist = String(rrow[rNotesCol - 1] || "").trim();
+            repSh.getRange(rSheetRow, rNotesCol).setValue((rexist ? rexist + " | " : "") + note);
+          }
+
+          try {
+            api_auditLog_("repair", repairId, ssId, "cancel",
+              { status: { old: rstatus, new: "Cancelled" }, reason: note },
+              actor);
+          } catch (auditErr2) { /* non-fatal */ }
+
+          result.repairsCancelled++;
+        }
+      }
+    }
+  } catch (rerr) {
+    result.warnings.push("Repair auto-cancel sweep failed: " + rerr);
+  }
+
+  // Mirror to Supabase so the React Tasks / Repairs pages flip without
+  // waiting on the next page refresh. Best-effort — sheet is authoritative,
+  // a sync failure just means a slight UI lag.
+  if (result.tasksCancelled > 0 || result.repairsCancelled > 0) {
+    try {
+      api_fullClientSync_(ss, ["tasks", "repairs"]);
+    } catch (syncErr) {
+      result.warnings.push("Supabase mirror of cancelled work failed: " + syncErr);
+    }
+  }
+
+  return result;
+}
+
+/**
  * handleProcessWcRelease_ — mirrors StrideProcessReleaseCallback
  *
  * Payload: {
@@ -19909,6 +20085,19 @@ function handleProcessWcRelease_(clientSheetId, payload) {
     warnings.push("Email skipped: ENABLE_NOTIFICATIONS is off for this client");
   }
 
+  // v38.211.0 — Auto-cancel any open Tasks / Repairs for the released
+  // items. Once the piece leaves the warehouse the queued work can't be
+  // performed anyway; leaving it open clutters the operators' queues.
+  try {
+    var wcCancelIds = releasingItems.map(function(it) { return String(it.itemId || "").trim(); }).filter(Boolean);
+    var wcCancelResult = api_cancelOpenWorkOnRelease_(ss, wcCancelIds, "Will Call " + wcNumber, "");
+    if (wcCancelResult.tasksCancelled > 0)   warnings.push("Auto-cancelled " + wcCancelResult.tasksCancelled + " open task(s) on released items");
+    if (wcCancelResult.repairsCancelled > 0) warnings.push("Auto-cancelled " + wcCancelResult.repairsCancelled + " open repair(s) on released items");
+    if (wcCancelResult.warnings.length)      warnings = warnings.concat(wcCancelResult.warnings);
+  } catch (cancelErr) {
+    warnings.push("Auto-cancel sweep failed (non-fatal): " + cancelErr);
+  }
+
   api_bumpSummaryVersion_();
   return jsonResponse_({
     success:       true,
@@ -20003,7 +20192,7 @@ function handleReleaseItems_(clientSheetId, payload, callerEmail) {
     var existingNotes = notesCol ? String(data[i][notesCol - 1] || "").trim() : "";
     var newNotes = existingNotes ? existingNotes + " | " + entrySuffix : entrySuffix;
 
-    changes.push({ rowNum: rowNum, dataIdx: i, newNotes: newNotes });
+    changes.push({ rowNum: rowNum, dataIdx: i, newNotes: newNotes, itemId: rowItemId });
     updated++;
   }
 
@@ -20052,11 +20241,28 @@ function handleReleaseItems_(clientSheetId, payload, callerEmail) {
   // Matches the pattern used by handleStartTask / handleCompleteTask.
   SpreadsheetApp.flush();
 
+  // v38.211.0 — Auto-cancel open Tasks / Repairs for the items we just
+  // released. Items aren't physically here anymore; the queued work
+  // can't be performed.
+  var releaseCancelWarnings = [];
+  if (changes.length > 0) {
+    try {
+      var releasedIds = changes.map(function(c) { return c.itemId; }).filter(Boolean);
+      var relCancelResult = api_cancelOpenWorkOnRelease_(ss, releasedIds, "Release (bulk)", "");
+      if (relCancelResult.tasksCancelled > 0)   releaseCancelWarnings.push("Auto-cancelled " + relCancelResult.tasksCancelled + " open task(s)");
+      if (relCancelResult.repairsCancelled > 0) releaseCancelWarnings.push("Auto-cancelled " + relCancelResult.repairsCancelled + " open repair(s)");
+      if (relCancelResult.warnings.length)      releaseCancelWarnings = releaseCancelWarnings.concat(relCancelResult.warnings);
+    } catch (relCancelErr) {
+      releaseCancelWarnings.push("Auto-cancel sweep failed: " + relCancelErr);
+    }
+  }
+
   return jsonResponse_({
     success: true,
     releasedCount: updated,
     skipped: skipped.length > 0 ? skipped : undefined,
-    totalRequested: itemIds.length
+    totalRequested: itemIds.length,
+    warnings: releaseCancelWarnings.length > 0 ? releaseCancelWarnings : undefined
   });
 }
 
@@ -29994,6 +30200,14 @@ function handleUpdateInventoryItem_(clientSheetId, payload) {
     }
     if (itemRowNum < 2) return errorResponse_("Item not found: " + itemId, "NOT_FOUND");
 
+    // v38.211.0 — Snapshot the previous status BEFORE writes so the
+    // auto-cancel-open-work helper below only fires on actual transitions
+    // into Released (not on re-saves of an already-Released row).
+    var statusColForSnapshot = hmap["Status"];
+    var prevStatus = statusColForSnapshot
+      ? String(sheet.getRange(itemRowNum, statusColForSnapshot).getValue() || "").trim()
+      : "";
+
     // Write each updated field — api_ensureColumn_ resolves the column
     // case-insensitively (or appends it) so the write can never silently
     // no-op due to header-casing drift.
@@ -30174,13 +30388,34 @@ function handleUpdateInventoryItem_(clientSheetId, payload) {
       } catch (sbErr4) { Logger.log("sb_mirror: billing " + mirroredBillingIds[mbi] + " threw " + sbErr4); }
     }
 
+    // v38.211.0 — Auto-cancel open Tasks / Repairs when this update flips
+    // the item INTO Released. Skip on no-op re-saves (prevStatus already
+    // 'Released') and on transitions to other statuses. The transferred
+    // case is handled by handleTransferItems_ which already cancels +
+    // ports source work to the destination — don't double-fire here.
+    var releaseAutoCancelInfo = null;
+    if (updates.hasOwnProperty("status")
+        && String(updates.status) === "Released"
+        && prevStatus !== "Released") {
+      try {
+        var manualCancel = api_cancelOpenWorkOnRelease_(ss, [itemId], "Manual Status Change", "");
+        releaseAutoCancelInfo = {
+          tasksCancelled:   manualCancel.tasksCancelled,
+          repairsCancelled: manualCancel.repairsCancelled
+        };
+      } catch (manualCancelErr) {
+        Logger.log("handleUpdateInventoryItem_ auto-cancel non-fatal: " + manualCancelErr);
+      }
+    }
+
     return jsonResponse_({
       success: true,
       itemId: itemId,
       updated: updates,
       // Surfaces the count for telemetry / debugging — number of Unbilled
       // billing rows on this item that picked up the new sidemark/reference.
-      billingFanOutCount: mirroredBillingIds.length
+      billingFanOutCount: mirroredBillingIds.length,
+      autoCancel: releaseAutoCancelInfo
     });
   } catch (err) {
     return errorResponse_("Failed to update inventory item: " + String(err), "SERVER_ERROR");
