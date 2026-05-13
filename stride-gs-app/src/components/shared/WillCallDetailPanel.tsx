@@ -257,6 +257,7 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
   const [editNotes, setEditNotes] = useState('');
   const [editCod, setEditCod] = useState(false);
   const [editCodAmount, setEditCodAmount] = useState('');
+  const [editRequestedBy, setEditRequestedBy] = useState('');
 
   // ── COD inline-edit state (view mode, separate from full-panel edit) ──
   // Lets staff/admin toggle COD + edit the amount directly from the
@@ -287,6 +288,9 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
     setEditNotes(wc.notes || '');
     setEditCod(!!wc.cod);
     setEditCodAmount(wc.codAmount != null ? String(wc.codAmount) : '');
+    // wc.requestedBy populates from the create modal's "Requested By"
+    // field; some legacy rows fall back to createdBy / createdByUser.
+    setEditRequestedBy((wc as any).requestedBy || (wc as any).createdBy || (wc as any).createdByUser || '');
     setEditSaveError(null);
     setEditSaveSuccess(false);
     setIsEditing(true);
@@ -338,6 +342,12 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
     let changed = false;
     if (editPickupParty !== (wc.pickupParty || '')) { payload.pickupParty = editPickupParty; patch.pickupParty = editPickupParty; changed = true; }
     if (editPhone !== (wc.pickupPartyPhone || '')) { payload.pickupPhone = editPhone; patch.pickupPartyPhone = editPhone; changed = true; }
+    const origRequestedBy = ((wc as any).requestedBy || (wc as any).createdBy || (wc as any).createdByUser || '') as string;
+    if (editRequestedBy !== origRequestedBy) {
+      payload.requestedBy = editRequestedBy;
+      (patch as any).requestedBy = editRequestedBy;
+      changed = true;
+    }
     // Compare normalized forms — wc.scheduledDate may carry a "00:00:00"
     // suffix from older sheets while editDate is always YYYY-MM-DD.
     if (editDate !== toDateInputValue(wc.scheduledDate)) { payload.estimatedPickupDate = editDate; patch.scheduledDate = editDate; changed = true; }
@@ -374,7 +384,7 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
       setEditSaveError('Network error — please try again');
     }
     setEditSaving(false);
-  }, [apiConfigured, clientSheetId, wc, editPickupParty, editPhone, editDate, editNotes, editCod, editCodAmount, onWcUpdated, mergeWcPatch, clearWcPatch]);
+  }, [apiConfigured, clientSheetId, wc, editPickupParty, editPhone, editDate, editNotes, editCod, editCodAmount, editRequestedBy, onWcUpdated, mergeWcPatch, clearWcPatch]);
 
   // ── COD inline-edit handler ──
   // SB-authoritative path: writes public.will_calls directly with the
@@ -647,6 +657,10 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
                   <input value={editPhone} onChange={e => setEditPhone(e.target.value)} style={inputStyle} />
                 </div>
                 <div>
+                  <label style={{ fontSize: 10, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', display: 'block', marginBottom: 3 }}>Requested By</label>
+                  <input value={editRequestedBy} onChange={e => setEditRequestedBy(e.target.value)} placeholder="Who requested this release" style={inputStyle} />
+                </div>
+                <div>
                   <label style={{ fontSize: 10, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', display: 'block', marginBottom: 3 }}>Estimated Pickup Date</label>
                   <input type="date" value={editDate} onChange={e => setEditDate(e.target.value)} style={inputStyle} />
                 </div>
@@ -675,6 +689,7 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 14px' }}>
                   <Field label="Pickup Party" value={wc.pickupParty} icon={User} />
                   <Field label="Phone" value={wc.pickupPartyPhone} icon={Phone} />
+                  <Field label="Requested By" value={(wc as any).requestedBy || (wc as any).createdBy || (wc as any).createdByUser || undefined} icon={User} />
                   <Field label="Estimated Pickup Date" value={fmtDate(wc.scheduledDate)} icon={Calendar} />
                   <Field label="Items" value={`${resolvedItemCount} items`} icon={Package} />
                   <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 10 }}>
