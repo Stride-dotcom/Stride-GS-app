@@ -1565,16 +1565,37 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
     repairItemIdStr,
     repair.clientSheetId ?? null,
   );
+
+  // v2026-05-13 — multi-item rollup. Photos + notes for ALL items in a
+  // multi-item repair (not just the primary) flow into the Photos/Notes
+  // tabs via rollupCtx.itemIds[]. For single-item repairs this is just
+  // [primary]; for multi-item it's every item in repair_items. The
+  // backfill migration guaranteed every repair has ≥1 repair_items row,
+  // so the items[] array is always populated post-PR #397 — falls back
+  // to the primary itemId if items[] is missing (defensive only).
+  const repairAllItemIds = useMemo<string[]>(() => {
+    const ids = (repair.items ?? [])
+      .map(it => it.itemId)
+      .filter((x): x is string => !!x);
+    if (ids.length > 0) return Array.from(new Set(ids));
+    return repairItemIdStr ? [repairItemIdStr] : [];
+  }, [repair.items, repairItemIdStr]);
+  // Stable join key for the deps array — useMemo recreates `repairAllItemIds`
+  // on every fetch, but the contents rarely change. Joining gives us a
+  // primitive comparable for downstream useMemo deps.
+  const repairAllItemIdsKey = repairAllItemIds.join('|');
+
   const rpRollupCtx = useMemo<RollupContext>(() => ({
     tenantId: repair.clientSheetId ?? null,
     // Orphan repairs (no itemId — should be rare) degrade gracefully to a
     // host-only scope so the photo / note rollup still finds the repair's
     // own records.
-    itemIds: repairItemIdStr ? [repairItemIdStr] : [],
-    scopes: repairItemIdStr
+    itemIds: repairAllItemIds,
+    scopes: repairAllItemIds.length > 0
       ? rpContainerScopes
       : [{ entityType: 'repair', entityId: repair.repairId }],
-  }), [repairItemIdStr, repair.repairId, repair.clientSheetId, rpContainerScopes]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [repairAllItemIdsKey, repair.repairId, repair.clientSheetId, rpContainerScopes]);
 
   const builtInTabsCfg = {
     photos: {
@@ -1639,7 +1660,13 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
         entityId={repair.repairId}
         tenantId={repair.clientSheetId}
         itemId={repair.itemId ? String(repair.itemId) : null}
-        enableSourceFilter={!!repair.itemId}
+        enableSourceFilter={repairAllItemIds.length > 0}
+        // v2026-05-13 — multi-item: surface every item so per-item photo
+        // sub-tabs (when the source filter is on) include all items, not
+        // just the primary. rollupCtx.itemIds[] drives the actual photo
+        // aggregation; relatedEntities drives the sub-tab routing for
+        // new uploads.
+        relatedEntities={repairAllItemIds.map(id => ({ type: 'inventory', id }))}
         rollupCtx={rpRollupCtx}
       />
       <DriveFoldersList folders={repairDriveFolders} />
@@ -1655,11 +1682,16 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
     <_NotesPanel
       entityType="repair"
       entityId={repair.repairId}
+      // v2026-05-13 — multi-item: surface EVERY item in the repair as a
+      // related entity so notes attached to any of them roll up here.
+      // For single-item repairs this is identical to the legacy
+      // [repair.itemId] entry. relatedEntities is also still consumed
+      // by the source-filter pill row when enableSourceFilter is true.
       relatedEntities={[
-        ...(repair.itemId ? [{ type: 'inventory', id: String(repair.itemId), label: `Item ${repair.itemId}` }] : []),
+        ...repairAllItemIds.map(id => ({ type: 'inventory', id, label: `Item ${id}` })),
         ...(repair.sourceTaskId ? [{ type: 'task', id: String(repair.sourceTaskId), label: `Task ${repair.sourceTaskId}` }] : []),
       ]}
-      enableSourceFilter={!!repair.itemId}
+      enableSourceFilter={repairAllItemIds.length > 0}
       itemId={repair.itemId ? String(repair.itemId) : null}
       tenantId={repair.clientSheetId ?? null}
       rollupCtx={rpRollupCtx}
