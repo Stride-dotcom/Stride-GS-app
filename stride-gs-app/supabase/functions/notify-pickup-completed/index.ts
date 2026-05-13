@@ -1,6 +1,20 @@
 /**
  * notify-pickup-completed — Supabase Edge Function
  *
+ * Version: v2 (2026-05-13 PST)
+ *   v2: After the email send, invoke the new
+ *       stamp-pickup-on-linked-delivery helper for P+D pairs (when
+ *       order has linked_order_id). Helper writes
+ *       linked_pickup_finished_at + linked_pickup_driver_name on the
+ *       delivery row and stamps picked_up_at on matching delivery items.
+ *       Webhook fires before DT export.xml lag is resolved, so values
+ *       start as (now()/null) and a later dt-sync-statuses run upgrades
+ *       them to (real timestamp/real driver).
+ *
+ * Version: v1 (2026-05-11 PST)
+ *   v1: Initial — staff email on Service_Route_Finished for pickup
+ *       orders. PICKUP_COMPLETED template.
+ *
  * Sends a PICKUP_COMPLETED email to staff in real time when a
  * DispatchTrack pickup leg fires Service_Route_Finished. Invoked
  * from dt-webhook-ingest after the order's status flips to
@@ -25,6 +39,7 @@
  */
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { stampPickupOnLinkedDelivery } from '../_shared/stamp-pickup-on-linked-delivery.ts';
 
 // CORS headers duplicated per-function — see notify-new-order for the
 // rationale on why we don't use a shared module here.
@@ -216,6 +231,32 @@ Deno.serve(async (req: Request) => {
     }
 
     console.log(`[notify-pickup-completed] Sent for pickup ${o.dt_identifier} (resend ${sendJson.resendEmailId ?? 'n/a'})`);
+
+    // ── 7. Propagate pickup completion to the linked delivery row ─────────
+    // Only fires when the pickup has linked_order_id (P+D pair). Standalone
+    // pickups have no linked delivery to stamp. Helper is idempotent + never
+    // throws, so failures here don't affect the email response we just sent.
+    // The webhook path stamps linked_pickup_finished_at = now() as a
+    // placeholder (DT export.xml lags the webhook); a later dt-sync-statuses
+    // run replaces it with the real DT timestamp + populates driver_name.
+    if (o.linked_order_id) {
+      const stampRes = await stampPickupOnLinkedDelivery({
+        supabase,
+        pickupOrderId: o.id,
+        source: 'webhook',
+      });
+      if (stampRes.fired) {
+        console.log(
+          `[notify-pickup-completed] Stamped linked delivery ${stampRes.linkedDeliveryId} for ${o.dt_identifier}: ` +
+          `order-level=${stampRes.orderLevelStamped} items=${stampRes.itemsStamped}/${stampRes.itemsEligibleOnPickup}`,
+        );
+      } else {
+        console.warn(
+          `[notify-pickup-completed] Linked-delivery stamp skipped for ${o.dt_identifier}: ${stampRes.skippedReason}`,
+        );
+      }
+    }
+
     return json({ ok: true });
 
   } catch (err) {
