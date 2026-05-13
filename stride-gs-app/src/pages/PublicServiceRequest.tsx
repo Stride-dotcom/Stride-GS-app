@@ -1593,50 +1593,63 @@ export function PublicServiceRequest() {
                 </label>
               ))}
             </div>
-            <div style={{ display: 'grid', gap: 10 }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-                <div>
-                  <label style={label}>Bill-To Name *</label>
-                  <input style={input} value={billToName} onChange={e => setBillToName(e.target.value)} placeholder="Full name" />
+            {/* Bill-to input fields — only shown when "Other" is
+                selected. For "Same as <pickup/delivery/service> contact"
+                the billToName / billToEmail / billToPhone / billToAddress
+                are auto-filled from the corresponding section's contact
+                (see the useEffect at lines ~667-709) and submitted
+                with the order. Showing duplicate fields would let an
+                operator drift them apart silently — better to lock to
+                the single source of truth and only reveal inputs when
+                the bill-to is genuinely a different party. The `required`
+                attribute on Name/Email/Phone bubbles native HTML5
+                validation when the user hits Submit Request. */}
+            {billToMode === 'other' && (
+              <div style={{ display: 'grid', gap: 10 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                  <div>
+                    <label style={label}>Bill-To Name *</label>
+                    <input style={input} value={billToName} onChange={e => setBillToName(e.target.value)} placeholder="Full name" required />
+                  </div>
+                  <div>
+                    <label style={label}>Company</label>
+                    <input style={input} value={billToCompany} onChange={e => setBillToCompany(e.target.value)} placeholder="Optional" />
+                  </div>
+                  <div>
+                    <label style={label}>Email *</label>
+                    <input style={input} type="email" value={billToEmail} onChange={e => setBillToEmail(e.target.value)} placeholder="invoice@example.com" required />
+                  </div>
+                  <div>
+                    <label style={label}>Phone *</label>
+                    <input style={input} type="tel" value={billToPhone} onChange={e => setBillToPhone(e.target.value)} placeholder="(555) 555-5555" required />
+                  </div>
                 </div>
                 <div>
-                  <label style={label}>Company</label>
-                  <input style={input} value={billToCompany} onChange={e => setBillToCompany(e.target.value)} placeholder="Optional" />
+                  <label style={label}>Billing Address (optional)</label>
+                  <input style={input} value={billToAddress} onChange={e => setBillToAddress(e.target.value)} placeholder="Street address" />
                 </div>
-                <div>
-                  <label style={label}>Email *</label>
-                  <input style={input} type="email" value={billToEmail} onChange={e => setBillToEmail(e.target.value)} placeholder="invoice@example.com" />
-                </div>
-                <div>
-                  <label style={label}>Phone *</label>
-                  <input style={input} type="tel" value={billToPhone} onChange={e => setBillToPhone(e.target.value)} placeholder="(555) 555-5555" />
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 80px 100px', gap: 10 }}>
+                  <div>
+                    <label style={label}>City</label>
+                    <input style={input} value={billToCity} onChange={e => setBillToCity(e.target.value)} placeholder="City" />
+                  </div>
+                  <div>
+                    <label style={label}>State</label>
+                    <input style={input} value={billToState} onChange={e => setBillToState(e.target.value.toUpperCase().slice(0, 2))} maxLength={2} placeholder="WA" />
+                  </div>
+                  <div>
+                    <label style={label}>Zip</label>
+                    <input
+                      style={input}
+                      value={billToZip}
+                      onChange={e => setBillToZip(e.target.value.replace(/[^0-9]/g, '').slice(0, 5))}
+                      maxLength={5}
+                      placeholder="00000"
+                    />
+                  </div>
                 </div>
               </div>
-              <div>
-                <label style={label}>Billing Address (optional)</label>
-                <input style={input} value={billToAddress} onChange={e => setBillToAddress(e.target.value)} placeholder="Street address" />
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 80px 100px', gap: 10 }}>
-                <div>
-                  <label style={label}>City</label>
-                  <input style={input} value={billToCity} onChange={e => setBillToCity(e.target.value)} placeholder="City" />
-                </div>
-                <div>
-                  <label style={label}>State</label>
-                  <input style={input} value={billToState} onChange={e => setBillToState(e.target.value.toUpperCase().slice(0, 2))} maxLength={2} placeholder="WA" />
-                </div>
-                <div>
-                  <label style={label}>Zip</label>
-                  <input
-                    style={input}
-                    value={billToZip}
-                    onChange={e => setBillToZip(e.target.value.replace(/[^0-9]/g, '').slice(0, 5))}
-                    maxLength={5}
-                    placeholder="00000"
-                  />
-                </div>
-              </div>
-            </div>
+            )}
           </div>
 
           {/* Driver Notes */}

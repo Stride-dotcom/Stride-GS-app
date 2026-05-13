@@ -738,7 +738,16 @@ function DetailsTab({
                     <React.Fragment key={item.id || idx}>
                       <tr style={{ borderBottom: `1px solid ${theme.colors.borderLight || '#f0f0f0'}`, background: idx % 2 === 0 ? '#fff' : '#FAFAF9' }}>
                         <td style={inlineItemTd}>
-                          <div style={{ fontWeight: 500 }}>{item.description || '—'}</div>
+                          <div style={{ fontWeight: 500, display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                            <span>{item.description || '—'}</span>
+                            {/* Ad-hoc items have no inventory_id and no dt_item_code —
+                                free-text entries from the public form or manual edits.
+                                Tag visually so reviewers know there's no Stride-side
+                                inventory row to release / track / cross-link. */}
+                            {!item.inventoryId && !item.dtItemCode && (
+                              <span style={{ fontSize: 9, fontWeight: 600, padding: '1px 6px', borderRadius: 8, background: '#EFF6FF', color: '#1D4ED8', border: '1px solid #BFDBFE', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Ad-hoc</span>
+                            )}
+                          </div>
                           {item.dtItemCode && (
                             <div style={{ fontSize: 10, color: EP.textMuted, fontFamily: 'monospace' }}>{item.dtItemCode}</div>
                           )}
