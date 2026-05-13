@@ -4,6 +4,27 @@
 
 ---
 
+## Recent Changes (2026-05-13, public-form proper fix — SECURITY DEFINER RPC)
+
+**Trigger:** Follow-up to the same-day RLS RETURNING fix below. Justin asked to ship the proper fix that the migration comment + BUILD_STATUS entry both flagged: replace the anon direct-INSERT path with a SECURITY DEFINER RPC so anon never needs INSERT/SELECT RLS surface on `dt_orders` / `dt_order_items`, and so order + items become atomic (currently a half-success leaves an order with no items).
+
+**What landed** (PR pending, branch `feat/fix/public-form-rpc`, commits `a013b86` + `d44c66e` + `754ff2d`):
+
+- Migration [`20260513130526_submit_public_request_rpc.sql`](stride-gs-app/supabase/migrations/20260513130526_submit_public_request_rpc.sql) — adds `public.submit_public_request(p_order jsonb, p_items jsonb)`. SECURITY DEFINER, `search_path` locked to `public`, `EXECUTE` revoked from PUBLIC then granted to anon + authenticated only.
+- Migration [`20260513131310_submit_public_request_rpc_fix_quantity_casts.sql`](stride-gs-app/supabase/migrations/20260513131310_submit_public_request_rpc_fix_quantity_casts.sql) — corrects two regressions caught in code review: `original_quantity` was always landing at 1 (wrong `NULLIF(a,b)` semantics — fixed to chained `COALESCE(orig, qty, 1)`), and `quantity` was being cast to `::integer` instead of `::numeric` to match the schema column type.
+- React change in [PublicServiceRequest.tsx:908-952](stride-gs-app/src/pages/PublicServiceRequest.tsx#L908) — single `.rpc('submit_public_request', { p_order, p_items })` call replaces the two `.from(...).insert(...)` calls. Items collection no longer threads `dt_order_id` (RPC fills it server-side). `notify-public-request` edge function call still fires with the returned `id`.
+
+**Security model:**
+- RPC FORCES `source='public_form'`, `review_status='pending_review'`, `tenant_id=NULL`, `created_by_user=NULL`, `created_by_role='public'`, `pricing_override=true`, `customer_tax_exempt=NULL` regardless of caller input. Defense-in-depth `RAISE` on any input attempt to set `tenant_id != NULL` or `created_by_user != NULL` for clearer error messaging.
+- Verified live: tampering attempt with `tenant_id="some-victim-tenant"` correctly returns HTTP 400 with `tenant_id must be null on public submissions`.
+- Items quantity verified: `quantity:3` → `dt_order_items.quantity=3 AND original_quantity=3` (was buggy=1 in the first commit before the corrective migration).
+
+**Two-phase rollout — legacy anon policies NOT dropped in this PR.** `dt_orders_insert_public_form_anon`, `dt_orders_select_just_inserted_public_anon`, and `dt_order_items_insert_public_form_anon` are intentionally left in place. Reasoning: if anything goes wrong with the RPC after deploy, the old anon paths still work as a safety net. Once the React change has soaked for a few days with no issues, a follow-up migration drops all three together.
+
+**Pin (do not regress):** the RPC is the only public-write path going forward. Don't add a new code path that does direct anon `.from('dt_orders').insert(...)` — it would re-open the original bug class (RETURNING needing SELECT RLS + atomicity hole between order and items inserts).
+
+---
+
 ## Recent Changes (2026-05-13, public service-request form 100% broken — RLS RETURNING fix)
 
 **Trigger:** Customer reported the public delivery order form failing every submission with "We could not submit your request. Please try again, or email us if the problem persists." Screenshot showed the form filled out cleanly with $204.24 estimated total (Zone 2 base + Quote-pending Assembly + Standard Valuation + 10.4% tax) and the agreement checkbox ticked. Bug had been silently in production since at least 2026-04-27 (the last successful `source='public_form'` insert in `dt_orders`).
