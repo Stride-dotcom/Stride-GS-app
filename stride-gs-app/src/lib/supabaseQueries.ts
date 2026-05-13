@@ -1450,11 +1450,19 @@ export async function fetchRepairByIdFromSupabase(
       clientSheetId: row.tenant_id,
       sourceTaskId: '',
       itemId: row.item_id || '',
-      description: items[0]?.description || '',
-      itemClass: items[0]?.itemClass || '',
-      vendor: items[0]?.vendor || '',
-      location: items[0]?.location || '',
-      sidemark: items[0]?.sidemark || '',
+      // Multi-item repairs (items.length > 1) intentionally leave the
+      // top-level description/class/vendor/location/sidemark blank so
+      // the page doesn't show a single item's metadata as if it
+      // described the whole job. The items table renders the per-item
+      // detail; the parent Description card stays empty (or surfaces
+      // the operator's own repair_notes / item_notes lower down).
+      // Single-item repairs (the legacy + 1-item-new case) keep the
+      // single-item denormalization for back-compat with existing UI.
+      description: items.length > 1 ? '' : (items[0]?.description || ''),
+      itemClass:   items.length > 1 ? '' : (items[0]?.itemClass   || ''),
+      vendor:      items.length > 1 ? '' : (items[0]?.vendor      || ''),
+      location:    items.length > 1 ? '' : (items[0]?.location    || ''),
+      sidemark:    items.length > 1 ? '' : (items[0]?.sidemark    || ''),
       taskNotes: row.task_notes || '',
       createdBy: row.created_by || '',
       createdDate: row.created_date || '',

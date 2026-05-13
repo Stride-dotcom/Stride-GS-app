@@ -164,6 +164,21 @@ Deno.serve(async (req: Request) => {
     // ── 4. Send email ─────────────────────────────────────────────────
     // Don't pass `to` — let send-email expand the template's recipients
     // column ({{STAFF_EMAILS}}). CC the client when we have their email.
+    //
+    // Resend rejects a single string containing multiple comma-joined
+    // addresses (422 validation_error). `clients.email` is stored as
+    // comma- or semicolon-joined for clients with multiple contacts
+    // (e.g. "seattle@x.com, losangeles@x.com") — split + trim + dedupe
+    // + filter blanks before passing to the CC array. Matches the same
+    // normalize step send-email already applies to the `to` field
+    // (send-email/index.ts:222).
+    const ccEmails = clientEmail
+      ? Array.from(new Set(
+          clientEmail.split(/[,;]/)
+            .map(s => s.trim())
+            .filter(s => s && s.includes('@'))
+        ))
+      : [];
     const sendRes = await fetch(`${supabaseUrl}/functions/v1/send-email`, {
       method: 'POST',
       headers: {
@@ -173,7 +188,7 @@ Deno.serve(async (req: Request) => {
       },
       body: JSON.stringify({
         templateKey: 'REPAIR_QUOTE_REQUEST',
-        cc: clientEmail ? [clientEmail] : undefined,
+        cc: ccEmails.length > 0 ? ccEmails : undefined,
         tokens: {
           CLIENT_NAME:     clientName,
           REPAIR_ID:       repairId,
