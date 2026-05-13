@@ -1,8 +1,50 @@
 # Stride GS App — Build Status
 
-> Last updated: 2026-05-13 ([feat/delivery/dt-sync-cron] `dt-sync-statuses` now runs every 5 min via pg_cron for non-terminal orders. DT-side cancellations no longer require an operator to manually click "Sync from DT" — the polling cron catches them within ~5 min and flips `dt_orders.status_id` to CANCELED, which auto-clears the "D" inventory badge via Inventory.tsx's existing cancelled-category filter. Background: investigation showed DT's API has no documented cancel endpoint AND DT doesn't fire a webhook on cancel — but we already had all the cancel-handling logic in dt-sync-statuses; the only missing piece was triggering it without operator action. Job name: `dt-sync-statuses-active-every-5min`, schedule `*/5 * * * *`, body `{"scope":"active"}`.).
+> Last updated: 2026-05-13 ([feat/delivery/pu-delivery-item-sync, PRs #388 + #389] PU→Delivery sync engine. When a DT pickup leg completes, the linked delivery order now (a) shows a green "Picked up [time] by [driver]" banner, (b) shows a per-item "From pickup" sub-row when the PU driver counted differently / added notes / flagged return codes, and (c) gets re-pushed to DT so the delivery driver's manifest reflects the post-PU reality. Two-tier helper `stamp-pickup-on-linked-delivery.ts`: Tier A (order-level stamps + picked_up_at) fires from both the webhook and the sync path; Tier B (per-item field propagation via `parent_pickup_item_id` FK match + DT push-back) fires only from the sync path where DT export.xml data is fresh. Quantity overwrite gated behind `quantity === original_quantity` so staff edits aren't reverted. Audit columns `pickup_item_note` / `pickup_return_codes` / `pickup_delivered_quantity` keep the PU mirror separate from the delivery's own driver-side fields, eliminating the brittle sentinel-marker concatenation that the first cut used.).
+
+> Earlier 2026-05-13 ([feat/delivery/dt-sync-cron] `dt-sync-statuses` now runs every 5 min via pg_cron for non-terminal orders. DT-side cancellations no longer require an operator to manually click "Sync from DT" — the polling cron catches them within ~5 min and flips `dt_orders.status_id` to CANCELED, which auto-clears the "D" inventory badge via Inventory.tsx's existing cancelled-category filter. Background: investigation showed DT's API has no documented cancel endpoint AND DT doesn't fire a webhook on cancel — but we already had all the cancel-handling logic in dt-sync-statuses; the only missing piece was triggering it without operator action. Job name: `dt-sync-statuses-active-every-5min`, schedule `*/5 * * * *`, body `{"scope":"active"}`.).
 
 > Earlier 2026-05-13 ([feat/fix/public-form] Public service-request form was 100% broken — every customer submission failed with the generic "We could not submit your request" error since at least 2026-04-27 (last successful submission in `dt_orders` source=public_form). Root cause: the supabase-js `.insert(...).select(...).single()` chain on `PublicServiceRequest.tsx:908` adds `Prefer: return=representation` which makes PostgREST emit `INSERT ... RETURNING id, dt_identifier`. RETURNING needs anon SELECT permission via RLS, but anon had only an INSERT policy on `dt_orders`. PostgREST surfaced this as the misleading `42501: new row violates row-level security policy` instead of a SELECT-side error. Fix: tightly-scoped anon SELECT policy in migration `20260513124647_dt_orders_anon_select_just_inserted.sql` — matches `source='public_form' AND review_status='pending_review' AND tenant_id IS NULL AND created_at > now() - interval '30 seconds'`. 30s window prevents enumeration of older submissions; everything else mirrors the existing INSERT WITH CHECK. Verified live via curl: anon REST POST with `Prefer: return=representation` now returns 201.).
+
+---
+
+## Recent Changes (2026-05-13, PU→Delivery item-sync engine — PRs #388 + #389)
+
+**Trigger:** Justin noted that when drivers complete a pickup job they often make adjustments (qty short, items damaged, notes about "actually 3 pieces not 1") in the DT pickup card — but that data wasn't flowing anywhere. The matching delivery order had no idea the pickup had even happened, the items table showed no pickup state, and DT's delivery card stayed at the original ordered values. Built end-to-end propagation in two PRs.
+
+**PR #388 — order-level banner (foundation):**
+
+- Migration [`20260513120000_dt_pickup_linkage_propagation.sql`](stride-gs-app/supabase/migrations/20260513120000_dt_pickup_linkage_propagation.sql) — adds `dt_orders.linked_pickup_finished_at`, `dt_orders.linked_pickup_driver_name`, `dt_order_items.picked_up_at` + partial index.
+- Helper [`_shared/stamp-pickup-on-linked-delivery.ts`](stride-gs-app/supabase/functions/_shared/stamp-pickup-on-linked-delivery.ts) — invoked from `notify-pickup-completed` v2 (webhook path, stamps `now()` placeholder) and `dt-sync-statuses` v12 (poll path, overwrites placeholder with real DT timestamp + driver). Idempotent, never throws.
+- `dt-webhook-ingest` v8 — fires `dt-sync-statuses` for ALL Service_Route_Finished events, not just non-pickups, so the placeholder upgrade happens within ~10–30s.
+- UI: green "Picked up [when] by [driver]" banner on the delivery `OrderPage` ([components are inline](stride-gs-app/src/pages/OrderPage.tsx)). Per-item ✓ Picked up indicator on the items table.
+
+**PR #389 — item-level sync (qty + notes + DT push-back):**
+
+- Migration [`20260513140000_dt_order_items_parent_pickup_fk.sql`](stride-gs-app/supabase/migrations/20260513140000_dt_order_items_parent_pickup_fk.sql) — adds `dt_order_items.parent_pickup_item_id` self-referential FK + description-match backfill (strips "PICK UP: PU: " prefix variants).
+- Migration [`20260513140100_…fungible_backfill.sql`](stride-gs-app/supabase/migrations/20260513140100_dt_order_items_parent_pickup_fk_fungible_backfill.sql) — top-up for pairs with duplicate descriptions (e.g. 2 chairs × 2 chairs); zips them in row-id order since fungible items are interchangeable.
+- Migration [`20260513150000_dt_order_items_pickup_audit_columns.sql`](stride-gs-app/supabase/migrations/20260513150000_dt_order_items_pickup_audit_columns.sql) — adds `pickup_item_note` / `pickup_return_codes` / `pickup_delivered_quantity` audit columns. Replaces the original sentinel-marker concatenation approach (brittle against staff edits) flagged in PR #388 code review.
+- [CreateDeliveryOrderModal.tsx:1486](stride-gs-app/src/components/shared/CreateDeliveryOrderModal.tsx#L1486) — generates client-side UUID for the PU row when building a P+D pair so the mirrored delivery row can be stamped with `parent_pickup_item_id` at creation. Forward-path FK established without server-side round-trip.
+- Helper rewritten with two propagation tiers. **Tier A** (always fires): order-level stamp + `picked_up_at` via FK with `dt_item_code` legacy fallback. **Tier B** (`propagateItemFields: true`, sync path only): copies `pu.delivered_quantity` → `pickup_delivered_quantity`, `pu.item_note` → `pickup_item_note`, `pu.return_codes` → `pickup_return_codes`. Authoritative `delivery.quantity` overwrite gated behind `quantity === original_quantity` (the "unedited by staff" proxy). Returns `itemsPropagated: string[]` for caller.
+- `dt-sync-statuses` v13 — after Tier-B returns items propagated, fire-and-forget `dt-push-order` for the linked delivery so DT manifest reflects the post-PU reality. Failed dispatch logs to `gs_sync_events` for FailedOperationsDrawer.
+- UI: items table now shows a green "From pickup: picked up 2 of 3. 'damage on box 2'. Return codes: damaged." sub-row under any item that has audit fields set ([OrderPage.tsx:786](stride-gs-app/src/pages/OrderPage.tsx)).
+
+**Idempotency:**
+- `picked_up_at`: `WHERE picked_up_at IS NULL` (first write wins)
+- `pickup_*` audit columns: always overwrite (PU is source of truth, converges)
+- `quantity` authoritative overwrite: gated on `quantity === original_quantity`
+- `dt-push-order` push-back: skipped when no items changed in the sync run
+
+**Versions deployed live:**
+| Function | Version |
+|---|---|
+| `dt-webhook-ingest` | v18 |
+| `dt-sync-statuses` | v18 |
+| `notify-pickup-completed` | v3 |
+
+**Deferred to follow-up (Phase 2.5):**
+- `dt-push-order` should merge `pickup_item_note` into the per-item DT push so the DT delivery card shows the PU note inline. Today the PU note shows in the app but not in the DT manifest.
+- 2 historical P+D pairs (`MRS-00047`, `MRS-00049`) didn't auto-link in the backfill (count mismatch / prefix variant). Forward path covers everything new; backfill cleanup not blocking.
 
 ---
 
