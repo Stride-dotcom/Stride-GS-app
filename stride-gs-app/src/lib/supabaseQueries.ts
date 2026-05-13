@@ -1801,9 +1801,16 @@ export interface DtOrderItemForUI {
   // Pickup→Delivery propagation (2026-05-13). Set on delivery items
   // (the items belonging to dt_orders rows where order_type !== 'pickup')
   // by stamp-pickup-on-linked-delivery when the linked PU leg completes.
-  // Matched by dt_item_code. NULL for items not picked up yet or not on
-  // a P+D pair.
+  // Matched by parent_pickup_item_id (forward path) or dt_item_code
+  // (legacy fallback). NULL for items not picked up yet or not on a P+D pair.
   pickedUpAt: string | null;
+  // PU-mirror audit fields — set by the Tier-B propagation step in
+  // dt-sync-statuses (sync path only; the webhook path has stale
+  // PU items). Independent of itemNote/returnCodes which belong to
+  // the delivery leg own driver.
+  pickupItemNote: string | null;
+  pickupReturnCodes: string[] | null;
+  pickupDeliveredQuantity: number | null;
 }
 
 export interface DtOrderForUI {
@@ -2123,6 +2130,11 @@ export async function fetchDtOrdersFromSupabase(
             dtLocation: String(item.location ?? ''),
             returnCodes,
             pickedUpAt: item.picked_up_at ? String(item.picked_up_at) : null,
+            pickupItemNote: item.pickup_item_note ? String(item.pickup_item_note) : null,
+            pickupReturnCodes: Array.isArray(item.pickup_return_codes)
+              ? (item.pickup_return_codes as unknown[]).filter(x => typeof x === 'string').map(String)
+              : null,
+            pickupDeliveredQuantity: item.pickup_delivered_quantity != null ? Number(item.pickup_delivered_quantity) : null,
           };
         }),
         // Pricing
@@ -2282,6 +2294,11 @@ export async function fetchDtOrderByIdFromSupabase(
           dtLocation: String(item.location ?? ''),
           returnCodes,
           pickedUpAt: item.picked_up_at ? String(item.picked_up_at) : null,
+          pickupItemNote: item.pickup_item_note ? String(item.pickup_item_note) : null,
+          pickupReturnCodes: Array.isArray(item.pickup_return_codes)
+            ? (item.pickup_return_codes as unknown[]).filter(x => typeof x === 'string').map(String)
+            : null,
+          pickupDeliveredQuantity: item.pickup_delivered_quantity != null ? Number(item.pickup_delivered_quantity) : null,
         };
       }),
       baseDeliveryFee: row.base_delivery_fee != null ? Number(row.base_delivery_fee) : null,

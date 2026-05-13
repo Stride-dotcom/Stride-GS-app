@@ -780,7 +780,9 @@ function DetailsTab({
                           )}
                         </td>
                       </tr>
-                      {(item.itemNote || (item.returnCodes && item.returnCodes.length > 0)) && (
+                      {(item.itemNote || (item.returnCodes && item.returnCodes.length > 0) ||
+                        item.pickupItemNote || (item.pickupReturnCodes && item.pickupReturnCodes.length > 0) ||
+                        (item.pickupDeliveredQuantity != null && item.quantity != null && Number(item.pickupDeliveredQuantity) !== Number(item.quantity))) && (
                         <tr>
                           <td colSpan={8} style={{ padding: '0 10px 8px', background: idx % 2 === 0 ? '#fff' : '#FAFAF9' }}>
                             {item.itemNote && (
@@ -789,8 +791,29 @@ function DetailsTab({
                               </div>
                             )}
                             {item.returnCodes && item.returnCodes.length > 0 && (
-                              <div style={{ fontSize: 11, color: '#991B1B', fontWeight: 500 }}>
+                              <div style={{ fontSize: 11, color: '#991B1B', fontWeight: 500, marginBottom: 4 }}>
                                 Return codes: {item.returnCodes.join(', ')}
+                              </div>
+                            )}
+                            {/* v2026-05-13 — PU-mirror audit row.
+                                Set by stamp-pickup-on-linked-delivery Tier-B
+                                propagation when the linked PU completes. Shows
+                                the picked-up count (if different from ordered)
+                                and any driver notes / return codes from the PU
+                                leg, so the delivery operator sees what actually
+                                happened at the source. */}
+                            {(item.pickupItemNote ||
+                              (item.pickupReturnCodes && item.pickupReturnCodes.length > 0) ||
+                              (item.pickupDeliveredQuantity != null && item.quantity != null && Number(item.pickupDeliveredQuantity) !== Number(item.quantity))) && (
+                              <div style={{ fontSize: 11, color: '#166534', padding: '4px 8px', background: '#F0FDF4', borderRadius: 6, borderLeft: '3px solid #16A34A' }}>
+                                <span style={{ fontWeight: 600 }}>From pickup:</span>{' '}
+                                {item.pickupDeliveredQuantity != null && item.quantity != null && Number(item.pickupDeliveredQuantity) !== Number(item.quantity) && (
+                                  <span>picked up {item.pickupDeliveredQuantity} of {item.quantity}. </span>
+                                )}
+                                {item.pickupItemNote && <span>"{item.pickupItemNote}". </span>}
+                                {item.pickupReturnCodes && item.pickupReturnCodes.length > 0 && (
+                                  <span>Return codes: {item.pickupReturnCodes.join(', ')}.</span>
+                                )}
                               </div>
                             )}
                           </td>
