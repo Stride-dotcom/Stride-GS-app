@@ -173,7 +173,7 @@ export function AddTaskServiceModal({ itemClass, parentType, onClose, onSubmit }
               <option value="">{loading ? 'Loading…' : 'Select a service…'}</option>
               {taskServices.map(s => (
                 <option key={s.id} value={s.id}>
-                  {s.code} — {s.name}
+                  {s.name}
                 </option>
               ))}
             </select>
