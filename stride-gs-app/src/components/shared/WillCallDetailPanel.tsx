@@ -268,13 +268,16 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
   const [codSaveError, setCodSaveError] = useState<string | null>(null);
   const [codSaveJustSucceeded, setCodSaveJustSucceeded] = useState(false);
   const [codAmountDraft, setCodAmountDraft] = useState('');
+  const [isCodAmountFocused, setIsCodAmountFocused] = useState(false);
   // Keep the amount draft in sync with prop changes (e.g. realtime
-  // echo from another tab, or a parent refetch). Don't clobber while
-  // the user has the input focused — that's handled inline via the
-  // saved-value comparison in onBlur.
+  // echo from another tab, or a parent refetch). Skip the resync
+  // while the user has the input focused — otherwise an echo
+  // arriving mid-keystroke (own optimistic patch, another tab's
+  // edit, etc.) would clobber what they're typing.
   useEffect(() => {
+    if (isCodAmountFocused) return;
     setCodAmountDraft(wc.codAmount != null ? String(wc.codAmount) : '');
-  }, [wc.codAmount]);
+  }, [wc.codAmount, isCodAmountFocused]);
 
   const handleEditStart = useCallback(() => {
     setEditPickupParty(wc.pickupParty || '');
@@ -704,7 +707,9 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
                               value={codAmountDraft}
                               disabled={codSaving}
                               onChange={e => setCodAmountDraft(e.target.value)}
+                              onFocus={() => setIsCodAmountFocused(true)}
                               onBlur={() => {
+                                setIsCodAmountFocused(false);
                                 const parsed = codAmountDraft.trim() === '' ? 0 : parseFloat(codAmountDraft);
                                 if (!Number.isFinite(parsed) || parsed < 0) {
                                   // Bad input — snap back to the saved value.
