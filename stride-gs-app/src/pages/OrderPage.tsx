@@ -11,7 +11,7 @@ import {
   AlertCircle, Loader2, SearchX, Pencil, X,
   CheckCircle2, Clock3, DollarSign, MapPin, Phone,
   Mail, Calendar, Clock, Package, FileText, Truck,
-  User, PenLine, MessageSquare, Lock,
+  User, PenLine, MessageSquare, Lock, PackageCheck,
   // v2026-05-09 — mobile FAB pattern (matches TaskDetailPanel /
   // RepairDetailPanel / WillCallDetailPanel). Approve / Push to DT /
   // Release Items stay inline as the chosen primary; Print PDF, Edit
@@ -337,6 +337,72 @@ function ResubmitBanner({ order }: { order: DtOrderForUI }) {
   );
 }
 
+// v2026-05-13 — pickup-completion banner shown on the DELIVERY view
+// of a P+D pair when the linked pickup leg has completed. Driven by
+// dt_orders.linked_pickup_finished_at + linked_pickup_driver_name,
+// populated by the stamp-pickup-on-linked-delivery shared helper.
+//
+// Two display states:
+//   • Webhook-fresh (driver_name still NULL): "Picked up <when>" — a
+//     placeholder timestamp from now() in the webhook path. Upgrades
+//     within ~10–30s when dt-sync-statuses pulls the real DT data.
+//   • Sync-fresh (driver_name populated): "Picked up <when> by <driver>"
+//     — the real DT export.xml timestamp + driver name.
+//
+// Color matches the "completed" tone elsewhere in the app (green) so
+// at a glance it reads as "good news, this step is done."
+function LinkedPickupBanner({
+  finishedAt, driverName, pickupOrderId, pickupIdentifier,
+}: {
+  finishedAt: string;
+  driverName: string | null;
+  pickupOrderId: string | null;
+  pickupIdentifier: string | null;
+}) {
+  const when = new Date(finishedAt).toLocaleString('en-US', {
+    weekday: 'short', month: 'short', day: 'numeric',
+    hour: 'numeric', minute: '2-digit',
+  });
+  const driverText = driverName && driverName.trim()
+    ? ` by ${driverName.trim()}`
+    : '';
+  return (
+    <div style={{
+      borderRadius: 10,
+      border: '1px solid #BBF7D0',
+      background: '#F0FDF4',
+      padding: '12px 16px',
+      fontFamily: theme.typography.fontFamily,
+      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+      gap: 12, flexWrap: 'wrap',
+    }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 10,
+        fontSize: 13, fontWeight: 600, color: '#166534',
+      }}>
+        <PackageCheck size={16} aria-hidden />
+        <span>Picked up {when}{driverText}</span>
+      </div>
+      {pickupOrderId && pickupIdentifier && (
+        <a
+          href={`#/orders/${pickupOrderId}`}
+          style={{
+            fontSize: 12, fontWeight: 600,
+            color: '#166534',
+            border: '1px solid #BBF7D0',
+            background: '#FFFFFF',
+            padding: '4px 10px', borderRadius: 6,
+            textDecoration: 'none',
+          }}
+          title="Open the linked pickup order"
+        >
+          View pickup {pickupIdentifier} →
+        </a>
+      )}
+    </div>
+  );
+}
+
 // Small status pill for the Items table's Status column. Color
 // scheme matches Inventory.tsx's STATUS_CONFIG so a row's status
 // reads identically across surfaces.
@@ -444,6 +510,22 @@ function DetailsTab({
           by the staff Approve handler so it survives until staff
           acknowledges. Self-hides when there's nothing to show. */}
       <ResubmitBanner order={order} />
+
+      {/* v2026-05-13 — linked-pickup completion banner. Renders only on
+          the DELIVERY leg of a P+D pair when the linked pickup has
+          completed. Driven by dt_orders.linked_pickup_finished_at +
+          linked_pickup_driver_name, populated by stamp-pickup-on-linked-delivery
+          (from notify-pickup-completed on the webhook path / dt-sync-statuses
+          on the poll path). The deep-link to the pickup order opens a new
+          tab so the operator doesn't lose their place on the delivery. */}
+      {!thisIsPickupLeg && order.linkedPickupFinishedAt && (
+        <LinkedPickupBanner
+          finishedAt={order.linkedPickupFinishedAt}
+          driverName={order.linkedPickupDriverName}
+          pickupOrderId={order.linkedOrderId}
+          pickupIdentifier={linkedOrder?.dtIdentifier ?? null}
+        />
+      )}
 
       {/* Card 1 — Schedule & Order Details. Combines the schedule
           fields, the order-level reference numbers, and the
@@ -659,6 +741,25 @@ function DetailsTab({
                           <div style={{ fontWeight: 500 }}>{item.description || '—'}</div>
                           {item.dtItemCode && (
                             <div style={{ fontSize: 10, color: EP.textMuted, fontFamily: 'monospace' }}>{item.dtItemCode}</div>
+                          )}
+                          {/* v2026-05-13 — per-item picked-up indicator.
+                              Stamped on the delivery item by stamp-pickup-on-linked-delivery
+                              when the linked PU leg completes. Most useful when
+                              a pickup is PARTIAL (driver picked some, refused
+                              others) — the order-level banner above already
+                              covers the all-or-nothing case. */}
+                          {item.pickedUpAt && (
+                            <div
+                              style={{
+                                display: 'inline-flex', alignItems: 'center', gap: 4,
+                                marginTop: 3,
+                                fontSize: 10, fontWeight: 600,
+                                color: '#166534',
+                              }}
+                              title={`Picked up ${new Date(item.pickedUpAt).toLocaleString()}`}
+                            >
+                              <PackageCheck size={11} aria-hidden /> Picked up
+                            </div>
                           )}
                         </td>
                         <td style={inlineItemTd}>{item.vendor || '—'}</td>
