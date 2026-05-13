@@ -1,6 +1,42 @@
 # Stride GS App — Build Status
 
-> Last updated: 2026-05-12 ([feat/billing] Re-issue button now appears on **voided** invoices in the Billing → Report tab Invoices section. Operator filters Status → Void, clicks Re-issue, rows flip back to Unbilled. Pure UI fix — the backend `handleReissueInvoice_` already accepted Void rows; the UI was hiding the action.).
+> Last updated: 2026-05-13 ([feat/fix/public-form] Public service-request form was 100% broken — every customer submission failed with the generic "We could not submit your request" error since at least 2026-04-27 (last successful submission in `dt_orders` source=public_form). Root cause: the supabase-js `.insert(...).select(...).single()` chain on `PublicServiceRequest.tsx:908` adds `Prefer: return=representation` which makes PostgREST emit `INSERT ... RETURNING id, dt_identifier`. RETURNING needs anon SELECT permission via RLS, but anon had only an INSERT policy on `dt_orders`. PostgREST surfaced this as the misleading `42501: new row violates row-level security policy` instead of a SELECT-side error. Fix: tightly-scoped anon SELECT policy in migration `20260513124647_dt_orders_anon_select_just_inserted.sql` — matches `source='public_form' AND review_status='pending_review' AND tenant_id IS NULL AND created_at > now() - interval '30 seconds'`. 30s window prevents enumeration of older submissions; everything else mirrors the existing INSERT WITH CHECK. Verified live via curl: anon REST POST with `Prefer: return=representation` now returns 201.).
+
+---
+
+## Recent Changes (2026-05-13, public service-request form 100% broken — RLS RETURNING fix)
+
+**Trigger:** Customer reported the public delivery order form failing every submission with "We could not submit your request. Please try again, or email us if the problem persists." Screenshot showed the form filled out cleanly with $204.24 estimated total (Zone 2 base + Quote-pending Assembly + Standard Valuation + 10.4% tax) and the agreement checkbox ticked. Bug had been silently in production since at least 2026-04-27 (the last successful `source='public_form'` insert in `dt_orders`).
+
+**Diagnostic trail (recorded for the next time this kind of error masks itself):**
+
+1. Generic error message in [PublicServiceRequest.tsx:915](stride-gs-app/src/pages/PublicServiceRequest.tsx#L915) hides the underlying Postgres error from the user. The console.warn at line 914 has the real error but the customer's browser console wasn't captured.
+2. Supabase project's `get_logs` MCP tool was broken (BigQuery analytics reservation 404 error) — couldn't pull recent failed inserts that way.
+3. Schema check via `information_schema.columns`: every column in the form payload existed and was nullable or defaulted. No NOT NULL violations, no constraint mismatches.
+4. RLS policy review: the `dt_orders_insert_public_form_anon` WITH CHECK matched all four conjuncts of the form's payload (`source='public_form'`, `review_status='pending_review'`, `tenant_id IS NULL`, `created_by_user IS NULL`).
+5. **Smoking-gun test:** even creating a brand-new `WITH CHECK (true)` permissive INSERT policy on `dt_orders` for anon, the INSERT still failed with the same RLS error. That ruled out the policy expression itself.
+6. **Decisive isolation:** disabling RLS entirely on `dt_orders` made anon REST insert succeed (HTTP 201). Then adding back RLS but stripping the `Prefer: return=representation` header from the curl POST also returned 201 — the INSERT was working all along; it was the implicit `RETURNING` that failed.
+7. supabase-js's `.insert(...).select(...)` chain → `Prefer: return=representation` → PostgREST emits `INSERT ... RETURNING id, dt_identifier` → RLS evaluates SELECT permission for the row being returned → anon has no SELECT policy on `dt_orders` → reads as "no policy permits this row" → error code 42501 is the same as a WITH CHECK failure, hence the misleading message.
+
+**What landed** (PR pending, branch `feat/fix/public-form-rls-select`, commit `bfb5901`):
+
+- Migration [`20260513124647_dt_orders_anon_select_just_inserted.sql`](stride-gs-app/supabase/migrations/20260513124647_dt_orders_anon_select_just_inserted.sql) — adds `dt_orders_select_just_inserted_public_anon` policy:
+  - `FOR SELECT TO anon`
+  - USING: `source='public_form' AND review_status='pending_review' AND tenant_id IS NULL AND created_at > now() - interval '30 seconds'`
+- Migration was applied via `apply_migration` MCP and verified live (curl POST with `Prefer: return=representation` now returns HTTP 201 with the row).
+
+**Information-disclosure tradeoff:** an anon caller could probe within the 30-second window and see other in-flight public-form submissions. Acceptable because (a) rows contain only what the submitter themselves provided (their own contact/address/items), (b) the window is too short for meaningful enumeration, and (c) IDs are UUIDs so probe-by-id is not feasible.
+
+**No React changes.** The bug was purely server-side (missing RLS SELECT policy). The form code at [PublicServiceRequest.tsx:908-916](stride-gs-app/src/pages/PublicServiceRequest.tsx#L908) is unchanged. dist/ is unchanged.
+
+**Pin (do not regress):** if a future change adds `created_at` to the form's INSERT payload (currently server-set via `DEFAULT now()`), the 30-second window becomes spoofable. Keep `created_at` server-defaulted only.
+
+**Followup backlog item — proper fix:** replace the anon direct-INSERT path with a SECURITY DEFINER RPC `submit_public_request(payload jsonb, items jsonb)` that:
+- Validates payload server-side (can't be tampered to send `source != 'public_form'`, etc.)
+- Wraps order + items insert in one transaction (currently a half-success leaves an order with no items)
+- Returns just `{id, dt_identifier}` — anon never gets RLS-readable rows
+- Lets us drop both the anon INSERT policies (`dt_orders_insert_public_form_anon`, `dt_order_items_insert_public_form_anon`) AND this new SELECT policy
+This is the right long-term shape; this PR is the immediate unblock.
 
 ---
 
