@@ -276,6 +276,71 @@ function genUid(): string {
   return Math.random().toString(36).slice(2, 10);
 }
 
+/**
+ * Re-push already-published orders to DT after an edit-save.
+ *
+ * Closes the "I saved but forgot to Republish to DT" footgun. Called
+ * at the end of the modal's edit-save paths (single-leg + P+D). Only
+ * fires for orders that were *already* pushed to DT (`pushed_to_dt_at`
+ * set) — drafts and pending-review orders should not auto-push, since
+ * the operator may still be iterating.
+ *
+ * For P+D pairs, both legs get pushed in parallel via `Promise.allSettled`
+ * so one leg's failure doesn't block the other. The function returns
+ * the list of failures; the caller surfaces them as warnings on the
+ * order-saved confirmation screen (Supabase write already succeeded).
+ *
+ * Note: dt-push-order is itself idempotent for already-pushed orders
+ * — it sends an upsert payload that DT accepts as an update. Our pre-
+ * check on `pushed_to_dt_at` is mostly an "is this order actually live
+ * in DT yet" gate, not a duplicate-push protection.
+ */
+async function repushOrdersAfterEdit(
+  supabaseClient: typeof supabase,
+  orderIds: string[],
+): Promise<{ failures: Array<{ orderId: string; identifier: string; error: string }> }> {
+  if (orderIds.length === 0) return { failures: [] };
+
+  const { data: rows } = await supabaseClient
+    .from('dt_orders')
+    .select('id, dt_identifier, pushed_to_dt_at')
+    .in('id', orderIds);
+
+  const previouslyPushed = (rows ?? []).filter(
+    (r: { pushed_to_dt_at: string | null }) => r.pushed_to_dt_at,
+  ) as Array<{ id: string; dt_identifier: string | null; pushed_to_dt_at: string }>;
+
+  if (previouslyPushed.length === 0) return { failures: [] };
+
+  const results = await Promise.allSettled(
+    previouslyPushed.map(r =>
+      supabaseClient.functions.invoke('dt-push-order', { body: { orderId: r.id } }),
+    ),
+  );
+
+  const failures: Array<{ orderId: string; identifier: string; error: string }> = [];
+  results.forEach((res, idx) => {
+    const ord = previouslyPushed[idx];
+    const ident = ord.dt_identifier ?? ord.id;
+    if (res.status === 'rejected') {
+      failures.push({
+        orderId: ord.id,
+        identifier: ident,
+        error: res.reason instanceof Error ? res.reason.message : String(res.reason),
+      });
+    } else if (res.value.error) {
+      failures.push({ orderId: ord.id, identifier: ident, error: res.value.error.message });
+    } else {
+      const data = res.value.data as { ok?: boolean; error?: string } | null;
+      if (data && data.ok === false) {
+        failures.push({ orderId: ord.id, identifier: ident, error: data.error ?? 'unknown' });
+      }
+    }
+  });
+
+  return { failures };
+}
+
 // ── AddressFields sub-component ──────────────────────────────────────────
 // Inline definition — used for both pickup and delivery contact sections.
 // Includes address book autocomplete and browse functionality.
@@ -2854,12 +2919,42 @@ export function CreateDeliveryOrderModal({
           },
           performedBy: user?.email ?? null,
         });
+
+        // v2026-05-13 — auto re-push to DT after a successful edit-save on
+        // ALREADY-PUSHED orders. Closes the "saved but forgot to Republish"
+        // footgun. Drafts and pending-review orders short-circuit naturally
+        // via the helper's `pushed_to_dt_at IS NULL` filter — that path is
+        // intentional, not a missed case (those orders haven't been
+        // approved yet, so there's no DT-side counterpart to update).
+        //
+        // On failure: keep the modal OPEN with an inline error so the
+        // operator sees the push didn't go through. Closing the modal
+        // would have swallowed the error (caught in code review — the
+        // setSubmitError-then-onClose pattern doesn't render anything
+        // because the modal unmounts before the error renders). The
+        // parent still gets onSubmit so it refetches the order data.
+        const legsToPush: string[] = [];
+        if (editingPickupRowIdRef.current) legsToPush.push(editingPickupRowIdRef.current);
+        if (editingDraftRowIdRef.current) legsToPush.push(editingDraftRowIdRef.current);
+        const { failures: pdPushFailures } = await repushOrdersAfterEdit(supabase, legsToPush);
+
         onSubmit?.({
           dtOrderId: savedDelivery.id,
           dtIdentifier: savedDelivery.dt_identifier,
           reviewStatus: savedDelivery.review_status,
           clientResubmit: isClientResubmittingPD,
         });
+
+        if (pdPushFailures.length > 0) {
+          const summary = pdPushFailures.map(f => `${f.identifier}: ${f.error}`).join('; ');
+          setSubmitError(
+            `Saved, but auto-republish to DT failed for ${pdPushFailures.length} leg(s): ${summary}. ` +
+            `Close this dialog and click Republish to DT manually on the affected order(s).`,
+          );
+          setSubmitting(false);
+          return;  // keep modal open so the error renders
+        }
+
         onClose();
         return;
       } catch (e) {
@@ -3085,12 +3180,31 @@ export function CreateDeliveryOrderModal({
           },
           performedBy: user?.email ?? null,
         });
+
+        // v2026-05-13 — auto re-push to DT after a successful single-leg
+        // edit-save on an ALREADY-PUSHED order. Same rationale + same
+        // keep-modal-open-on-failure pattern as the P+D block above.
+        const { failures: singleLegPushFailures } = await repushOrdersAfterEdit(
+          supabase, [savedRow.id],
+        );
+
         onSubmit?.({
           dtOrderId: savedRow.id,
           dtIdentifier: savedRow.dt_identifier,
           reviewStatus: savedRow.review_status,
           clientResubmit: isClientResubmittingSingle,
         });
+
+        if (singleLegPushFailures.length > 0) {
+          const f = singleLegPushFailures[0];
+          setSubmitError(
+            `Saved, but auto-republish to DT failed for ${f.identifier}: ${f.error}. ` +
+            `Close this dialog and click Republish to DT manually.`,
+          );
+          setSubmitting(false);
+          return;  // keep modal open so the error renders
+        }
+
         onClose();
         return;
       } catch (e) {
