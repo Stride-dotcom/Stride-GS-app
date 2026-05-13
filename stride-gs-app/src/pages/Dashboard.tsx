@@ -13,7 +13,7 @@ import { useVirtualRows } from '../hooks/useVirtualRows';
 import { theme } from '../styles/theme';
 import { useItemIndicators } from '../hooks/useItemIndicators';
 import { ItemIdBadges } from '../components/shared/ItemIdBadges';
-import { isApiConfigured, postUpdateTaskPriority } from '../lib/api';
+import { isApiConfigured, postUpdateTaskPriority, postUpdateTaskDueDate } from '../lib/api';
 import { useDashboardSummary } from '../hooks/useDashboardSummary';
 import { useEntityCompleters, shortEmail } from '../hooks/useEntityCompleters';
 import type { SummaryTask, SummaryRepair, SummaryWillCall } from '../hooks/useDashboardSummary';
@@ -181,7 +181,11 @@ function TasksTab({ tasks, onNavigate, indicators, canEditPriority }: { tasks: S
   // actor instead of the (now-irrelevant) assignee.
   const dashTaskIds = useMemo(() => tasks.map(t => t.taskId).filter(Boolean), [tasks]);
   const { completerMap: dashTaskCompleterMap } = useEntityCompleters('task', dashTaskIds);
-  const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder } = useTablePreferences('dashboard-tasks', [{ id: 'taskCreated', desc: true }], {}, TASK_DEFAULT_ORDER);
+  // Default sort: due date ascending (most urgent first), then created
+  // descending (newest first) as tiebreaker. Tasks with no due date sort
+  // to the bottom via the taskDueDate sortingFn — see column def.
+  // Per Justin 2026-05-13: staff want to work tasks in due-date order.
+  const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder } = useTablePreferences('dashboard-tasks', [{ id: 'taskDueDate', desc: false }, { id: 'taskCreated', desc: true }], {}, TASK_DEFAULT_ORDER);
   const [statusFilters, setStatusFilters] = useState<string[]>(DEFAULT_TASK_STATUSES);
   const [showCols, setShowCols] = useState(false);
   const [dragColId, setDragColId] = useState<string | null>(null);
@@ -199,6 +203,16 @@ function TasksTab({ tasks, onNavigate, indicators, canEditPriority }: { tasks: S
   // when the underlying tasks prop updates with the matching value (the next
   // useDashboardSummary refetch picks up the GAS write-through).
   const [priorityOverrides, setPriorityOverrides] = useState<Record<string, 'High' | 'Normal'>>({});
+  // Optimistic due-date overrides — populated when togglePriority lands
+  // on High and auto-fills today's date. Same clear-on-canonical-match
+  // pattern as priorityOverrides.
+  const [dueDateOverrides, setDueDateOverrides] = useState<Record<string, string>>({});
+  // Brief click-debounce window (~400ms) so a furious double-click doesn't
+  // fire 4 GAS round-trips. The optimistic overrides above paint the change
+  // instantly; this just guards against duplicate writes within a single
+  // intent. Pre-2026-05-13 this Set was held until the await-postUpdate
+  // resolved (10-20s on a slow GAS round-trip), which was the root cause
+  // of Justin's "click priority, can't revert for 10 seconds" complaint.
   const [prioritySaving, setPrioritySaving] = useState<Set<string>>(new Set());
   useEffect(() => {
     // Drop overrides whose value matches the canonical row value — keeps
@@ -213,28 +227,72 @@ function TasksTab({ tasks, onNavigate, indicators, canEditPriority }: { tasks: S
       }
       return changed ? next : prev;
     });
+    setDueDateOverrides(prev => {
+      let changed = false;
+      const next: Record<string, string> = {};
+      for (const [id, val] of Object.entries(prev)) {
+        const t = tasks.find(x => x.taskId === id);
+        if (t && (t.dueDate || '') === val) { changed = true; continue; }
+        next[id] = val;
+      }
+      return changed ? next : prev;
+    });
   }, [tasks]);
 
   const togglePriority = useCallback(async (task: SummaryTask) => {
     if (!canEditPriority || !task.taskId || !task.clientSheetId) return;
-    if (prioritySaving.has(task.taskId)) return;
+    if (prioritySaving.has(task.taskId)) return;  // ~400ms double-click guard
     const current = priorityOverrides[task.taskId] ?? (task.priority === 'High' ? 'High' : 'Normal');
     const next: 'High' | 'Normal' = current === 'High' ? 'Normal' : 'High';
-    setPriorityOverrides(prev => ({ ...prev, [task.taskId]: next }));
-    setPrioritySaving(prev => { const s = new Set(prev); s.add(task.taskId); return s; });
-    try {
-      const resp = await postUpdateTaskPriority({ taskId: task.taskId, priority: next }, task.clientSheetId);
-      if (!resp.ok || !resp.data?.success) {
-        // Rollback
-        setPriorityOverrides(prev => ({ ...prev, [task.taskId]: current }));
-      } else {
-        // Tell other consumers (Tasks page, TaskDetailPanel) about the write.
-        entityEvents.emit('task', task.taskId);
-      }
-    } catch {
-      setPriorityOverrides(prev => ({ ...prev, [task.taskId]: current }));
+    const taskId = task.taskId;
+    const sheetId = task.clientSheetId;
+
+    // Optimistic flip — paint priority + (when going to High) today's
+    // due date immediately. Sort then re-orders the row to the top
+    // because the table sort is `taskDueDate asc, taskCreated desc` and
+    // today's date floats above any future-or-empty due dates.
+    setPriorityOverrides(prev => ({ ...prev, [taskId]: next }));
+    if (next === 'High') {
+      setDueDateOverrides(prev => ({ ...prev, [taskId]: TODAY_DASH }));
     }
-    setPrioritySaving(prev => { const s = new Set(prev); s.delete(task.taskId); return s; });
+
+    // Brief lock to debounce furious double-clicks. Cleared on a fixed
+    // 400ms timer regardless of GAS response — the GAS write itself
+    // is fire-and-forget, so the UI isn't held hostage by a slow
+    // round-trip (this was the root cause of the 10-20s freeze).
+    setPrioritySaving(prev => { const s = new Set(prev); s.add(taskId); return s; });
+    setTimeout(() => {
+      setPrioritySaving(prev => { const s = new Set(prev); s.delete(taskId); return s; });
+    }, 400);
+
+    // Fire-and-forget: priority write. On failure, revert the override
+    // so the canonical state is restored (next refetch matches anyway).
+    void postUpdateTaskPriority({ taskId, priority: next }, sheetId)
+      .then(resp => {
+        if (!resp.ok || !resp.data?.success) {
+          setPriorityOverrides(prev => ({ ...prev, [taskId]: current }));
+        } else {
+          entityEvents.emit('task', taskId);
+        }
+      })
+      .catch(() => setPriorityOverrides(prev => ({ ...prev, [taskId]: current })));
+
+    // Auto-set due_date = today on the High transition. Separate fire-
+    // and-forget call (no atomic batch endpoint exists today). On
+    // failure: leave the optimistic override + log; the priority change
+    // still succeeded so the user-visible "I set it to High" intent
+    // landed at least partially.
+    if (next === 'High') {
+      void postUpdateTaskDueDate({ taskId, dueDate: TODAY_DASH }, sheetId)
+        .then(resp => {
+          if (!resp.ok || !resp.data?.success) {
+            console.warn('[dashboard] auto-set due date on High failed:', resp.error || resp.data?.error);
+          } else {
+            entityEvents.emit('task', taskId);
+          }
+        })
+        .catch(err => console.warn('[dashboard] auto-set due date on High failed:', err));
+    }
   }, [canEditPriority, priorityOverrides, prioritySaving]);
 
   const allStatuses = useMemo(() => [...new Set(tasks.map(t => t.status))].sort(), [tasks]);
@@ -273,7 +331,23 @@ function TasksTab({ tasks, onNavigate, indicators, canEditPriority }: { tasks: S
         </span>
       );
     } }),
-    colT.accessor('dueDate', { id: 'taskDueDate', header: 'Due Date', size: 90, sortingFn: (a, b) => { const av = a.original.dueDate ?? ''; const bv = b.original.dueDate ?? ''; if (!av && !bv) return 0; if (!av) return 1; if (!bv) return -1; return av.localeCompare(bv); }, cell: i => { const d = i.getValue(); if (!d) return <span style={{ fontSize: 12, color: theme.colors.textMuted }}>—</span>; const overdue = d < TODAY_DASH; const isToday = d === TODAY_DASH; return <span style={{ fontSize: 12, color: overdue ? '#DC2626' : isToday ? theme.colors.orange : theme.colors.textSecondary, fontWeight: overdue || isToday ? 600 : 400 }}>{fmtDate(d)}</span>; } }),
+    colT.accessor('dueDate', { id: 'taskDueDate', header: 'Due Date', size: 90, sortingFn: (a, b) => {
+      // Honor optimistic override so the row jumps to the top of the
+      // sort immediately when togglePriority(High) sets dueDate=today.
+      const av = dueDateOverrides[a.original.taskId] ?? a.original.dueDate ?? '';
+      const bv = dueDateOverrides[b.original.taskId] ?? b.original.dueDate ?? '';
+      if (!av && !bv) return 0;
+      if (!av) return 1;
+      if (!bv) return -1;
+      return av.localeCompare(bv);
+    }, cell: i => {
+      const t = i.row.original;
+      const d = dueDateOverrides[t.taskId] ?? i.getValue();
+      if (!d) return <span style={{ fontSize: 12, color: theme.colors.textMuted }}>—</span>;
+      const overdue = d < TODAY_DASH;
+      const isToday = d === TODAY_DASH;
+      return <span style={{ fontSize: 12, color: overdue ? '#DC2626' : isToday ? theme.colors.orange : theme.colors.textSecondary, fontWeight: overdue || isToday ? 600 : 400 }}>{fmtDate(d)}</span>;
+    } }),
     colT.accessor('itemId', { id: 'taskItem', header: 'Item', size: 110, cell: i => { const id = i.getValue(); return <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}><span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{id || '—'}</span>{id && indicators && <ItemIdBadges itemId={id} inspOpenItems={indicators.inspOpenItems} inspDoneItems={indicators.inspDoneItems} inspFailedItems={indicators.inspFailedItems} asmOpenItems={indicators.asmOpenItems} asmDoneItems={indicators.asmDoneItems} repairOpenItems={indicators.repairOpenItems} repairDoneItems={indicators.repairDoneItems} wcOpenItems={indicators.wcOpenItems} wcDoneItems={indicators.wcDoneItems} />}</div>; } }),
     colT.accessor('description', { id: 'taskDesc', header: 'Description', size: 200, cell: i => <span style={{ fontSize: 12, maxWidth: 190, overflow: 'hidden', textOverflow: 'ellipsis', display: 'block', color: theme.colors.textSecondary }}>{i.getValue() || '—'}</span> }),
     colT.accessor('location', { id: 'taskLocation', header: 'Location', size: 90, cell: i => <span style={{ fontSize: 12, fontFamily: 'monospace', color: theme.colors.textSecondary }}>{i.getValue() || '—'}</span> }),
@@ -299,7 +373,7 @@ function TasksTab({ tasks, onNavigate, indicators, canEditPriority }: { tasks: S
     colT.accessor('sidemark', { id: 'taskSidemark', header: 'Sidemark', size: 120, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{i.getValue() || '—'}</span> }),
     colT.accessor('created', { id: 'taskCreated', header: 'Created', size: 90, cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{fmtDate(i.getValue())}</span> }),
     colT.display({ id: 'taskFolder', header: 'Folder', size: 90, cell: i => <FolderButton label="Task" url={i.row.original.taskFolderUrl} disabledTooltip="Start task to create folder" /> }),
-  ], [colT, indicators, canEditPriority, priorityOverrides, prioritySaving, togglePriority, dashTaskCompleterMap]);
+  ], [colT, indicators, canEditPriority, priorityOverrides, prioritySaving, dueDateOverrides, togglePriority, dashTaskCompleterMap]);
 
   const table = useReactTable({
     data: filtered, columns,
