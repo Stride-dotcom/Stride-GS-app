@@ -108,11 +108,16 @@ Deno.serve(async (req: Request) => {
       console.error('[request-repair-quote-sb] RPC failed:', rpcErr);
       return json({ ok: false, error: `Create failed: ${rpcErr.message}` }, 500);
     }
+    // RPC returns TABLE (new_repair_id text, item_count integer) — the
+    // OUT parameter was renamed from `repair_id` to `new_repair_id` in
+    // the 20260513180000 migration to avoid a 42702 "ambiguous column
+    // reference" on the INSERT INTO repair_items ... ON CONFLICT clause.
+    // See the migration file for the full RCA.
     const rpcRow = Array.isArray(rpcRows) ? rpcRows[0] : rpcRows;
-    if (!rpcRow?.repair_id) {
+    if (!rpcRow?.new_repair_id) {
       return json({ ok: false, error: 'RPC returned no repair_id' }, 500);
     }
-    const repairId: string = String(rpcRow.repair_id);
+    const repairId: string = String(rpcRow.new_repair_id);
     const itemCount: number = Number(rpcRow.item_count ?? itemIds.length);
 
     // ── 2. Resolve client info for email tokens ────────────────────────

@@ -15,8 +15,14 @@
 -- Discovered live 2026-05-13 when the user's first attempt to use the new
 -- multi-item path returned "Edge Function returned a non-2xx status code"
 -- — the function bubbled the RPC exception through.
+--
+-- DROP-then-CREATE rather than CREATE OR REPLACE because the OUT
+-- parameter rename changes the function's return signature, which
+-- Postgres rejects on REPLACE (42P13 — "cannot change return type").
 
-CREATE OR REPLACE FUNCTION public.create_repair_quote_request(
+DROP FUNCTION IF EXISTS public.create_repair_quote_request(text, text[], text, text, text, text);
+
+CREATE FUNCTION public.create_repair_quote_request(
   p_tenant_id      text,
   p_item_ids       text[],
   p_repair_vendor  text DEFAULT NULL,
