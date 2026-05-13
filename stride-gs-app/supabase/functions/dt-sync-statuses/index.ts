@@ -1,5 +1,15 @@
 /**
- * dt-sync-statuses — Supabase Edge Function — v13 2026-05-13 PST
+ * dt-sync-statuses — Supabase Edge Function — v14 2026-05-13 PST
+ *
+ * v14: P+D mirror for driver-added PU lines. When the item-reconcile
+ *      block INSERTs a new PU item (DT introduced a line outside our
+ *      app — driver discovered an unexpected piece, etc.) AND the
+ *      parent order has linked_order_id, also INSERT a matching
+ *      delivery line with parent_pickup_item_id set. Description is
+ *      stored clean (strips "PICK UP: PU:" prefix). Tier-B propagation
+ *      at end of loop then stamps picked_up_at + audit columns on the
+ *      new delivery item, and dt-push-order republishes the delivery
+ *      so the manifest carries the new line.
  *
  * v13: PU→Delivery item-sync engine (Tier B). After the v12 pickup-stamp
  *      pass, when one or more delivery items were propagated (quantity
@@ -142,7 +152,7 @@ Deno.serve(async (req) => {
   // legacy reconciled rows (source='reconcile') also pull statuses.
   let query = supabase
     .from('dt_orders')
-    .select('id, dt_identifier, dt_dispatch_id, status_id, last_synced_at, tenant_id, paid_at, order_type')
+    .select('id, dt_identifier, dt_dispatch_id, status_id, last_synced_at, tenant_id, paid_at, order_type, linked_order_id')
     .not('dt_identifier', 'is', null);
 
   if (singleOrderId) {
@@ -314,7 +324,14 @@ Deno.serve(async (req) => {
             // Insert: DT introduced this line outside our app. Stamp
             // extras.added_by so downstream surfaces (Order page badges,
             // billing review) can flag it for an operator double-check.
-            const insErr = (await supabase.from('dt_order_items').insert({
+            //
+            // .select('id').single() returns the new row id so the P+D
+            // mirror block below can create a matching delivery item with
+            // parent_pickup_item_id set. Without this we'd have a PU line
+            // with no delivery counterpart — the driver discovered a piece
+            // we didn't know about, but the delivery manifest still doesn't
+            // know to load it.
+            const insRes = await supabase.from('dt_order_items').insert({
               dt_order_id:        o.id,
               dt_item_code:       it.item_id,
               description:        it.description,
@@ -328,8 +345,39 @@ Deno.serve(async (req) => {
               return_codes:       it.return_codes,
               extras:             { added_by: 'dt_sync', added_at: new Date().toISOString() },
               last_synced_at:     new Date().toISOString(),
-            })).error;
-            if (insErr) result.errors.push(`${o.dt_identifier} item insert ${it.item_id}: ${insErr.message}`);
+            }).select('id').single();
+            if (insRes.error) {
+              result.errors.push(`${o.dt_identifier} item insert ${it.item_id}: ${insRes.error.message}`);
+            } else if (insRes.data && o.order_type === 'pickup' && o.linked_order_id) {
+              // P+D mirror — driver added a line to the PU manifest in DT
+              // that didn't exist when the pair was created. Insert a
+              // matching delivery line linked back to this PU item via
+              // parent_pickup_item_id so:
+              //   (a) the delivery manifest will carry the line when
+              //       dt-push-order republishes the delivery,
+              //   (b) Tier-B propagation at end of loop will stamp
+              //       picked_up_at + audit columns on the new delivery
+              //       item (if the PU item is already delivered=true).
+              // Description is stored CLEAN on the delivery side (no
+              // "PICK UP: PU:" prefix) to match the existing convention
+              // from CreateDeliveryOrderModal at L1459.
+              const cleanDesc = (it.description ?? '').replace(/^\s*(PICK\s*UP:\s*)?(PU:\s*)?/i, '').replace(/\s+/g, ' ').trim();
+              const mirrorErr = (await supabase.from('dt_order_items').insert({
+                dt_order_id:           o.linked_order_id,
+                dt_item_code:          null,  // delivery doesn't have a DT-side id yet; dt-push-order will assign on next push
+                description:           cleanDesc || it.description,
+                quantity:              it.quantity,
+                original_quantity:     it.quantity,
+                parent_pickup_item_id: (insRes.data as { id: string }).id,
+                extras:                { source: 'pickup_added_in_dt_mirrored', added_at: new Date().toISOString() },
+                last_synced_at:        new Date().toISOString(),
+              })).error;
+              if (mirrorErr) {
+                result.errors.push(`${o.dt_identifier} P+D mirror insert for new PU item ${it.item_id}: ${mirrorErr.message}`);
+              } else {
+                console.log(`[dt-sync-statuses] P+D mirror — created delivery counterpart for new PU item ${it.item_id} on order=${o.dt_identifier}`);
+              }
+            }
           }
         }
 
