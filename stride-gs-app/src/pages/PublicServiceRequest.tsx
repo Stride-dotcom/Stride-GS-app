@@ -905,18 +905,10 @@ export function PublicServiceRequest() {
         pricing_notes:    pricingNotes || null,
       };
 
-      const { data: orderRow, error: orderErr } = await supabase
-        .from('dt_orders')
-        .insert(orderPayload)
-        .select('id, dt_identifier')
-        .single();
-      if (orderErr || !orderRow) {
-        if (orderErr) console.warn('[public-service-request] order insert failed:', orderErr);
-        throw new Error('We could not submit your request. Please try again, or email us if the problem persists.');
-      }
-
       // Items — public users only get ad-hoc lines (no inventory).
-      const itemRows: Array<Record<string, unknown>> = [];
+      // Built first so we can hand them to the RPC alongside the order
+      // payload (one transaction, no half-success orphans).
+      const itemPayload: Array<Record<string, unknown>> = [];
       const adhocSources: FreeItem[][] =
         mode === 'pickup' ? [pickupFreeItems]
         : mode === 'delivery' ? [deliveryFreeItems]
@@ -928,12 +920,9 @@ export function PublicServiceRequest() {
           const qty = Math.max(1, Number(item.quantity) || 1);
           const weight = Number.isFinite(Number(item.weight)) && Number(item.weight) > 0 ? Number(item.weight) : null;
           const cuFt = Number.isFinite(Number(item.cubicFeet)) && Number(item.cubicFeet) > 0 ? Number(item.cubicFeet) : null;
-          itemRows.push({
-            dt_order_id: (orderRow as { id: string }).id,
-            dt_item_code: null,
+          itemPayload.push({
             description: item.description.trim(),
             quantity: qty,
-            original_quantity: qty,
             cubic_feet: cuFt != null ? cuFt * qty : null,
             extras: {
               source: 'public_form_adhoc',
@@ -943,21 +932,27 @@ export function PublicServiceRequest() {
           });
         }
       }
-      if (itemRows.length > 0) {
-        const { error: itemsErr } = await supabase.from('dt_order_items').insert(itemRows);
-        if (itemsErr) {
-          console.warn('[public-service-request] items insert failed:', itemsErr);
-          throw new Error('Your request was received, but we could not save the items list. Please email us with the items so we can attach them.');
-        }
-      }
 
-      setSuccess({ identifier: (orderRow as { dt_identifier: string }).dt_identifier });
+      // Single SECURITY DEFINER RPC handles order + items in one transaction.
+      // RPC forces the policy-critical fields server-side (source,
+      // review_status, tenant_id, created_by_user, created_by_role,
+      // pricing_override, customer_tax_exempt) regardless of payload —
+      // they're only included above for shape clarity / staff visibility.
+      const { data: rpcResult, error: rpcErr } = await supabase
+        .rpc('submit_public_request', { p_order: orderPayload, p_items: itemPayload });
+      if (rpcErr || !rpcResult) {
+        if (rpcErr) console.warn('[public-service-request] submit_public_request RPC failed:', rpcErr);
+        throw new Error('We could not submit your request. Please try again, or email us if the problem persists.');
+      }
+      const orderRow = rpcResult as { id: string; dt_identifier: string };
+
+      setSuccess({ identifier: orderRow.dt_identifier });
 
       // Fire-and-forget submitter confirmation + internal alert. Failure
       // to email shouldn't change what the submitter sees — admins still
       // see the order in the Review Queue.
       void supabase.functions
-        .invoke('notify-public-request', { body: { orderId: (orderRow as { id: string }).id } })
+        .invoke('notify-public-request', { body: { orderId: orderRow.id } })
         .catch(err => console.warn('[public-service-request] notify-public-request failed:', err));
     } catch (e) {
       setSubmitError(e instanceof Error ? e.message : String(e));
