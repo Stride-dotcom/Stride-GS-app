@@ -1,6 +1,13 @@
 /**
  * dt-webhook-ingest — Supabase Edge Function
  *
+ * Version: v8 (2026-05-13 PST)
+ *   v8: dt-sync-statuses dispatch now fires for ALL Service_Route_Finished
+ *       events, not just non-pickups. The pickup-stamp helper (in
+ *       dt-sync-statuses v12) needs export.xml-fresh data (finished_at,
+ *       driver_name) to upgrade the webhook-path placeholder on the linked
+ *       delivery row, so the sync invocation has to happen for pickups too.
+ *
  * Version: v7 (2026-05-11 PST)
  *   v7: Real-time pickup-completion email. When DT pushes
  *       Service_Route_Finished and the order is order_type='pickup'
@@ -535,7 +542,15 @@ Deno.serve(async (req: Request) => {
   //
   // EdgeRuntime.waitUntil keeps the dispatched fetch alive after the
   // webhook ack, mirroring the notify-pickup-completed pattern below.
-  if (eventType === 'Service_Route_Finished' && orderId && orderOrderType !== 'pickup') {
+  //
+  // 2026-05-13 — also fire for PICKUP orders. Previously this block was
+  // gated to `!== 'pickup'` because only the delivery path needed
+  // dt-sync-statuses (for auto-release). Now the pickup-stamp helper
+  // also runs at the end of dt-sync-statuses, so PU completions also
+  // benefit from the export.xml refresh — the webhook-path placeholder
+  // (linked_pickup_finished_at = now(), driver_name = null) gets
+  // upgraded to the real DT timestamp + driver within ~10–30 seconds.
+  if (eventType === 'Service_Route_Finished' && orderId) {
     const syncUrl = `${Deno.env.get('SUPABASE_URL')}/functions/v1/dt-sync-statuses`;
     const syncSvcKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
     const syncPromise = fetch(syncUrl, {
@@ -551,7 +566,7 @@ Deno.serve(async (req: Request) => {
         const text = await resp.text().catch(() => '');
         console.warn(`[dt-webhook-ingest] dt-sync-statuses returned ${resp.status} for order=${dtIdentifier}: ${text.slice(0, 200)}`);
       } else {
-        console.log(`[dt-webhook-ingest] dt-sync-statuses dispatched for order=${dtIdentifier} (auto-release runs there)`);
+        console.log(`[dt-webhook-ingest] dt-sync-statuses dispatched for order=${dtIdentifier} (${orderOrderType === 'pickup' ? 'pickup-stamp' : 'auto-release'} runs there)`);
       }
     }).catch((err) => {
       console.warn(`[dt-webhook-ingest] dt-sync-statuses dispatch failed for order=${dtIdentifier}:`, (err as Error).message);
