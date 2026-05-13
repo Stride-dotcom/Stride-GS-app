@@ -30,6 +30,14 @@
 - [ ] DetailPanel internals v2 polish — deep interiors still have old styling in places
 - [ ] Generate Work Order button from TaskDetailPanel (backend handler exists, needs React wiring)
 
+## Repairs
+
+- [ ] **Per-item pass/fail toggle UI on RepairDetailPanel** — `repair_items.item_result` column + read-only display shipped in PR #397. Need staff-edit affordance (checkbox or two-state pill per row) that writes the result back. Informational only — doesn't affect billing or parent status.
+- [ ] **Re-quote / edit-items flow for existing repairs** — current SB path is create-only. Adding/removing items would invalidate the quote, so the right pattern is either (a) "Re-quote" action that nulls quote_amount + lets staff add/remove items + sends a new REPAIR_QUOTE email, or (b) keep cancel-and-rebuild as the only path. Punted from PR #397.
+- [ ] **Legacy single-item repair-quote path → SB cutover** — TaskDetailPanel / ItemDetailPanel "Request Repair Quote" buttons still route through the GAS `handleRequestRepairQuote_` endpoint (folder creation + email). Cutover them to `request-repair-quote-sb` (which already handles single-item correctly — just pass `itemIds: [oneItem]`) once the multi-item path has soaked.
+- [ ] **REPAIR_QUOTE / REPAIR_APPROVED / REPAIR_DECLINED / REPAIR_COMPLETE templates for multi-item** — currently use single-item tokens (ITEM_ID, SIDEMARK, LOCATION) populated from the primary item. Multi-item versions can lean on the same `{{ITEM_TABLE_HTML}}` pattern the REPAIR_QUOTE_REQUEST already uses.
+- [x] **Multi-item repair jobs — select N items → ONE repair with N items underneath. Mirrors will_calls/will_call_items pattern. SB-authoritative create via SECURITY DEFINER RPC + edge function. Shipped 2026-05-13 (PR #397).**
+
 ## Inventory
 
 - [ ] Auto-Print Labels from Receiving (toggle for inline label printing)
