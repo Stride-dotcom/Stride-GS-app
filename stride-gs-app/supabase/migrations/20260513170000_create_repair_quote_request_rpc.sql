@@ -68,9 +68,15 @@ DECLARE
 BEGIN
   -- ── Auth: staff/admin only, or service_role bypass ───────────────
   -- This function is SECURITY DEFINER so we have to re-impose
-  -- permissions inside the body. service_role's jwt() returns the
-  -- service-role claims; staff/admin from logged-in clients gets the
-  -- user_metadata.role check.
+  -- permissions inside the body. Three cases:
+  --   • service_role caller (edge function path): auth.jwt() has no
+  --     user_metadata, so v_role = ''. auth.uid() is NULL. The second
+  --     clause (`v_caller_uid IS NOT NULL`) is false → IF skipped →
+  --     bypass succeeds. This is the intended path.
+  --   • Logged-in staff/admin: v_role IN ('admin','staff') → first
+  --     clause false → IF skipped → passes.
+  --   • Logged-in client (role='client'): v_role = 'client',
+  --     v_caller_uid is non-null → both clauses true → EXCEPTION.
   v_role := COALESCE(((auth.jwt() -> 'user_metadata') ->> 'role'), '');
   v_caller_uid := auth.uid();
   IF v_role NOT IN ('admin', 'staff') AND v_caller_uid IS NOT NULL THEN

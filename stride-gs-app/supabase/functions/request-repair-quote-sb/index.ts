@@ -46,7 +46,11 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-const APP_URL = 'https://www.mystridehub.com/#';
+// Plain origin (no trailing `#`) so the {{APP_URL}} email token
+// renders cleanly when templates concatenate it with paths. The
+// deep-link variant adds the `#/` HashRouter prefix below where it's
+// needed.
+const APP_URL = 'https://www.mystridehub.com';
 
 interface InventoryRow {
   item_id:     string;
@@ -147,8 +151,10 @@ Deno.serve(async (req: Request) => {
     // App deep link to the new repair page. The deep-link convention
     // for the GS app uses #/repairs?open=<repair_id>&client=<tenant_id>
     // (matches the deep-link rules in CLAUDE.md — query-param form +
-    // &client= so the detail panel opens).
-    const appDeepLink = `${APP_URL}/repairs?open=${encodeURIComponent(repairId)}&client=${encodeURIComponent(tenantId)}`;
+    // &client= so the detail panel opens). The `#/` HashRouter prefix
+    // is appended here, not in APP_URL, so the {{APP_URL}} token stays
+    // suitable for plain URL concatenation in the rest of the template.
+    const appDeepLink = `${APP_URL}/#/repairs?open=${encodeURIComponent(repairId)}&client=${encodeURIComponent(tenantId)}`;
 
     // ── 4. Send email ─────────────────────────────────────────────────
     // Don't pass `to` — let send-email expand the template's recipients
@@ -183,17 +189,29 @@ Deno.serve(async (req: Request) => {
     if (!sendJson.ok) {
       // Repair already created — surface email failure to FailedOperationsDrawer.
       console.error('[request-repair-quote-sb] send-email failed:', JSON.stringify(sendJson));
-      await supabase.from('gs_sync_events').insert({
-        tenant_id:     tenantId,
-        entity_type:   'repair',
-        entity_id:     repairId,
-        action_type:   'send_repair_quote_request_email',
-        sync_status:   'sync_failed',
-        requested_by:  'request-repair-quote-sb',
-        request_id:    crypto.randomUUID(),
-        payload:       { itemIds, clientEmail, ccd: !!clientEmail },
-        error_message: String(sendJson.error ?? 'unknown').slice(0, 1000),
-      }).then(() => {}, () => {});
+      // Audit-log the email failure to gs_sync_events for
+      // FailedOperationsDrawer. If the audit insert itself fails (e.g.
+      // RLS regression, network blip) log it loudly — silently
+      // swallowing means the operator has no signal that the email
+      // didn't go out.
+      try {
+        const { error: logErr } = await supabase.from('gs_sync_events').insert({
+          tenant_id:     tenantId,
+          entity_type:   'repair',
+          entity_id:     repairId,
+          action_type:   'send_repair_quote_request_email',
+          sync_status:   'sync_failed',
+          requested_by:  'request-repair-quote-sb',
+          request_id:    crypto.randomUUID(),
+          payload:       { itemIds, clientEmail, ccd: !!clientEmail },
+          error_message: String(sendJson.error ?? 'unknown').slice(0, 1000),
+        });
+        if (logErr) {
+          console.error('[request-repair-quote-sb] gs_sync_events insert failed:', logErr.message);
+        }
+      } catch (logEx) {
+        console.error('[request-repair-quote-sb] gs_sync_events insert threw:', logEx);
+      }
       // Still return success — the repair is created. Email is the side
       // effect; the operator can resend from the repair page.
       return json({ ok: true, repairId, itemCount, emailFailed: true, emailError: String(sendJson.error ?? '') });
