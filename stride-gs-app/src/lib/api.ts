@@ -429,6 +429,29 @@ export interface ApiRepair {
   quoteTaxRate?: number | null;
   quoteTaxAmount?: number | null;
   quoteGrandTotal?: number | null;
+  // Multi-item repairs (2026-05-13). Populated from public.repair_items
+  // overlaid with inventory descriptions/vendors/etc. For legacy
+  // single-item repairs there's exactly one row in here matching
+  // `itemId` above; for new bulk-created repairs there are N rows.
+  // Empty array (not undefined) when the parent repair exists but has
+  // no repair_items rows yet.
+  items?: ApiRepairItem[];
+}
+
+export interface ApiRepairItem {
+  itemId: string;
+  qty: number;
+  itemResult: string | null;   // 'passed' | 'failed' | null  (informational)
+  itemNotes: string | null;
+  // Inventory overlay fields — read-time join, may be empty if the
+  // inventory row was archived/transferred. Same shape as WC items.
+  description: string;
+  vendor: string;
+  sidemark: string;
+  location: string;
+  room: string;
+  itemClass: string;
+  inventoryStatus: string;
 }
 
 export interface ApiRepairQuoteLine {

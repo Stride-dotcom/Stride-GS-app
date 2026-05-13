@@ -1434,17 +1434,27 @@ export async function fetchRepairByIdFromSupabase(
       .maybeSingle();
     if (error || !data) return null;
     const row = data as SupabaseRepairRow;
+
+    // Eagerly load repair_items + overlay inventory fields. Same
+    // pattern as fetchWillCallByIdFromSupabase — keeps the detail
+    // page rendering items on first paint without a second roundtrip.
+    // Legacy single-item repairs have exactly one repair_items row
+    // (created by the 20260513160000 backfill); new multi-item
+    // repairs have N rows. Either way we end up with a uniform
+    // items[] array on the response.
+    const items = await fetchRepairItemsWithOverlay(row.repair_id, row.tenant_id);
+
     return {
       repairId: row.repair_id,
       clientName: clientNameMap ? (clientNameMap[row.tenant_id] || '') : '',
       clientSheetId: row.tenant_id,
       sourceTaskId: '',
       itemId: row.item_id || '',
-      description: '',
-      itemClass: '',
-      vendor: '',
-      location: '',
-      sidemark: '',
+      description: items[0]?.description || '',
+      itemClass: items[0]?.itemClass || '',
+      vendor: items[0]?.vendor || '',
+      location: items[0]?.location || '',
+      sidemark: items[0]?.sidemark || '',
       taskNotes: row.task_notes || '',
       createdBy: row.created_by || '',
       createdDate: row.created_date || '',
@@ -1478,10 +1488,78 @@ export async function fetchRepairByIdFromSupabase(
       quoteTaxRate:         row.quote_tax_rate != null ? Number(row.quote_tax_rate) : null,
       quoteTaxAmount:       row.quote_tax_amount != null ? Number(row.quote_tax_amount) : null,
       quoteGrandTotal:      row.quote_grand_total != null ? Number(row.quote_grand_total) : null,
+      items,
     };
   } catch {
     return null;
   }
+}
+
+/**
+ * Fetch repair_items for a single repair, overlaying inventory fields
+ * (description, vendor, sidemark, etc.) for display. Returns [] when
+ * the repair has no items (which shouldn't happen post-backfill, but
+ * is safe to render). Same eager-load pattern as
+ * fetchWillCallByIdFromSupabase's items section.
+ */
+async function fetchRepairItemsWithOverlay(
+  repairId: string,
+  tenantId: string,
+): Promise<NonNullable<ApiRepair['items']>> {
+  if (!repairId || !tenantId) return [];
+
+  const { data: itemRows } = await supabase
+    .from('repair_items')
+    .select('item_id, qty, item_result, item_notes')
+    .eq('repair_id', repairId)
+    .eq('tenant_id', tenantId)
+    .order('created_at', { ascending: true });
+
+  const rows = (itemRows ?? []) as Array<{
+    item_id: string;
+    qty: number | string | null;
+    item_result: string | null;
+    item_notes: string | null;
+  }>;
+  if (rows.length === 0) return [];
+
+  const itemIds = rows.map(r => r.item_id).filter(Boolean);
+  const { data: invRows } = await supabase
+    .from('inventory')
+    .select('item_id, description, vendor, sidemark, location, room, item_class, status')
+    .eq('tenant_id', tenantId)
+    .in('item_id', itemIds);
+
+  const invByItemId = new Map<string, {
+    description: string | null; vendor: string | null;
+    sidemark: string | null; location: string | null;
+    room: string | null; item_class: string | null;
+    status: string | null;
+  }>();
+  for (const inv of (invRows ?? []) as Array<{
+    item_id: string; description: string | null; vendor: string | null;
+    sidemark: string | null; location: string | null; room: string | null;
+    item_class: string | null; status: string | null;
+  }>) {
+    invByItemId.set(inv.item_id, inv);
+  }
+
+  return rows.map(r => {
+    const inv = invByItemId.get(r.item_id);
+    return {
+      itemId: r.item_id,
+      qty: r.qty != null ? Number(r.qty) : 1,
+      itemResult: r.item_result,
+      itemNotes: r.item_notes,
+      description:     inv?.description ?? '',
+      vendor:          inv?.vendor ?? '',
+      sidemark:        inv?.sidemark ?? '',
+      location:        inv?.location ?? '',
+      room:            inv?.room ?? '',
+      itemClass:       inv?.item_class ?? '',
+      inventoryStatus: inv?.status ?? '',
+    };
+  });
 }
 
 /**
