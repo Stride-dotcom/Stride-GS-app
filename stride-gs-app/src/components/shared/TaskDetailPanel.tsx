@@ -16,7 +16,8 @@ import { buildDeepLinkUrl } from '../../lib/deepLinks';
 import { theme } from '../../styles/theme';
 import { fmtDate, fmtDateTime, toDateInputValue } from '../../lib/constants';
 import { WriteButton } from './WriteButton';
-import { postCompleteTask, postStartTask, postUpdateTaskNotes, postUpdateTaskCustomPrice, postRequestRepairQuote, postCancelTask, postCorrectTaskResult, postReopenTask, postUpdateInventoryItem, postUpdateTaskPriority, postUpdateTaskDueDate, isApiConfigured } from '../../lib/api';
+import { postCompleteTask, postStartTask, postUpdateTaskNotes, postUpdateTaskCustomPrice, postRequestRepairQuote, postRequestRepairQuoteSb, postCancelTask, postCorrectTaskResult, postReopenTask, postUpdateInventoryItem, postUpdateTaskPriority, postUpdateTaskDueDate, isApiConfigured } from '../../lib/api';
+import { useFeatureFlag } from '../../contexts/FeatureFlagContext';
 import { generateTaskWorkOrderPdf } from '../../lib/workOrderPdf';
 import { writeSyncFailed } from '../../lib/syncEvents';
 import { entityEvents } from '../../lib/entityEvents';
@@ -81,6 +82,9 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
 
   const { user } = useAuth();
   const { isMobile, isTablet } = useIsMobile();
+  // [MIGRATION-P3] flag-routed Request Repair Quote — SB path creates ONE
+  // repair with item + sourceTaskId stamped; legacy GAS path same shape.
+  const requestRepairQuoteBackend = useFeatureFlag('requestRepairQuote');
   const isCompactViewport = isMobile || isTablet;
 
   const [notes, setNotes] = useState(task.taskNotes || task.notes || '');
@@ -290,8 +294,25 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
     }
 
     try {
-      const resp = await postRequestRepairQuote({ itemId: task.itemId, sourceTaskId: task.taskId }, clientSheetId);
-      if (resp.ok && resp.data?.success) {
+      // [MIGRATION-P3] Route via requestRepairQuote flag. SB path creates
+      // ONE repair with this single item + sourceTaskId stamped on the
+      // repair so the Source Task deep link still works.
+      let ok = false;
+      let errMsg = '';
+      if (requestRepairQuoteBackend === 'supabase') {
+        const resp = await postRequestRepairQuoteSb({
+          tenantId:     clientSheetId,
+          itemIds:      [task.itemId],
+          sourceTaskId: task.taskId,
+        });
+        ok = !!resp.ok;
+        errMsg = resp.error || 'Request failed';
+      } else {
+        const resp = await postRequestRepairQuote({ itemId: task.itemId, sourceTaskId: task.taskId }, clientSheetId);
+        ok = !!(resp.ok && resp.data?.success);
+        errMsg = resp.data?.error || resp.error || 'Request failed — please try again.';
+      }
+      if (ok) {
         setRepairRequested(true);
         // Don't removeOptimisticRepair on success — useRepairs auto-reconcile
         // drops the temp once the real row lands. Eager removal creates a
@@ -303,7 +324,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
         onTaskUpdated?.();
       } else {
         removeOptimisticRepair?.(tempRepairId); // rollback
-        setRepairRequestError(resp.data?.error || 'Request failed — please try again.');
+        setRepairRequestError(errMsg);
       }
     } catch (_) {
       removeOptimisticRepair?.(tempRepairId); // rollback

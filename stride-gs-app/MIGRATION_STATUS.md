@@ -121,7 +121,7 @@ Match-rate column is the rolling 7-day match rate from `parity_results`.
 | `updateShipment` | gas | 0 | n/a | 0 | n/a | not_started | — |
 | `startTask` | gas | 0 | n/a | 0 | n/a | not_started | — |
 | `startRepair` | gas | 0 | n/a | 0 | n/a | **handler_drafted** | 2026-05-13 (shipped PR #406, deployed, unflipped) |
-| `requestRepairQuote` (single-item) | gas | 0 | n/a | 0 | n/a | not_started | 2026-05-13 (feature_flags row seeded; cutover wires TaskDetailPanel + ItemDetailPanel to existing `request-repair-quote-sb` with `itemIds:[oneItem]`) |
+| `requestRepairQuote` (single-item) | gas | 0 | n/a | 0 | n/a | **handler_drafted** | 2026-05-13 (PR pending — wires TaskDetailPanel + ItemDetailPanel + Tasks-page per-row through existing `request-repair-quote-sb` with `itemIds:[oneItem]` + sourceTaskId. RPC extended with `p_source_task_id` parameter — migration `20260513210000_create_repair_quote_request_rpc_source_task_id.sql`. Flag: `requestRepairQuote`.) |
 | `respondRepairQuote` | gas | 0 | n/a | 0 | n/a | **handler_drafted** | 2026-05-13 (shipped PR #408, deployed, unflipped; shares sendRepairEmails flag with sendRepairQuote) |
 | `cancelRepair` | gas | 0 | n/a | 0 | n/a | **handler_drafted** | 2026-05-13 (shipped PR #405, smoke-tested end-to-end, deployed, unflipped) |
 | `sendRepairQuote` | gas | 0 | n/a | 0 | n/a | **handler_drafted** | 2026-05-13 (shipped PR #407, deployed, unflipped; shares sendRepairEmails flag with respondRepairQuote) |

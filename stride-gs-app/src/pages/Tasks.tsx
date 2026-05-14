@@ -32,7 +32,8 @@ import { ConfirmDialog } from '../components/shared/ConfirmDialog';
 import { BulkResultSummary } from '../components/shared/BulkResultSummary';
 import { BulkReassignModal } from '../components/shared/BulkReassignModal';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { isApiConfigured, postRequestRepairQuote, postBatchCancelTasks, postBatchReassignTasks, postUpdateTaskPriority, type BatchMutationResult } from '../lib/api';
+import { isApiConfigured, postRequestRepairQuote, postRequestRepairQuoteSb, postBatchCancelTasks, postBatchReassignTasks, postUpdateTaskPriority, type BatchMutationResult } from '../lib/api';
+import { useFeatureFlag } from '../contexts/FeatureFlagContext';
 import { mergePreflightSkips } from '../lib/batchLoop';
 import { applyBulkPatch, revertBulkPatchForFailures } from '../lib/optimisticBulk';
 import { useTasks } from '../hooks/useTasks';
@@ -564,18 +565,35 @@ export function Tasks() {
     }
   }, [pendingBulkItems, apiConfigured, showToast, refetchTasks, applyTaskPatch, clearTaskPatch]);
 
+  // [MIGRATION-P3] Tasks-page per-row "Request Repair Quote" routes via flag.
+  // Same shape as the in-detail-panel handlers — flag-gated single-item create.
+  const requestRepairQuoteBackend = useFeatureFlag('requestRepairQuote');
   const handleRequestRepairQuote = useCallback(async (itemId: string, sourceTaskId?: string) => {
     const task = tasks.find(t => t.itemId === itemId && (!sourceTaskId || t.taskId === sourceTaskId));
     const csId = task?.clientSheetId || task?.clientId || '';
     if (!apiConfigured || !csId || !itemId) { showToast('API not configured'); return; }
-    const resp = await postRequestRepairQuote({ itemId, sourceTaskId }, csId);
-    if (resp.ok && resp.data?.success) {
-      showToast(`Repair ${resp.data.repairId} created — Pending Quote`);
-      refetchTasks();
+    if (requestRepairQuoteBackend === 'supabase') {
+      const resp = await postRequestRepairQuoteSb({
+        tenantId:     csId,
+        itemIds:      [itemId],
+        sourceTaskId: sourceTaskId ?? null,
+      });
+      if (resp.ok) {
+        showToast(`Repair ${resp.repairId} created — Pending Quote`);
+        refetchTasks();
+      } else {
+        showToast(resp.error || 'Failed to create repair');
+      }
     } else {
-      showToast(resp.error || resp.data?.error || 'Failed to create repair');
+      const resp = await postRequestRepairQuote({ itemId, sourceTaskId }, csId);
+      if (resp.ok && resp.data?.success) {
+        showToast(`Repair ${resp.data.repairId} created — Pending Quote`);
+        refetchTasks();
+      } else {
+        showToast(resp.error || resp.data?.error || 'Failed to create repair');
+      }
     }
-  }, [tasks, apiConfigured, showToast, refetchTasks]);
+  }, [tasks, apiConfigured, showToast, refetchTasks, requestRepairQuoteBackend]);
 
   // Session 70 fix #1: split filtering so status-chip counts reflect the client+assignee
   // filtered dataset, not the fully-status-filtered dataset. Clicking one chip used to

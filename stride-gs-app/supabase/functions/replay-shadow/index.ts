@@ -103,6 +103,13 @@ const SHADOW_REGISTRY: Record<string, ShadowEntry> = {
   // GAS action key is 'respondToRepairQuote' (camelCase from the React
   // payload). See respond-repair-quote-shadow/index.ts.
   respondToRepairQuote: { shadow: 'respond-repair-quote-shadow', action: 'respondToRepairQuote' },
+  // [MIGRATION-P3] requestRepairQuote — fifth + final repair P3 entry
+  // (multi-item was net-new and doesn't go through parity). Variable
+  // shape — items array stringified into a `summary` string. Note:
+  // entity_id=='' for this audit row because the legacy GAS path
+  // created N repairs (one per item) so the audit doesn't bind to a
+  // single repair_id. See request-repair-quote-shadow/index.ts.
+  requestRepairQuote: { shadow: 'request-repair-quote-shadow', action: 'requestRepairQuote' },
 };
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
