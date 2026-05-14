@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.221.0 — 2026-05-14 PST — [MIGRATION-P3 SB→Sheet mirror for repairs] Extends __writeThroughReverseRepairs_ to support op='insert' (treats both 'insert' and 'update' as upserts: find row by Repair ID, append if missing, update if present — same idempotency invariants either way). Extends REVERSE_REPAIR_FIELDS_ with created_date / created_by / item_notes / task_notes / source_task_id so a fresh sheet row built by the insert path has the full create state. New admin function runBackfillSbOnlyRepairsToSheet(tenantIdArg?) (and the runBackfillSevaRepairsToSheet convenience wrapper) walks active CB clients, fetches every public.repairs row for the tenant, and inserts the missing ones into the per-tenant Repairs sheet via the writer — idempotent, so re-running is harmless. Companion edge function change in request-repair-quote-sb fires the writer with op='insert' after the RPC, so new multi-item repairs land on the sheet immediately instead of being SB-only and invisible to legacy readers. Closes the symmetric gap to v38.220.0: that PR stopped the GAS sync from DELETING SB-only rows; this PR stops the multi-item create flow from leaving them SB-only in the first place.
+   StrideAPI.gs — v38.222.0 — 2026-05-14 PST — [BILLING bridge] CB Consolidated_Ledger auto-reconcile from public.billing on every QBO push. Closes the silent-drop class that bit INV-001152 (and the six other stuck invoices from the 2026-05-05 / 2026-05-06 cycle): handleCreateInvoice_'s CB dedup-skip at ~line 25303, plus the symmetry gaps in handleVoidInvoice_ / handleReopenTask_ (open backlog #5 / #7), let CB Consolidated_Ledger drift behind per-tenant Billing_Ledger + public.billing. handleQboCreateInvoice_ reads CB for the grouping pass, so any row that diverged got silently dropped from the push payload (React sent N invoices, GAS grouped <N). New helper `reconcileCbFromBilling_(invoiceNos)` reads public.billing as the source of truth, indexes CB by Ledger Row ID, and either UPDATEs the matching CB row in place (Status / Invoice # / Sidemark / Client / svc fields) or APPENDs a fresh CB row for IDs missing from CB. Idempotent — re-running is a no-op when state matches. handleQboCreateInvoice_ derives the set of invoice numbers covered by the incoming ledger_row_ids (one supabaseSelect_ on public.billing.invoice_no), calls the reconciler before reading CB, then proceeds with the existing grouping pass against the post-reconcile state. Wrapped in try/catch so a Supabase outage degrades to the prior behavior (silent skip of drifted rows) instead of blocking the push. NOT a structural fix — the underlying CB-symmetry bugs are intentionally left in place per MIG-005 (CB is retired in P4b). This is a transitional bridge that keeps billing accurate during the migration window.
+   v38.221.0 — 2026-05-14 PST — [MIGRATION-P3 SB→Sheet mirror for repairs] Extends __writeThroughReverseRepairs_ to support op='insert' (treats both 'insert' and 'update' as upserts: find row by Repair ID, append if missing, update if present — same idempotency invariants either way). Extends REVERSE_REPAIR_FIELDS_ with created_date / created_by / item_notes / task_notes / source_task_id so a fresh sheet row built by the insert path has the full create state. New admin function runBackfillSbOnlyRepairsToSheet(tenantIdArg?) (and the runBackfillSevaRepairsToSheet convenience wrapper) walks active CB clients, fetches every public.repairs row for the tenant, and inserts the missing ones into the per-tenant Repairs sheet via the writer — idempotent, so re-running is harmless. Companion edge function change in request-repair-quote-sb fires the writer with op='insert' after the RPC, so new multi-item repairs land on the sheet immediately instead of being SB-only and invisible to legacy readers. Closes the symmetric gap to v38.220.0: that PR stopped the GAS sync from DELETING SB-only rows; this PR stops the multi-item create flow from leaving them SB-only in the first place.
    v38.220.0 — 2026-05-14 PST — [MIGRATION-P3 SB-primary preserves SB-only repairs] api_fullClientSync_ no longer calls supabaseDeleteStaleRows_ on the repairs entity. With all six repair feature flags now at active_backend='supabase' fleet-wide (cancelRepair / startRepair / sendRepairEmails / completeRepair / requestRepairQuote / respondRepairQuote — flipped 2026-05-14 19:32 UTC), public.repairs is the authoritative store. The SB-only multi-item create path (request-repair-quote-sb, PR #397) intentionally never writes to the per-tenant Repairs sheet — so the stale-delete sweep was nuking legitimate SB rows on every full-sync (caught 2026-05-14 19:43 UTC when Seva Home's RPR-63280-1778715634749 lost its parent row mid-quote-send; reconstructed manually via SQL; this fix prevents a recurrence). Sheet edits still upsert to SB via supabaseBatchUpsert_; only the destructive delete sweep is dropped.
    v38.219.0 — 2026-05-14 PST — handleProcessWcRelease_ now reads Qty + Sidemark when building allUnreleasedItems. Pre-fix the per-row object only carried itemId/wcFee/itemClass/description/location/vendor, so the downstream releaseItemsForTable.map produced rows with qty=undefined and sidemark=undefined — every WC release email rendered "Qty 1" regardless of the actual quantity on the WC_Items row, and the Sidemark column was blank for every line. Fix is two added field reads at the push() site — `qty: Number(...||1)` mirrors the inventory release email's safe default, `sidemark: String(...||"").trim()` matches the existing description/vendor coercion. releaseItemsForTable already references r.qty and r.sidemark so no downstream change needed. Pure data-plumbing fix; no schema or RLS change; no React/Supabase change.
    v38.218.0 — 2026-05-14 PST — [MIGRATION-P3 reQuoteRepair] Extends REVERSE_REPAIR_FIELDS_ with two more columns so the new `re-quote-repair` Edge Function can mirror its full state to the per-tenant Repairs sheet via the existing __writeThroughReverseRepairs_ writer: `item_id` → "Item ID" (the denormalized "primary item" cache on the Repairs sheet — re-quote rewrites this to the new first item) and `approved` → "Approved" (boolean — cleared on re-quote because the customer agreement is being re-issued). No new writer code; the writer ignores unknown row keys silently and skips columns that don't exist on the sheet. Companion Edge Function `re-quote-repair` is the SB-primary entry for the new "Edit Items" flow in RepairDetailPanel — lets staff add/remove items on an in-flight repair (status in Pending Quote / Quote Sent) without cancelling and recreating. RPC `re_quote_repair` is atomic: delete existing repair_items + insert new + UPDATE repairs (status='Pending Quote', clear quote_* fields, approved=false, new primary item_id) + audit-log entry. Per-tenant Repair_Items sheet is NOT mirrored on the swap — multi-item repair items only live in SB until P4a flips invoice generation (same scope as the multi-item create flow). Sheet stays current as the legacy-readers' read-only mirror via the parent Repairs row update.
@@ -41296,6 +41297,268 @@ function api_patchQboPushJob_(jobId, patch) {
   }
 }
 
+/**
+ * v38.222.0 — Reconcile CB Consolidated_Ledger from public.billing for the
+ * specified invoice numbers. public.billing is treated as the source of
+ * truth (the migration plan retires CB entirely in Phase 4b — see MIG-005
+ * in MIGRATION_STATUS.md).
+ *
+ * Why this exists: handleCreateInvoice_'s CB-write loop at ~line 25303
+ * dedupes by Ledger Row ID with a bare `continue` — it never UPDATEs an
+ * existing CB row. Combined with the symmetry gaps in handleVoidInvoice_
+ * (backlog #5) and handleReopenTask_ (backlog #7), CB diverges from the
+ * per-tenant Billing_Ledger sheet + public.billing mirror over time. Any
+ * downstream consumer that reads CB (handleQboCreateInvoice_, IIF export)
+ * silently drops the divergent rows.
+ *
+ * This reconciler reads public.billing for the supplied invoice numbers
+ * (status != Void), indexes CB by Ledger Row ID, and either UPDATEs the
+ * matching CB row in place or APPENDs a new row for IDs missing from CB.
+ * Idempotent — re-running with the same state is a no-op.
+ *
+ * Caller is responsible for passing the FULL set of invoice numbers it
+ * needs reconciled. Pass [] / null to skip.
+ *
+ * Returns:
+ *   {
+ *     success:           boolean,
+ *     invoiceNos:        string[],   // echo of input
+ *     billingRowCount:   number,     // rows read from public.billing
+ *     updatedCount:      number,     // existing CB rows updated in place
+ *     appendedCount:     number,     // new CB rows appended
+ *     duplicateLrids:    string[],   // ledger_row_ids present 2+ times in CB
+ *     error?:            string      // populated only on terminal failure
+ *   }
+ *
+ * NOT a structural fix. The migration retires CB in P4b — this is a
+ * transitional bridge so billing stays accurate during the migration
+ * window. Do not extend this to "harden" the GAS billing path in any
+ * other direction; per the MIG-005 decision, CB-symmetry work belongs
+ * inside the SB-native handlers, not the dying GAS ones.
+ */
+function reconcileCbFromBilling_(invoiceNos) {
+  if (!Array.isArray(invoiceNos) || invoiceNos.length === 0) {
+    return {
+      success: true,
+      invoiceNos: [],
+      billingRowCount: 0,
+      updatedCount: 0,
+      appendedCount: 0,
+      duplicateLrids: []
+    };
+  }
+
+  // De-dupe + sanitize input. Reject anything containing characters that
+  // would break PostgREST's in.(...) filter or imply tampering.
+  var sanitized = {};
+  for (var ai = 0; ai < invoiceNos.length; ai++) {
+    var raw = String(invoiceNos[ai] || "").trim();
+    if (!raw) continue;
+    if (!/^[A-Za-z0-9_\-]+$/.test(raw)) {
+      Logger.log("reconcileCbFromBilling_ rejecting invoice_no with unsafe chars: " + raw);
+      continue;
+    }
+    sanitized[raw] = true;
+  }
+  var safeInvoiceNos = Object.keys(sanitized);
+  if (safeInvoiceNos.length === 0) {
+    return {
+      success: true,
+      invoiceNos: [],
+      billingRowCount: 0,
+      updatedCount: 0,
+      appendedCount: 0,
+      duplicateLrids: []
+    };
+  }
+
+  // 1. Read authoritative state from public.billing.
+  //    Filter excludes Void rows — those don't belong on a "live invoice"
+  //    in CB. (Void-symmetry is a separate concern; backlog #5 owns it,
+  //    and it dies entirely when CB retires in P4b.)
+  var inList = safeInvoiceNos.map(function(n) { return '"' + n + '"'; }).join(',');
+  var sel = supabaseSelect_(
+    "billing",
+    "invoice_no=in.(" + inList + ")&status=neq.Void",
+    "tenant_id,ledger_row_id,status,invoice_no,client_name,date,svc_code,svc_name,category,item_id,description,item_class,qty,rate,total,task_id,repair_id,shipment_number,item_notes,invoice_date,invoice_url,sidemark,reference"
+  );
+  if (!sel.ok) {
+    return {
+      success: false,
+      invoiceNos: safeInvoiceNos,
+      billingRowCount: 0,
+      updatedCount: 0,
+      appendedCount: 0,
+      duplicateLrids: [],
+      error: "Supabase read failed for public.billing"
+    };
+  }
+
+  if (sel.rows.length === 0) {
+    // No rows to reconcile (every supplied invoice has only Void rows or
+    // doesn't exist in public.billing). Nothing to do — not an error.
+    return {
+      success: true,
+      invoiceNos: safeInvoiceNos,
+      billingRowCount: 0,
+      updatedCount: 0,
+      appendedCount: 0,
+      duplicateLrids: []
+    };
+  }
+
+  // 2. Open CB Consolidated_Ledger.
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) {
+    return {
+      success: false,
+      invoiceNos: safeInvoiceNos,
+      billingRowCount: sel.rows.length,
+      updatedCount: 0,
+      appendedCount: 0,
+      duplicateLrids: [],
+      error: "CB_SPREADSHEET_ID not configured"
+    };
+  }
+  var cbSS = SpreadsheetApp.openById(cbId);
+  var consolSh = cbSS.getSheetByName("Consolidated_Ledger");
+  if (!consolSh) {
+    return {
+      success: false,
+      invoiceNos: safeInvoiceNos,
+      billingRowCount: sel.rows.length,
+      updatedCount: 0,
+      appendedCount: 0,
+      duplicateLrids: [],
+      error: "Consolidated_Ledger sheet not found"
+    };
+  }
+
+  var hdrCB = api_getHeaderMap_(consolSh);
+  var lridCol = hdrCB["Ledger Row ID"];
+  if (!lridCol) {
+    return {
+      success: false,
+      invoiceNos: safeInvoiceNos,
+      billingRowCount: sel.rows.length,
+      updatedCount: 0,
+      appendedCount: 0,
+      duplicateLrids: [],
+      error: "CB Consolidated_Ledger missing 'Ledger Row ID' column"
+    };
+  }
+
+  var ncolsCB = consolSh.getLastColumn();
+  var lastRow = consolSh.getLastRow();
+  var cbValues = lastRow >= 2
+    ? consolSh.getRange(2, 1, lastRow - 1, ncolsCB).getValues()
+    : [];
+
+  // 3. Index CB by Ledger Row ID. First-seen wins; extras are flagged but
+  //    not touched (cleanup of dup CB rows is a separate manual exercise).
+  var cbIndex = {};
+  var duplicateLrids = [];
+  for (var ci = 0; ci < cbValues.length; ci++) {
+    var lid = String(cbValues[ci][lridCol - 1] || "").trim();
+    if (!lid) continue;
+    if (cbIndex[lid]) {
+      duplicateLrids.push(lid);
+      continue;
+    }
+    cbIndex[lid] = { sheetRow: ci + 2 };  // 1-indexed sheet row
+  }
+
+  // 4. Plan updates + appends.
+  //    Field map: public.billing column → CB Consolidated_Ledger header.
+  //    Anything not in this map is left untouched on the CB row (e.g., the
+  //    QBO INVOICE ID / QBO STATUS columns the QBO push writes back).
+  var FIELD_MAP = [
+    { sb: "status",          cb: "Status" },
+    { sb: "invoice_no",      cb: "Invoice #" },
+    { sb: "client_name",     cb: "Client" },
+    { sb: "tenant_id",       cb: "Client Sheet ID" },
+    { sb: "date",            cb: "Date" },
+    { sb: "svc_code",        cb: "Svc Code" },
+    { sb: "svc_name",        cb: "Svc Name" },
+    { sb: "item_id",         cb: "Item ID" },
+    { sb: "description",     cb: "Description" },
+    { sb: "item_class",      cb: "Class" },
+    { sb: "qty",             cb: "Qty" },
+    { sb: "rate",            cb: "Rate" },
+    { sb: "total",           cb: "Total" },
+    { sb: "task_id",         cb: "Task ID" },
+    { sb: "repair_id",       cb: "Repair ID" },
+    { sb: "shipment_number", cb: "Shipment #" },
+    { sb: "item_notes",      cb: "Item Notes" },
+    { sb: "sidemark",        cb: "Sidemark" },
+    { sb: "invoice_url",     cb: "Invoice URL" }
+  ];
+
+  function setCB_(rowArr, name, val) {
+    var col = hdrCB[name];
+    if (col !== undefined && col >= 1 && col <= ncolsCB) {
+      rowArr[col - 1] = (val !== undefined && val !== null) ? val : "";
+    }
+  }
+
+  // updates[]: each entry is { sheetRow: int, rowArr: any[ncolsCB] }.
+  // The rowArr holds the FULL post-reconcile row contents (existing values
+  // preserved for any column not in FIELD_MAP), so we can write it back
+  // in one setValues per row instead of one setValue per cell.
+  var updates = [];
+  var appends = [];
+
+  for (var bi = 0; bi < sel.rows.length; bi++) {
+    var b = sel.rows[bi];
+    var lid2 = String(b.ledger_row_id || "").trim();
+    if (!lid2) continue;
+
+    if (cbIndex[lid2]) {
+      // UPDATE in place. Read the current CB row, overwrite only the
+      // mapped columns, leave QBO INVOICE ID / QBO STATUS / etc. alone.
+      var sheetRow = cbIndex[lid2].sheetRow;
+      var existing = cbValues[sheetRow - 2].slice();  // copy
+      for (var fi = 0; fi < FIELD_MAP.length; fi++) {
+        var fm = FIELD_MAP[fi];
+        setCB_(existing, fm.cb, b[fm.sb]);
+      }
+      updates.push({ sheetRow: sheetRow, rowArr: existing });
+    } else {
+      // APPEND. Build a fresh row from FIELD_MAP + the Ledger Row ID.
+      var newRow = new Array(ncolsCB).fill("");
+      setCB_(newRow, "Ledger Row ID", lid2);
+      for (var fj = 0; fj < FIELD_MAP.length; fj++) {
+        var fm2 = FIELD_MAP[fj];
+        setCB_(newRow, fm2.cb, b[fm2.sb]);
+      }
+      appends.push(newRow);
+    }
+  }
+
+  // 5. Apply updates — one setValues per row (cheap; the typical batch is
+  //    O(10s) of rows, not thousands). Could be optimized with a clustered
+  //    setValues if/when call volume grows.
+  for (var ui = 0; ui < updates.length; ui++) {
+    var u = updates[ui];
+    consolSh.getRange(u.sheetRow, 1, 1, ncolsCB).setValues([u.rowArr]);
+  }
+
+  // 6. Apply appends as a single setValues at the end of the sheet.
+  if (appends.length > 0) {
+    var insertStart = api_getLastDataRow_(consolSh) + 1;
+    consolSh.getRange(insertStart, 1, appends.length, ncolsCB).setValues(appends);
+  }
+
+  return {
+    success: true,
+    invoiceNos: safeInvoiceNos,
+    billingRowCount: sel.rows.length,
+    updatedCount: updates.length,
+    appendedCount: appends.length,
+    duplicateLrids: duplicateLrids
+  };
+}
+
 function handleQboCreateInvoice_(payload) {
   var ledgerRowIds = payload.ledgerRowIds;
   if (!ledgerRowIds || !Array.isArray(ledgerRowIds) || ledgerRowIds.length === 0) {
@@ -41323,6 +41586,45 @@ function handleQboCreateInvoice_(payload) {
 
   // v38.22.0: Invoice date = today
   var qboTodayDate = new Date();
+
+  // v38.222.0 — Auto-reconcile CB Consolidated_Ledger from public.billing for
+  // any invoice covered by the incoming ledger_row_ids, BEFORE we read CB
+  // for the grouping pass. CB can drift behind public.billing because
+  // handleCreateInvoice_'s CB-write dedupe-skips when the Ledger Row ID
+  // already exists in CB (~line 25303), and because handleVoidInvoice_ /
+  // handleReopenTask_ void the per-tenant sheet without touching CB
+  // (open hardening backlog #5 / #7). Pre-reconcile means the grouping
+  // pass below sees the post-reconcile state, so no invoice gets silently
+  // dropped from the push payload. Failures are non-fatal — push still
+  // proceeds with whatever CB shows, matching the prior behavior.
+  try {
+    var preInList = ledgerRowIds
+      .map(function(id) { return String(id || "").trim(); })
+      .filter(function(id) { return id && /^[A-Za-z0-9_\-]+$/.test(id); })
+      .map(function(id) { return '"' + id + '"'; })
+      .join(',');
+    if (preInList) {
+      var preSel = supabaseSelect_(
+        "billing",
+        "ledger_row_id=in.(" + preInList + ")&invoice_no=not.is.null&status=neq.Void",
+        "invoice_no"
+      );
+      if (preSel.ok && preSel.rows.length > 0) {
+        var preInvoiceNoSet = {};
+        for (var pi = 0; pi < preSel.rows.length; pi++) {
+          var pin = String(preSel.rows[pi].invoice_no || "").trim();
+          if (pin) preInvoiceNoSet[pin] = true;
+        }
+        var preInvoiceNos = Object.keys(preInvoiceNoSet);
+        if (preInvoiceNos.length > 0) {
+          var reconcileRes = reconcileCbFromBilling_(preInvoiceNos);
+          Logger.log("handleQboCreateInvoice_ pre-push CB reconcile: " + JSON.stringify(reconcileRes));
+        }
+      }
+    }
+  } catch (reconcileErr) {
+    Logger.log("handleQboCreateInvoice_ pre-push CB reconcile threw (non-fatal — push continues with current CB state): " + reconcileErr.message);
+  }
 
   // Load CB data
   var cbId = prop_("CB_SPREADSHEET_ID");
