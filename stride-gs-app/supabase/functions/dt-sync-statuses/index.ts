@@ -1,5 +1,33 @@
 /**
- * dt-sync-statuses — Supabase Edge Function — v15 2026-05-13 PST
+ * dt-sync-statuses — Supabase Edge Function — v16 2026-05-13 PST
+ *
+ * v16: dt_order_items reconcile now ALSO matches local rows by the
+ *      first 8 hex chars of dt_order_items.id (case-insensitive),
+ *      not just by dt_item_code. dt-push-order v21 stamps that
+ *      short-prefix as the <item_id> for ad-hoc rows whose
+ *      dt_item_code is NULL (the v18→v21 churn around DT's
+ *      add_order collapsing empty item_ids). Pre-v16 the sync
+ *      keyed local rows ONLY by dt_item_code, so on every push
+ *      cycle dt-sync-statuses imported the round-tripped items as
+ *      NEW rows because the existing NULL-coded mirrors didn't
+ *      match. Result: a single push could 2x the ad-hoc row count
+ *      on a P+D delivery leg — surfaced as MRS-00047-D showing
+ *      33+ items in the OrderPage on 2026-05-13.
+ *
+ *      Fix: build a second lookup map keyed by short-id at the
+ *      start of the reconcile. When the dt_item_code lookup misses
+ *      AND the short-id lookup hits, treat it as the same row,
+ *      UPDATE in place, AND backfill dt_item_code = it.item_id so
+ *      future syncs match via the fast path. Orphan-removal is
+ *      unchanged (still only considers rows that had a
+ *      dt_item_code at snapshot time — short-id-matched rows with
+ *      NULL dt_item_code remain Stride-managed and aren't candidates
+ *      for soft-delete during the transitional period before the
+ *      backfill propagates).
+ *
+ *      Cleanup of pre-fix MRS-00047 duplicates ran in SQL during the
+ *      same session (32 rows soft-deleted via removed_source=
+ *      'cleanup_2026_05_13_v21_sync_dupes').
  *
  * v15: P+D mirror idempotency. The v14 INSERT-branch mirror could leave a
  *      PU line without a delivery counterpart if the mirror INSERT failed
@@ -308,8 +336,15 @@ Deno.serve(async (req) => {
           .eq('dt_order_id', o.id)
           .is('removed_at', null);
         const localByCode = new Map<string, { id: string; extras: Record<string, unknown> | null }>();
+        // v16 — also key local rows by `first 8 hex of id`. dt-push-order
+        // v21 stamps that as the <item_id> for ad-hoc rows with NULL
+        // dt_item_code, so the round-trip needs this fallback to match
+        // the existing row instead of inserting a duplicate.
+        const localByShortId = new Map<string, { id: string; extras: Record<string, unknown> | null; dt_item_code: string | null }>();
         for (const r of (localRows ?? []) as Array<{ id: string; dt_item_code: string | null; extras: Record<string, unknown> | null }>) {
           if (r.dt_item_code) localByCode.set(r.dt_item_code, { id: r.id, extras: r.extras });
+          const shortId = r.id.replace(/-/g, '').slice(0, 8).toLowerCase();
+          localByShortId.set(shortId, { id: r.id, extras: r.extras, dt_item_code: r.dt_item_code });
         }
 
         // Helper for the P+D mirror branch (used by both INSERT-new and
@@ -342,7 +377,21 @@ Deno.serve(async (req) => {
         // UPDATE matching + INSERT new
         for (const it of parsed.items) {
           if (!it.item_id) continue;
-          const local = localByCode.get(it.item_id);
+          // v16 — two-stage lookup. dt_item_code (fast path, set on
+          // inventory rows and on ad-hoc rows after a previous sync
+          // backfilled them) → short-id fallback (newly-pushed ad-hoc
+          // rows whose dt_item_code is still NULL). When the
+          // short-id path hits, we backfill dt_item_code below so
+          // future syncs match via the fast path.
+          let local = localByCode.get(it.item_id);
+          let matchedViaShortId = false;
+          if (!local) {
+            const fromShort = localByShortId.get(it.item_id.toLowerCase());
+            if (fromShort) {
+              local = { id: fromShort.id, extras: fromShort.extras };
+              matchedViaShortId = fromShort.dt_item_code == null;
+            }
+          }
           if (local) {
             await supabase.from('dt_order_items').update({
               delivered:          it.delivered,
@@ -351,6 +400,11 @@ Deno.serve(async (req) => {
               checked_quantity:   it.checked_quantity,
               location:           it.location,
               return_codes:       it.return_codes,
+              // Backfill dt_item_code on the short-id match so future
+              // syncs match via the fast localByCode path. We only
+              // overwrite when the local row's dt_item_code is NULL —
+              // never clobber an existing value.
+              ...(matchedViaShortId ? { dt_item_code: it.item_id } : {}),
               last_synced_at:     new Date().toISOString(),
             }).eq('id', local.id);
             // Idempotency: if a prior sync run inserted the PU line but
