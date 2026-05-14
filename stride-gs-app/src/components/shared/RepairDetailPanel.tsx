@@ -1523,10 +1523,18 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
                     ok = !!resp.ok;
                     errMsg = resp.error || '';
                     // mirrorOk=false means the SB commit succeeded but the
-                    // sheet writethrough didn't — already logged to
-                    // gs_sync_events inside the edge function, so we don't
-                    // log again here. UI treats it as success since the
-                    // authoritative SB write went through.
+                    // sheet writethrough didn't — surface to console + a
+                    // non-blocking setSubmitError banner so the canary
+                    // operator sees the issue and can manually re-sync the
+                    // sheet if needed. The edge function already wrote a
+                    // gs_sync_events row for FailedOperationsDrawer pickup.
+                    if (ok && resp.mirrorOk === false) {
+                      console.warn('[cancelRepair-sb] sheet mirror failed:', resp.mirrorError);
+                      setSubmitError(
+                        `Repair cancelled, but the legacy sheet mirror failed (${resp.mirrorError ?? 'unknown'}). ` +
+                        `App state is correct; sheet will catch up on the next full sync.`,
+                      );
+                    }
                   } else {
                     const resp = await postCancelRepair({ repairId: repair.repairId }, cid);
                     ok = !!(resp.ok && resp.data?.success);

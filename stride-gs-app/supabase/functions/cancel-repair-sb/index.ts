@@ -52,23 +52,32 @@ Deno.serve(async (req: Request) => {
 
     const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
     const serviceKey  = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
-    if (!supabaseUrl || !serviceKey) {
+    const anonKey     = Deno.env.get('SUPABASE_ANON_KEY') ?? '';
+    if (!supabaseUrl || !serviceKey || !anonKey) {
       return json({ ok: false, error: 'Server misconfigured' }, 500);
     }
 
-    // Caller-JWT pass-through — preserves the actual operator's role on
-    // the entity_audit_log row via user_metadata.email, and lets the RPC
-    // layer (when we move there) re-validate. Falls back to service-role
-    // when called by the replay harness which has no user JWT.
+    // ── Verified caller email ───────────────────────────────────────
+    // Critical: do NOT trust an unsigned JWT decode. The previous
+    // implementation did `atob(jwt.split('.')[1])` and trusted whatever
+    // email it found — forgeable trivially. Now we validate the JWT
+    // against Supabase Auth via getUser(token) using an anon-keyed
+    // client. That triggers signature verification server-side. If the
+    // caller is service_role (replay harness), getUser fails and we
+    // fall back to 'system' which is the correct telemetry value for
+    // that path.
     const authHeader = req.headers.get('Authorization');
-    const callerEmail = (() => {
-      if (!authHeader) return 'system';
-      try {
-        const jwt = authHeader.replace(/^Bearer\s+/i, '');
-        const payload = JSON.parse(atob(jwt.split('.')[1]));
-        return String(payload?.user_metadata?.email ?? payload?.email ?? 'system');
-      } catch { return 'system'; }
-    })();
+    let callerEmail = 'system';
+    if (authHeader) {
+      const token = authHeader.replace(/^Bearer\s+/i, '');
+      const authClient = createClient(supabaseUrl, anonKey);
+      const { data: { user }, error: authErr } = await authClient.auth.getUser(token);
+      if (!authErr && user?.email) {
+        callerEmail = user.email;
+      }
+      // No error path on authErr — getUser failure with a service_role JWT
+      // is expected (it's not a user JWT). Falls through to 'system'.
+    }
 
     const supabase = createClient(supabaseUrl, serviceKey);
 
