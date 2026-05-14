@@ -277,8 +277,10 @@ Deno.serve(async (req: Request) => {
             REPAIR_RESULT:       resultValue,
             REPAIR_RESULT_COLOR: resultValue === 'Pass' ? '#16A34A' : '#DC2626',
             COMPLETED_DATE:      completedDate,
-            QUOTE_AMOUNT:        formatCurrency(quoteAmount),
-            FINAL_AMOUNT:        formatCurrency(finalAmt),
+            // Raw numbers — REPAIR_COMPLETE template wraps each with
+            // `${{...}}`, so formatCurrency() would yield $$X.XX.
+            QUOTE_AMOUNT:        formatMoney(quoteAmount),
+            FINAL_AMOUNT:        formatMoney(finalAmt),
             PARTS_COST:          '-',  // not tracked separately
             LABOR_HOURS:         '-',  // not tracked separately
             NOTES:               notes || '-',
@@ -322,7 +324,13 @@ Deno.serve(async (req: Request) => {
 });
 
 function formatCurrency(n: number): string {
-  return `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return `$${formatMoney(n)}`;
+}
+
+// Same shape as formatCurrency but without the $ prefix — used for tokens
+// that go into templates which provide their own '$' (e.g. `${{TOKEN}}`).
+function formatMoney(n: number): string {
+  return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 function renderItemTable(itemId: string, inv: {
