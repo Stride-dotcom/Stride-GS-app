@@ -92,6 +92,10 @@ const SHADOW_REGISTRY: Record<string, ShadowEntry> = {
   // start (incl. re-runs after status is already In Progress / Complete
   // for PDF regen). See start-repair-shadow/index.ts.
   startRepair:  { shadow: 'start-repair-shadow',  action: 'startRepair'  },
+  // [MIGRATION-P3] sendRepairQuote — third of the repair P3 cluster.
+  // GAS logs {status:{old:'Pending Quote',new:'Quote Sent'}}. See
+  // send-repair-quote-shadow/index.ts. (GAS action is 'sendRepairQuote'.)
+  sendRepairQuote: { shadow: 'send-repair-quote-shadow', action: 'sendRepairQuote' },
 };
 
 // ─── Helpers ────────────────────────────────────────────────────────────────

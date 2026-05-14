@@ -3325,6 +3325,50 @@ export async function postStartRepairSb(
   return data ?? { ok: false, error: 'no response body' };
 }
 
+// [MIGRATION-P3] SB-primary entry for sendRepairQuote. Multi-line quote
+// + tax math is server-recomputed; client-supplied totals are ignored.
+// Sends REPAIR_QUOTE email via send-email (Resend). Idempotent on
+// identical lines + total (skips re-send).
+export interface SendRepairQuoteSbPayload {
+  tenantId: string;
+  repairId: string;
+  requestId?: string;
+  // Multi-line shape (preferred):
+  quoteLines?: Array<{ svcCode: string; svcName: string; qty: number; rate: number; taxable: boolean }>;
+  taxAreaId?: string | null;
+  taxAreaName?: string | null;
+  taxRate?: number;
+  // Legacy single-amount shape:
+  quoteAmount?: number;
+  notes?: string;
+}
+export interface SendRepairQuoteSbResponse {
+  ok: boolean;
+  repairId?: string;
+  previousStatus?: string;
+  subtotal?: number;
+  taxAmount?: number;
+  grandTotal?: number;
+  alreadyMatching?: boolean;
+  mirrorOk?: boolean;
+  mirrorError?: string;
+  emailSent?: boolean;
+  emailError?: string;
+  error?: string;
+  errorCode?: string;
+}
+export async function postSendRepairQuoteSb(
+  payload: SendRepairQuoteSbPayload
+): Promise<SendRepairQuoteSbResponse> {
+  const { supabase } = await import('./supabase');
+  const { data, error } = await supabase.functions.invoke<SendRepairQuoteSbResponse>(
+    'send-repair-quote-sb',
+    { body: payload },
+  );
+  if (error) return { ok: false, error: error.message };
+  return data ?? { ok: false, error: 'no response body' };
+}
+
 // ─── Bulk action batch endpoints (v38.9.0) ────────────────────────────────────
 // Standardized result contract shared across all 4 new batch endpoints AND all
 // loop-based bulk actions (see src/lib/batchLoop.ts). The frontend has exactly
