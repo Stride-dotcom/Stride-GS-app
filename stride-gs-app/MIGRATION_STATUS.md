@@ -1,6 +1,8 @@
 # GAS → Supabase Migration — Living Status
 
-> Last updated: 2026-05-13 — **P3 kickoff via Path C (hybrid)**. First repair P3 handler shipped: `cancelRepair`. Feature-flag substrate extended with `requestRepairQuote`, `respondRepairQuote`, `cancelRepair`. Third per-table reverse-writethrough writer registered (`__writeThroughReverseRepairs_` in StrideAPI v38.215.0 — replaces stub). Shadow + primary edge functions deployed (`cancel-repair-shadow` v1, `cancel-repair-sb` v1). RepairDetailPanel reads `useFeatureFlag('cancelRepair')` and routes GAS↔SB. SHADOW_REGISTRY extended. Per MIG-007 Path-C variant: skip 90-day replay (corpus only ~4 days old since P1.2), keep shadow + canary gates. Cluster plan: cancelRepair (now) → startRepair → sendRepairQuote → respondRepairQuote → requestRepairQuote (single-item) → completeRepair (P4a). Each future handler: 1 PR mirroring this template.
+> Last updated: 2026-05-13 (later) — **P3 repair cluster: 4-of-6 handlers shipped via Path-C** (PRs #405 + #406 + #407 + #408). `cancelRepair` (smoke-tested), `startRepair`, `sendRepairQuote` (+ Resend email), `respondToRepairQuote` (+ Resend Approved/Declined email). All deployed at `active_backend='gas'`; flip in Settings → Migration to activate (gas → supabase, `tenant_scope=NULL` for fleet-flip — Justin's plan since repairs are low-volume). Two remaining for the cluster: **`requestRepairQuote` single-item** (~30 min — wire TaskDetailPanel + ItemDetailPanel to existing `request-repair-quote-sb` with `itemIds:[oneItem]`) and **`completeRepair`** (P4a, ~4-5 hrs — new `__writeThroughReverseBilling_` writer for per-tenant Billing_Ledger + new `mirrorBillingToCb` GAS endpoint for the separate CB spreadsheet + REPAIR_COMPLETE email). Architectural call confirmed: SB needs only ONE billing table (`public.billing` with `tenant_id` column), not two — the per-tenant + consolidated split exists in GAS only because Google Sheets can't aggregate across spreadsheets. StrideAPI bumped to v38.216.0 — `__writeThroughReverseRepairs_` covers all 17 repair columns including the 8 quote_* fields. SHADOW_REGISTRY in `replay-shadow` lists 5 entries (updateItem + 4 repair P3). Critical security pattern carried through every handler: JWT signature verified via `supabase.auth.getUser(token)` against anon-keyed client (NOT just `atob` decode — the cancelRepair code review caught the forgeable-token issue and the fix propagated to all subsequent handlers).
+
+> Earlier 2026-05-13 — **P3 kickoff via Path C (hybrid)**. First repair P3 handler shipped: `cancelRepair`. Feature-flag substrate extended with `requestRepairQuote`, `respondRepairQuote`, `cancelRepair`. Third per-table reverse-writethrough writer registered (`__writeThroughReverseRepairs_` in StrideAPI v38.215.0 — replaces stub). Shadow + primary edge functions deployed (`cancel-repair-shadow` v1, `cancel-repair-sb` v1). RepairDetailPanel reads `useFeatureFlag('cancelRepair')` and routes GAS↔SB. SHADOW_REGISTRY extended. Per MIG-007 Path-C variant: skip 90-day replay (corpus only ~4 days old since P1.2), keep shadow + canary gates. Cluster plan: cancelRepair (now) → startRepair → sendRepairQuote → respondRepairQuote → requestRepairQuote (single-item) → completeRepair (P4a). Each future handler: 1 PR mirroring this template.
 
 > Earlier 2026-05-12 — **P1.7 + P2.1 MVP shipped**. Phase 1 now **7/7 done**. End-to-end parity-testing pipeline live; DB layer smoke-verified. Full Edge Function invocation pending operator-run with service_role key (smoke command in MIG-012). Slash command `/sb` documented in "Start here" block — use it on every migration-focused session start.
 > This file is **authoritative for execution**. The v1.1 docx in `Dropbox\Apps\GS Inventory\` is a stakeholder snapshot.
@@ -35,7 +37,7 @@ If you only have time for one section: read **Architectural Decisions** in full.
 | Worktree | Branch | Phase | Scope | Started |
 |---|---|---|---|---|
 
-(Empty rows after merge. Add yourself at session start; remove at session end. Repair P3 cluster ongoing per MIG-013 — `cancelRepair` PR pending; `startRepair`/`sendRepairQuote`/`respondRepairQuote`/`requestRepairQuote`(single-item) still `not_started`; `completeRepair` is P4a not P3.)
+(Empty rows after merge. Add yourself at session start; remove at session end. Repair P3 cluster ongoing per MIG-013 — 4-of-6 handlers shipped + deployed (`cancelRepair` #405, `startRepair` #406, `sendRepairQuote` #407, `respondToRepairQuote` #408). All four at `active_backend='gas'` pending Justin's fleet-flip. Two remaining: `requestRepairQuote` single-item cutover (~30 min) + `completeRepair` P4a (~4-5 hrs, billing-touching, needs new GAS writers). Next session: read this file + BUILD_STATUS.md "Recent Changes (2026-05-13, [MIGRATION-P3]…)" to resume.)
 
 ---
 
@@ -118,10 +120,11 @@ Match-rate column is the rolling 7-day match rate from `parity_results`.
 | `updateRepair` | gas | 0 | n/a | 0 | n/a | not_started | — |
 | `updateShipment` | gas | 0 | n/a | 0 | n/a | not_started | — |
 | `startTask` | gas | 0 | n/a | 0 | n/a | not_started | — |
-| `startRepair` | gas | 0 | n/a | 0 | n/a | **handler_drafted** | 2026-05-13 (PR pending) |
-| `requestRepairQuote` (single-item) | gas | 0 | n/a | 0 | n/a | not_started | 2026-05-13 (feature_flags row seeded) |
-| `respondRepairQuote` | gas | 0 | n/a | 0 | n/a | **handler_drafted** | 2026-05-13 (PR pending — shares sendRepairEmails flag with sendRepairQuote) |
-| `cancelRepair` | gas | 0 | n/a | 0 | n/a | **handler_drafted** | 2026-05-13 (smoke-tested end-to-end via #405) |
+| `startRepair` | gas | 0 | n/a | 0 | n/a | **handler_drafted** | 2026-05-13 (shipped PR #406, deployed, unflipped) |
+| `requestRepairQuote` (single-item) | gas | 0 | n/a | 0 | n/a | not_started | 2026-05-13 (feature_flags row seeded; cutover wires TaskDetailPanel + ItemDetailPanel to existing `request-repair-quote-sb` with `itemIds:[oneItem]`) |
+| `respondRepairQuote` | gas | 0 | n/a | 0 | n/a | **handler_drafted** | 2026-05-13 (shipped PR #408, deployed, unflipped; shares sendRepairEmails flag with sendRepairQuote) |
+| `cancelRepair` | gas | 0 | n/a | 0 | n/a | **handler_drafted** | 2026-05-13 (shipped PR #405, smoke-tested end-to-end, deployed, unflipped) |
+| `sendRepairQuote` | gas | 0 | n/a | 0 | n/a | **handler_drafted** | 2026-05-13 (shipped PR #407, deployed, unflipped; shares sendRepairEmails flag with respondRepairQuote) |
 | `createTask` | gas | 0 | n/a | 0 | n/a | not_started | — |
 | `createWillCall` | gas | 0 | n/a | 0 | n/a | not_started | — |
 | `releaseItems` | gas | 0 | n/a | 0 | n/a | not_started | — |
@@ -140,7 +143,7 @@ Match-rate column is the rolling 7-day match rate from `parity_results`.
 | `runStaxCharges` | gas | 0 | n/a | 0 | n/a | not_started | — |
 | `sendShipmentEmail` | gas | 0 | n/a | 0 | n/a | not_started | — |
 | `sendWillCallEmails` | gas | 0 | n/a | 0 | n/a | not_started | — |
-| `sendRepairEmails` (non-terminal) | gas | 0 | n/a | 0 | n/a | **handler_drafted (sendRepairQuote half)** | 2026-05-13 (PR pending) — flag covers send-quote + respond-quote; only send-quote ships in this PR |
+| `sendRepairEmails` (non-terminal) | gas | 0 | n/a | 0 | n/a | **handler_drafted (both halves)** | 2026-05-13 (PRs #407 + #408 shipped) — flipping this single flag activates BOTH send-quote and respond-to-quote in tandem |
 
 Already-Done (no migration work): DispatchTrack, Marketing, Intake, Audit log, In-app notifications, Photos, Documents, Notes, Messaging, Service catalog, `invoice_tracking`, `next_invoice_no()`, `calculate_storage_charges`, Insurance auto-billing, `notify-order-revision`, `notify-new-order`, intake reminders, `send-onboarding-email`, claim emails (received/more-info/denial), `ACCOUNT_REFRESH_INVITATION`, `stax-catalog-sync`. See v1.1 docx for citations.
 
