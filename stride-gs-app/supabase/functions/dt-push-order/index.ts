@@ -367,10 +367,16 @@ async function buildAttachmentsField(
       .eq('entity_id', order.id)
       .order('created_at', { ascending: true });
 
-    if (Array.isArray(photos) && photos.length > 0) {
+    if (Array.isArray(photos) && photos.length > 0 && order.tenant_id) {
+      // photo_shares.tenant_id is NOT NULL — a small slice of dt_orders
+      // (external-customer / public-form submissions) carry tenant_id =
+      // NULL and can't get a share row created. Skip silently for those;
+      // the rest of the attachments field (signed doc URLs) still ships.
+      const photoIds = photos.map((p: { id: string }) => p.id);
+
       const { data: existingShare } = await supabase
         .from('photo_shares')
-        .select('share_id')
+        .select('share_id, photo_ids')
         .eq('entity_type', 'dt_order')
         .eq('entity_id', order.id)
         .eq('active', true)
@@ -379,6 +385,25 @@ async function buildAttachmentsField(
         .maybeSingle();
 
       let shareId: string | undefined = existingShare?.share_id;
+
+      // Idempotency refresh: if the photo set has changed since the
+      // share was created (someone added/removed photos after the first
+      // push), update the existing share's photo_ids so the public
+      // gallery shows the current set. RLS for anonymous reads (per
+      // `item_photos_anon_read_via_share`) gates on `id = ANY (ps.photo_ids)` —
+      // an out-of-date list silently hides new photos from the driver.
+      if (shareId && existingShare) {
+        const existingIds = Array.isArray(existingShare.photo_ids) ? existingShare.photo_ids : [];
+        const sameSet = existingIds.length === photoIds.length
+          && photoIds.every((id: string) => existingIds.includes(id));
+        if (!sameSet) {
+          await supabase
+            .from('photo_shares')
+            .update({ photo_ids: photoIds })
+            .eq('share_id', shareId);
+        }
+      }
+
       if (!shareId) {
         const newShareId = crypto.randomUUID().replace(/-/g, '').slice(0, 12);
         const { data: created, error: shareErr } = await supabase
@@ -388,7 +413,7 @@ async function buildAttachmentsField(
             entity_type:     'dt_order',
             entity_id:       order.id,
             tenant_id:       order.tenant_id,
-            photo_ids:       photos.map((p: { id: string }) => p.id),
+            photo_ids:       photoIds,
             title:           `Order ${order.dt_identifier} attachments`,
             active:          true,
             created_by_name: 'dt-push-order',
