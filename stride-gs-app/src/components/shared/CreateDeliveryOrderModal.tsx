@@ -99,6 +99,8 @@ import { useCoverageOptions, type CoverageOption } from '../../hooks/useCoverage
 import { useItemClasses } from '../../hooks/useItemClasses';
 import { useServiceCatalog } from '../../hooks/useServiceCatalog';
 import { ProcessingOverlay } from './ProcessingOverlay';
+import { AttachmentUploadField } from './AttachmentUploadField';
+import { uploadOrderAttachments } from '../../lib/orderAttachmentUpload';
 
 // ── Address Book helpers ─────────────────────────────────────────────────
 interface AddressBookContact {
@@ -2754,6 +2756,39 @@ export function CreateDeliveryOrderModal({
   const [createResult, setCreateResult] = useState<{ dtIdentifier: string; linkedIdentifier?: string; orderId: string } | null>(null);
   const [orderPaid, setOrderPaid] = useState(false);
 
+  // Photo + doc attachments captured before submit. Held as File
+  // objects until the dt_order row exists, then flushed in one pass
+  // via uploadOrderAttachments() at every create / save success
+  // point. Progress drives a "Uploading X of Y…" message on the
+  // field while the rest of the modal stays disabled via submitting.
+  const [attachmentFiles, setAttachmentFiles] = useState<File[]>([]);
+  const [attachUploading, setAttachUploading] = useState<{ done: number; total: number } | null>(null);
+  // Best-effort: flush files for an order id and surface any errors
+  // as a submit warning. NEVER throws — the order is already saved
+  // and the user shouldn't lose the modal-close on an upload hiccup.
+  const flushAttachmentsFor = async (orderId: string) => {
+    if (attachmentFiles.length === 0) return;
+    setAttachUploading({ done: 0, total: attachmentFiles.length });
+    try {
+      const res = await uploadOrderAttachments({
+        orderId,
+        tenantId: clientSheetId || null,
+        uploaderName: user?.email || null,
+        files: attachmentFiles,
+        onProgress: (done, total) => setAttachUploading({ done, total }),
+      });
+      if (res.failed > 0) {
+        const head = res.errors[0] || 'See console for details';
+        setSubmitError(
+          `Order saved, but ${res.failed} attachment${res.failed === 1 ? '' : 's'} failed to upload (${head}). ` +
+          `Open the order and retry from the Photos & Docs tab.`,
+        );
+      }
+    } finally {
+      setAttachUploading(null);
+    }
+  };
+
   const handleSubmit = async () => {
     if (!canSubmit) return;
     setSubmitting(true);
@@ -2951,6 +2986,11 @@ export function CreateDeliveryOrderModal({
           },
           performedBy: user?.email ?? null,
         });
+
+        // Flush newly-picked attachments BEFORE the re-push so the DT
+        // Attachments custom field (built by dt-push-order v23) sees
+        // the latest set when it builds/refreshes the share row.
+        await flushAttachmentsFor(savedDelivery.id);
 
         // v2026-05-13 — auto re-push to DT after a successful edit-save on
         // ALREADY-PUSHED orders. Closes the "saved but forgot to Republish"
@@ -3213,6 +3253,10 @@ export function CreateDeliveryOrderModal({
           performedBy: user?.email ?? null,
         });
 
+        // Flush newly-picked attachments BEFORE the re-push so DT's
+        // Attachments custom field reflects the latest set.
+        await flushAttachmentsFor(savedRow.id);
+
         // v2026-05-13 — auto re-push to DT after a successful single-leg
         // edit-save on an ALREADY-PUSHED order. Same rationale + same
         // keep-modal-open-on-failure pattern as the P+D block above.
@@ -3435,6 +3479,11 @@ export function CreateDeliveryOrderModal({
           },
           performedBy: user?.email ?? null,
         });
+        // Flush newly-picked attachments BEFORE any auto-push so DT
+        // gets the share URL with the full attachment set in one shot
+        // (no re-push needed after upload).
+        await flushAttachmentsFor(deliveryRow.id);
+
         onSubmit?.({
           dtOrderId: deliveryRow.id,
           dtIdentifier: deliveryRow.dt_identifier,
@@ -3652,6 +3701,10 @@ export function CreateDeliveryOrderModal({
           },
           performedBy: user?.email ?? null,
         });
+        // Flush newly-picked attachments BEFORE auto-push so DT sees
+        // the share URL with the full attachment set.
+        await flushAttachmentsFor(orderRow.id);
+
         onSubmit?.({
           dtOrderId: orderRow.id,
           dtIdentifier: orderRow.dt_identifier,
@@ -5327,6 +5380,25 @@ export function CreateDeliveryOrderModal({
               <strong>Service-only orders don't have standard pricing.</strong> Staff will set the service fee during review based on travel time and work scope.
             </div>
           )}
+
+          {/* Photos & documents — the only piece of attachment capture
+              before submit. Held in modal state until the order row
+              exists, then flushed via flushAttachmentsFor(orderId) at
+              each create / save success point above. Kept at the very
+              bottom of the form body (just above the error banner +
+              footer buttons) so it reads as the last step before
+              "Submit". */}
+          <div style={{ marginTop: 24 }}>
+            <AttachmentUploadField
+              files={attachmentFiles}
+              onChange={setAttachmentFiles}
+              uploading={!!attachUploading}
+              uploadingMessage={attachUploading
+                ? `Uploading ${attachUploading.done} of ${attachUploading.total}…`
+                : undefined}
+              disabled={submitting}
+            />
+          </div>
 
           {submitError && (
             <div style={{
