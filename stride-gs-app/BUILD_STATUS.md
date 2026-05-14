@@ -1,12 +1,67 @@
 # Stride GS App — Build Status
 
-> Last updated: 2026-05-13 ([feat/repair/multi-item-select, PR #397] Multi-item repair jobs — mirrors the will_calls/will_call_items pattern. Select N inventory items → bulk Request Repair Quote → ONE repair with N items underneath (was: N separate repairs). New `public.repair_items` join table + `create_repair_quote_request` SECURITY DEFINER RPC. New `request-repair-quote-sb` Edge Function calls the RPC then dispatches REPAIR_QUOTE_REQUEST email via Resend with server-rendered `{{ITEM_TABLE_HTML}}` token — zero GAS interaction in the create flow. RepairDetailPanel renders an items table when items.length > 1; legacy single-item view preserved for back-compat. Quote/pricing/status/completion-billing all stay at the parent level: one quote per job, per-item pass/fail informational only. Backfill on the migration gave every existing repair (33 rows) one matching repair_items row so the data model is uniform from day one. Legacy single-item path (Tasks/ItemDetailPanel) keeps using GAS — cutover to SB is a separate Migration phase.).
+> Last updated: 2026-05-13 ([MIGRATION-P3, PRs #405 + #406 + #407 + #408] Repair-cluster P3 migration — four of six handlers shipped SB-primary via Path-C (see MIG-013). `cancelRepair` (smoke-tested end-to-end), `startRepair`, `sendRepairQuote` (+ Resend email), `respondToRepairQuote` (+ Resend Approved/Declined email). All gated by feature flags (`cancelRepair`, `startRepair`, `sendRepairEmails`) currently at `active_backend='gas'`; flip in Settings → Migration to activate. StrideAPI bumped to v38.216.0 — `__writeThroughReverseRepairs_` writer now covers 17 repair columns (status, all quote_* + dates + result + amounts). Two remaining: `requestRepairQuote` single-item (~30 min, reuses existing multi-item `request-repair-quote-sb`); `completeRepair` (P4a, ~4-5 hrs — new `__writeThroughReverseBilling_` writer + new `mirrorBillingToCb` GAS endpoint for the consolidated-ledger append + REPAIR_COMPLETE email). NEXT SESSION PICKUP: read this entry, MIGRATION_STATUS.md MIG-013 + per-function table, then resume with requestRepairQuote → completeRepair.).
+
+> Earlier 2026-05-13 ([feat/repair/multi-item-select, PR #397] Multi-item repair jobs — mirrors the will_calls/will_call_items pattern. Select N inventory items → bulk Request Repair Quote → ONE repair with N items underneath (was: N separate repairs). New `public.repair_items` join table + `create_repair_quote_request` SECURITY DEFINER RPC. New `request-repair-quote-sb` Edge Function calls the RPC then dispatches REPAIR_QUOTE_REQUEST email via Resend with server-rendered `{{ITEM_TABLE_HTML}}` token — zero GAS interaction in the create flow. RepairDetailPanel renders an items table when items.length > 1; legacy single-item view preserved for back-compat. Quote/pricing/status/completion-billing all stay at the parent level: one quote per job, per-item pass/fail informational only. Backfill on the migration gave every existing repair (33 rows) one matching repair_items row so the data model is uniform from day one. Legacy single-item path (Tasks/ItemDetailPanel) keeps using GAS — cutover to SB is a separate Migration phase.).
 
 > Earlier 2026-05-13 ([feat/delivery/pu-delivery-item-sync, PRs #388 + #389] PU→Delivery sync engine. When a DT pickup leg completes, the linked delivery order now (a) shows a green "Picked up [time] by [driver]" banner, (b) shows a per-item "From pickup" sub-row when the PU driver counted differently / added notes / flagged return codes, and (c) gets re-pushed to DT so the delivery driver's manifest reflects the post-PU reality. Two-tier helper `stamp-pickup-on-linked-delivery.ts`: Tier A (order-level stamps + picked_up_at) fires from both the webhook and the sync path; Tier B (per-item field propagation via `parent_pickup_item_id` FK match + DT push-back) fires only from the sync path where DT export.xml data is fresh. Quantity overwrite gated behind `quantity === original_quantity` so staff edits aren't reverted. Audit columns `pickup_item_note` / `pickup_return_codes` / `pickup_delivered_quantity` keep the PU mirror separate from the delivery's own driver-side fields, eliminating the brittle sentinel-marker concatenation that the first cut used.).
 
 > Earlier 2026-05-13 ([feat/delivery/dt-sync-cron] `dt-sync-statuses` now runs every 5 min via pg_cron for non-terminal orders. DT-side cancellations no longer require an operator to manually click "Sync from DT" — the polling cron catches them within ~5 min and flips `dt_orders.status_id` to CANCELED, which auto-clears the "D" inventory badge via Inventory.tsx's existing cancelled-category filter. Background: investigation showed DT's API has no documented cancel endpoint AND DT doesn't fire a webhook on cancel — but we already had all the cancel-handling logic in dt-sync-statuses; the only missing piece was triggering it without operator action. Job name: `dt-sync-statuses-active-every-5min`, schedule `*/5 * * * *`, body `{"scope":"active"}`.).
 
 > Earlier 2026-05-13 ([feat/fix/public-form] Public service-request form was 100% broken — every customer submission failed with the generic "We could not submit your request" error since at least 2026-04-27 (last successful submission in `dt_orders` source=public_form). Root cause: the supabase-js `.insert(...).select(...).single()` chain on `PublicServiceRequest.tsx:908` adds `Prefer: return=representation` which makes PostgREST emit `INSERT ... RETURNING id, dt_identifier`. RETURNING needs anon SELECT permission via RLS, but anon had only an INSERT policy on `dt_orders`. PostgREST surfaced this as the misleading `42501: new row violates row-level security policy` instead of a SELECT-side error. Fix: tightly-scoped anon SELECT policy in migration `20260513124647_dt_orders_anon_select_just_inserted.sql` — matches `source='public_form' AND review_status='pending_review' AND tenant_id IS NULL AND created_at > now() - interval '30 seconds'`. 30s window prevents enumeration of older submissions; everything else mirrors the existing INSERT WITH CHECK. Verified live via curl: anon REST POST with `Prefer: return=representation` now returns 201.).
+
+---
+
+## Recent Changes (2026-05-13, [MIGRATION-P3] repair-cluster — PRs #405–#408)
+
+**Trigger:** Justin asked to migrate repairs out of GAS (only the completion-time billing-ledger write should remain in GAS for now). Aligned with MIGRATION_STATUS.md's P3 phase + MIG-013 (Path-C hybrid: keep framework gates — feature flags, shadow handlers, reverse writethrough, canary — but skip the 90-day historical replay since corpus is only ~4 days old). Per Justin's later direction: repairs are low-volume so canary is single-tenant + short or fleet-flip immediately after a clean smoke test.
+
+**Cluster order + state:**
+
+| # | Handler | PR | State | Flag | Notes |
+|---|---|---|---|---|---|
+| 1 | `cancelRepair` | [#405](https://github.com/Stride-dotcom/Stride-GS-app/pull/405) | handler_drafted, smoke-tested ✓ | `cancelRepair` | Status flip only; foundation PR established the template. |
+| 2 | `startRepair` | [#406](https://github.com/Stride-dotcom/Stride-GS-app/pull/406) | handler_drafted | `startRepair` | Status flip + start_date stamp + Approved/In Progress/Complete re-run rules. PDF generation stays React-side via `lib/workOrderPdf.ts`. |
+| 3 | `sendRepairQuote` | [#407](https://github.com/Stride-dotcom/Stride-GS-app/pull/407) | handler_drafted | `sendRepairEmails` (paired w/ #4) | Status flip + 11 quote columns + REPAIR_QUOTE email via Resend. StrideAPI v38.216.0 extends REVERSE_REPAIR_FIELDS_ to all 17 repair columns. Server-recomputes totals from quote lines. Idempotent re-send detection. |
+| 4 | `respondToRepairQuote` | [#408](https://github.com/Stride-dotcom/Stride-GS-app/pull/408) | handler_drafted | `sendRepairEmails` (paired w/ #3) | Approve→approved=true+status='Approved'+REPAIR_APPROVED email; Decline→status='Declined'+REPAIR_DECLINED email. Idempotent on already-resolved. |
+| 5 | `requestRepairQuote` (single-item) | — | not_started | `requestRepairQuote` | NEXT SESSION. ~30 min — TaskDetailPanel + ItemDetailPanel call `request-repair-quote-sb` with `itemIds:[oneItem]`. Existing multi-item infra already does the work; just retire the legacy GAS call sites. |
+| 6 | `completeRepair` (P4a) | — | not_started | `completeRepair` | NEXT SESSION (bigger). ~4-5 hrs. Per MIG-004 the status+billing+addons+email are one logical transaction. SB writes `public.billing` rows directly (authoritative). Then TWO new GAS writes: `__writeThroughReverseBilling_` for the per-tenant Billing_Ledger sheet + a new `mirrorBillingToCb` GAS endpoint for the CB Consolidated_Ledger (different spreadsheet from the per-tenant one). REPAIR_COMPLETE email via Resend. Standard 14-day canary per MIG-013 since billing is in the path. P4b later retires CB sheet entirely. |
+
+**Key architectural call (this session):** Justin asked whether SB needs both a client billing ledger AND a consolidated ledger like the GAS world has. Answer: NO — `public.billing` is a single table with `tenant_id` as a column. The per-tenant view is `WHERE tenant_id=X`; the consolidated view is the full table. The two SHEETS exist in GAS only because Google Sheets can't aggregate across spreadsheets. After P4b, the CB sheet is gone and Supabase is the only billing store.
+
+**Framework substrate touched:**
+- Migration `20260513200000_seed_repair_p3_feature_flags.sql` (PR #405) — seeded 3 missing feature_flags rows: `requestRepairQuote`, `respondRepairQuote`, `cancelRepair`. `startRepair`, `sendRepairEmails`, `updateRepair`, `completeRepair` were already in P1.1.
+- `__writeThroughReverseRepairs_` writer registered in StrideAPI v38.215.0 (cancelRepair) → extended to 17 columns in v38.216.0 (sendRepairQuote). Idempotent by Repair ID + per-field value comparison; throws on missing row.
+- `SHADOW_REGISTRY` in `replay-shadow` now lists 5 entries: `updateItem`, `cancelRepair`, `startRepair`, `sendRepairQuote`, `respondToRepairQuote`.
+- All 4 SB primaries verify JWT signature via `supabase.auth.getUser(token)` against an anon-keyed client (NOT just `atob` decode — that was a critical code-review fix in PR #405 carried through every subsequent handler).
+
+**Smoke test result (cancelRepair, PR #405):**
+- `cancel-repair-sb` invoked via curl with anon JWT against a synthetic test repair
+- `public.repairs.status='Cancelled'` ✓
+- `entity_audit_log` row with `action='cancel'` + `changes={"status":{"new":"Cancelled"}}` + `source='edge'` ✓
+- Idempotent double-call returns `alreadyCancelled:true` with no second audit row ✓
+- Mirror failure (test repair was SB-only, not in the sheet) correctly logged to `gs_sync_events` ✓
+
+**What's flippable in Settings → Migration RIGHT NOW** (fleet-wide, `tenant_scope=NULL`):
+- `cancelRepair` → activates SB Cancel Repair button
+- `startRepair` → activates SB Start Repair button
+- `sendRepairEmails` → activates BOTH Send Quote AND Approve/Decline at once (they share the flag per P1.1 seed)
+
+**Activation path:** flip `parity_enabled=true` first to log shadow comparisons for a few real clicks; once parity_results shows matches, flip `active_backend='supabase'`. Master-switch emergency revert in the same UI flips everything back to GAS atomically.
+
+**Versions deployed live:**
+| Layer | Version |
+|---|---|
+| StrideAPI Web App | v38.216.0 / v512 |
+| `cancel-repair-sb` | v1 |
+| `cancel-repair-shadow` | v1 |
+| `start-repair-sb` | v1 |
+| `start-repair-shadow` | v1 |
+| `send-repair-quote-sb` | v1 |
+| `send-repair-quote-shadow` | v1 |
+| `respond-repair-quote-sb` | v1 |
+| `respond-repair-quote-shadow` | v1 |
+| `replay-shadow` | v5 |
 
 ---
 

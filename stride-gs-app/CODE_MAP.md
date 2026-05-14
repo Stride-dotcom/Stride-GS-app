@@ -88,16 +88,20 @@ Operational tasks (Inspect, Assemble, Move, etc.) per inventory item.
 
 ## Repairs
 
-Repair quotes → approve/decline → execute → bill. Supports multi-item jobs (PR #397) — one repair can carry N items via `repair_items`, one quote/status/billing event at the parent level.
+Repair quotes → approve/decline → execute → bill. Supports multi-item jobs (PR #397) — one repair can carry N items via `repair_items`, one quote/status/billing event at the parent level. **GAS→Supabase migration cluster (P3) underway**: 4 of 6 handlers SB-primary (PRs #405-#408); 2 remaining (`requestRepairQuote` single-item + `completeRepair` P4a). See `MIGRATION_STATUS.md` for the per-handler state machine and MIG-013 for the cluster's Path-C decision.
 
 | Layer | Files |
 |---|---|
 | Pages | `src/pages/Repairs.tsx`, `src/pages/RepairPage.tsx`, `src/pages/RepairJobPage.tsx` (legacy) |
-| Hooks | `src/hooks/useRepairs.ts`, `src/hooks/useRepairDetail.ts` |
-| Components | `src/components/shared/RepairDetailPanel.tsx` (items table renders when `items.length > 1`) |
-| Edge Functions | `supabase/functions/request-repair-quote-sb/index.ts` v1 (SB-authoritative create — RPC + REPAIR_QUOTE_REQUEST email via Resend; replaces GAS bulk-quote for multi-item path) |
-| Migrations | `20260417020000_add_repair_date_columns.sql` (quote_date, completed_date), `20260513160000_repair_items_table.sql` (PR #397 — `public.repair_items` join table + backfill from existing single-item repairs), `20260513170000_create_repair_quote_request_rpc.sql` (PR #397 — `next_repair_id` helper + `create_repair_quote_request` SECURITY DEFINER RPC) |
-| Apps Script | `AppScripts/stride-client-inventory/src/Repairs.gs` (single-item quote request — used by TaskDetailPanel / ItemDetailPanel; legacy path until SB cutover. Multi-item path goes through `request-repair-quote-sb` edge function.) |
+| Hooks | `src/hooks/useRepairs.ts`, `src/hooks/useRepairDetail.ts` (skips GAS enrichment when `items.length > 1` so multi-item description stays correct) |
+| Components | `src/components/shared/RepairDetailPanel.tsx` — items table when `items.length > 1`; lifecycle buttons (`Cancel`, `Start`, `Send Quote`, `Approve/Decline`) route GAS vs SB via `useFeatureFlag('cancelRepair' \| 'startRepair' \| 'sendRepairEmails')` |
+| Edge Functions (multi-item create) | `supabase/functions/request-repair-quote-sb/index.ts` v3 — SB-authoritative create via RPC + REPAIR_QUOTE_REQUEST email |
+| Edge Functions (P3 cluster — cancelRepair) | `supabase/functions/cancel-repair-shadow/index.ts` v1 (pure parity shadow), `supabase/functions/cancel-repair-sb/index.ts` v1 (SB-primary: status flip + audit + reverse writethrough) |
+| Edge Functions (P3 cluster — startRepair) | `supabase/functions/start-repair-shadow/index.ts` v1, `supabase/functions/start-repair-sb/index.ts` v1 (status flip + start_date stamp + Approved/In Progress/Complete re-run rules) |
+| Edge Functions (P3 cluster — sendRepairQuote) | `supabase/functions/send-repair-quote-shadow/index.ts` v1, `supabase/functions/send-repair-quote-sb/index.ts` v1 (server-recomputed totals, 11-column update, REPAIR_QUOTE email via Resend, idempotent re-send) |
+| Edge Functions (P3 cluster — respondToRepairQuote) | `supabase/functions/respond-repair-quote-shadow/index.ts` v1, `supabase/functions/respond-repair-quote-sb/index.ts` v1 (Approve/Decline branching, REPAIR_APPROVED / REPAIR_DECLINED email) |
+| Migrations | `20260417020000_add_repair_date_columns.sql`, `20260513160000_repair_items_table.sql` (PR #397 — `public.repair_items` join table + backfill), `20260513170000_create_repair_quote_request_rpc.sql` (PR #397 — `next_repair_id` helper + `create_repair_quote_request` RPC), `20260513200000_seed_repair_p3_feature_flags.sql` (PR #405 — feature_flags rows for `requestRepairQuote`, `respondRepairQuote`, `cancelRepair`) |
+| Apps Script | `AppScripts/stride-api/StrideAPI.gs` v38.216.0: `__writeThroughReverseRepairs_` writer + 17-column `REVERSE_REPAIR_FIELDS_` map covers all of the P3 + (planned) P4a column writes. Single-item GAS path (`handleRequestRepairQuote_`, `handleSendRepairQuote_`, etc.) still serves users where `feature_flags.{handler}.active_backend = 'gas'`. |
 
 ---
 
