@@ -1,0 +1,446 @@
+/**
+ * send-repair-quote-sb — [MIGRATION-P3] SB-primary for `sendRepairQuote`.
+ *
+ * Project context: stride-gs-app/MIGRATION_STATUS.md.
+ *
+ * Behavior mirrors GAS handleSendRepairQuote_ in shape and side effects:
+ *   1. Validate inputs + source status (must be 'Pending Quote' or
+ *      'Quote Sent' for re-send; reject 'Approved'/'Completed'/'In Progress'
+ *      with INVALID_STATE per the legacy semantics).
+ *   2. Parse multi-line quote OR legacy single quoteAmount → normalize
+ *      to a quoteLines[] array. Server recomputes ALL totals from the
+ *      lines + tax rate — client-supplied totals are never trusted.
+ *   3. UPDATE public.repairs with status='Quote Sent', quote_sent_date,
+ *      all quote_* numeric columns, quote_lines_json.
+ *   4. INSERT entity_audit_log matching GAS shape:
+ *      { status: { old: 'Pending Quote', new: 'Quote Sent' } } with
+ *      action='status_change'.
+ *   5. Fire reverse writethrough — writer's REVERSE_REPAIR_FIELDS_ map
+ *      (v38.216.0) now covers all the quote_* columns.
+ *   6. Send REPAIR_QUOTE email via send-email (Resend). Tokens:
+ *      CLIENT_NAME, REPAIR_ID, ITEM_ID, ITEM_TABLE_HTML, QUOTE_LINE_ITEMS_HTML,
+ *      QUOTE_SUBTOTAL, QUOTE_TAX_*, QUOTE_GRAND_TOTAL, NOTES, TASK_NOTES,
+ *      APP_URL, APP_DEEP_LINK. send-email resolves recipients via the
+ *      REPAIR_QUOTE template's recipients column ({{STAFF_EMAILS}},{{CLIENT_EMAIL}}).
+ *      Email failure logs to gs_sync_events; SB commit is not unwound.
+ *
+ * Idempotency:
+ *   • Same lines + same totals already sent → skip email + reverse
+ *     writethrough; return alreadyMatching=true. Prevents accidental
+ *     re-sends. The legacy GAS handler has the same protection.
+ *
+ * Auth: verified caller email via supabase.auth.getUser(token); falls
+ * back to 'system' on service_role / unauthenticated calls.
+ *
+ * Request:  POST {
+ *   tenantId, repairId, requestId?,
+ *   quoteLines?: [{ svcCode, svcName, qty, rate, taxable }],
+ *   quoteAmount?: number (legacy single-line),
+ *   taxAreaId?, taxAreaName?, taxRate?,
+ *   notes?
+ * }
+ * Response: { ok, repairId, previousStatus, subtotal, taxAmount, grandTotal,
+ *             alreadyMatching?, mirrorOk, mirrorError?,
+ *             emailSent, emailError? }
+ */
+
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+};
+
+const APP_URL = 'https://www.mystridehub.com';
+
+// Statuses that allow (re-)sending a quote. 'Pending Quote' is the
+// canonical first-quote state; 'Quote Sent' allows the operator to
+// re-send / re-quote until the client acts on it. Approved /
+// Completed / In Progress are locked — operator must Void the quote
+// first. Mirrors handleSendRepairQuote_'s INVALID_STATE branch.
+const ALLOWED_SOURCE_STATUSES = new Set(['Pending Quote', 'Quote Sent']);
+
+interface QuoteLineInput {
+  svcCode?: unknown;
+  svcName?: unknown;
+  qty?: unknown;
+  rate?: unknown;
+  taxable?: unknown;
+}
+interface QuoteLine {
+  svcCode: string;
+  svcName: string;
+  qty:     number;
+  rate:    number;
+  taxable: boolean;
+  amount:  number;
+}
+
+Deno.serve(async (req: Request) => {
+  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
+
+  try {
+    const body = await req.json().catch(() => ({}));
+    const tenantId: string  = String(body.tenantId ?? '').trim();
+    const repairId: string  = String(body.repairId ?? '').trim();
+    const requestId: string = String(body.requestId ?? '').trim() || crypto.randomUUID();
+    const notes: string     = String(body.notes ?? '').trim();
+
+    if (!tenantId) return json({ ok: false, error: 'tenantId is required' }, 400);
+    if (!repairId) return json({ ok: false, error: 'repairId is required' }, 400);
+
+    const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
+    const serviceKey  = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
+    const anonKey     = Deno.env.get('SUPABASE_ANON_KEY') ?? '';
+    if (!supabaseUrl || !serviceKey || !anonKey) {
+      return json({ ok: false, error: 'Server misconfigured' }, 500);
+    }
+
+    const authHeader = req.headers.get('Authorization');
+    let callerEmail = 'system';
+    if (authHeader) {
+      const token = authHeader.replace(/^Bearer\s+/i, '');
+      const authClient = createClient(supabaseUrl, anonKey);
+      const { data: { user }, error: authErr } = await authClient.auth.getUser(token);
+      if (!authErr && user?.email) callerEmail = user.email;
+    }
+    const supabase = createClient(supabaseUrl, serviceKey);
+
+    // ── 1. Normalize quote input ────────────────────────────────────
+    const hasLines = Array.isArray(body.quoteLines) && body.quoteLines.length > 0;
+    let quoteLines: QuoteLine[] = [];
+    let taxAreaId   = String(body.taxAreaId   ?? '').trim() || null;
+    let taxAreaName = String(body.taxAreaName ?? '').trim() || null;
+    let taxRate     = Number(body.taxRate);
+    if (Number.isNaN(taxRate) || taxRate < 0) taxRate = 0;
+
+    if (hasLines) {
+      quoteLines = (body.quoteLines as QuoteLineInput[]).map(l => {
+        let qty  = Number(l?.qty);
+        let rate = Number(l?.rate);
+        if (Number.isNaN(qty)  || qty  < 0) qty  = 0;
+        if (Number.isNaN(rate) || rate < 0) rate = 0;
+        return {
+          svcCode: String(l?.svcCode ?? '').trim(),
+          svcName: String(l?.svcName ?? '').trim(),
+          qty, rate,
+          taxable: l?.taxable === true,
+          amount:  Math.round(qty * rate * 100) / 100,
+        };
+      }).filter(l => l.svcCode);
+      if (quoteLines.length === 0) {
+        return json({ ok: false, error: 'quoteLines must contain at least one line with a non-empty svcCode' }, 400);
+      }
+    } else if (body.quoteAmount != null) {
+      // Legacy single-amount path — synthesize one REPAIR line.
+      const legacyAmt = Number(body.quoteAmount);
+      if (Number.isNaN(legacyAmt) || legacyAmt < 0) {
+        return json({ ok: false, error: 'quoteAmount must be a non-negative number' }, 400);
+      }
+      quoteLines = [{
+        svcCode: 'REPAIR', svcName: 'Repair',
+        qty: 1, rate: legacyAmt, taxable: false,
+        amount: Math.round(legacyAmt * 100) / 100,
+      }];
+      taxAreaId = null; taxAreaName = null; taxRate = 0;
+    } else {
+      return json({ ok: false, error: 'Either quoteLines or quoteAmount is required' }, 400);
+    }
+
+    const subtotal        = round2(quoteLines.reduce((s, l) => s + l.amount, 0));
+    const taxableSubtotal = round2(quoteLines.filter(l => l.taxable).reduce((s, l) => s + l.amount, 0));
+    const taxAmount       = round2(taxableSubtotal * (taxRate / 100));
+    const grandTotal      = round2(subtotal + taxAmount);
+
+    // ── 2. Load existing repair + validate state ─────────────────────
+    const { data: existing, error: existingErr } = await supabase
+      .from('repairs')
+      .select('repair_id, status, quote_lines_json, quote_grand_total, item_id, repair_notes, task_notes')
+      .eq('tenant_id', tenantId)
+      .eq('repair_id', repairId)
+      .maybeSingle();
+    if (existingErr) return json({ ok: false, error: `Repair lookup failed: ${existingErr.message}` }, 500);
+    if (!existing)   return json({ ok: false, error: `Repair ${repairId} not found` }, 404);
+
+    const previousStatus = String(existing.status ?? '').trim();
+    if (!ALLOWED_SOURCE_STATUSES.has(previousStatus)) {
+      return json({
+        ok: false,
+        error: `Cannot re-send a quote on a repair that is already ${previousStatus}. Void this quote first to make changes.`,
+        errorCode: 'INVALID_STATE',
+      }, 422);
+    }
+
+    // Idempotency — same lines + same grand total → skip email + mirror.
+    const existingLines = Array.isArray(existing.quote_lines_json) ? existing.quote_lines_json : null;
+    const linesMatch = existingLines
+      && existingLines.length === quoteLines.length
+      && JSON.stringify(existingLines) === JSON.stringify(quoteLines.map(({ amount: _a, ...rest }) => rest));
+    const totalMatches = Number(existing.quote_grand_total ?? -1) === grandTotal;
+    if (linesMatch && totalMatches && previousStatus === 'Quote Sent') {
+      return json({
+        ok: true, repairId, previousStatus,
+        subtotal, taxAmount, grandTotal,
+        alreadyMatching: true,
+        mirrorOk: true, emailSent: false,
+      });
+    }
+
+    // ── 3. UPDATE public.repairs ─────────────────────────────────────
+    const ptDate = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+    const { error: updErr } = await supabase
+      .from('repairs')
+      .update({
+        status:                 'Quote Sent',
+        quote_amount:           grandTotal,  // back-compat with single-amount readers
+        quote_sent_date:        ptDate,
+        quote_lines_json:       quoteLines.map(({ amount: _a, ...rest }) => rest),
+        quote_subtotal:         subtotal,
+        quote_taxable_subtotal: taxableSubtotal,
+        quote_tax_area_id:      taxAreaId,
+        quote_tax_area_name:    taxAreaName,
+        quote_tax_rate:         taxRate,
+        quote_tax_amount:       taxAmount,
+        quote_grand_total:      grandTotal,
+        updated_at:             new Date().toISOString(),
+      })
+      .eq('tenant_id', tenantId)
+      .eq('repair_id', repairId);
+    if (updErr) return json({ ok: false, error: `Update failed: ${updErr.message}` }, 500);
+
+    // ── 4. entity_audit_log ──────────────────────────────────────────
+    await supabase.from('entity_audit_log').insert({
+      entity_type:  'repair',
+      entity_id:    repairId,
+      tenant_id:    tenantId,
+      action:       'status_change',
+      changes:      { status: { old: 'Pending Quote', new: 'Quote Sent' } },
+      performed_by: callerEmail,
+      source:       'edge',
+    });
+
+    // ── 5. Reverse writethrough ──────────────────────────────────────
+    let mirrorOk = true;
+    let mirrorError: string | undefined;
+    try {
+      const gasUrl = Deno.env.get('GAS_API_URL');
+      const gasToken = Deno.env.get('GAS_API_TOKEN');
+      if (gasUrl && gasToken) {
+        // Stringify quote_lines_json before sending — the GAS writer
+        // does setValue() and setValue([object]) writes "[object Object]"
+        // to the sheet. The legacy GAS handler stores the lines as
+        // JSON.stringify'd text. We mirror that.
+        const mirrorRes = await fetch(`${gasUrl}?action=writeThroughReverse&token=${encodeURIComponent(gasToken)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            tenantId,
+            table: 'repairs',
+            op:    'update',
+            rowId: repairId,
+            row:   {
+              status:                 'Quote Sent',
+              quote_amount:           grandTotal,
+              quote_sent_date:        ptDate,
+              quote_lines_json:       JSON.stringify(quoteLines.map(({ amount: _a, ...rest }) => rest)),
+              quote_subtotal:         subtotal,
+              quote_taxable_subtotal: taxableSubtotal,
+              quote_tax_area_id:      taxAreaId,
+              quote_tax_area_name:    taxAreaName,
+              quote_tax_rate:         taxRate,
+              quote_tax_amount:       taxAmount,
+              quote_grand_total:      grandTotal,
+            },
+            requestId,
+          }),
+        });
+        const text = await mirrorRes.text();
+        let parsed: { success?: boolean; error?: string } = {};
+        try { parsed = JSON.parse(text); } catch { parsed = { error: `non-JSON: ${text.slice(0, 200)}` }; }
+        if (!mirrorRes.ok || !parsed.success) {
+          mirrorOk = false;
+          mirrorError = parsed.error ?? `HTTP ${mirrorRes.status}`;
+        }
+      } else {
+        mirrorOk = false;
+        mirrorError = 'GAS_API_URL or GAS_API_TOKEN not configured';
+      }
+    } catch (e) {
+      mirrorOk = false;
+      mirrorError = e instanceof Error ? e.message : String(e);
+    }
+
+    if (!mirrorOk) {
+      await supabase.from('gs_sync_events').insert({
+        tenant_id:     tenantId,
+        entity_type:   'repair',
+        entity_id:     repairId,
+        action_type:   'writethrough_reverse',
+        sync_status:   'sync_failed',
+        requested_by:  `send-repair-quote-sb:${callerEmail}`,
+        request_id:    requestId,
+        payload:       { table: 'repairs', op: 'update', rowId: repairId, fieldCount: 11 },
+        error_message: (mirrorError ?? 'unknown').slice(0, 1000),
+      }).then(() => {}, () => {});
+    }
+
+    // ── 6. Resolve client + item info for email tokens ───────────────
+    const { data: clientRow } = await supabase
+      .from('clients')
+      .select('name, email')
+      .eq('tenant_id', tenantId)
+      .maybeSingle();
+    const clientName  = (clientRow as { name?: string } | null)?.name?.trim()  || 'Client';
+
+    // Inventory overlay for ITEM_TABLE_HTML
+    const itemId = String(existing.item_id ?? '').trim();
+    interface InventoryRow {
+      item_id: string; description: string | null; vendor: string | null;
+      sidemark: string | null; location: string | null; item_class: string | null;
+      qty: number | null;
+    }
+    const { data: invRow } = itemId
+      ? await supabase
+          .from('inventory')
+          .select('item_id, description, vendor, sidemark, location, item_class, qty')
+          .eq('tenant_id', tenantId).eq('item_id', itemId).maybeSingle()
+      : { data: null };
+    const inv = invRow as InventoryRow | null;
+
+    const itemTableHtml  = renderItemTable(itemId, inv);
+    const quoteLinesHtml = renderQuoteLines(quoteLines);
+    const appDeepLink    = `${APP_URL}/#/repairs?open=${encodeURIComponent(repairId)}&client=${encodeURIComponent(tenantId)}`;
+
+    // ── 7. Send email ────────────────────────────────────────────────
+    let emailSent = false;
+    let emailError: string | undefined;
+    try {
+      const sendRes = await fetch(`${supabaseUrl}/functions/v1/send-email`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${serviceKey}`,
+          'apikey':         serviceKey,
+          'Content-Type':   'application/json',
+        },
+        body: JSON.stringify({
+          templateKey: 'REPAIR_QUOTE',
+          tokens: {
+            CLIENT_NAME:           clientName,
+            REPAIR_ID:             repairId,
+            ITEM_ID:               itemId,
+            ITEM_TABLE_HTML:       itemTableHtml,
+            QUOTE_LINE_ITEMS_HTML: quoteLinesHtml,
+            QUOTE_SUBTOTAL:        formatCurrency(subtotal),
+            QUOTE_TAX_AREA_NAME:   taxAreaName ?? '',
+            QUOTE_TAX_RATE:        taxRate ? `${taxRate.toFixed(3)}%` : '',
+            QUOTE_TAX_AMOUNT:      formatCurrency(taxAmount),
+            QUOTE_GRAND_TOTAL:     formatCurrency(grandTotal),
+            NOTES:                 notes || String(existing.repair_notes ?? ''),
+            TASK_NOTES:            String(existing.task_notes ?? ''),
+            APP_URL:               APP_URL,
+            APP_DEEP_LINK:         appDeepLink,
+          },
+          idempotencyKey:    `repair-quote:${repairId}:${grandTotal}`,
+          relatedEntityType: 'repair',
+          relatedEntityId:   repairId,
+          tenantId,
+        }),
+      });
+      const sendJson = await sendRes.json().catch(() => ({})) as Record<string, unknown>;
+      if (sendJson.ok) emailSent = true;
+      else emailError = String(sendJson.error ?? 'unknown');
+    } catch (e) {
+      emailError = e instanceof Error ? e.message : String(e);
+    }
+    if (!emailSent) {
+      console.error('[send-repair-quote-sb] email failed:', emailError);
+      await supabase.from('gs_sync_events').insert({
+        tenant_id:     tenantId,
+        entity_type:   'repair',
+        entity_id:     repairId,
+        action_type:   'send_repair_quote_email',
+        sync_status:   'sync_failed',
+        requested_by:  `send-repair-quote-sb:${callerEmail}`,
+        request_id:    requestId,
+        payload:       { templateKey: 'REPAIR_QUOTE', grandTotal },
+        error_message: (emailError ?? 'unknown').slice(0, 1000),
+      }).then(() => {}, () => {});
+    }
+
+    return json({
+      ok: true, repairId, previousStatus,
+      subtotal, taxAmount, grandTotal,
+      mirrorOk, mirrorError,
+      emailSent, emailError,
+    });
+
+  } catch (err) {
+    console.error('[send-repair-quote-sb] Unexpected error:', err);
+    return json({ ok: false, error: String(err) }, 500);
+  }
+});
+
+function round2(n: number): number { return Math.round(n * 100) / 100; }
+
+function formatCurrency(n: number): string {
+  return `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function renderItemTable(itemId: string, inv: {
+  description: string | null; vendor: string | null;
+  sidemark: string | null; location: string | null; qty: number | null;
+} | null): string {
+  if (!itemId) return '';
+  const td = 'padding:6px 10px;border-bottom:1px solid #E5E7EB;font-size:13px;color:#1F2937;vertical-align:top;';
+  const th = 'padding:8px 10px;background:#F9FAFB;border-bottom:2px solid #D1D5DB;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:#374151;text-align:left;';
+  return [
+    '<table cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;width:100%;margin:8px 0 16px;">',
+    '<thead><tr>',
+    `<th style="${th}">Item ID</th>`,
+    `<th style="${th}">Description</th>`,
+    `<th style="${th}">Vendor</th>`,
+    `<th style="${th}">Sidemark</th>`,
+    `<th style="${th}">Location</th>`,
+    '</tr></thead><tbody><tr>',
+    `<td style="${td}font-family:monospace;font-size:12px;">${escapeHtml(itemId)}</td>`,
+    `<td style="${td}">${escapeHtml(inv?.description ?? '')}</td>`,
+    `<td style="${td}">${escapeHtml(inv?.vendor ?? '')}</td>`,
+    `<td style="${td}">${escapeHtml(inv?.sidemark ?? '')}</td>`,
+    `<td style="${td}">${escapeHtml(inv?.location ?? '')}</td>`,
+    '</tr></tbody></table>',
+  ].join('');
+}
+
+function renderQuoteLines(lines: QuoteLine[]): string {
+  const td = 'padding:6px 10px;border-bottom:1px solid #E5E7EB;font-size:13px;color:#1F2937;';
+  const th = 'padding:8px 10px;background:#F9FAFB;border-bottom:2px solid #D1D5DB;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:#374151;text-align:left;';
+  return [
+    '<table cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;width:100%;margin:8px 0 16px;">',
+    '<thead><tr>',
+    `<th style="${th}">Service</th>`,
+    `<th style="${th};text-align:right;">Qty</th>`,
+    `<th style="${th};text-align:right;">Rate</th>`,
+    `<th style="${th};text-align:right;">Amount</th>`,
+    '</tr></thead><tbody>',
+    ...lines.map(l => [
+      '<tr>',
+      `<td style="${td}">${escapeHtml(l.svcName || l.svcCode)}</td>`,
+      `<td style="${td};text-align:right;">${l.qty}</td>`,
+      `<td style="${td};text-align:right;">${formatCurrency(l.rate)}</td>`,
+      `<td style="${td};text-align:right;font-weight:600;">${formatCurrency(l.amount)}</td>`,
+      '</tr>',
+    ].join('')),
+    '</tbody></table>',
+  ].join('');
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+  });
+}

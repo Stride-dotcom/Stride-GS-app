@@ -140,7 +140,7 @@ Match-rate column is the rolling 7-day match rate from `parity_results`.
 | `runStaxCharges` | gas | 0 | n/a | 0 | n/a | not_started | — |
 | `sendShipmentEmail` | gas | 0 | n/a | 0 | n/a | not_started | — |
 | `sendWillCallEmails` | gas | 0 | n/a | 0 | n/a | not_started | — |
-| `sendRepairEmails` (non-terminal) | gas | 0 | n/a | 0 | n/a | not_started | — |
+| `sendRepairEmails` (non-terminal) | gas | 0 | n/a | 0 | n/a | **handler_drafted (sendRepairQuote half)** | 2026-05-13 (PR pending) — flag covers send-quote + respond-quote; only send-quote ships in this PR |
 
 Already-Done (no migration work): DispatchTrack, Marketing, Intake, Audit log, In-app notifications, Photos, Documents, Notes, Messaging, Service catalog, `invoice_tracking`, `next_invoice_no()`, `calculate_storage_charges`, Insurance auto-billing, `notify-order-revision`, `notify-new-order`, intake reminders, `send-onboarding-email`, claim emails (received/more-info/denial), `ACCOUNT_REFRESH_INVITATION`, `stax-catalog-sync`. See v1.1 docx for citations.
 

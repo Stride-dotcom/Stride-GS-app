@@ -19,7 +19,7 @@ import { WriteButton } from './WriteButton';
 import { ProcessingOverlay } from './ProcessingOverlay';
 import { BillingPreviewCard } from './BillingPreviewCard';
 import { useEntityAddons } from '../../hooks/useEntityAddons';
-import { postSendRepairQuote, postRespondToRepairQuote, postCompleteRepair, postStartRepair, postStartRepairSb, postCancelRepair, postCancelRepairSb, postUpdateRepairNotes, postReopenRepair, postCorrectRepairResult, postVoidRepairQuote, isApiConfigured } from '../../lib/api';
+import { postSendRepairQuote, postSendRepairQuoteSb, postRespondToRepairQuote, postCompleteRepair, postStartRepair, postStartRepairSb, postCancelRepair, postCancelRepairSb, postUpdateRepairNotes, postReopenRepair, postCorrectRepairResult, postVoidRepairQuote, isApiConfigured } from '../../lib/api';
 import { useFeatureFlag } from '../../contexts/FeatureFlagContext';
 import { generateRepairWorkOrderPdf } from '../../lib/workOrderPdf';
 import { entityEvents } from '../../lib/entityEvents';
@@ -72,6 +72,11 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   // in MIG-013.
   const cancelRepairBackend = useFeatureFlag('cancelRepair');
   const startRepairBackend  = useFeatureFlag('startRepair');
+  // sendRepairEmails is the single P3 flag covering both send-quote and
+  // respond-to-quote per the P1.1 substrate seed ("status-only emails"
+  // for repair). Reuse it here; respondToRepairQuote will gate on the
+  // same flag when its migration ships.
+  const sendRepairEmailsBackend = useFeatureFlag('sendRepairEmails');
   const { isMobile, isTablet } = useIsMobile();
   const isCompactViewport = isMobile || isTablet;
   // v2026-04-22 — panel frame handled by TabbedDetailPanel shell.
@@ -562,34 +567,73 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
     });
     setSubmitting(true);
     try {
-      const resp = await postSendRepairQuote(
-        {
+      // [MIGRATION-P3] Route via sendRepairEmails flag. Both paths produce
+      // the same end-state (status=Quote Sent + quote_* columns + email);
+      // server-recomputes totals in both cases so client-side math doesn't
+      // need to be perfect.
+      if (sendRepairEmailsBackend === 'supabase') {
+        const resp = await postSendRepairQuoteSb({
+          tenantId:    clientSheetId,
           repairId:    repair.repairId,
           quoteLines:  cleanLines,
-          taxAreaId:   taxArea?.id || '',
-          taxAreaName: taxArea?.name || '',
+          taxAreaId:   taxArea?.id || null,
+          taxAreaName: taxArea?.name || null,
           taxRate:     totals.taxRate,
-        },
-        clientSheetId
-      );
-      if (!resp.ok || !resp.data?.success) {
-        clearRepairPatch?.(repair.repairId);
-        const errMsg = resp.error || resp.data?.error || 'Failed to send repair quote. Please try again.';
-        setSubmitError(errMsg);
-        void writeSyncFailed({
-          tenant_id: clientSheetId, entity_type: 'repair', entity_id: repair.repairId,
-          action_type: 'send_repair_quote', requested_by: user?.email ?? '',
-          request_id: resp.requestId,
-          payload: {
-            repairId: repair.repairId, clientName: repair.clientName, description: repair.description,
-            grandTotal: totals.grand, lineCount: cleanLines.length,
-          },
-          error_message: errMsg,
         });
+        if (!resp.ok) {
+          clearRepairPatch?.(repair.repairId);
+          setSubmitError(resp.error || 'Failed to send repair quote.');
+        } else {
+          setEffectiveStatus('Quote Sent');
+          // Synthesize a minimal SendRepairQuoteResponse-shape for the
+          // existing setSubmitResult banner so the success UI path
+          // doesn't need a separate branch.
+          setSubmitResult({
+            success: true,
+            repairId: resp.repairId ?? repair.repairId,
+            grandTotal: resp.grandTotal,
+            subtotal: resp.subtotal,
+            taxAmount: resp.taxAmount,
+            emailSent: resp.emailSent,
+          } as unknown as SendRepairQuoteResponse);
+          onRepairUpdated?.();
+          if (resp.mirrorOk === false) {
+            console.warn('[sendRepairQuote-sb] sheet mirror failed:', resp.mirrorError);
+          }
+          if (resp.emailSent === false) {
+            setSubmitError(`Quote saved, but email send failed: ${resp.emailError ?? 'unknown'}. Resend from the order page.`);
+          }
+        }
       } else {
-        setEffectiveStatus('Quote Sent');
-        setSubmitResult(resp.data);
-        onRepairUpdated?.();
+        const resp = await postSendRepairQuote(
+          {
+            repairId:    repair.repairId,
+            quoteLines:  cleanLines,
+            taxAreaId:   taxArea?.id || '',
+            taxAreaName: taxArea?.name || '',
+            taxRate:     totals.taxRate,
+          },
+          clientSheetId
+        );
+        if (!resp.ok || !resp.data?.success) {
+          clearRepairPatch?.(repair.repairId);
+          const errMsg = resp.error || resp.data?.error || 'Failed to send repair quote. Please try again.';
+          setSubmitError(errMsg);
+          void writeSyncFailed({
+            tenant_id: clientSheetId, entity_type: 'repair', entity_id: repair.repairId,
+            action_type: 'send_repair_quote', requested_by: user?.email ?? '',
+            request_id: resp.requestId,
+            payload: {
+              repairId: repair.repairId, clientName: repair.clientName, description: repair.description,
+              grandTotal: totals.grand, lineCount: cleanLines.length,
+            },
+            error_message: errMsg,
+          });
+        } else {
+          setEffectiveStatus('Quote Sent');
+          setSubmitResult(resp.data);
+          onRepairUpdated?.();
+        }
       }
     } catch (err) {
       clearRepairPatch?.(repair.repairId);

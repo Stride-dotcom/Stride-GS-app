@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.215.0 — 2026-05-13 PST — [MIGRATION-P3 cancelRepair] Third per-table writer registered against the P1.4 reverse-writethrough framework. Replaces `__writeThroughReverseStub_` for the `repairs` table in `REVERSE_WRITETHROUGH_TABLES_` with `__writeThroughReverseRepairs_` — finds the row by Repair ID, idempotently writes Status (and prepares to extend to quote_amount / quote_sent_date / completed_date / repair_result / final_amount as the rest of the P3 cluster ships). Companion Edge Function `cancel-repair-sb` is the first SB-primary caller, fired by RepairDetailPanel's Cancel Repair button when `feature_flags.cancelRepair.active_backend = 'supabase'`. Sheet stays current as the legacy-readers' read-only mirror through the P3/P4a window. Scope today is Status only — adding fields later is a one-line registry extension at REVERSE_REPAIR_FIELDS_.
+   StrideAPI.gs — v38.216.0 — 2026-05-13 PST — [MIGRATION-P3 sendRepairQuote] Extends REVERSE_REPAIR_FIELDS_ with the multi-line quote columns (quote_lines_json, quote_subtotal, quote_taxable_subtotal, quote_tax_area_id, quote_tax_area_name, quote_tax_rate, quote_tax_amount, quote_grand_total) so the new `send-repair-quote-sb` Edge Function can mirror its full state to the per-tenant Repairs sheet via the existing __writeThroughReverseRepairs_ writer. No new writer code; the writer ignores unknown row keys silently and skips columns that don't exist on the sheet. Tenants that never went through handleSendRepairQuote_ will be missing some of the Quote-* columns; that's acceptable for the canary — the SB row carries the canonical state and downstream readers (invoice generation, completion billing) flip to reading public.billing in P4a.
+   v38.215.0 — 2026-05-13 PST — [MIGRATION-P3 cancelRepair] Third per-table writer registered against the P1.4 reverse-writethrough framework. Replaces `__writeThroughReverseStub_` for the `repairs` table in `REVERSE_WRITETHROUGH_TABLES_` with `__writeThroughReverseRepairs_` — finds the row by Repair ID, idempotently writes Status (and prepares to extend to quote_amount / quote_sent_date / completed_date / repair_result / final_amount as the rest of the P3 cluster ships). Companion Edge Function `cancel-repair-sb` is the first SB-primary caller, fired by RepairDetailPanel's Cancel Repair button when `feature_flags.cancelRepair.active_backend = 'supabase'`. Sheet stays current as the legacy-readers' read-only mirror through the P3/P4a window. Scope today is Status only — adding fields later is a one-line registry extension at REVERSE_REPAIR_FIELDS_.
    v38.214.0 — 2026-05-13 PST — handleBatchCreateTasks_ now honors `slaHoursBySvcCode` from the React payload. The service catalog's `default_sla_hours` field has existed since the catalog migrated from the Master Price List, but the create-task flow never read it — every new task landed with Due Date = blank regardless of what the operator configured. CreateTaskModal now reads `useServiceCatalog().catalog` and passes a `{svcCode: hours}` map; this handler stamps `Due Date = now() + (hours * 3600 * 1000)` per task whose svcCode is in the map. Legacy `payload.dueDate` (single value, all tasks) still wins if explicitly set, preserving any caller that relied on it. SvcCodes without a configured SLA leave Due Date blank, exactly like before.
    v38.213.0 — 2026-05-13 PST — [MIGRATION-P2 will-calls COD] Second per-table writer registered against the P1.4 reverse-writethrough framework. Replaces `__writeThroughReverseStub_` for the `will_calls` table in `REVERSE_WRITETHROUGH_TABLES_` with `__writeThroughReverseWillCalls_` — finds the row by WC Number, idempotently writes the COD + COD Amount columns. Companion Edge Function `push-will-call-cod-to-sheet` fires this after the React WillCallDetailPanel commits a Supabase-authoritative will_calls.cod / cod_amount write directly to Supabase. Sheet stays current as the legacy-readers' read-only mirror (PDF release doc generator, full client sync, COD payment page launcher). Scope is COD fields only — every other Will_Calls field still flows through the legacy GAS-authoritative `handleUpdateWillCall_` path until they migrate. Adding fields later is a one-line registry extension.
    v38.212.0 — 2026-05-13 PST — Defense-in-depth for the task-addon $0-rate bug. The React-side fix (#360 on 2026-05-12) only covered the list path (useTasks → fetchTasksFromSupabase, which overlays itemClass from inventory). The single-task by-id path (useTaskDetail → fetchTaskByIdFromSupabase, used by TaskPage / standalone deep links) bypassed that overlay because public.tasks has no item_class column. Result: when a task panel was opened via deep link, AddTaskServiceModal received itemClass=undefined and pre-filled $0 on class-based services (MULTI_INS, ASM, INSP …); operators submitted the addon as-is and it landed on Billing_Ledger with rate=0. React side is fixed in useTaskDetail.ts (now overlays itemClass from inventory matching the list path). This GAS-side complement: api_writeAddonsToLedger_'s rate fallback now treats rate=0 the same as rate=null/NaN — the prior guard (`if (adRate == null || isNaN(adRate))`) let through a snapshot of 0 untouched, so the catalog fallback never fired and the row went to the sheet at $0. New guard `if (adRate == null || isNaN(adRate) || adRate === 0)` always re-resolves via api_lookupRate_ so the catalog gets a shot regardless of how the addon was saved. Operators who want a legitimate $0 charge can set rate>0 then override; the lookup is harmless when no catalog row exists (returns 0 and the row gets the existing "Missing Rate" flag). One-shot cleanup of the pre-fix INSP-63255-1-MULTI_INS-ADDON-1 row (Unbilled, rate=0, qty=4, class=S → catalog $15) was performed manually via SQL during the same session. No companion migration; no schema change.
@@ -2803,15 +2804,27 @@ function __writeThroughReverseWillCalls_(ss, payload) {
  */
 var REVERSE_REPAIR_FIELDS_ = {
   // SB column name → per-tenant Repairs sheet header
-  "status":           "Status",
-  "quote_amount":     "Quote Amount",
-  "quote_sent_date":  "Quote Sent Date",
-  "start_date":       "Start Date",
-  "completed_date":   "Completed Date",
-  "repair_result":    "Repair Result",
-  "final_amount":     "Final Amount",
-  "repair_vendor":    "Repair Vendor",
-  "repair_notes":     "Repair Notes"
+  "status":                  "Status",
+  "quote_amount":            "Quote Amount",
+  "quote_sent_date":         "Quote Sent Date",
+  "start_date":              "Start Date",
+  "completed_date":          "Completed Date",
+  "repair_result":           "Repair Result",
+  "final_amount":            "Final Amount",
+  "repair_vendor":           "Repair Vendor",
+  "repair_notes":            "Repair Notes",
+  // v38.216.0 — multi-line quote fields (added 2026-05-13 for sendRepairQuote SB).
+  // Auto-created on the sheet by the legacy handleSendRepairQuote_ via
+  // api_ensureColumn_; missing columns on never-quoted tenants are
+  // silently skipped by __writeThroughReverseRepairs_'s scope-resolution.
+  "quote_lines_json":        "Quote Lines JSON",
+  "quote_subtotal":          "Quote Subtotal",
+  "quote_taxable_subtotal":  "Quote Taxable Subtotal",
+  "quote_tax_area_id":       "Quote Tax Area ID",
+  "quote_tax_area_name":     "Quote Tax Area Name",
+  "quote_tax_rate":          "Quote Tax Rate",
+  "quote_tax_amount":        "Quote Tax Amount",
+  "quote_grand_total":       "Quote Grand Total"
 };
 
 function __writeThroughReverseRepairs_(ss, payload) {
