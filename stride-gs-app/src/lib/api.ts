@@ -3271,6 +3271,31 @@ export function postCancelRepair(
   );
 }
 
+// [MIGRATION-P3] SB-primary entry point for cancelRepair. Used when the
+// caller has resolved feature_flags.cancelRepair.active_backend = 'supabase'
+// for the current tenant via useFeatureFlag('cancelRepair'). Otherwise stay
+// on the legacy postCancelRepair GAS path above. See MIGRATION_STATUS.md
+// for the per-tenant flag mechanism + canary workflow.
+export interface CancelRepairSbResponse {
+  ok: boolean;
+  repairId?: string;
+  alreadyCancelled?: boolean;
+  mirrorOk?: boolean;
+  mirrorError?: string;
+  error?: string;
+}
+export async function postCancelRepairSb(
+  payload: { tenantId: string; repairId: string; requestId?: string }
+): Promise<CancelRepairSbResponse> {
+  const { supabase } = await import('./supabase');
+  const { data, error } = await supabase.functions.invoke<CancelRepairSbResponse>(
+    'cancel-repair-sb',
+    { body: payload },
+  );
+  if (error) return { ok: false, error: error.message };
+  return data ?? { ok: false, error: 'no response body' };
+}
+
 // ─── Bulk action batch endpoints (v38.9.0) ────────────────────────────────────
 // Standardized result contract shared across all 4 new batch endpoints AND all
 // loop-based bulk actions (see src/lib/batchLoop.ts). The frontend has exactly

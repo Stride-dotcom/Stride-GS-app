@@ -1,6 +1,8 @@
 # GAS → Supabase Migration — Living Status
 
-> Last updated: 2026-05-12 — **P1.7 + P2.1 MVP shipped**. Phase 1 now **7/7 done**. End-to-end parity-testing pipeline live; DB layer smoke-verified. Full Edge Function invocation pending operator-run with service_role key (smoke command in MIG-012). Slash command `/sb` documented in "Start here" block — use it on every migration-focused session start.
+> Last updated: 2026-05-13 — **P3 kickoff via Path C (hybrid)**. First repair P3 handler shipped: `cancelRepair`. Feature-flag substrate extended with `requestRepairQuote`, `respondRepairQuote`, `cancelRepair`. Third per-table reverse-writethrough writer registered (`__writeThroughReverseRepairs_` in StrideAPI v38.215.0 — replaces stub). Shadow + primary edge functions deployed (`cancel-repair-shadow` v1, `cancel-repair-sb` v1). RepairDetailPanel reads `useFeatureFlag('cancelRepair')` and routes GAS↔SB. SHADOW_REGISTRY extended. Per MIG-007 Path-C variant: skip 90-day replay (corpus only ~4 days old since P1.2), keep shadow + canary gates. Cluster plan: cancelRepair (now) → startRepair → sendRepairQuote → respondRepairQuote → requestRepairQuote (single-item) → completeRepair (P4a). Each future handler: 1 PR mirroring this template.
+
+> Earlier 2026-05-12 — **P1.7 + P2.1 MVP shipped**. Phase 1 now **7/7 done**. End-to-end parity-testing pipeline live; DB layer smoke-verified. Full Edge Function invocation pending operator-run with service_role key (smoke command in MIG-012). Slash command `/sb` documented in "Start here" block — use it on every migration-focused session start.
 > This file is **authoritative for execution**. The v1.1 docx in `Dropbox\Apps\GS Inventory\` is a stakeholder snapshot.
 
 ---
@@ -33,7 +35,7 @@ If you only have time for one section: read **Architectural Decisions** in full.
 | Worktree | Branch | Phase | Scope | Started |
 |---|---|---|---|---|
 
-(Empty rows after merge. Add yourself at session start; remove at session end.)
+(Empty rows after merge. Add yourself at session start; remove at session end. Repair P3 cluster ongoing per MIG-013 — `cancelRepair` PR pending; `startRepair`/`sendRepairQuote`/`respondRepairQuote`/`requestRepairQuote`(single-item) still `not_started`; `completeRepair` is P4a not P3.)
 
 ---
 
@@ -117,6 +119,9 @@ Match-rate column is the rolling 7-day match rate from `parity_results`.
 | `updateShipment` | gas | 0 | n/a | 0 | n/a | not_started | — |
 | `startTask` | gas | 0 | n/a | 0 | n/a | not_started | — |
 | `startRepair` | gas | 0 | n/a | 0 | n/a | not_started | — |
+| `requestRepairQuote` (single-item) | gas | 0 | n/a | 0 | n/a | not_started | 2026-05-13 (feature_flags row seeded) |
+| `respondRepairQuote` | gas | 0 | n/a | 0 | n/a | not_started | 2026-05-13 (feature_flags row seeded) |
+| `cancelRepair` | gas | 0 | n/a | 0 | n/a | **handler_drafted** | 2026-05-13 (PR pending) |
 | `createTask` | gas | 0 | n/a | 0 | n/a | not_started | — |
 | `createWillCall` | gas | 0 | n/a | 0 | n/a | not_started | — |
 | `releaseItems` | gas | 0 | n/a | 0 | n/a | not_started | — |
@@ -240,6 +245,34 @@ Master switch (MIG-003) emergency revert: every row to `{active_backend:'gas', t
 **Rationale:** the 25-flag table covered only the top-level migration handlers. With the full inventory, builders + Justin get a complete coverage picture and Justin can see "we've migrated X of Y across project Z" without grepping. The inventory doc is plain-English by directive — readable without code knowledge.
 
 **Operational rule:** every PR that adds, renames, or deletes a GAS function MUST also update `FUNCTION_INVENTORY.md` in the same commit. Drift between source and the inventory breaks the dashboard's coverage stats (once Layer 2 ships).
+
+### MIG-013 — Path-C hybrid for the repair P3 cluster (skip 90-day replay) (2026-05-13)
+
+**Decision:** For the six-handler repair cluster (`requestRepairQuote` single-item, `startRepair`, `sendRepairQuote`, `respondRepairQuote`, `cancelRepair`, `completeRepair`), use the full framework — feature flag + shadow handler + parity logging + canary tenant + reverse writethrough — **except** skip the 90-day historical replay step.
+
+**Rationale:** The historical-replay layer (MIG-007 layer 2) requires a populated `gas_call_log` corpus. P1.2 shipped 2026-05-09; today (2026-05-13) the corpus is ~4 days old. Waiting for 90 days of corpus accumulation before migrating repairs delays the work by months for a low-volume entity class where the headline risk (billing) is already handled by P4a's three-storage-layer rules (MIG-005). Repairs are not in the billing-correctness blast radius until `completeRepair` ships (P4a), and that handler will get full canary + reverse-writethrough verification independently.
+
+**What we keep:**
+- Per-call state diff via shadow handler → `parity_results` (MIG-007 layer 1)
+- Canary tenant (one tenant, 3-day window vs the standard 14-day from MIG-007 — see below)
+- Synchronous SB→Sheet reverse writethrough (MIG-002)
+- Stripped-credential shadow deployments (MIG-008) — vacuously satisfied since the repair shadows are pure
+
+**What we shorten:**
+- 14-day canary → **3-day canary**. Justification: repair workflow is fully exercised in 1-2 days (a repair lifecycle from request-quote through complete is typically <72 hrs). A 14-day canary on a low-traffic entity adds wall-time without adding signal. The 14-day default in MIG-007 was scoped at high-traffic billing handlers (P4a) where edge-case-per-hour rates require the longer window.
+
+**What's deferred / skipped:**
+- Historical replay (MIG-007 layer 2). Future builders can run replay against the post-Path-C corpus if needed for retrospective regression analysis.
+
+**Scope:** This decision applies ONLY to the repair P3 cluster. Other P2/P3/P4 handlers still go through the full MIG-007 verification by default. `completeRepair` (P4a) ships with the standard 14-day canary because its billing-write is in the critical path.
+
+**Cluster order** (one PR each, mirroring the cancelRepair template):
+1. `cancelRepair` — shipped 2026-05-13 (this PR). Status flip only.
+2. `startRepair` — status flip + work-order PDF (already React-side via lib/workOrderPdf.ts).
+3. `sendRepairQuote` — status flip + REPAIR_QUOTE email via Resend.
+4. `respondRepairQuote` — status flip (Approved/Declined) + REPAIR_APPROVED or REPAIR_DECLINED email via Resend.
+5. `requestRepairQuote` (single-item) — status flip + REPAIR_QUOTE_REQUEST email via Resend. Reuses the multi-item `request-repair-quote-sb` infrastructure with `itemIds:[oneItem]`.
+6. `completeRepair` — P4a, NOT P3 per MIG-004. Standard 14-day canary. Status flip + billing write + addon flush + REPAIR_COMPLETE email. The slim remaining GAS write per the project intent: append rows to per-tenant `Billing_Ledger` + CB `Consolidated_Ledger` (P4b retires the CB sheet eventually).
 
 ### MIG-012 — Replay harness is operator-triggered today; cron + UI button deferred (2026-05-12)
 

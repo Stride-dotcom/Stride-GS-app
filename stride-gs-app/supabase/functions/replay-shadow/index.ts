@@ -82,6 +82,11 @@ interface ShadowEntry {
 }
 const SHADOW_REGISTRY: Record<string, ShadowEntry> = {
   updateItem: { shadow: 'update-item-shadow', action: 'updateInventoryItem' },
+  // [MIGRATION-P3] cancelRepair — first of the repair P3 cluster. Shadow
+  // is pure (no DB writes), mirrors the fixed-shape audit log GAS produces
+  // ({status:{new:'Cancelled'}}). See cancel-repair-shadow/index.ts and
+  // MIGRATION_STATUS.md "Per-function migration table".
+  cancelRepair: { shadow: 'cancel-repair-shadow', action: 'cancelRepair' },
 };
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
