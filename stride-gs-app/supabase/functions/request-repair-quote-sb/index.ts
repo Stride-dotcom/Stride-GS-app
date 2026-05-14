@@ -127,6 +127,71 @@ Deno.serve(async (req: Request) => {
     const repairId: string = String(rpcRow.new_repair_id);
     const itemCount: number = Number(rpcRow.item_count ?? itemIds.length);
 
+    // ── 1b. SB→Sheet mirror: insert the new repair row into the per-tenant
+    // Repairs sheet via the P1.4 reverse-writethrough framework. Best-effort:
+    // failures log to gs_sync_events but don't block the user-visible
+    // create (the SB row is canonical; the sheet is a downstream mirror).
+    // Without this step the multi-item SB-only repair would never reach
+    // the sheet — that's the gap that caused Seva Home's 2026-05-14
+    // mid-quote wipe (v38.220 stopped the sync from deleting SB-only
+    // rows; v38.221 stops them from BEING SB-only in the first place).
+    //
+    // The writer's op='insert' is an upsert (find by Repair ID, append if
+    // missing, update if present), so retries are safe and we don't need
+    // to track whether the row was already inserted.
+    const todayPtDate = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+    const mirrorRequestId = crypto.randomUUID();
+    try {
+      const gasUrl = Deno.env.get('GAS_API_URL');
+      const gasToken = Deno.env.get('GAS_API_TOKEN');
+      if (gasUrl && gasToken) {
+        const mirrorRes = await fetch(`${gasUrl}?action=writeThroughReverse&token=${encodeURIComponent(gasToken)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            tenantId,
+            table: 'repairs',
+            op:    'insert',
+            rowId: repairId,
+            row: {
+              status:          'Pending Quote',
+              item_id:         itemIds[0],
+              created_date:    todayPtDate,
+              created_by:      createdBy ?? '',
+              repair_vendor:   repairVendor ?? '',
+              repair_notes:    repairNotes ?? '',
+              item_notes:      itemNotes ?? '',
+              source_task_id:  sourceTaskId ?? '',
+              approved:        false,
+            },
+            requestId: mirrorRequestId,
+          }),
+        });
+        const text = await mirrorRes.text();
+        let parsed: { success?: boolean; error?: string } = {};
+        try { parsed = JSON.parse(text); } catch { parsed = { error: `non-JSON: ${text.slice(0, 200)}` }; }
+        if (!mirrorRes.ok || !parsed.success) {
+          console.error(`[request-repair-quote-sb] sheet mirror failed for ${repairId}: ${parsed.error ?? `HTTP ${mirrorRes.status}`}`);
+          await supabase.from('gs_sync_events').insert({
+            tenant_id:     tenantId,
+            entity_type:   'repair',
+            entity_id:     repairId,
+            action_type:   'writethrough_reverse',
+            sync_status:   'sync_failed',
+            requested_by:  'request-repair-quote-sb',
+            request_id:    mirrorRequestId,
+            payload:       { table: 'repairs', op: 'insert', rowId: repairId },
+            error_message: String(parsed.error ?? `HTTP ${mirrorRes.status}`).slice(0, 1000),
+          }).then(() => {}, () => {});
+        }
+      } else {
+        console.warn('[request-repair-quote-sb] GAS_API_URL / GAS_API_TOKEN not configured, skipping sheet mirror');
+      }
+    } catch (mirrorEx) {
+      console.error('[request-repair-quote-sb] sheet mirror threw:', mirrorEx);
+      // best-effort — SB-side commit is the authority
+    }
+
     // ── 2. Resolve client info for email tokens ────────────────────────
     const { data: clientRow } = await supabase
       .from('clients')
