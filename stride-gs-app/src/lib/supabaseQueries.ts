@@ -1451,15 +1451,32 @@ export async function fetchRepairByIdFromSupabase(
       sourceTaskId: '',
       itemId: row.item_id || '',
       // Multi-item repairs (items.length > 1) intentionally leave the
-      // top-level description/class/vendor/location/sidemark blank so
-      // the page doesn't show a single item's metadata as if it
-      // described the whole job. The items table renders the per-item
-      // detail; the parent Description card stays empty (or surfaces
-      // the operator's own repair_notes / item_notes lower down).
+      // top-level description/vendor/location/sidemark blank so the
+      // page doesn't show a single item's metadata as if it described
+      // the whole job. The items table renders the per-item detail;
+      // the parent Description card stays empty (or surfaces the
+      // operator's own repair_notes / item_notes lower down).
       // Single-item repairs (the legacy + 1-item-new case) keep the
       // single-item denormalization for back-compat with existing UI.
+      //
+      // EXCEPTION: itemClass. When every item in a multi-item repair
+      // shares the same class (typical — staff usually batch items of
+      // the same furniture style/size), surface that common class so
+      // the Quote Builder's class-based rate lookup (resolveCatalogRate
+      // in RepairDetailPanel) can auto-fill catalog rates for Restock /
+      // Inspection / etc. instead of leaving the operator to type each
+      // line's rate by hand. When the items span mixed classes the
+      // class IS ambiguous for the whole job — leave it blank and the
+      // operator types per line (same as the single-class==='' case).
       description: items.length > 1 ? '' : (items[0]?.description || ''),
-      itemClass:   items.length > 1 ? '' : (items[0]?.itemClass   || ''),
+      itemClass: (() => {
+        if (items.length === 0) return '';
+        if (items.length === 1) return items[0]?.itemClass || '';
+        const classes = new Set(
+          items.map(i => (i.itemClass || '').trim()).filter(Boolean)
+        );
+        return classes.size === 1 ? [...classes][0] : '';
+      })(),
       vendor:      items.length > 1 ? '' : (items[0]?.vendor      || ''),
       location:    items.length > 1 ? '' : (items[0]?.location    || ''),
       sidemark:    items.length > 1 ? '' : (items[0]?.sidemark    || ''),
