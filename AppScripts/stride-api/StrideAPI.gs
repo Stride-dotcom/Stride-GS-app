@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.214.0 — 2026-05-13 PST — handleBatchCreateTasks_ now honors `slaHoursBySvcCode` from the React payload. The service catalog's `default_sla_hours` field has existed since the catalog migrated from the Master Price List, but the create-task flow never read it — every new task landed with Due Date = blank regardless of what the operator configured. CreateTaskModal now reads `useServiceCatalog().catalog` and passes a `{svcCode: hours}` map; this handler stamps `Due Date = now() + (hours * 3600 * 1000)` per task whose svcCode is in the map. Legacy `payload.dueDate` (single value, all tasks) still wins if explicitly set, preserving any caller that relied on it. SvcCodes without a configured SLA leave Due Date blank, exactly like before.
+   StrideAPI.gs — v38.215.0 — 2026-05-13 PST — [MIGRATION-P3 cancelRepair] Third per-table writer registered against the P1.4 reverse-writethrough framework. Replaces `__writeThroughReverseStub_` for the `repairs` table in `REVERSE_WRITETHROUGH_TABLES_` with `__writeThroughReverseRepairs_` — finds the row by Repair ID, idempotently writes Status (and prepares to extend to quote_amount / quote_sent_date / completed_date / repair_result / final_amount as the rest of the P3 cluster ships). Companion Edge Function `cancel-repair-sb` is the first SB-primary caller, fired by RepairDetailPanel's Cancel Repair button when `feature_flags.cancelRepair.active_backend = 'supabase'`. Sheet stays current as the legacy-readers' read-only mirror through the P3/P4a window. Scope today is Status only — adding fields later is a one-line registry extension at REVERSE_REPAIR_FIELDS_.
+   v38.214.0 — 2026-05-13 PST — handleBatchCreateTasks_ now honors `slaHoursBySvcCode` from the React payload. The service catalog's `default_sla_hours` field has existed since the catalog migrated from the Master Price List, but the create-task flow never read it — every new task landed with Due Date = blank regardless of what the operator configured. CreateTaskModal now reads `useServiceCatalog().catalog` and passes a `{svcCode: hours}` map; this handler stamps `Due Date = now() + (hours * 3600 * 1000)` per task whose svcCode is in the map. Legacy `payload.dueDate` (single value, all tasks) still wins if explicitly set, preserving any caller that relied on it. SvcCodes without a configured SLA leave Due Date blank, exactly like before.
    v38.213.0 — 2026-05-13 PST — [MIGRATION-P2 will-calls COD] Second per-table writer registered against the P1.4 reverse-writethrough framework. Replaces `__writeThroughReverseStub_` for the `will_calls` table in `REVERSE_WRITETHROUGH_TABLES_` with `__writeThroughReverseWillCalls_` — finds the row by WC Number, idempotently writes the COD + COD Amount columns. Companion Edge Function `push-will-call-cod-to-sheet` fires this after the React WillCallDetailPanel commits a Supabase-authoritative will_calls.cod / cod_amount write directly to Supabase. Sheet stays current as the legacy-readers' read-only mirror (PDF release doc generator, full client sync, COD payment page launcher). Scope is COD fields only — every other Will_Calls field still flows through the legacy GAS-authoritative `handleUpdateWillCall_` path until they migrate. Adding fields later is a one-line registry extension.
    v38.212.0 — 2026-05-13 PST — Defense-in-depth for the task-addon $0-rate bug. The React-side fix (#360 on 2026-05-12) only covered the list path (useTasks → fetchTasksFromSupabase, which overlays itemClass from inventory). The single-task by-id path (useTaskDetail → fetchTaskByIdFromSupabase, used by TaskPage / standalone deep links) bypassed that overlay because public.tasks has no item_class column. Result: when a task panel was opened via deep link, AddTaskServiceModal received itemClass=undefined and pre-filled $0 on class-based services (MULTI_INS, ASM, INSP …); operators submitted the addon as-is and it landed on Billing_Ledger with rate=0. React side is fixed in useTaskDetail.ts (now overlays itemClass from inventory matching the list path). This GAS-side complement: api_writeAddonsToLedger_'s rate fallback now treats rate=0 the same as rate=null/NaN — the prior guard (`if (adRate == null || isNaN(adRate))`) let through a snapshot of 0 untouched, so the catalog fallback never fired and the row went to the sheet at $0. New guard `if (adRate == null || isNaN(adRate) || adRate === 0)` always re-resolves via api_lookupRate_ so the catalog gets a shot regardless of how the addon was saved. Operators who want a legitimate $0 charge can set rate>0 then override; the lookup is harmless when no catalog row exists (returns 0 and the row gets the existing "Missing Rate" flag). One-shot cleanup of the pre-fix INSP-63255-1-MULTI_INS-ADDON-1 row (Unbilled, rate=0, qty=4, class=S → catalog $15) was performed manually via SQL during the same session. No companion migration; no schema change.
    v38.211.0 — 2026-05-13 PST — Auto-cancel of open Tasks and Repairs when an item flips to Released. Pre-fix only the Transfer flow cancelled downstream work; the three other release paths (will-call release via `handleProcessWcRelease_`, manual bulk release via `handleReleaseItems_`, manual single-item Status→Released flip via `handleUpdateInventoryItem_`, plus the SB-primary reverse-writethrough release via `__writeThroughReverseInventory_` and the DT-Finished bulk backfill via `handleMirrorInventoryReleaseBulk_`) all left orphaned Open/In-Progress tasks + Pending-Quote/Quote-Sent/Approved/In-Progress repairs on the books with no item present to perform the work on. New helper `api_cancelOpenWorkOnRelease_(ss, itemIds, releaseSource, callerEmail)` opens the per-tenant Tasks and Repairs sheets via header maps (no positional indexes), filters to rows whose Item ID is in the released set AND whose Status is NOT already a terminal state (Tasks: Completed/Cancelled; Repairs: Complete/Completed/Failed/Cancelled/Declined), and bulk-writes Status="Cancelled" + Cancelled At=now() + appends "Auto-cancelled: item released via {source}" to the notes column. Writes one entity_audit_log row per cancellation via api_auditLog_ with action="cancel" and changes={reason:"item_released", source}. Finishes with a best-effort api_fullClientSync_(ss, ["tasks", "repairs"]) so the React side picks up the cancellations within ~1-2s. Wired into 5 release sites with the appropriate releaseSource string ("Will Call <wcNumber>", "Bulk Release", "Reverse Writethrough", "DT Finished Backfill", "Manual Status Edit"). The manual-edit site reads prevStatus before the write so it only fires on a true Released-transition, not on re-saves of an already-Released row. Each wire-in surfaces tasksCancelled/repairsCancelled counters + any warnings in the response payload. Per Justin: repairs DO get cancelled on release because the item is no longer present to perform the repair on; failed inspections do NOT auto-create repair jobs (current behavior preserved).
@@ -2641,7 +2642,7 @@ function handleMirrorInventoryReleaseBulk_(payload, callerEmail) {
 var REVERSE_WRITETHROUGH_TABLES_ = {
   "inventory":         __writeThroughReverseInventory_,
   "tasks":             __writeThroughReverseStub_,
-  "repairs":           __writeThroughReverseStub_,
+  "repairs":           __writeThroughReverseRepairs_,
   "shipments":         __writeThroughReverseStub_,
   "will_calls":        __writeThroughReverseWillCalls_,
   "will_call_items":   __writeThroughReverseStub_,
@@ -2765,6 +2766,137 @@ function __writeThroughReverseWillCalls_(ss, payload) {
     cod:        hasCod    ? newCod    : currentCod,
     codAmount:  hasAmount ? newAmount : currentAmountNum
   };
+}
+
+/**
+ * v38.215.0 — [MIGRATION-P3] Repairs reverse-writethrough writer. Third
+ * per-table writer against the P1.4 framework (inventory v38.208.0,
+ * will_calls v38.213.0).
+ *
+ * Fires from Edge Functions that commit SB-authoritative repairs writes:
+ *   • `cancel-repair-sb` — first caller. Writes Status='Cancelled'.
+ *   • `start-repair-sb`, `send-repair-quote-sb`, `respond-repair-quote-sb`,
+ *     `complete-repair-sb` (P3/P4a follow-ups) — will write a superset
+ *     of fields below.
+ *
+ * Scope today: the REVERSE_REPAIR_FIELDS_ map. Adding a column is a
+ * one-liner: add the SB row-key → sheet-header pair. The writer ignores
+ * unknown row keys so a future expansion of the row payload doesn't
+ * require touching this writer if the new field maps cleanly.
+ *
+ * Contract — receives (ss, payload):
+ *   ss      — SpreadsheetApp.openById(tenantId), already validated +
+ *             opened by handleWriteThroughReverse_
+ *   payload — { tenantId, table:'repairs', op:'update', rowId, row, ... }
+ *
+ * Idempotent by Repair ID: looks up the row, no-ops when every targeted
+ * column already matches its target value. Throws on missing row or
+ * unsupported op so handleWriteThroughReverse_ catches and writes
+ * gs_sync_events for the FailedOperationsDrawer.
+ *
+ * Op support: only 'update' for now. Repair inserts come from the
+ * SB-primary create path (`request-repair-quote-sb`) which doesn't
+ * mirror to the sheet on creation (multi-item repairs only exist in
+ * SB until invoice flow lands in P4a); single-item creates still flow
+ * through the legacy GAS `handleRequestRepairQuote_`. Repair deletes
+ * are never performed.
+ */
+var REVERSE_REPAIR_FIELDS_ = {
+  // SB column name → per-tenant Repairs sheet header
+  "status":           "Status",
+  "quote_amount":     "Quote Amount",
+  "quote_sent_date":  "Quote Sent Date",
+  "start_date":       "Start Date",
+  "completed_date":   "Completed Date",
+  "repair_result":    "Repair Result",
+  "final_amount":     "Final Amount",
+  "repair_vendor":    "Repair Vendor",
+  "repair_notes":     "Repair Notes"
+};
+
+function __writeThroughReverseRepairs_(ss, payload) {
+  var rowId = payload && payload.rowId ? String(payload.rowId).trim() : "";
+  var row   = (payload && payload.row) || {};
+  var op    = payload && payload.op ? String(payload.op) : "";
+
+  if (op !== "update") {
+    throw new Error(
+      "__writeThroughReverseRepairs_: op '" + op + "' not supported " +
+      "(only 'update' is implemented; insert/delete still on GAS-authoritative path)."
+    );
+  }
+  if (!rowId) throw new Error("__writeThroughReverseRepairs_: rowId (Repair ID) required");
+
+  var repSheet = ss.getSheetByName("Repairs");
+  if (!repSheet) throw new Error("__writeThroughReverseRepairs_: Repairs sheet not found on this tenant");
+
+  var hMap = api_getHeaderMap_(repSheet);
+  var idCol = hMap["Repair ID"];
+  if (!idCol) throw new Error("__writeThroughReverseRepairs_: 'Repair ID' column not found");
+
+  // Resolve which targeted fields are present in the payload + map them
+  // to column indexes. Skip unknown row keys silently — defensive against
+  // future SB-side row shape expansions that don't map to sheet columns.
+  var targets = [];  // [{sbKey, header, col, newValue}]
+  for (var sbKey in REVERSE_REPAIR_FIELDS_) {
+    if (!row.hasOwnProperty(sbKey)) continue;
+    var header = REVERSE_REPAIR_FIELDS_[sbKey];
+    var col = hMap[header];
+    if (!col) continue;  // header not present on this tenant's sheet
+    targets.push({ sbKey: sbKey, header: header, col: col, newValue: row[sbKey] });
+  }
+  if (targets.length === 0) {
+    throw new Error(
+      "__writeThroughReverseRepairs_: row had no fields in REVERSE_REPAIR_FIELDS_ " +
+      "(payload keys: " + Object.keys(row).join(",") + ")"
+    );
+  }
+
+  // api_getLastDataRow_ guards against trailing-blank-row pollution.
+  var lastRow = api_getLastDataRow_(repSheet);
+  if (lastRow < 2) throw new Error("__writeThroughReverseRepairs_: Repairs sheet has no data rows");
+
+  // Scan Repair ID column once.
+  var idValues = repSheet.getRange(2, idCol, lastRow - 1, 1).getValues();
+  var foundRow = -1;
+  for (var i = 0; i < idValues.length; i++) {
+    if (String(idValues[i][0] || "").trim() === rowId) {
+      foundRow = i + 2;
+      break;
+    }
+  }
+  if (foundRow < 0) {
+    throw new Error("__writeThroughReverseRepairs_: Repair ID '" + rowId + "' not found in Repairs sheet");
+  }
+
+  // Idempotency — skip the write when every target column already
+  // matches its new value. Cheap N-cell read avoids redundant setValue
+  // round-trips on FailedOps retry.
+  var allMatch = true;
+  for (var j = 0; j < targets.length; j++) {
+    var current = repSheet.getRange(foundRow, targets[j].col).getValue();
+    var target = targets[j].newValue;
+    // Normalize for comparison: empty string ~= null/undefined.
+    var currentNorm = (current === null || current === "" || current === undefined) ? null : current;
+    var targetNorm  = (target  === null || target  === "" || target  === undefined) ? null : target;
+    if (currentNorm !== targetNorm) { allMatch = false; break; }
+  }
+  if (allMatch) {
+    return { rowNumber: foundRow, skipped: true, reason: "already-matches-target-state" };
+  }
+
+  for (var k = 0; k < targets.length; k++) {
+    repSheet.getRange(foundRow, targets[k].col).setValue(targets[k].newValue);
+  }
+
+  SpreadsheetApp.flush();
+
+  // Build response with the actual written values per field.
+  var written = {};
+  for (var m = 0; m < targets.length; m++) {
+    written[targets[m].sbKey] = targets[m].newValue;
+  }
+  return { rowNumber: foundRow, written: written };
 }
 
 /**
