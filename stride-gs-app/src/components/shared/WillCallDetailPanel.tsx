@@ -696,11 +696,13 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
                     <DollarSign size={14} color={theme.colors.textMuted} style={{ marginTop: 2 }} />
                     <div>
                       <div style={{ fontSize: 10, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 3 }}>COD</div>
-                      {/* Inline-editable COD for staff/admin on active WCs. SB-authoritative
+                      {/* Inline-editable COD for staff/admin on ANY WC status. SB-authoritative
                           path: writes public.will_calls directly, then fire-and-forgets the
-                          sheet mirror via push-will-call-cod-to-sheet. Released/Cancelled
-                          WCs and non-staff users get the read-only fallback. */}
-                      {(isActive && canRelease) ? (
+                          sheet mirror via push-will-call-cod-to-sheet. Justin's ask:
+                          retroactively toggle COD on Released WCs (e.g. customer paid
+                          later, mark COD collected after the fact). Non-staff users
+                          still get the read-only fallback below. */}
+                      {canRelease ? (
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                           <input
                             type="checkbox"
