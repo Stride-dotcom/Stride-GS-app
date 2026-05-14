@@ -62,13 +62,18 @@ export function PhotoGallery({
   rollupCtx,
 }: Props) {
   const [sourceFilter, setSourceFilter] = useState<string>('all');
-  // v2026-05-14 — Polish: sort + grouping. Newest-first by default (matches
-  // existing behavior since usePhotos returns rows ordered by created_at
-  // ascending, then this state-driven sort flips them to descending).
+  // v2026-05-14 — Polish: sort + grouping. Default is OLDEST first to
+  // preserve the inspection workflow: staff shoot the label first, then
+  // the full item, then issue details. Keeping that upload-time order
+  // intact means each item's label photo still acts as a visual divider
+  // for the next item's series — staff can read down the grid in batch
+  // order and know which item each cluster belongs to. Newest-first is
+  // available via the dropdown for users who want the most-recent
+  // uploads at the top (e.g. checking what just got added).
   // Grouping splits the grid by item_id when there are multiple items
   // contributing photos — gated to the multi-item scenario via the toggle
   // visibility below.
-  const [sortOrder, setSortOrder] = useState<'newest' | 'oldest' | 'name'>('newest');
+  const [sortOrder, setSortOrder] = useState<'newest' | 'oldest' | 'name'>('oldest');
   const [groupByItem, setGroupByItem] = useState(false);
   // Session 74: `setPrimaryPhoto` is still exported by usePhotos for
   // interface compatibility but no longer consumed here — the "Make
