@@ -28,6 +28,7 @@
 - [ ] Insurance auto-billing — cron-based insurance charge generation (schema exists, logic pending)
 - [ ] Invoice-level `invoiceDate` field on `InvoiceGroup`
 - [ ] Invoice number link in billing summary row
+- [x] **CB Consolidated_Ledger auto-reconcile from public.billing on every QBO push — bridge for the silent-drop class (INV-001152 + 6 stuck siblings). Reads `public.billing` as source of truth, brings CB into agreement before grouping. Transitional until P4b retires CB. Shipped 2026-05-14 (PR #438, StrideAPI.gs v38.222.0).**
 
 ## Entity Pages
 
