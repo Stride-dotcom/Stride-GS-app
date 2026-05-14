@@ -19,7 +19,8 @@ import { WriteButton } from './WriteButton';
 import { ProcessingOverlay } from './ProcessingOverlay';
 import { BillingPreviewCard } from './BillingPreviewCard';
 import { useEntityAddons } from '../../hooks/useEntityAddons';
-import { postSendRepairQuote, postRespondToRepairQuote, postCompleteRepair, postStartRepair, postCancelRepair, postUpdateRepairNotes, postReopenRepair, postCorrectRepairResult, postVoidRepairQuote, isApiConfigured } from '../../lib/api';
+import { postSendRepairQuote, postRespondToRepairQuote, postCompleteRepair, postStartRepair, postCancelRepair, postCancelRepairSb, postUpdateRepairNotes, postReopenRepair, postCorrectRepairResult, postVoidRepairQuote, isApiConfigured } from '../../lib/api';
+import { useFeatureFlag } from '../../contexts/FeatureFlagContext';
 import { generateRepairWorkOrderPdf } from '../../lib/workOrderPdf';
 import { entityEvents } from '../../lib/entityEvents';
 import type { ApiRepair, SendRepairQuoteResponse, RespondToRepairQuoteResponse, CompleteRepairResponse, StartRepairResponse, SendRepairQuoteLine } from '../../lib/api';
@@ -63,6 +64,11 @@ const input: React.CSSProperties = { width: '100%', padding: '8px 10px', fontSiz
 
 export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepairPatch, mergeRepairPatch, clearRepairPatch, renderAsPage }: Props) {
   const { user } = useAuth();
+  // [MIGRATION-P3] Resolves to 'gas' or 'supabase' based on
+  // feature_flags.cancelRepair + tenant_scope. See MIGRATION_STATUS.md
+  // MIG-010 for the per-tenant scope semantics. Resolves to 'gas' while
+  // flags are loading — safe default since pre-migration backend.
+  const cancelRepairBackend = useFeatureFlag('cancelRepair');
   const { isMobile, isTablet } = useIsMobile();
   const isCompactViewport = isMobile || isTablet;
   // v2026-04-22 — panel frame handled by TabbedDetailPanel shell.
@@ -1504,15 +1510,37 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
                 applyRepairPatch?.(repair.repairId, { status: 'Cancelled' });
                 setSubmitting(true); setSubmitError(null);
                 try {
-                  const resp = await postCancelRepair({ repairId: repair.repairId }, cid);
-                  if (resp.ok && resp.data?.success) {
+                  // [MIGRATION-P3] Branch on the feature flag. When the
+                  // flag resolves to 'supabase' for this tenant, hit the
+                  // SB-primary cancel-repair-sb edge function. Otherwise
+                  // stay on the legacy GAS endpoint. Both code paths produce
+                  // the same end-state (status=Cancelled + audit log + sheet
+                  // mirror); only the authority differs.
+                  let ok = false;
+                  let errMsg = '';
+                  if (cancelRepairBackend === 'supabase') {
+                    const resp = await postCancelRepairSb({ tenantId: cid, repairId: repair.repairId });
+                    ok = !!resp.ok;
+                    errMsg = resp.error || '';
+                    // mirrorOk=false means the SB commit succeeded but the
+                    // sheet writethrough didn't — already logged to
+                    // gs_sync_events inside the edge function, so we don't
+                    // log again here. UI treats it as success since the
+                    // authoritative SB write went through.
+                  } else {
+                    const resp = await postCancelRepair({ repairId: repair.repairId }, cid);
+                    ok = !!(resp.ok && resp.data?.success);
+                    errMsg = resp.data?.error || resp.error || 'Failed to cancel repair';
+                    if (!ok) {
+                      void writeSyncFailed({ tenant_id: cid, entity_type: 'repair', entity_id: repair.repairId, action_type: 'cancel_repair', requested_by: user?.email ?? '', request_id: resp.requestId, payload: { repairId: repair.repairId, clientName: repair.clientName, description: repair.description }, error_message: errMsg });
+                    }
+                  }
+                  if (ok) {
                     // Don't clear patch on success — let TTL handle it (prevents flicker while refetch loads)
                     setEffectiveStatus('Cancelled'); setCompleted(true); onRepairUpdated?.();
                   } else {
                     clearRepairPatch?.(repair.repairId); // rollback
-                    const errMsg = resp.data?.error || resp.error || 'Failed to cancel repair';
                     setSubmitError(errMsg);
-                    void writeSyncFailed({ tenant_id: cid, entity_type: 'repair', entity_id: repair.repairId, action_type: 'cancel_repair', requested_by: user?.email ?? '', request_id: resp.requestId, payload: { repairId: repair.repairId, clientName: repair.clientName, description: repair.description }, error_message: errMsg });
                   }
                 } catch (_) {
                   clearRepairPatch?.(repair.repairId); // rollback
