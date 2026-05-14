@@ -157,17 +157,27 @@ export function useShipmentDetail(shipmentNo: string | undefined): UseShipmentDe
     return () => { abortRef.current?.abort(); };
   }, [fetchShipment]);
 
-  // Realtime: refetch when this shipment OR any of its items change
-  // cross-tab/cross-user. Items are mirrored to `inventory` so we also
-  // listen for inventory events keyed by the items currently rendered.
+  // Realtime: refetch on shipment-level changes only (carrier, tracking,
+  // receive date, etc.). Item-level changes (inventory writes from inline
+  // editing sidemark/vendor/description/reference/room/location) are
+  // handled by ShipmentDetailPanel's own entityEvents listener, which is
+  // properly guarded with OPTIMISTIC_GUARD_MS and only refetches items
+  // (not the full shipment).
+  //
+  // v2026-05-14 — removed the `type === 'inventory'` branch from this
+  // listener. It was firing a full fetchShipment() on every inline-edit,
+  // unguarded — so editing 3 sidemarks in quick succession queued 3 full
+  // shipment+items refetches stacked on top of the optimistic patches,
+  // producing the visible flash Justin reported. Same shape as the
+  // PR #393 fix on WillCallDetailPanel (COD toggle flashing). The panel-
+  // level listener at ShipmentDetailPanel.tsx:184 already covers the
+  // cross-tab/cross-user inventory-edit case, with the optimistic guard.
   useEffect(() => {
     if (!shipmentNo) return;
-    const itemIds = new Set(items.map(it => it.itemId).filter(Boolean));
     return entityEvents.subscribe((type, id) => {
       if (type === 'shipment' && id === shipmentNo) void fetchShipment();
-      if (type === 'inventory' && itemIds.has(id)) void fetchShipment();
     });
-  }, [shipmentNo, fetchShipment, items]);
+  }, [shipmentNo, fetchShipment]);
 
   return { shipment, items, status, error, refetch: fetchShipment };
 }
