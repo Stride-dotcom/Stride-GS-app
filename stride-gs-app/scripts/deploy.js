@@ -84,15 +84,29 @@ function hasStagedChanges(cwd) {
 function pushWithRetry(args, cwd) {
   const cmd = `git push ${args.join(' ')}`;
   console.log(`\n[deploy] $ ${cmd}  (in ${cwd.split(/[\\/]/).slice(-2).join('/')})`);
+  let firstErr;
   try {
     execSync(cmd, { cwd, stdio: 'inherit', shell: true });
     return;
-  } catch (firstErr) {
-    console.log('[deploy] push failed (likely Windows schannel TLS) — retrying with postBuffer + HTTP/1.1…');
-    const retryCmd = `git -c http.postBuffer=524288000 -c http.version=HTTP/1.1 push ${args.join(' ')}`;
-    console.log(`[deploy] $ ${retryCmd}`);
+  } catch (err) {
+    firstErr = err;
+  }
+
+  console.log('[deploy] push failed (likely Windows schannel TLS) — retrying with postBuffer + HTTP/1.1…');
+  const retryCmd = `git -c http.postBuffer=524288000 -c http.version=HTTP/1.1 push ${args.join(' ')}`;
+  console.log(`[deploy] $ ${retryCmd}`);
+  try {
     execSync(retryCmd, { cwd, stdio: 'inherit', shell: true });
     console.log('[deploy] ✓ retry succeeded');
+  } catch (retryErr) {
+    // 2026-05-14: don't let the retry failure die silently — both attempts
+    // failing is the real "the push didn't land" signal, and step 3 must
+    // exit non-zero so the operator doesn't mistake a non-fast-forward
+    // rejection (or anything else persistent) for a successful deploy.
+    console.error(`[deploy] ✗ push failed on both attempts: git push ${args.join(' ')}`);
+    if (firstErr && firstErr.message) console.error(`[deploy]   first attempt:  ${firstErr.message}`);
+    if (retryErr && retryErr.message) console.error(`[deploy]   retry attempt:  ${retryErr.message}`);
+    throw retryErr;
   }
 }
 
@@ -166,16 +180,30 @@ if (hasUncommittedChanges(parentDir)) {
 } else {
   console.log('[deploy] source: nothing to commit (already clean)');
 
-  // Still push in case local is ahead of remote (e.g. a prior commit wasn't pushed)
+  // Still push in case local is ahead of remote (e.g. a prior commit wasn't pushed).
+  //
+  // 2026-05-14: the previous version wrapped the rev-list + push in one
+  // try/catch with an empty `catch (_)`, which silently swallowed
+  // pushWithRetry failures (e.g. non-fast-forward rejections from a
+  // diverged local source). The script then printed "all steps complete"
+  // and exited 0 — an operator-fooling false success. Catch ONLY the
+  // rev-list failure (benign: e.g. origin/source not yet fetched locally);
+  // let push failures propagate so the script exits non-zero.
+  let ahead = 0;
   try {
-    const ahead = execFileSync(
+    const out = execFileSync(
       'git', ['rev-list', '--count', 'origin/source..HEAD'], { cwd: parentDir }
     ).toString().trim();
-    if (parseInt(ahead, 10) > 0) {
-      console.log(`[deploy] source: ${ahead} commit(s) ahead of origin — pushing`);
-      pushWithRetry(['origin', 'source'], parentDir);
-    }
-  } catch (_) { /* ignore */ }
+    ahead = parseInt(out, 10) || 0;
+  } catch (err) {
+    console.log('[deploy] source: could not compare with origin/source — skipping ahead-check');
+    console.log(`[deploy]   (${err && err.message ? err.message.split('\n')[0] : err})`);
+  }
+
+  if (ahead > 0) {
+    console.log(`[deploy] source: ${ahead} commit(s) ahead of origin — pushing`);
+    pushWithRetry(['origin', 'source'], parentDir);
+  }
 }
 
 console.log('\n[deploy] ✓ all steps complete');
