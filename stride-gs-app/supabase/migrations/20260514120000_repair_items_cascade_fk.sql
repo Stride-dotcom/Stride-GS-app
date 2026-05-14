@@ -9,13 +9,19 @@
 -- The 9 ghost orphans were deleted; one (RPR-63280-1778715634749)
 -- had its parent restored. This migration prevents a repeat.
 --
--- Pre-conditions verified before authoring:
+-- Pre-conditions expected (per the cleanup operator + tracked schema
+-- — NOT live-checked at authoring time; the runtime guards below
+-- enforce them at apply time):
 --   • Zero orphan repair_items rows remain (manual cleanup today).
 --   • repair_items has zero existing FK constraints.
 --   • public.repairs uses a uuid `id` as its primary key — there is
 --     no UNIQUE/PK covering (tenant_id, repair_id) in the tracked
 --     migration history, so this migration adds one defensively
 --     (idempotent — skipped if a matching constraint already exists).
+--     Note: Guard 2 inspects pg_constraint only, not bare unique
+--     indexes (`CREATE UNIQUE INDEX` without a backing constraint).
+--     This is correct — Postgres requires a UNIQUE/PK *constraint*
+--     to satisfy an FK reference; a bare unique index won't.
 --
 -- Why ON DELETE CASCADE (not RESTRICT):
 --   Repair items have no meaning without their parent repair. The
@@ -74,13 +80,27 @@ BEGIN
 END $$;
 
 -- ── Add the CASCADE FK ────────────────────────────────────────────────
-ALTER TABLE public.repair_items
-  ADD CONSTRAINT repair_items_parent_fk
-    FOREIGN KEY (tenant_id, repair_id)
-    REFERENCES   public.repairs (tenant_id, repair_id)
-    ON DELETE CASCADE;
+-- Wrapped in a DO block for idempotency parity with the guards above —
+-- Supabase's apply_migration dedupes by version so this won't bite the
+-- normal path, but a manual `psql -f` replay or wiped migrations table
+-- would otherwise fail with "constraint already exists".
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname  = 'repair_items_parent_fk'
+      AND conrelid = 'public.repair_items'::regclass
+  ) THEN
+    ALTER TABLE public.repair_items
+      ADD CONSTRAINT repair_items_parent_fk
+        FOREIGN KEY (tenant_id, repair_id)
+        REFERENCES   public.repairs (tenant_id, repair_id)
+        ON DELETE CASCADE;
 
-COMMENT ON CONSTRAINT repair_items_parent_fk ON public.repair_items IS
-  'CASCADE FK to public.repairs — prevents orphan child rows. Added '
-  '2026-05-14 after orphan-cleanup incident traced to manual parent '
-  'deletion during PR #397 multi-item repair testing.';
+    COMMENT ON CONSTRAINT repair_items_parent_fk ON public.repair_items IS
+      'CASCADE FK to public.repairs — prevents orphan child rows. Added '
+      '2026-05-14 after orphan-cleanup incident traced to manual parent '
+      'deletion during PR #397 multi-item repair testing.';
+  END IF;
+END $$;
