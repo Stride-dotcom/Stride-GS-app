@@ -81,6 +81,12 @@ Deno.serve(async (req: Request) => {
     const repairNotes:  string | null = body.repairNotes  ? String(body.repairNotes).trim()  : null;
     const itemNotes:    string | null = body.itemNotes    ? String(body.itemNotes).trim()    : null;
     const createdBy:    string | null = body.createdBy    ? String(body.createdBy).trim()    : null;
+    // v2026-05-13 — sourceTaskId for the single-item migration. When
+    // called from TaskDetailPanel's "Request Repair Quote" button the
+    // resulting repair links back to its parent task via this field
+    // (preserves the existing GAS-side behavior). Multi-item flow from
+    // Inventory bulk action leaves it null.
+    const sourceTaskId: string | null = body.sourceTaskId ? String(body.sourceTaskId).trim() : null;
 
     if (!tenantId)             return json({ ok: false, error: 'tenantId is required' }, 400);
     if (itemIds.length === 0)  return json({ ok: false, error: 'itemIds must be a non-empty array' }, 400);
@@ -96,12 +102,13 @@ Deno.serve(async (req: Request) => {
     // ── 1. Atomic create via RPC ───────────────────────────────────────
     const { data: rpcRows, error: rpcErr } = await supabase
       .rpc('create_repair_quote_request', {
-        p_tenant_id:     tenantId,
-        p_item_ids:      itemIds,
-        p_repair_vendor: repairVendor,
-        p_repair_notes:  repairNotes,
-        p_item_notes:    itemNotes,
-        p_created_by:    createdBy,
+        p_tenant_id:      tenantId,
+        p_item_ids:       itemIds,
+        p_repair_vendor:  repairVendor,
+        p_repair_notes:   repairNotes,
+        p_item_notes:     itemNotes,
+        p_created_by:     createdBy,
+        p_source_task_id: sourceTaskId,
       });
 
     if (rpcErr) {

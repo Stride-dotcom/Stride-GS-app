@@ -3520,6 +3520,11 @@ export interface RequestRepairQuoteSbPayload {
   repairNotes?: string | null;
   itemNotes?: string | null;
   createdBy?: string | null;
+  // [MIGRATION-P3] sourceTaskId — passed when called from TaskDetailPanel
+  // single-item flow. Stamps repairs.source_task_id so the Repair detail
+  // panel's "Source Task" deep link works. Multi-item flow from Inventory
+  // bulk action leaves null.
+  sourceTaskId?: string | null;
 }
 export interface RequestRepairQuoteSbResponse {
   ok: boolean;

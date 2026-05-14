@@ -9,7 +9,8 @@ import { AutocompleteInput } from './AutocompleteInput';
 import { theme } from '../../styles/theme';
 import { fmtDate } from '../../lib/constants';
 import { useReceivingAddons } from '../../hooks/useReceivingAddons';
-import { postUpdateInventoryItem, fetchItemMoveHistory, postRequestRepairQuote, postAddItemAddon, postRemoveItemAddon, isApiConfigured } from '../../lib/api';
+import { postUpdateInventoryItem, fetchItemMoveHistory, postRequestRepairQuote, postRequestRepairQuoteSb, postAddItemAddon, postRemoveItemAddon, isApiConfigured } from '../../lib/api';
+import { useFeatureFlag } from '../../contexts/FeatureFlagContext';
 import { entityEvents } from '../../lib/entityEvents';
 import type { MoveHistoryEntry } from '../../lib/api';
 import type { InventoryItem, InventoryStatus } from '../../lib/types';
@@ -731,15 +732,27 @@ export function ItemDetailPanel({
     : repairRequested ? 'Pending Quote'
     : null;
 
+  const requestRepairQuoteBackend = useFeatureFlag('requestRepairQuote');
   const handleRequestRepair = useCallback(async () => {
     if (!isApiConfigured() || !clientSheetId || !item.itemId) return;
     setRepairRequesting(true);
     try {
-      const resp = await postRequestRepairQuote({ itemId: item.itemId }, clientSheetId);
-      if (resp.ok && resp.data?.success) { setRepairRequested(true); onItemUpdated?.(); }
+      // [MIGRATION-P3] Route via requestRepairQuote flag. SB path creates
+      // ONE repair with this single item; legacy GAS path also creates
+      // one repair. Same end-state.
+      if (requestRepairQuoteBackend === 'supabase') {
+        const resp = await postRequestRepairQuoteSb({
+          tenantId: clientSheetId,
+          itemIds:  [item.itemId],
+        });
+        if (resp.ok) { setRepairRequested(true); onItemUpdated?.(); }
+      } else {
+        const resp = await postRequestRepairQuote({ itemId: item.itemId }, clientSheetId);
+        if (resp.ok && resp.data?.success) { setRepairRequested(true); onItemUpdated?.(); }
+      }
     } catch (_) {}
     setRepairRequesting(false);
-  }, [clientSheetId, item.itemId, onItemUpdated]);
+  }, [clientSheetId, item.itemId, onItemUpdated, requestRepairQuoteBackend]);
 
   // ─── Add-on services (OVER300, NO_ID, etc.) — live toggles ───────────────
   // Checked state derives from itemBilling: an unbilled row with svcCode matching
