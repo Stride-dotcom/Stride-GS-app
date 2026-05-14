@@ -110,6 +110,12 @@ const SHADOW_REGISTRY: Record<string, ShadowEntry> = {
   // created N repairs (one per item) so the audit doesn't bind to a
   // single repair_id. See request-repair-quote-shadow/index.ts.
   requestRepairQuote: { shadow: 'request-repair-quote-shadow', action: 'requestRepairQuote' },
+  // [MIGRATION-P4a] completeRepair — sixth + final repair handler.
+  //   { status: { new: 'Complete' }, result: 'Pass'|'Fail' }
+  // Per MIG-004 status flip + billing + addon flush + email are all
+  // one logical transaction (handled by complete_repair_atomic RPC).
+  // See complete-repair-shadow/index.ts.
+  completeRepair: { shadow: 'complete-repair-shadow', action: 'completeRepair' },
 };
 
 // ─── Helpers ────────────────────────────────────────────────────────────────

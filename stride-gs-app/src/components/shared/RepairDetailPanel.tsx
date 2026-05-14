@@ -19,7 +19,7 @@ import { WriteButton } from './WriteButton';
 import { ProcessingOverlay } from './ProcessingOverlay';
 import { BillingPreviewCard } from './BillingPreviewCard';
 import { useEntityAddons } from '../../hooks/useEntityAddons';
-import { postSendRepairQuote, postSendRepairQuoteSb, postRespondToRepairQuote, postRespondRepairQuoteSb, postCompleteRepair, postStartRepair, postStartRepairSb, postCancelRepair, postCancelRepairSb, postUpdateRepairNotes, postReopenRepair, postCorrectRepairResult, postVoidRepairQuote, isApiConfigured } from '../../lib/api';
+import { postSendRepairQuote, postSendRepairQuoteSb, postRespondToRepairQuote, postRespondRepairQuoteSb, postCompleteRepair, postCompleteRepairSb, postStartRepair, postStartRepairSb, postCancelRepair, postCancelRepairSb, postUpdateRepairNotes, postReopenRepair, postCorrectRepairResult, postVoidRepairQuote, isApiConfigured } from '../../lib/api';
 import { useFeatureFlag } from '../../contexts/FeatureFlagContext';
 import { generateRepairWorkOrderPdf } from '../../lib/workOrderPdf';
 import { entityEvents } from '../../lib/entityEvents';
@@ -77,6 +77,9 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   // for repair). Reuse it here; respondToRepairQuote will gate on the
   // same flag when its migration ships.
   const sendRepairEmailsBackend = useFeatureFlag('sendRepairEmails');
+  // [MIGRATION-P4a] completeRepair has its own flag (billing-touching,
+  // standard 14-day canary per MIG-013 vs the P3 cluster's 3-day).
+  const completeRepairBackend = useFeatureFlag('completeRepair');
   const { isMobile, isTablet } = useIsMobile();
   const isCompactViewport = isMobile || isTablet;
   // v2026-04-22 — panel frame handled by TabbedDetailPanel shell.
@@ -863,17 +866,54 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
     // 2. Background GAS
     void (async () => {
       try {
-        const resp = await postCompleteRepair(
-          { repairId: repair.repairId, resultValue, repairNotes: repairNotes || undefined },
-          clientSheetId
-        );
-        if (!resp.ok || !resp.data?.success) {
-          const errMsg = resp.error || resp.data?.error || 'Completion recorded locally but the server call failed.';
-          setSubmitError(errMsg + ' Refresh to reconcile, or retry.');
-          void writeSyncFailed({ tenant_id: clientSheetId, entity_type: 'repair', entity_id: repair.repairId, action_type: 'complete_repair', requested_by: user?.email ?? '', request_id: resp.requestId, payload: { repairId: repair.repairId, resultValue, repairNotes: repairNotes || undefined, clientName: repair.clientName, description: repair.description }, error_message: errMsg });
+        // [MIGRATION-P4a] Route via completeRepair flag. Both paths produce
+        // the same end-state: repairs.status='Complete' + completed_date +
+        // repair_result + final_amount + billing rows (per quote_lines_json
+        // line + per addon) + REPAIR_COMPLETE email. Only the authority
+        // differs.
+        if (completeRepairBackend === 'supabase') {
+          const resp = await postCompleteRepairSb({
+            tenantId:    clientSheetId,
+            repairId:    repair.repairId,
+            resultValue,
+            repairNotes: repairNotes || null,
+          });
+          if (!resp.ok) {
+            setSubmitError((resp.error || 'Completion failed.') + ' Refresh to reconcile, or retry.');
+          } else if (resp.skipped) {
+            setSubmitError(`Repair already ${resp.skipReason ?? 'completed'}. Refresh to see current state.`);
+          } else {
+            // Synthesize a CompleteRepairResponse-shaped object for the
+            // existing setCompleteResult banner.
+            setCompleteResult({
+              success: true,
+              repairId: resp.repairId ?? repair.repairId,
+              resultValue,
+              billingCreated: (resp.billingCount ?? 0) > 0,
+              warnings: [] as string[],
+            } as unknown as CompleteRepairResponse);
+            onRepairUpdated?.();
+            if (resp.mirrorOk === false) {
+              console.warn('[completeRepair-sb] sheet mirror failed:', resp.mirrorError);
+              setSubmitError(`Repair completed, but legacy sheet mirror failed (${resp.mirrorError ?? 'unknown'}). App state is correct; sheet will catch up on the next full sync.`);
+            }
+            if (resp.emailSent === false) {
+              setSubmitError(`Repair completed, but REPAIR_COMPLETE email send failed: ${resp.emailError ?? 'unknown'}.`);
+            }
+          }
         } else {
-          setCompleteResult(resp.data);
-          onRepairUpdated?.();
+          const resp = await postCompleteRepair(
+            { repairId: repair.repairId, resultValue, repairNotes: repairNotes || undefined },
+            clientSheetId
+          );
+          if (!resp.ok || !resp.data?.success) {
+            const errMsg = resp.error || resp.data?.error || 'Completion recorded locally but the server call failed.';
+            setSubmitError(errMsg + ' Refresh to reconcile, or retry.');
+            void writeSyncFailed({ tenant_id: clientSheetId, entity_type: 'repair', entity_id: repair.repairId, action_type: 'complete_repair', requested_by: user?.email ?? '', request_id: resp.requestId, payload: { repairId: repair.repairId, resultValue, repairNotes: repairNotes || undefined, clientName: repair.clientName, description: repair.description }, error_message: errMsg });
+          } else {
+            setCompleteResult(resp.data);
+            onRepairUpdated?.();
+          }
         }
       } catch (err) {
         setSubmitError(
