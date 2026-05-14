@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.220.0 — 2026-05-14 PST — [MIGRATION-P3 SB-primary preserves SB-only repairs] api_fullClientSync_ no longer calls supabaseDeleteStaleRows_ on the repairs entity. With all six repair feature flags now at active_backend='supabase' fleet-wide (cancelRepair / startRepair / sendRepairEmails / completeRepair / requestRepairQuote / respondRepairQuote — flipped 2026-05-14 19:32 UTC), public.repairs is the authoritative store. The SB-only multi-item create path (request-repair-quote-sb, PR #397) intentionally never writes to the per-tenant Repairs sheet — so the stale-delete sweep was nuking legitimate SB rows on every full-sync (caught 2026-05-14 19:43 UTC when Seva Home's RPR-63280-1778715634749 lost its parent row mid-quote-send; reconstructed manually via SQL; this fix prevents a recurrence). Sheet edits still upsert to SB via supabaseBatchUpsert_; only the destructive delete sweep is dropped.
+   StrideAPI.gs — v38.221.0 — 2026-05-14 PST — [MIGRATION-P3 SB→Sheet mirror for repairs] Extends __writeThroughReverseRepairs_ to support op='insert' (treats both 'insert' and 'update' as upserts: find row by Repair ID, append if missing, update if present — same idempotency invariants either way). Extends REVERSE_REPAIR_FIELDS_ with created_date / created_by / item_notes / task_notes / source_task_id so a fresh sheet row built by the insert path has the full create state. New admin function runBackfillSbOnlyRepairsToSheet(tenantIdArg?) (and the runBackfillSevaRepairsToSheet convenience wrapper) walks active CB clients, fetches every public.repairs row for the tenant, and inserts the missing ones into the per-tenant Repairs sheet via the writer — idempotent, so re-running is harmless. Companion edge function change in request-repair-quote-sb fires the writer with op='insert' after the RPC, so new multi-item repairs land on the sheet immediately instead of being SB-only and invisible to legacy readers. Closes the symmetric gap to v38.220.0: that PR stopped the GAS sync from DELETING SB-only rows; this PR stops the multi-item create flow from leaving them SB-only in the first place.
+   v38.220.0 — 2026-05-14 PST — [MIGRATION-P3 SB-primary preserves SB-only repairs] api_fullClientSync_ no longer calls supabaseDeleteStaleRows_ on the repairs entity. With all six repair feature flags now at active_backend='supabase' fleet-wide (cancelRepair / startRepair / sendRepairEmails / completeRepair / requestRepairQuote / respondRepairQuote — flipped 2026-05-14 19:32 UTC), public.repairs is the authoritative store. The SB-only multi-item create path (request-repair-quote-sb, PR #397) intentionally never writes to the per-tenant Repairs sheet — so the stale-delete sweep was nuking legitimate SB rows on every full-sync (caught 2026-05-14 19:43 UTC when Seva Home's RPR-63280-1778715634749 lost its parent row mid-quote-send; reconstructed manually via SQL; this fix prevents a recurrence). Sheet edits still upsert to SB via supabaseBatchUpsert_; only the destructive delete sweep is dropped.
    v38.219.0 — 2026-05-14 PST — handleProcessWcRelease_ now reads Qty + Sidemark when building allUnreleasedItems. Pre-fix the per-row object only carried itemId/wcFee/itemClass/description/location/vendor, so the downstream releaseItemsForTable.map produced rows with qty=undefined and sidemark=undefined — every WC release email rendered "Qty 1" regardless of the actual quantity on the WC_Items row, and the Sidemark column was blank for every line. Fix is two added field reads at the push() site — `qty: Number(...||1)` mirrors the inventory release email's safe default, `sidemark: String(...||"").trim()` matches the existing description/vendor coercion. releaseItemsForTable already references r.qty and r.sidemark so no downstream change needed. Pure data-plumbing fix; no schema or RLS change; no React/Supabase change.
    v38.218.0 — 2026-05-14 PST — [MIGRATION-P3 reQuoteRepair] Extends REVERSE_REPAIR_FIELDS_ with two more columns so the new `re-quote-repair` Edge Function can mirror its full state to the per-tenant Repairs sheet via the existing __writeThroughReverseRepairs_ writer: `item_id` → "Item ID" (the denormalized "primary item" cache on the Repairs sheet — re-quote rewrites this to the new first item) and `approved` → "Approved" (boolean — cleared on re-quote because the customer agreement is being re-issued). No new writer code; the writer ignores unknown row keys silently and skips columns that don't exist on the sheet. Companion Edge Function `re-quote-repair` is the SB-primary entry for the new "Edit Items" flow in RepairDetailPanel — lets staff add/remove items on an in-flight repair (status in Pending Quote / Quote Sent) without cancelling and recreating. RPC `re_quote_repair` is atomic: delete existing repair_items + insert new + UPDATE repairs (status='Pending Quote', clear quote_* fields, approved=false, new primary item_id) + audit-log entry. Per-tenant Repair_Items sheet is NOT mirrored on the swap — multi-item repair items only live in SB until P4a flips invoice generation (same scope as the multi-item create flow). Sheet stays current as the legacy-readers' read-only mirror via the parent Repairs row update.
    v38.217.0 — 2026-05-13 PST — [MIGRATION-P4a completeRepair] Fourth per-table reverse-writethrough writer registered against the P1.4 framework: `__writeThroughReverseBilling_` for the `billing` table (replaces the stub). Mirrors `public.billing` row inserts/updates into the per-tenant Billing_Ledger sheet — driven by `complete-repair-sb` (companion Edge Function shipping in the same PR). Idempotent by Ledger Row ID. Status='Invoiced' rows are NEVER overwritten (mirrors `api_writeBillingRowIdempotent_`'s skipped_invoiced guard) so re-completion after a Void lands on the SAME row in place but doesn't trample a Voided→Invoiced chain. Supports both 'insert' (find-or-create new Ledger Row IDs from the SB-side completion flow) and 'update' (future use). Field map covers all 17 user-facing Billing_Ledger columns; unknown SB columns are silently skipped. Per MIG-005 the CB Consolidated_Ledger sheet stays on its existing aggregation path (not part of this writer) and is retired entirely in P4b.
@@ -2832,7 +2833,17 @@ var REVERSE_REPAIR_FIELDS_ = {
   // v38.218.0 — re-quote flow needs to rewrite the denormalized "primary
   // item" cache + clear the Approved flag when items are added/removed.
   "item_id":                 "Item ID",
-  "approved":                "Approved"
+  "approved":                "Approved",
+  // v38.221.0 — additional fields needed for the upsert/insert path so a
+  // newly-created SB-primary repair (request-repair-quote-sb) gets a
+  // complete sheet row from the start. Unknown headers are still ignored
+  // silently per writer convention, so adding fields here is safe even on
+  // tenants whose sheet template predates these columns.
+  "created_date":            "Created Date",
+  "created_by":              "Created By",
+  "item_notes":              "Item Notes",
+  "task_notes":              "Task Notes",
+  "source_task_id":          "Source Task ID"
 };
 
 function __writeThroughReverseRepairs_(ss, payload) {
@@ -2840,10 +2851,22 @@ function __writeThroughReverseRepairs_(ss, payload) {
   var row   = (payload && payload.row) || {};
   var op    = payload && payload.op ? String(payload.op) : "";
 
-  if (op !== "update") {
+  // v38.221.0 — supports both 'insert' and 'update', and treats them as
+  // upserts (find row by Repair ID; if found update, else append). Same
+  // idempotency invariants either way. Closes the gap where SB-only
+  // multi-item repairs (request-repair-quote-sb, PR #397) couldn't
+  // reach the per-tenant Repairs sheet at all — the sheet would never
+  // get a row, downstream readers (PDF gen, audit, manual review) saw
+  // nothing, and any time the now-removed delete-stale-rows sweep ran
+  // it would nuke the SB row because the sheet had no anchor.
+  //
+  // 'delete' is still not supported — the SB cancel path writes
+  // status='Cancelled' rather than deleting, and the sheet preserves
+  // history. If a future flow ever needs hard delete, it goes here.
+  if (op !== "update" && op !== "insert") {
     throw new Error(
       "__writeThroughReverseRepairs_: op '" + op + "' not supported " +
-      "(only 'update' is implemented; insert/delete still on GAS-authoritative path)."
+      "(supported: 'insert' | 'update'; cancel = status flip, not delete)."
     );
   }
   if (!rowId) throw new Error("__writeThroughReverseRepairs_: rowId (Repair ID) required");
@@ -2873,24 +2896,50 @@ function __writeThroughReverseRepairs_(ss, payload) {
     );
   }
 
-  // api_getLastDataRow_ guards against trailing-blank-row pollution.
+  // Find the existing row by Repair ID, if any. api_getLastDataRow_
+  // guards against trailing-blank-row pollution. lastRow < 2 just means
+  // the sheet is header-only — that's fine for an insert.
   var lastRow = api_getLastDataRow_(repSheet);
-  if (lastRow < 2) throw new Error("__writeThroughReverseRepairs_: Repairs sheet has no data rows");
-
-  // Scan Repair ID column once.
-  var idValues = repSheet.getRange(2, idCol, lastRow - 1, 1).getValues();
   var foundRow = -1;
-  for (var i = 0; i < idValues.length; i++) {
-    if (String(idValues[i][0] || "").trim() === rowId) {
-      foundRow = i + 2;
-      break;
+  if (lastRow >= 2) {
+    var idValues = repSheet.getRange(2, idCol, lastRow - 1, 1).getValues();
+    for (var i = 0; i < idValues.length; i++) {
+      if (String(idValues[i][0] || "").trim() === rowId) {
+        foundRow = i + 2;
+        break;
+      }
     }
   }
+
+  // ── INSERT path: row not in sheet → append a new one ────────────────
+  // Used by request-repair-quote-sb (initial create), and as the
+  // fallback for any op when the sheet has no row yet (Seva's
+  // RPR-63280-1778715634749 backfill on 2026-05-14, plus any other
+  // SB-only repair that was created before this writer extension).
   if (foundRow < 0) {
-    throw new Error("__writeThroughReverseRepairs_: Repair ID '" + rowId + "' not found in Repairs sheet");
+    var insertRowNum = lastRow + 1;
+    if (insertRowNum < 2) insertRowNum = 2;  // header-only sheet → first data row
+    var maxCol = repSheet.getLastColumn();
+    // Build a full-width row aligned to existing headers. Repair ID
+    // always lands in idCol; other cells take payload value or '' if
+    // not mapped/provided.
+    var rowValues = new Array(maxCol);
+    for (var c = 0; c < maxCol; c++) rowValues[c] = '';
+    rowValues[idCol - 1] = rowId;
+    for (var t = 0; t < targets.length; t++) {
+      rowValues[targets[t].col - 1] = targets[t].newValue == null ? '' : targets[t].newValue;
+    }
+    repSheet.getRange(insertRowNum, 1, 1, maxCol).setValues([rowValues]);
+    SpreadsheetApp.flush();
+    var insertWritten = { repair_id: rowId };
+    for (var ti = 0; ti < targets.length; ti++) {
+      insertWritten[targets[ti].sbKey] = targets[ti].newValue;
+    }
+    return { rowNumber: insertRowNum, inserted: true, written: insertWritten };
   }
 
-  // Idempotency — skip the write when every target column already
+  // ── UPDATE path: row exists → write only the changed cells ──────────
+  // Idempotency: skip the write when every target column already
   // matches its new value. Cheap N-cell read avoids redundant setValue
   // round-trips on FailedOps retry.
   var allMatch = true;
@@ -43875,6 +43924,167 @@ function runPullBillingContactsFromQbo() {
              ", not-found-in-qbo=" + stats.notFoundInQbo +
              ", skipped=" + stats.skipped +
              ", errors=" + stats.errors);
+}
+
+/**
+ * v38.221.0 — One-shot backfill for SB-only repairs (the multi-item
+ * `request-repair-quote-sb` path, PR #397) into their per-tenant
+ * Repairs sheet. Idempotent: rows already on the sheet are left as-is
+ * (the writer compares by Repair ID and updates if exact match,
+ * inserts if missing). Restoring SB-only rows to the sheet means
+ * downstream readers (PDF gen, manual review, full client sync) see
+ * the same set; otherwise the sheet is the lagging mirror and any
+ * sheet-side operation would 404 on these repairs.
+ *
+ * Originally triggered by 2026-05-14 incident — Seva Home's
+ * RPR-63280-1778715634749 was created multi-item, then api_fullClientSync_
+ * kept deleting the SB row on every full-sync because the sheet had
+ * no matching row to keep. v38.220.0 removed the destructive
+ * delete-stale sweep; this function plugs the other direction
+ * (sheet-side absence stays absence rather than a missing mirror).
+ *
+ * Scope: iterate active clients in CB Clients, fetch every
+ * public.repairs row for that tenant from Supabase, and for each one
+ * that's missing from the per-tenant Repairs sheet, append a new row
+ * with the current SB state. Reverse-writethrough writer handles the
+ * column mapping via REVERSE_REPAIR_FIELDS_.
+ *
+ * Optional arg: tenantId. When provided, only that tenant is
+ * backfilled (useful for one-tenant recovery like Seva's). When
+ * omitted, every active client is walked.
+ *
+ * Run from Apps Script editor: Run → runBackfillSbOnlyRepairsToSheet
+ * (no args, all clients), or open the function inline and pass a
+ * tenantId string to the call site below.
+ */
+function runBackfillSbOnlyRepairsToSheet(tenantIdArg) {
+  var startedAt = new Date();
+  Logger.log("runBackfillSbOnlyRepairsToSheet starting at " + startedAt.toISOString() +
+             (tenantIdArg ? " (scoped to " + tenantIdArg + ")" : " (all active clients)"));
+
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) { Logger.log("CB_SPREADSHEET_ID not set"); return; }
+  var cbSS = SpreadsheetApp.openById(cbId);
+  var clientsSh = cbSS.getSheetByName("Clients");
+  if (!clientsSh) { Logger.log("CB Clients tab not found"); return; }
+
+  var rows = clientsSh.getDataRange().getValues();
+  var hdr = rows[0].map(function(h) { return String(h).trim().toUpperCase(); });
+  var idCol = hdr.indexOf("CLIENT SPREADSHEET ID");
+  var nameCol = hdr.indexOf("CLIENT NAME");
+  var activeCol = hdr.indexOf("ACTIVE");
+  if (idCol < 0) { Logger.log("CLIENT SPREADSHEET ID column not found"); return; }
+
+  var totals = { clients: 0, sbRows: 0, alreadyInSheet: 0, inserted: 0, errors: 0 };
+
+  for (var i = 1; i < rows.length; i++) {
+    var sid = String(rows[i][idCol] || "").trim();
+    var cName = nameCol >= 0 ? String(rows[i][nameCol] || "").trim() : sid;
+    var active = activeCol >= 0 ? toBool_(rows[i][activeCol]) : true;
+    if (!sid || !active) continue;
+    if (tenantIdArg && sid !== tenantIdArg) continue;
+    totals.clients++;
+
+    try {
+      // Pull every SB repair for this tenant. The select projects every
+      // column REVERSE_REPAIR_FIELDS_ maps over plus the row identifier.
+      var sel = supabaseSelect_(
+        "repairs",
+        "tenant_id=eq." + encodeURIComponent(sid),
+        "repair_id,item_id,status,quote_amount,quote_sent_date,start_date,completed_date," +
+        "repair_result,final_amount,repair_vendor,repair_notes,quote_lines_json," +
+        "quote_subtotal,quote_taxable_subtotal,quote_tax_area_id,quote_tax_area_name," +
+        "quote_tax_rate,quote_tax_amount,quote_grand_total,approved," +
+        "created_date,created_by,item_notes,task_notes,source_task_id"
+      );
+      if (!sel.ok) {
+        Logger.log("[backfill-sb-repairs] " + cName + " — supabase select failed, skipping");
+        totals.errors++;
+        continue;
+      }
+      var sbRows = sel.rows || [];
+      totals.sbRows += sbRows.length;
+      if (sbRows.length === 0) continue;
+
+      var ss = SpreadsheetApp.openById(sid);
+      var repSheet = ss.getSheetByName("Repairs");
+      if (!repSheet) {
+        Logger.log("[backfill-sb-repairs] " + cName + " — Repairs sheet not found, skipping");
+        totals.errors++;
+        continue;
+      }
+
+      // Snapshot the sheet's Repair ID column so we can check existence
+      // without re-scanning per row.
+      var hMap = api_getHeaderMap_(repSheet);
+      var sheetIdCol = hMap["Repair ID"];
+      if (!sheetIdCol) {
+        Logger.log("[backfill-sb-repairs] " + cName + " — 'Repair ID' column missing");
+        totals.errors++;
+        continue;
+      }
+      var lastRow = api_getLastDataRow_(repSheet);
+      var sheetIds = {};
+      if (lastRow >= 2) {
+        var existing = repSheet.getRange(2, sheetIdCol, lastRow - 1, 1).getValues();
+        for (var ei = 0; ei < existing.length; ei++) {
+          var eid = String(existing[ei][0] || "").trim();
+          if (eid) sheetIds[eid] = true;
+        }
+      }
+
+      // For each SB row missing from the sheet, run the writer with op='insert'.
+      // The writer is idempotent (find-or-create), so a race where another
+      // writer wrote the row between our scan and our call still resolves
+      // to update (no duplicate).
+      for (var s = 0; s < sbRows.length; s++) {
+        var rep = sbRows[s];
+        var rid = String(rep.repair_id || "").trim();
+        if (!rid) continue;
+        if (sheetIds[rid]) { totals.alreadyInSheet++; continue; }
+
+        var insertPayload = {
+          tenantId: sid,
+          table:    "repairs",
+          op:       "insert",
+          rowId:    rid,
+          row:      rep
+        };
+        try {
+          __writeThroughReverseRepairs_(ss, insertPayload);
+          totals.inserted++;
+          Logger.log("[backfill-sb-repairs] " + cName + " — inserted " + rid +
+                     " (status=" + rep.status + ")");
+        } catch (insertErr) {
+          totals.errors++;
+          Logger.log("[backfill-sb-repairs] " + cName + " — insert failed for " + rid +
+                     ": " + insertErr);
+        }
+      }
+    } catch (e) {
+      totals.errors++;
+      Logger.log("[backfill-sb-repairs] " + cName + " — unexpected: " + e);
+    }
+  }
+
+  var finishedAt = new Date();
+  var elapsedSec = ((finishedAt.getTime() - startedAt.getTime()) / 1000).toFixed(1);
+  Logger.log("runBackfillSbOnlyRepairsToSheet finished in " + elapsedSec + "s. " +
+             "Clients=" + totals.clients + ", sbRows=" + totals.sbRows +
+             ", alreadyInSheet=" + totals.alreadyInSheet +
+             ", inserted=" + totals.inserted +
+             ", errors=" + totals.errors);
+  return totals;
+}
+
+/**
+ * Convenience wrapper — runs the backfill for Seva Home only. The
+ * tenant_id is the production Seva Home client spreadsheet ID. Useful
+ * for the 2026-05-14 incident recovery; harmless to re-run because the
+ * underlying function is idempotent.
+ */
+function runBackfillSevaRepairsToSheet() {
+  return runBackfillSbOnlyRepairsToSheet("1_E5xG0PZR8pGxxFVudrRDLU8NyLYDIXkG4rbPcBfj0s");
 }
 
 /**
