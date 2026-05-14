@@ -63,7 +63,10 @@ BEGIN
     JOIN pg_class      t ON c.conrelid     = t.oid
     JOIN pg_namespace  n ON n.oid          = t.relnamespace
     JOIN LATERAL (
-      SELECT array_agg(a.attname ORDER BY a.attname) AS cols
+      -- Cast attname (pg_catalog `name`) to text so the array compare
+      -- below resolves — Postgres has no implicit name[] = text[]
+      -- operator. Without the cast Guard 2 raises 42883 at apply time.
+      SELECT array_agg(a.attname::text ORDER BY a.attname::text) AS cols
       FROM unnest(c.conkey) AS u(num)
       JOIN pg_attribute a
         ON a.attrelid = t.oid AND a.attnum = u.num
@@ -71,7 +74,7 @@ BEGIN
     WHERE n.nspname  = 'public'
       AND t.relname  = 'repairs'
       AND c.contype IN ('p', 'u')
-      AND k.cols     = ARRAY['repair_id', 'tenant_id']  -- alphabetical
+      AND k.cols     = ARRAY['repair_id', 'tenant_id']::text[]  -- alphabetical
   ) THEN
     ALTER TABLE public.repairs
       ADD CONSTRAINT repairs_tenant_repair_unique
