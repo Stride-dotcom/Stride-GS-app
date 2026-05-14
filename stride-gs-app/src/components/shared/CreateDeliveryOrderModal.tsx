@@ -1980,6 +1980,15 @@ export function CreateDeliveryOrderModal({
   // populated after an INSERT in the P+D Save Draft path so subsequent
   // saves UPDATE in place instead of re-INSERTing a duplicate pair.
   const editingPickupRowIdRef = useRef<string | null>(null);
+  // v2026-05-14 — captured-on-load metadata for the delivery → P+D
+  // conversion path. The mode-card gate reads originalStatusIdRef to
+  // block conversion when the source delivery is already completed or
+  // cancelled; the save branch reads originalOrderTypeRef to scope
+  // conversion narrowly to delivery → P+D (we don't yet support
+  // pickup-only → P+D, which has different field semantics on the
+  // pickup contact block).
+  const originalStatusIdRef = useRef<number | null>(null);
+  const originalOrderTypeRef = useRef<string | null>(null);
   const [, forceUpdateForRefs] = useState(0);  // tick when refs change so labels re-render
   const [savingDraft, setSavingDraft] = useState(false);
   const [draftSavedAt, setDraftSavedAt] = useState<Date | null>(null);
@@ -2103,6 +2112,15 @@ export function CreateDeliveryOrderModal({
       // Capture review_notes for the client-resubmit audit-trail
       // append (preserves prior reviewer notes alongside the new stamp).
       originalReviewNotesRef.current  = (r.review_notes as string) || null;
+      // v2026-05-14 — capture DT status_id + order_type from the
+      // delivery-side row (post-swap if Path A fired) so the mode-card
+      // gate and conversion save branch can read them. status_id is a
+      // FK into dt_statuses; the terminal-status set used by the gate
+      // is hardcoded (status_id 7=arrived, 9=deleted, 100=delivered,
+      // 102=partial_delivery) because dt_statuses is a closed
+      // enumeration that's stable across releases.
+      originalStatusIdRef.current   = (r.status_id as number) ?? null;
+      originalOrderTypeRef.current  = (r.order_type as string) || null;
       // v2026-05-09 — snapshot the loaded order's editable scalar fields
       // + a stable item signature for the client-resubmit diff. Only
       // columns the modal can mutate are captured — order_total,
@@ -2834,6 +2852,294 @@ export function CreateDeliveryOrderModal({
     //     identifier + review_status, just update the field values.
     // P+D edits update BOTH the pickup + delivery rows in lockstep
     // via editingPickupRowIdRef + editingDraftRowIdRef.
+    //
+    // ── CONVERT: delivery → pickup_and_delivery ───────────────────
+    // Operator opened a standalone delivery order, flipped the mode
+    // card to "Pickup + Delivery", and clicked save. No pickup leg
+    // exists yet (editingPickupRowIdRef is null). Insert a brand-new
+    // pickup row, link both sides via linked_order_id, flip the
+    // delivery's order_type, refresh items via buildPDItemRows,
+    // and re-push to DT.
+    //
+    // What's preserved on the existing delivery row:
+    //   • id, dt_identifier, created_at, source, created_by_* —
+    //     UPDATE never touches these
+    //   • audit log rows (entity_id is dt_orders.id which is stable)
+    //   • photos, notes, attachments (FK to dt_orders.id)
+    //   • inventory FKs on items (rebuilt via selectedInvItems[]
+    //     .inventoryRowId in buildPDItemRows)
+    // What changes:
+    //   • order_type: 'delivery' → 'pickup_and_delivery'
+    //   • linked_order_id: null → newPickupId
+    //   • pricing/contact/etc. — whatever the operator edited in
+    //     the modal before saving
+    //   • dt_order_items rows: deleted + re-inserted (new row UUIDs
+    //     but parent_pickup_item_id is the only external FK that
+    //     targets dt_order_items.id, and the helper re-stamps it)
+    //
+    // Identifier rule: keep the delivery's existing ROC-NNNN-...-D
+    // untouched (customer-known + already on DT). Mint the matching
+    // pickup -P by string-substituting the trailing -D. Pre-flight
+    // SELECT rejects the rare collision where a stray -P already
+    // exists at that root (UNIQUE(tenant_id, dt_identifier) would
+    // catch it post-insert anyway, but the error message is clearer
+    // up-front).
+    //
+    // DT push: dt-push-order follows linked_order_id when called
+    // with either leg's id (see its `isPDDeliveryPrimary` branch
+    // ~line 881 of supabase/functions/dt-push-order/index.ts), so
+    // repushOrdersAfterEdit on the delivery handles both legs.
+    // The new pickup row will receive its `pushed_to_dt_at` stamp
+    // inside the edge function on the same invocation.
+    //
+    // Scope: only delivery → P+D today. Pickup-only → P+D has
+    // different field semantics on the pickup contact block and
+    // isn't supported by this branch (the `originalOrderTypeRef`
+    // guard enforces this).
+    if (
+      editingDraftRowIdRef.current
+      && !editingPickupRowIdRef.current
+      && mode === 'pickup_and_delivery'
+      && originalOrderTypeRef.current === 'delivery'
+    ) {
+      const existingDeliveryId = editingDraftRowIdRef.current;
+      try {
+        const { data: authData2 } = await supabase.auth.getUser();
+        const authUid2 = authData2?.user?.id || null;
+
+        // 1. Read existing delivery's identifier + tenant for the
+        //    pickup-identifier derivation + collision check.
+        const { data: existingRow, error: existingErr } = await supabase
+          .from('dt_orders')
+          .select('id, dt_identifier, tenant_id')
+          .eq('id', existingDeliveryId)
+          .single();
+        if (existingErr || !existingRow) {
+          throw new Error(`Could not load existing delivery for conversion: ${existingErr?.message || 'no row'}`);
+        }
+        const existingIdent = String((existingRow as { dt_identifier?: string }).dt_identifier || '');
+        if (!existingIdent.endsWith('-D')) {
+          throw new Error(
+            `Cannot convert: existing delivery's identifier (${existingIdent}) does not end in '-D'. ` +
+            `Conversion requires the standard ROC-N-suffix-D format.`,
+          );
+        }
+        const newPickupIdent = existingIdent.slice(0, -2) + '-P';
+
+        // 2. Pre-flight collision check on the target -P identifier.
+        const tenantForCheck = (existingRow as { tenant_id?: string | null }).tenant_id ?? null;
+        const collisionQuery = supabase
+          .from('dt_orders')
+          .select('id')
+          .eq('dt_identifier', newPickupIdent);
+        const { data: existingPickupHit } = await (tenantForCheck
+          ? collisionQuery.eq('tenant_id', tenantForCheck)
+          : collisionQuery.is('tenant_id', null)
+        ).maybeSingle();
+        if (existingPickupHit) {
+          throw new Error(
+            `Cannot convert: a pickup order with identifier ${newPickupIdent} already exists. ` +
+            `This delivery may have been converted previously, or someone created a manual pickup at this root.`,
+          );
+        }
+
+        // 3. INSERT new pickup row. Pricing fields null/zero per the
+        //    P+D convention (pickup leg never bills standalone).
+        const accListConv = Array.from(selectedAccessorials.values()).map(a => ({
+          code: a.code, quantity: a.quantity, rate: a.rate,
+          subtotal: a.subtotal,
+          clientNotes: a.clientNotes ?? null,
+          quotePending: !!a.quotePending,
+        }));
+        const commonConv: Record<string, unknown> = {
+          tenant_id: clientSheetId || null,
+          timezone: 'America/Los_Angeles',
+          local_service_date: serviceDate || null,
+          window_start_local: windowStart || null,
+          window_end_local: windowEnd || null,
+          po_number: poNumber.trim() || null,
+          sidemark: sidemark.trim() || null,
+          details: details.trim() || null,
+          driver_notes: driverNotes.trim() || null,
+          internal_notes: internalNotes.trim() || null,
+          billing_method: billingMethod,
+          service_time_minutes: effectiveServiceTime || null,
+          coverage_option_id: selectedCoverage?.id ?? null,
+          declared_value: selectedCoverage?.calcType === 'percent_declared' ? (parseFloat(declaredValue) || null) : null,
+          coverage_charge: coverageCharge || 0,
+          updated_by_user: authUid2,
+        };
+        // Inherit the delivery's review_status. A conversion done on
+        // an approved delivery shouldn't bounce the new pickup leg
+        // back to pending_review — they're a unit now and should
+        // share state. If the delivery was still pending, the new
+        // pickup inherits 'pending_review' which matches the rest
+        // of the P+D-create flow.
+        const inheritedReviewStatus = originalReviewStatusRef.current || 'pending_review';
+        const pickupInsert: Record<string, unknown> = {
+          ...commonConv,
+          order_type: 'pickup',
+          is_pickup: true,
+          dt_identifier: newPickupIdent,
+          review_status: inheritedReviewStatus,
+          source: 'app',
+          created_by_user: authUid2,
+          created_by_role: user?.role || 'admin',
+          linked_order_id: existingDeliveryId,
+          contact_name: pickupContactName.trim() || null,
+          contact_address: pickupAddress.trim() || null,
+          contact_city: pickupCity.trim() || null,
+          contact_state: pickupState.trim() || null,
+          contact_zip: pickupZip.trim() || null,
+          contact_phone: pickupPhone.trim() || null,
+          contact_phone2: pickupPhone2.trim() || null,
+          contact_email: pickupEmail.trim() || null,
+          // Pickup leg of P+D never bills standalone — every charge
+          // lives on the delivery leg. Mirrors the create-P+D
+          // pickupPayload at line ~2520.
+          base_delivery_fee: null,
+          extra_items_count: 0,
+          extra_items_fee: 0,
+          accessorials_json: null,
+          accessorials_total: null,
+          coverage_option_id: null,
+          declared_value: null,
+          coverage_charge: null,
+          tax_amount: null,
+          tax_rate_pct: null,
+          customer_tax_exempt: null,
+          order_total: null,
+          pricing_override: true,
+          pricing_notes: 'Pickup leg of linked pickup+delivery (converted from standalone delivery) — pricing rolled into delivery order.',
+        };
+        const { data: insertedPickup, error: insertErr } = await supabase
+          .from('dt_orders')
+          .insert(pickupInsert)
+          .select('id')
+          .single();
+        if (insertErr || !insertedPickup) {
+          throw new Error(`Insert new pickup row failed: ${insertErr?.message || 'no row returned'}`);
+        }
+        const newPickupId = (insertedPickup as { id: string }).id;
+        // Stash on the ref so any subsequent re-save in the same
+        // modal session takes the existing P+D edit branch below
+        // instead of trying to re-convert.
+        editingPickupRowIdRef.current = newPickupId;
+
+        // 4. UPDATE existing delivery: flip order_type + linked_order_id
+        //    + apply any operator edits made in this submit. Mirrors
+        //    the deliveryEdit payload of the existing P+D edit branch.
+        const deliveryConvEdit: Record<string, unknown> = {
+          ...commonConv,
+          order_type: 'pickup_and_delivery',
+          is_pickup: false,
+          linked_order_id: newPickupId,
+          contact_name: deliveryContactName.trim() || null,
+          contact_address: deliveryAddress.trim() || null,
+          contact_city: deliveryCity.trim() || null,
+          contact_state: deliveryState.trim() || null,
+          contact_zip: deliveryZip.trim() || null,
+          contact_phone: deliveryPhone.trim() || null,
+          contact_phone2: deliveryPhone2.trim() || null,
+          contact_email: deliveryEmail.trim() || null,
+          base_delivery_fee: baseFee != null ? baseFee + pickupLegFee : null,
+          extra_items_count: extraItemsCount,
+          extra_items_fee: extraItemsFee,
+          accessorials_json: accListConv.length > 0 ? accListConv : null,
+          accessorials_total: accessorialsTotal,
+          order_total: orderTotal,
+          ...taxFields,
+        };
+        const { data: savedDelivery, error: updErr } = await supabase
+          .from('dt_orders')
+          .update(deliveryConvEdit)
+          .eq('id', existingDeliveryId)
+          .select('id, dt_identifier, review_status')
+          .single();
+        if (updErr || !savedDelivery) {
+          // Roll back the pickup insert so we don't leave an orphan
+          // half-pair if the delivery UPDATE failed.
+          await supabase.from('dt_orders').delete().eq('id', newPickupId);
+          editingPickupRowIdRef.current = null;
+          throw new Error(`Update existing delivery for conversion failed: ${updErr?.message || 'no row returned'}`);
+        }
+
+        // 5. Refresh items on both legs. The delivery's existing
+        //    items (inventory + delivery-only ad-hoc) are
+        //    reconstructed from `selectedInvItems` + `deliveryFreeItems`
+        //    state, which the edit-load hydrated from the original
+        //    rows. Inventory FK preserved via .inventoryRowId. Any
+        //    newly-added pickup ad-hoc items + their delivery-side
+        //    mirrors are written by buildPDItemRows in the same call.
+        //    Item row UUIDs change but parent_pickup_item_id is the
+        //    only external FK to dt_order_items.id and the helper
+        //    re-stamps it.
+        {
+          const { error: delErr } = await supabase.from('dt_order_items')
+            .delete().eq('dt_order_id', existingDeliveryId);
+          if (delErr) throw new Error(`Convert items refresh (delete delivery items) failed: ${delErr.message}`);
+        }
+        {
+          const pdItemRows = buildPDItemRows(newPickupId, existingDeliveryId);
+          if (pdItemRows.length > 0) {
+            const { error: iErr } = await supabase.from('dt_order_items').insert(pdItemRows);
+            if (iErr) throw new Error(`Convert items refresh insert failed: ${iErr.message}`);
+          }
+        }
+
+        const savedDeliveryTyped = savedDelivery as { id: string; dt_identifier: string; review_status: string };
+        // 6. Audit log — convert event. Best-effort.
+        void logDtOrderAudit({
+          orderId: savedDeliveryTyped.id,
+          tenantId: clientSheetId,
+          action: 'convert_to_pd',
+          changes: {
+            from: 'delivery',
+            to: 'pickup_and_delivery',
+            newPickupOrderId: newPickupId,
+            newPickupIdentifier: newPickupIdent,
+            itemCount: selectedInvItems.length,
+            orderTotal: orderTotal ?? null,
+          },
+          performedBy: user?.email ?? null,
+        });
+
+        // 7. Repush to DT — same pattern as the existing P+D edit
+        //    branch. The helper filters to previously-pushed orders
+        //    (the brand-new pickup has pushed_to_dt_at IS NULL → it
+        //    gets skipped client-side), and the dt-push-order edge
+        //    function picks the new pickup up via linked_order_id
+        //    when called with the delivery leg's id. Drafts naturally
+        //    no-op since pushed_to_dt_at IS NULL on both legs.
+        const { failures: convPushFailures } = await repushOrdersAfterEdit(
+          supabase, [savedDeliveryTyped.id, newPickupId],
+        );
+
+        onSubmit?.({
+          dtOrderId: savedDeliveryTyped.id,
+          dtIdentifier: savedDeliveryTyped.dt_identifier,
+          reviewStatus: savedDeliveryTyped.review_status,
+        });
+
+        if (convPushFailures.length > 0) {
+          const summary = convPushFailures.map(f => `${f.identifier}: ${f.error}`).join('; ');
+          setSubmitError(
+            `Converted to Pickup + Delivery, but DT republish failed for ${convPushFailures.length} leg(s): ${summary}. ` +
+            `Close this dialog and click Republish to DT manually on the affected order(s).`,
+          );
+          setSubmitting(false);
+          return;  // keep modal open so the error renders
+        }
+
+        onClose();
+        return;
+      } catch (e) {
+        setSubmitError(e instanceof Error ? e.message : String(e));
+        setSubmitting(false);
+        return;
+      }
+    }
+
     if (editingDraftRowIdRef.current && mode === 'pickup_and_delivery' && editingPickupRowIdRef.current) {
       const wasDraftPD = originalReviewStatusRef.current === 'draft' || !originalReviewStatusRef.current;
       try {
@@ -4031,28 +4337,77 @@ export function CreateDeliveryOrderModal({
           <div style={section}>
             <div style={sectionTitle}>What type of order?</div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 10 }}>
-              {modeCards.map(card => (
-                <button
-                  key={card.mode}
-                  onClick={() => setMode(card.mode)}
-                  style={{
-                    padding: '14px 14px', borderRadius: 12,
-                    border: mode === card.mode ? `2px solid ${theme.colors.primary}` : `1px solid ${theme.colors.border}`,
-                    background: mode === card.mode ? '#FFF7ED' : '#fff',
-                    color: mode === card.mode ? theme.colors.primary : theme.colors.text,
-                    cursor: 'pointer', fontFamily: 'inherit',
-                    textAlign: 'left',
-                    display: 'flex', flexDirection: 'column', gap: 6,
-                  }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, fontWeight: 700 }}>
-                    {card.icon} {card.label}
-                  </div>
-                  <div style={{ fontSize: 11, color: theme.colors.textMuted, lineHeight: 1.3 }}>
-                    {card.desc}
-                  </div>
-                </button>
-              ))}
+              {modeCards.map(card => {
+                // v2026-05-14 — gate the "Pickup + Delivery" card when
+                // it would trigger a delivery→P+D conversion on a
+                // delivery that's already completed or cancelled.
+                // status_id ∈ {7=arrived, 9=deleted, 100=delivered,
+                // 102=partial_delivery} are the terminal codes; the
+                // dt_statuses table is a stable closed enumeration.
+                // review_status='cancelled' covers the Stride-side
+                // cancel path that doesn't always land a status_id.
+                const isConvertCandidate = !!editingDraftRowIdRef.current
+                  && !editingPickupRowIdRef.current
+                  && originalOrderTypeRef.current === 'delivery';
+                const TERMINAL_STATUS_IDS = [7, 9, 100, 102];
+                const isTerminalStatus =
+                  (originalStatusIdRef.current != null && TERMINAL_STATUS_IDS.includes(originalStatusIdRef.current))
+                  || originalReviewStatusRef.current === 'cancelled';
+                const cardDisabled = card.mode === 'pickup_and_delivery'
+                  && isConvertCandidate
+                  && isTerminalStatus;
+                const cardTitle = cardDisabled
+                  ? 'This delivery is already completed or cancelled — conversion is not allowed.'
+                  : undefined;
+                // Conversion hint shown when the operator selects P+D
+                // on a non-P+D edit (i.e. they're about to convert).
+                // Render-time only; the actual conversion happens on
+                // Save. Keeps the UX legible without a separate
+                // confirmation step.
+                const showConvertHint = card.mode === 'pickup_and_delivery'
+                  && mode === 'pickup_and_delivery'
+                  && isConvertCandidate
+                  && !isTerminalStatus;
+                return (
+                  <button
+                    key={card.mode}
+                    onClick={() => { if (!cardDisabled) setMode(card.mode); }}
+                    title={cardTitle}
+                    disabled={cardDisabled}
+                    style={{
+                      padding: '14px 14px', borderRadius: 12,
+                      border: mode === card.mode ? `2px solid ${theme.colors.primary}` : `1px solid ${theme.colors.border}`,
+                      background: cardDisabled
+                        ? '#F3F4F6'
+                        : mode === card.mode ? '#FFF7ED' : '#fff',
+                      color: cardDisabled
+                        ? '#9CA3AF'
+                        : mode === card.mode ? theme.colors.primary : theme.colors.text,
+                      cursor: cardDisabled ? 'not-allowed' : 'pointer',
+                      fontFamily: 'inherit',
+                      textAlign: 'left',
+                      display: 'flex', flexDirection: 'column', gap: 6,
+                      opacity: cardDisabled ? 0.7 : 1,
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, fontWeight: 700 }}>
+                      {card.icon} {card.label}
+                    </div>
+                    <div style={{ fontSize: 11, color: cardDisabled ? '#9CA3AF' : theme.colors.textMuted, lineHeight: 1.3 }}>
+                      {card.desc}
+                    </div>
+                    {showConvertHint && (
+                      <div style={{
+                        marginTop: 4, padding: '4px 6px',
+                        background: '#FEF3C7', color: '#92400E',
+                        borderRadius: 4, fontSize: 10, fontWeight: 600,
+                      }}>
+                        Adding a pickup leg to this delivery on save
+                      </div>
+                    )}
+                  </button>
+                );
+              })}
             </div>
           </div>
 
