@@ -1271,11 +1271,28 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
     </button>
   );
 
-  // Below-ID status row
+  // Below-ID status row. The total shown is the CUSTOMER-FACING grand
+  // total (tax-inclusive) so the badge matches what the client sees in
+  // the REPAIR_QUOTE email's hero number and what they have to budget /
+  // get vendor approval for. Legacy single-amount repairs (pre-v38.120.0
+  // multi-line builder) have no grand_total computed — fall back to the
+  // single-amount `quoteAmount` so the badge still renders, and use a
+  // distinct tooltip so staff know they're looking at a pre-tax number.
+  const headerTotal = repair.quoteGrandTotal ?? repair.quoteAmount;
+  const headerTotalIsGrand = repair.quoteGrandTotal != null;
   const belowIdContent = (
     <div style={{ display: 'flex', gap: 6 }}>
       <Badge t={effectiveStatus} bg={sc.bg} color={sc.color} />
-      {repair.quoteAmount != null && <span style={{ fontSize: 12, fontWeight: 600, color: theme.colors.text, padding: '2px 10px', background: theme.colors.bgSubtle, borderRadius: 10 }}>${repair.quoteAmount}</span>}
+      {headerTotal != null && (
+        <span
+          title={headerTotalIsGrand
+            ? 'Customer-facing total — includes sales tax'
+            : 'Legacy single-amount quote (pre-tax-builder; no tax breakdown on file)'}
+          style={{ fontSize: 12, fontWeight: 600, color: theme.colors.text, padding: '2px 10px', background: theme.colors.bgSubtle, borderRadius: 10 }}
+        >
+          ${Number(headerTotal).toFixed(2)}
+        </span>
+      )}
     </div>
   );
 
