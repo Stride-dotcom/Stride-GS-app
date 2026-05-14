@@ -25,6 +25,20 @@
 --   5. INSERT entity_audit_log with action='requote', changes shape:
 --      { old_item_ids: [...], new_item_ids: [...], cleared_quote: true }
 
+-- Note on OUT-param naming: PL/pgSQL substitutes RETURNS TABLE column
+-- names BEFORE Postgres parses the body, so any column reference whose
+-- name collides with an OUT param raises a 42702 "ambiguous column
+-- reference" at every invocation. The `create_repair_quote_request` RPC
+-- hit this in PR #400 (2026-05-13) when its OUT was named `repair_id` —
+-- the same pattern would bite this RPC's WHERE/ON CONFLICT clauses
+-- below. Prefixing with `new_` / `result_` mirrors that fix's convention.
+--
+-- DROP-then-CREATE because changing OUT column names in a TABLE return
+-- type requires a signature drop (Postgres errors "cannot change return
+-- type of existing function" on plain CREATE OR REPLACE). Safe to
+-- re-apply: REVOKE/GRANT at the bottom re-stamps permissions cleanly.
+DROP FUNCTION IF EXISTS public.re_quote_repair(text, text, text[], text);
+
 CREATE OR REPLACE FUNCTION public.re_quote_repair(
   p_tenant_id     text,
   p_repair_id     text,
@@ -32,10 +46,10 @@ CREATE OR REPLACE FUNCTION public.re_quote_repair(
   p_performed_by  text DEFAULT NULL
 )
 RETURNS TABLE (
-  repair_id     text,
-  item_count    integer,
-  old_item_ids  text[],
-  new_item_ids  text[]
+  new_repair_id      text,
+  result_item_count  integer,
+  result_old_items   text[],
+  result_new_items   text[]
 )
 LANGUAGE plpgsql
 SECURITY DEFINER

@@ -68,14 +68,40 @@ Deno.serve(async (req: Request) => {
       return json({ ok: false, error: 'Server misconfigured' }, 500);
     }
 
-    // Verified caller email — same pattern as start-repair-sb / cancel-repair-sb.
+    // Verified caller — JWT signature-validated via getUser(token) on an
+    // anon-keyed client. Two paths:
+    //   • User JWT (admin / staff / client) — user object populated; we
+    //     enforce role ∈ {admin,staff} below before invoking the RPC.
+    //   • service_role JWT (replay harness) — getUser fails; we fall through
+    //     to callerEmail='system' AND skip the role gate.
+    //
+    // The RPC itself uses serviceKey for its DB client (so PostgREST sees
+    // service_role), which means the SECURITY DEFINER role check inside
+    // re_quote_repair is bypassed every time. That makes the edge-function-
+    // level role gate the authoritative authz surface for end-user calls.
+    // Without this gate a logged-in client JWT could re-quote any repair in
+    // any tenant (flagged in the PR #420 code review).
     const authHeader = req.headers.get('Authorization');
     let callerEmail = 'system';
+    let callerRole: string | null = null;
+    let isUserJwt = false;
     if (authHeader) {
       const token = authHeader.replace(/^Bearer\s+/i, '');
       const authClient = createClient(supabaseUrl, anonKey);
       const { data: { user }, error: authErr } = await authClient.auth.getUser(token);
-      if (!authErr && user?.email) callerEmail = user.email;
+      if (!authErr && user?.email) {
+        callerEmail = user.email;
+        isUserJwt = true;
+        const meta = (user.user_metadata ?? {}) as { role?: string };
+        callerRole = typeof meta.role === 'string' ? meta.role : null;
+      }
+    }
+    if (isUserJwt && callerRole !== 'admin' && callerRole !== 'staff') {
+      return json({
+        ok: false,
+        error: 'Only staff or admin can re-quote a repair',
+        errorCode: 'FORBIDDEN',
+      }, 403);
     }
 
     const supabase = createClient(supabaseUrl, serviceKey);
@@ -113,13 +139,17 @@ Deno.serve(async (req: Request) => {
       return json({ ok: false, error: `Re-quote failed: ${msg}` }, 500);
     }
 
+    // RPC OUT column names are prefixed (new_repair_id / result_item_count /
+    // result_old_items / result_new_items) to avoid the 42702 ambiguous-
+    // column-reference trap that hit create_repair_quote_request in PR #400.
+    // See the migration file for full RCA.
     const rpcRow = Array.isArray(rpcRows) ? rpcRows[0] : rpcRows;
-    if (!rpcRow?.repair_id) {
+    if (!rpcRow?.new_repair_id) {
       return json({ ok: false, error: 'RPC returned no repair_id' }, 500);
     }
-    const itemCount: number   = Number(rpcRow.item_count ?? newItemIds.length);
-    const oldItemIds: string[] = Array.isArray(rpcRow.old_item_ids) ? rpcRow.old_item_ids : [];
-    const returnedNewIds: string[] = Array.isArray(rpcRow.new_item_ids) ? rpcRow.new_item_ids : newItemIds;
+    const itemCount: number   = Number(rpcRow.result_item_count ?? newItemIds.length);
+    const oldItemIds: string[] = Array.isArray(rpcRow.result_old_items) ? rpcRow.result_old_items : [];
+    const returnedNewIds: string[] = Array.isArray(rpcRow.result_new_items) ? rpcRow.result_new_items : newItemIds;
 
     // ── 2. Reverse writethrough — mirror parent repair row to sheet ────
     // Field set matches what the RPC writes: status='Pending Quote',
