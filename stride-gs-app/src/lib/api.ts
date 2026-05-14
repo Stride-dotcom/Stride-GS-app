@@ -3369,6 +3369,42 @@ export async function postSendRepairQuoteSb(
   return data ?? { ok: false, error: 'no response body' };
 }
 
+// [MIGRATION-P3] SB-primary entry for respondToRepairQuote.
+// Approve → status='Approved', approved=true, REPAIR_APPROVED email.
+// Decline → status='Declined', REPAIR_DECLINED email.
+// Idempotent: skip if Approve on already-approved or Decline on already-declined.
+export interface RespondRepairQuoteSbPayload {
+  tenantId: string;
+  repairId: string;
+  decision: 'Approve' | 'Decline';
+  requestId?: string;
+}
+export interface RespondRepairQuoteSbResponse {
+  ok: boolean;
+  repairId?: string;
+  decision?: 'Approve' | 'Decline';
+  newStatus?: 'Approved' | 'Declined';
+  skipped?: boolean;
+  message?: string;
+  mirrorOk?: boolean;
+  mirrorError?: string;
+  emailSent?: boolean;
+  emailError?: string;
+  error?: string;
+  errorCode?: string;
+}
+export async function postRespondRepairQuoteSb(
+  payload: RespondRepairQuoteSbPayload
+): Promise<RespondRepairQuoteSbResponse> {
+  const { supabase } = await import('./supabase');
+  const { data, error } = await supabase.functions.invoke<RespondRepairQuoteSbResponse>(
+    'respond-repair-quote-sb',
+    { body: payload },
+  );
+  if (error) return { ok: false, error: error.message };
+  return data ?? { ok: false, error: 'no response body' };
+}
+
 // ─── Bulk action batch endpoints (v38.9.0) ────────────────────────────────────
 // Standardized result contract shared across all 4 new batch endpoints AND all
 // loop-based bulk actions (see src/lib/batchLoop.ts). The frontend has exactly
