@@ -24,7 +24,8 @@ export type DtOrderAuditAction =
   | 'revision_requested'
   | 'push_to_dt'
   | 'cancel'
-  | 'release_items';
+  | 'release_items'
+  | 'convert_to_pd';
 
 interface AuditOptions {
   orderId: string;
