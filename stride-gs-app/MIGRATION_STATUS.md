@@ -129,7 +129,7 @@ Match-rate column is the rolling 7-day match rate from `parity_results`.
 | `createWillCall` | gas | 0 | n/a | 0 | n/a | not_started | — |
 | `releaseItems` | gas | 0 | n/a | 0 | n/a | not_started | — |
 | `completeTask` | gas | 0 | n/a | 0 | n/a | not_started | — |
-| `completeRepair` | gas | 0 | n/a | 0 | n/a | not_started | — |
+| `completeRepair` | gas | 0 | n/a | 0 | n/a | **handler_drafted** | 2026-05-13 (PR pending — atomic complete_repair_atomic RPC: status+billing+addons+audit in 1 txn. New __writeThroughReverseBilling_ writer in StrideAPI v38.217.0. REPAIR_COMPLETE email via Resend. CB on independent aggregation per MIG-005, retired P4b.) |
 | `processWcRelease` | gas | 0 | n/a | 0 | n/a | not_started | — |
 | `commitStorageCharges` | gas | 0 | n/a | 0 | n/a | not_started | — |
 | `createInvoice` | gas | 0 | n/a | 0 | n/a | not_started | — |

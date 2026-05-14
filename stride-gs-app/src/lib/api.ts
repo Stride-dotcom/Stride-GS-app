@@ -3369,6 +3369,54 @@ export async function postSendRepairQuoteSb(
   return data ?? { ok: false, error: 'no response body' };
 }
 
+// [MIGRATION-P4a] SB-primary entry for completeRepair. Per MIG-004 the
+// atomic transaction is: public.repairs UPDATE (status='Complete',
+// completed_date, repair_result, final_amount, repair_notes, billed)
+// + public.billing INSERTs (one per quote_lines_json line, one per
+// unbilled addon) + public.addons UPDATE billed=true +
+// entity_audit_log INSERT. RPC handles all of that in one Postgres
+// transaction; the edge function then fires reverse-writethrough for
+// the per-tenant Billing_Ledger + Repairs sheets and the REPAIR_COMPLETE
+// email. Per MIG-005 the CB Consolidated_Ledger sheet stays on its
+// existing aggregation path (independent — retired in P4b). Idempotent
+// on status='Complete'/'Cancelled' (returns skipped=true).
+export interface CompleteRepairSbPayload {
+  tenantId: string;
+  repairId: string;
+  resultValue: 'Pass' | 'Fail';
+  finalAmount?: number | null;
+  repairNotes?: string | null;
+  requestId?: string;
+}
+export interface CompleteRepairSbResponse {
+  ok: boolean;
+  repairId?: string;
+  resultValue?: 'Pass' | 'Fail';
+  skipped?: boolean;
+  skipReason?: string;
+  billingCount?: number;
+  addonCount?: number;
+  ledgerRowIds?: string[];
+  mirroredCount?: number;
+  mirrorOk?: boolean;
+  mirrorError?: string;
+  emailSent?: boolean;
+  emailError?: string;
+  error?: string;
+  errorCode?: string;
+}
+export async function postCompleteRepairSb(
+  payload: CompleteRepairSbPayload
+): Promise<CompleteRepairSbResponse> {
+  const { supabase } = await import('./supabase');
+  const { data, error } = await supabase.functions.invoke<CompleteRepairSbResponse>(
+    'complete-repair-sb',
+    { body: payload },
+  );
+  if (error) return { ok: false, error: error.message };
+  return data ?? { ok: false, error: 'no response body' };
+}
+
 // [MIGRATION-P3] SB-primary entry for respondToRepairQuote.
 // Approve → status='Approved', approved=true, REPAIR_APPROVED email.
 // Decline → status='Declined', REPAIR_DECLINED email.

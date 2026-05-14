@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.216.0 — 2026-05-13 PST — [MIGRATION-P3 sendRepairQuote] Extends REVERSE_REPAIR_FIELDS_ with the multi-line quote columns (quote_lines_json, quote_subtotal, quote_taxable_subtotal, quote_tax_area_id, quote_tax_area_name, quote_tax_rate, quote_tax_amount, quote_grand_total) so the new `send-repair-quote-sb` Edge Function can mirror its full state to the per-tenant Repairs sheet via the existing __writeThroughReverseRepairs_ writer. No new writer code; the writer ignores unknown row keys silently and skips columns that don't exist on the sheet. Tenants that never went through handleSendRepairQuote_ will be missing some of the Quote-* columns; that's acceptable for the canary — the SB row carries the canonical state and downstream readers (invoice generation, completion billing) flip to reading public.billing in P4a.
+   StrideAPI.gs — v38.217.0 — 2026-05-13 PST — [MIGRATION-P4a completeRepair] Fourth per-table reverse-writethrough writer registered against the P1.4 framework: `__writeThroughReverseBilling_` for the `billing` table (replaces the stub). Mirrors `public.billing` row inserts/updates into the per-tenant Billing_Ledger sheet — driven by `complete-repair-sb` (companion Edge Function shipping in the same PR). Idempotent by Ledger Row ID. Status='Invoiced' rows are NEVER overwritten (mirrors `api_writeBillingRowIdempotent_`'s skipped_invoiced guard) so re-completion after a Void lands on the SAME row in place but doesn't trample a Voided→Invoiced chain. Supports both 'insert' (find-or-create new Ledger Row IDs from the SB-side completion flow) and 'update' (future use). Field map covers all 17 user-facing Billing_Ledger columns; unknown SB columns are silently skipped. Per MIG-005 the CB Consolidated_Ledger sheet stays on its existing aggregation path (not part of this writer) and is retired entirely in P4b.
+   v38.216.0 — 2026-05-13 PST — [MIGRATION-P3 sendRepairQuote] Extends REVERSE_REPAIR_FIELDS_ with the multi-line quote columns (quote_lines_json, quote_subtotal, quote_taxable_subtotal, quote_tax_area_id, quote_tax_area_name, quote_tax_rate, quote_tax_amount, quote_grand_total) so the new `send-repair-quote-sb` Edge Function can mirror its full state to the per-tenant Repairs sheet via the existing __writeThroughReverseRepairs_ writer. No new writer code; the writer ignores unknown row keys silently and skips columns that don't exist on the sheet. Tenants that never went through handleSendRepairQuote_ will be missing some of the Quote-* columns; that's acceptable for the canary — the SB row carries the canonical state and downstream readers (invoice generation, completion billing) flip to reading public.billing in P4a.
    v38.215.0 — 2026-05-13 PST — [MIGRATION-P3 cancelRepair] Third per-table writer registered against the P1.4 reverse-writethrough framework. Replaces `__writeThroughReverseStub_` for the `repairs` table in `REVERSE_WRITETHROUGH_TABLES_` with `__writeThroughReverseRepairs_` — finds the row by Repair ID, idempotently writes Status (and prepares to extend to quote_amount / quote_sent_date / completed_date / repair_result / final_amount as the rest of the P3 cluster ships). Companion Edge Function `cancel-repair-sb` is the first SB-primary caller, fired by RepairDetailPanel's Cancel Repair button when `feature_flags.cancelRepair.active_backend = 'supabase'`. Sheet stays current as the legacy-readers' read-only mirror through the P3/P4a window. Scope today is Status only — adding fields later is a one-line registry extension at REVERSE_REPAIR_FIELDS_.
    v38.214.0 — 2026-05-13 PST — handleBatchCreateTasks_ now honors `slaHoursBySvcCode` from the React payload. The service catalog's `default_sla_hours` field has existed since the catalog migrated from the Master Price List, but the create-task flow never read it — every new task landed with Due Date = blank regardless of what the operator configured. CreateTaskModal now reads `useServiceCatalog().catalog` and passes a `{svcCode: hours}` map; this handler stamps `Due Date = now() + (hours * 3600 * 1000)` per task whose svcCode is in the map. Legacy `payload.dueDate` (single value, all tasks) still wins if explicitly set, preserving any caller that relied on it. SvcCodes without a configured SLA leave Due Date blank, exactly like before.
    v38.213.0 — 2026-05-13 PST — [MIGRATION-P2 will-calls COD] Second per-table writer registered against the P1.4 reverse-writethrough framework. Replaces `__writeThroughReverseStub_` for the `will_calls` table in `REVERSE_WRITETHROUGH_TABLES_` with `__writeThroughReverseWillCalls_` — finds the row by WC Number, idempotently writes the COD + COD Amount columns. Companion Edge Function `push-will-call-cod-to-sheet` fires this after the React WillCallDetailPanel commits a Supabase-authoritative will_calls.cod / cod_amount write directly to Supabase. Sheet stays current as the legacy-readers' read-only mirror (PDF release doc generator, full client sync, COD payment page launcher). Scope is COD fields only — every other Will_Calls field still flows through the legacy GAS-authoritative `handleUpdateWillCall_` path until they migrate. Adding fields later is a one-line registry extension.
@@ -2647,7 +2648,7 @@ var REVERSE_WRITETHROUGH_TABLES_ = {
   "shipments":         __writeThroughReverseStub_,
   "will_calls":        __writeThroughReverseWillCalls_,
   "will_call_items":   __writeThroughReverseStub_,
-  "billing":           __writeThroughReverseStub_,
+  "billing":           __writeThroughReverseBilling_,
   "addons":            __writeThroughReverseStub_,
   "invoice_tracking":  __writeThroughReverseStub_,
   "entity_notes":      __writeThroughReverseStub_,
@@ -2910,6 +2911,163 @@ function __writeThroughReverseRepairs_(ss, payload) {
     written[targets[m].sbKey] = targets[m].newValue;
   }
   return { rowNumber: foundRow, written: written };
+}
+
+/**
+ * v38.217.0 — [MIGRATION-P4a] Billing reverse-writethrough writer.
+ * Fourth per-table writer against the P1.4 framework (inventory v38.208,
+ * will_calls v38.213, repairs v38.215).
+ *
+ * Fires from `complete-repair-sb` after the SB primary writes
+ * `public.billing` rows (and from any future SB-primary handler that
+ * writes billing — completeTask P4a, voidInvoice P4a, etc). Mirrors
+ * the SB row into the per-tenant Billing_Ledger sheet so legacy
+ * readers (invoice PDF generation, CB Consolidated_Ledger aggregation,
+ * QBO/IIF export) see the same state. CB Consolidated_Ledger stays on
+ * its existing aggregation path (independent of this writer) and is
+ * retired entirely in P4b.
+ *
+ * Idempotent by Ledger Row ID. Status='Invoiced' / 'Void' rows are
+ * NEVER overwritten (you must Void the invoice first to re-bill) —
+ * mirrors `api_writeBillingRowIdempotent_`'s skipped_invoiced branch
+ * at line ~16800.
+ *
+ * Op support: 'insert' (find-or-create) and 'update' (update-or-create).
+ * Repair-completion writes use 'insert' even though they may overwrite
+ * a previously-Voided REPAIR-{repairId}-{N} row on re-completion — that's
+ * the "find by Ledger Row ID, update in place" idempotency contract.
+ */
+function __writeThroughReverseBilling_(ss, payload) {
+  var rowId = payload && payload.rowId ? String(payload.rowId).trim() : "";
+  var row   = (payload && payload.row) || {};
+  var op    = payload && payload.op ? String(payload.op) : "";
+
+  if (op !== "insert" && op !== "update") {
+    throw new Error("__writeThroughReverseBilling_: op '" + op + "' not supported (insert/update only)");
+  }
+  if (!rowId) throw new Error("__writeThroughReverseBilling_: rowId (Ledger Row ID) required");
+
+  var billSheet = ss.getSheetByName("Billing_Ledger");
+  if (!billSheet) throw new Error("__writeThroughReverseBilling_: Billing_Ledger sheet not found on this tenant");
+  var billMap = api_getHeaderMap_(billSheet);
+  var idCol = billMap["Ledger Row ID"];
+  if (!idCol) throw new Error("__writeThroughReverseBilling_: 'Ledger Row ID' column not found");
+
+  // SB column → sheet header. Mirrors the actual public.billing schema
+  // (verified 2026-05-13). Anything not in this map is silently skipped,
+  // defending against future schema growth.
+  var FIELD_MAP = {
+    "ledger_row_id":   "Ledger Row ID",
+    "status":          "Status",
+    "invoice_no":      "Invoice #",
+    "client_name":     "Client",
+    "date":            "Date",
+    "svc_code":        "Svc Code",
+    "svc_name":        "Svc Name",
+    "category":        "Category",
+    "item_id":         "Item ID",
+    "description":     "Description",
+    "item_class":      "Class",
+    "qty":             "Qty",
+    "rate":            "Rate",
+    "total":           "Total",
+    "task_id":         "Task ID",
+    "repair_id":       "Repair ID",
+    "shipment_number": "Shipment #",
+    "item_notes":      "Item Notes",
+    "sidemark":        "Sidemark",
+    "reference":       "Reference"
+  };
+
+  // ── Find existing row by Ledger Row ID ───────────────────────────
+  var lastRow = api_getLastDataRow_(billSheet);
+  var foundRow = -1;
+  if (lastRow >= 2) {
+    var idValues = billSheet.getRange(2, idCol, lastRow - 1, 1).getValues();
+    for (var i = 0; i < idValues.length; i++) {
+      if (String(idValues[i][0] || "").trim() === rowId) {
+        foundRow = i + 2;
+        break;
+      }
+    }
+  }
+
+  // ── Status guard for Invoiced/Void — mirror existing handler ───
+  // Re-completion after a Void can land on a previously-Voided row.
+  // The legacy `api_writeBillingRowIdempotent_` flips Voided rows back
+  // to Unbilled (un-void semantics). We do the same here — let the SB
+  // row's Status value pass through.
+  if (foundRow > 0) {
+    var statusCol = billMap["Status"];
+    if (statusCol) {
+      var existingStatus = String(billSheet.getRange(foundRow, statusCol).getValue() || "").trim();
+      if (existingStatus === "Invoiced") {
+        return { rowNumber: foundRow, skipped: true, reason: "row already Invoiced (won't overwrite)" };
+      }
+    }
+  }
+
+  // ── Build the write payload — column-indexed value array ─────────
+  // We do a full-row setValues to amortize the round-trip vs N
+  // setValue calls. Slice covers minCol..maxCol of TARGETED columns.
+  var targetCols = [];
+  var valuesByCol = {};
+  for (var sbKey in FIELD_MAP) {
+    if (!row.hasOwnProperty(sbKey)) continue;
+    var col = billMap[FIELD_MAP[sbKey]];
+    if (!col) continue;
+    var v = row[sbKey];
+    // jsonb values come through as objects/arrays; the legacy ledger
+    // doesn't use any jsonb-typed columns so we just pass the raw
+    // value through (numbers stay numbers, strings stay strings,
+    // nulls become empty cells).
+    if (v === null || v === undefined) v = "";
+    valuesByCol[col] = v;
+    targetCols.push(col);
+  }
+  if (targetCols.length === 0) {
+    throw new Error("__writeThroughReverseBilling_: row had no fields in FIELD_MAP (payload keys: " + Object.keys(row).join(",") + ")");
+  }
+
+  if (foundRow > 0) {
+    // ── UPDATE existing row ──────────────────────────────────────
+    // Bulk-write the targeted contiguous slice to minimize setValue
+    // round-trips on multi-field updates.
+    targetCols.sort(function(a, b) { return a - b; });
+    var minCol = targetCols[0];
+    var maxCol = targetCols[targetCols.length - 1];
+    var existingSlice = billSheet.getRange(foundRow, minCol, 1, maxCol - minCol + 1).getValues()[0];
+    for (var col2 = minCol; col2 <= maxCol; col2++) {
+      if (valuesByCol.hasOwnProperty(col2)) {
+        existingSlice[col2 - minCol] = valuesByCol[col2];
+      }
+    }
+    billSheet.getRange(foundRow, minCol, 1, maxCol - minCol + 1).setValues([existingSlice]);
+  } else {
+    // ── INSERT new row ───────────────────────────────────────────
+    // Build a full-width row of empties + populate targeted cells.
+    var lastCol = billSheet.getLastColumn();
+    var newRow = new Array(lastCol).fill("");
+    for (var col3 in valuesByCol) {
+      newRow[Number(col3) - 1] = valuesByCol[col3];
+    }
+    // Ledger Row ID is always populated even if FIELD_MAP didn't cover it
+    // (defensive: ensures the row can be looked up on next call).
+    if (idCol && newRow[idCol - 1] === "") {
+      newRow[idCol - 1] = rowId;
+    }
+    var insertRow = (lastRow < 2 ? 2 : lastRow + 1);
+    billSheet.getRange(insertRow, 1, 1, lastCol).setValues([newRow]);
+    foundRow = insertRow;
+  }
+
+  SpreadsheetApp.flush();
+  return {
+    rowNumber: foundRow,
+    op: op,
+    rowId: rowId,
+    fieldsWritten: targetCols.length
+  };
 }
 
 /**
