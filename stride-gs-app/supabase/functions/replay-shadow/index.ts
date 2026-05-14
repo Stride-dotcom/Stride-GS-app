@@ -87,6 +87,11 @@ const SHADOW_REGISTRY: Record<string, ShadowEntry> = {
   // ({status:{new:'Cancelled'}}). See cancel-repair-shadow/index.ts and
   // MIGRATION_STATUS.md "Per-function migration table".
   cancelRepair: { shadow: 'cancel-repair-shadow', action: 'cancelRepair' },
+  // [MIGRATION-P3] startRepair — second of the repair P3 cluster. Same
+  // pure-shadow shape; GAS logs {status:{new:'In Progress'}} on every
+  // start (incl. re-runs after status is already In Progress / Complete
+  // for PDF regen). See start-repair-shadow/index.ts.
+  startRepair:  { shadow: 'start-repair-shadow',  action: 'startRepair'  },
 };
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
