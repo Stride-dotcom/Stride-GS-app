@@ -1,5 +1,17 @@
 /**
- * dt-push-order — Supabase Edge Function (Phase 2c) — v21 2026-05-11 PST
+ * dt-push-order — Supabase Edge Function (Phase 2c) — v22 2026-05-13 PST
+ * v22: DT custom field #3 ("Attachments") now carries the public photo
+ *      share URL + signed document URLs for any files attached to the
+ *      order (entity_type='dt_order'). One photo share covers all photos
+ *      attached to the order; documents get individual 90-day signed
+ *      Storage URLs. Comma-joined, truncated to 255 chars (DT's per-field
+ *      limit) with an "…" marker when overflowing. Best-effort: a failure
+ *      to build the field never blocks the push — order goes through with
+ *      empty Attachments. Currently zero dt_order entity rows in either
+ *      item_photos or documents — this wires the pipeline for future use
+ *      via the Photos & Docs tab on OrderPage.
+ *
+ * v21 2026-05-11 PST:
  * v21: Ad-hoc items get a short-UUID-prefix item_id (was empty since
  *      v18). DT's add_order importer treats <item_id> as the per-order
  *      primary key for items: multiple <item> elements sharing the same
@@ -321,12 +333,127 @@ function buildOrderDescription(
   return cdataEscape(descParts.join('\n'));
 }
 
+// Build the comma-joined attachments URL list for DT's
+// <additional_field_3> "Attachments" custom field. Best-effort: returns
+// '' on any failure so the order push always proceeds.
+//
+// Sources:
+//   • item_photos with entity_type='dt_order' / entity_id=order.id
+//     → reuse the most recent active photo_share for this entity, or
+//       create a fresh one covering every photo. Public URL is
+//       /#/shared/photos/<share_id> on mystridehub.com (the same route
+//       PhotoShareDialog generates client-side).
+//   • documents with context_type='dt_order' / context_id=order.id
+//     → signed Storage URLs valid for 90 days, one per file.
+//
+// Caps the joined string at 255 chars (DT's per-field limit). When the
+// full list would overflow, drops trailing URLs and appends "…" so the
+// driver knows there's more in the app.
+async function buildAttachmentsField(
+  // deno-lint-ignore no-explicit-any
+  supabase: any,
+  order: DtOrderRow,
+): Promise<string> {
+  const FIELD_MAX = 255;
+  const APP_ORIGIN = 'https://www.mystridehub.com';
+  const urls: string[] = [];
+
+  try {
+    // ── Photos: one share link per order ───────────────────────────────
+    const { data: photos } = await supabase
+      .from('item_photos')
+      .select('id')
+      .eq('entity_type', 'dt_order')
+      .eq('entity_id', order.id)
+      .order('created_at', { ascending: true });
+
+    if (Array.isArray(photos) && photos.length > 0) {
+      const { data: existingShare } = await supabase
+        .from('photo_shares')
+        .select('share_id')
+        .eq('entity_type', 'dt_order')
+        .eq('entity_id', order.id)
+        .eq('active', true)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      let shareId: string | undefined = existingShare?.share_id;
+      if (!shareId) {
+        const newShareId = crypto.randomUUID().replace(/-/g, '').slice(0, 12);
+        const { data: created, error: shareErr } = await supabase
+          .from('photo_shares')
+          .insert({
+            share_id:        newShareId,
+            entity_type:     'dt_order',
+            entity_id:       order.id,
+            tenant_id:       order.tenant_id,
+            photo_ids:       photos.map((p: { id: string }) => p.id),
+            title:           `Order ${order.dt_identifier} attachments`,
+            active:          true,
+            created_by_name: 'dt-push-order',
+          })
+          .select('share_id')
+          .single();
+        if (!shareErr && created?.share_id) shareId = created.share_id;
+      }
+      if (shareId) urls.push(`${APP_ORIGIN}/#/shared/photos/${shareId}`);
+    }
+
+    // ── Documents: one signed URL per file (90-day TTL) ────────────────
+    const { data: docs } = await supabase
+      .from('documents')
+      .select('storage_key')
+      .eq('context_type', 'dt_order')
+      .eq('context_id', order.id)
+      .is('deleted_at', null)
+      .order('created_at', { ascending: true });
+
+    if (Array.isArray(docs) && docs.length > 0) {
+      const NINETY_DAYS = 60 * 60 * 24 * 90;
+      for (const doc of docs as Array<{ storage_key: string | null }>) {
+        if (!doc.storage_key) continue;
+        const { data: signed } = await supabase
+          .storage
+          .from('documents')
+          .createSignedUrl(doc.storage_key, NINETY_DAYS);
+        if (signed?.signedUrl) urls.push(signed.signedUrl);
+      }
+    }
+  } catch (err) {
+    console.warn('[dt-push-order] attachments build failed (non-fatal):', (err as Error).message);
+    return '';
+  }
+
+  if (urls.length === 0) return '';
+
+  // Greedy fit within 255 chars. If we have to drop URLs, append "…"
+  // so dispatch knows there's more attached in-app.
+  const SEP = ',';
+  const TRUNC_MARK = '…';
+  let joined = '';
+  let dropped = false;
+  for (const u of urls) {
+    const next = joined ? `${joined}${SEP}${u}` : u;
+    if (next.length > FIELD_MAX) { dropped = true; break; }
+    joined = next;
+  }
+  if (dropped) {
+    // Leave room for the truncation marker.
+    const room = FIELD_MAX - TRUNC_MARK.length - SEP.length;
+    if (joined.length > room) joined = joined.slice(0, room);
+    joined = `${joined}${SEP}${TRUNC_MARK}`;
+  }
+  return joined;
+}
+
 function buildOrderXml(
   order: DtOrderRow,
   items: DtOrderItemRow[],
   accountName: string,
   crossRefIdent?: string,
   linkedDeliveryInfo?: { identifier: string; contactName?: string; address?: string; city?: string; state?: string; zip?: string },
+  attachmentsField?: string,
 ): string {
   const nameParts = (order.contact_name || '').trim().split(/\s+/);
   const firstName = nameParts[0] || '';
@@ -414,6 +541,13 @@ function buildOrderXml(
     ? `\n    <notes count="${noteEntries.length}">\n${noteEntries.join('\n')}\n    </notes>`
     : '';
 
+  // DT custom field #3 = "Attachments" tag. Only emit the block when we
+  // actually have a value — DT rejects empty <additional_field_3/> on
+  // some accounts.
+  const attachmentsXml = attachmentsField
+    ? `\n    <additional_fields>\n      <additional_field_3>${xmlEscape(attachmentsField)}</additional_field_3>\n    </additional_fields>`
+    : '';
+
   return `<?xml version="1.0" encoding="UTF-8"?>
 <service_orders>
   <service_order>
@@ -438,7 +572,7 @@ function buildOrderXml(
     <amount>${order.order_total != null ? Number(order.order_total).toFixed(2) : '0.00'}</amount>${order.service_time_minutes != null && order.service_time_minutes > 0 ? `\n    <service_time>${order.service_time_minutes}</service_time>` : ''}
     <items>
 ${itemsXml}
-    </items>${notesXml}
+    </items>${notesXml}${attachmentsXml}
   </service_order>
 </service_orders>`;
 }
@@ -549,10 +683,15 @@ async function pushSingleOrder(
   items: DtOrderItemRow[],
   accountName: string,
   postUrl: string,
+  // deno-lint-ignore no-explicit-any
+  supabase: any,
   crossRefIdent?: string,
   linkedDeliveryInfo?: { identifier: string; contactName?: string; address?: string; city?: string; state?: string; zip?: string },
 ): Promise<{ ok: boolean; body: string; errMsg?: string }> {
-  const xml = buildOrderXml(order, items, accountName, crossRefIdent, linkedDeliveryInfo);
+  // Build the DT Attachments custom-field BEFORE the XML — best-effort
+  // and never blocks the push (returns '' on any failure).
+  const attachmentsField = await buildAttachmentsField(supabase, order);
+  const xml = buildOrderXml(order, items, accountName, crossRefIdent, linkedDeliveryInfo, attachmentsField);
   console.log(`[dt-push-order] POST order=${order.dt_identifier} type=${order.order_type || 'delivery'} items=${items.length} account=${accountName}${crossRefIdent ? ` crossRef=${crossRefIdent}` : ''}`);
   console.log(`[dt-push-order] XML payload:\n${xml.slice(0, 800)}`);
   try {
@@ -770,7 +909,7 @@ Deno.serve(async (req: Request) => {
       const linkedIsPickup = String(linkedTyped.order_type || '') === 'pickup'
         || linkedTyped.is_pickup === true;
       const linkedPush = await pushSingleOrder(
-        linkedTyped, linkedItemsTyped, accountName, postUrl,
+        linkedTyped, linkedItemsTyped, accountName, postUrl, supabase,
         orderTyped.dt_identifier, // cross-ref always points to the primary
         linkedIsPickup ? {
           identifier: deliveryRow.dt_identifier,
@@ -808,7 +947,10 @@ Deno.serve(async (req: Request) => {
   // needs the linkedDeliveryInfo block so dispatch sees the delivery
   // address. Reuse the linked row Section 4 already fetched into
   // stashedLinkedRow — no extra round-trip.
-  let primaryLinkedDeliveryInfo: Parameters<typeof pushSingleOrder>[5] | undefined;
+  // Index 6 = linkedDeliveryInfo (5 was bumped to supabase in the
+  // attachments wiring). Type query keeps the shape automatically in
+  // sync with the function signature.
+  let primaryLinkedDeliveryInfo: Parameters<typeof pushSingleOrder>[6] | undefined;
   if (isPDPickupPrimary && stashedLinkedRow) {
     primaryLinkedDeliveryInfo = {
       identifier: stashedLinkedRow.dt_identifier as string,
@@ -820,7 +962,7 @@ Deno.serve(async (req: Request) => {
     };
   }
   const primaryPush = await pushSingleOrder(
-    orderTyped, itemsTyped, accountName, postUrl,
+    orderTyped, itemsTyped, accountName, postUrl, supabase,
     linkedPushedIdentifier, // include cross-ref if we pushed a linked leg
     primaryLinkedDeliveryInfo,
   );
