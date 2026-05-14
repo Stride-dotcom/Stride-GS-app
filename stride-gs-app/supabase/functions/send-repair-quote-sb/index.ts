@@ -330,11 +330,17 @@ Deno.serve(async (req: Request) => {
             ITEM_ID:               itemId,
             ITEM_TABLE_HTML:       itemTableHtml,
             QUOTE_LINE_ITEMS_HTML: quoteLinesHtml,
-            QUOTE_SUBTOTAL:        formatCurrency(subtotal),
+            // Token values are RAW numbers — the template surrounds each
+            // with a literal '$' (e.g. `${{QUOTE_GRAND_TOTAL}}`). Passing
+            // formatCurrency() here used to render $$808.92 (double $).
+            // The inline HTML in QUOTE_LINE_ITEMS_HTML keeps using
+            // formatCurrency() because it builds the $ into the cells
+            // itself (no surrounding template prefix).
+            QUOTE_SUBTOTAL:        formatMoney(subtotal),
             QUOTE_TAX_AREA_NAME:   taxAreaName ?? '',
             QUOTE_TAX_RATE:        taxRate ? `${taxRate.toFixed(3)}%` : '',
-            QUOTE_TAX_AMOUNT:      formatCurrency(taxAmount),
-            QUOTE_GRAND_TOTAL:     formatCurrency(grandTotal),
+            QUOTE_TAX_AMOUNT:      formatMoney(taxAmount),
+            QUOTE_GRAND_TOTAL:     formatMoney(grandTotal),
             NOTES:                 notes || String(existing.repair_notes ?? ''),
             TASK_NOTES:            String(existing.task_notes ?? ''),
             APP_URL:               APP_URL,
@@ -383,7 +389,13 @@ Deno.serve(async (req: Request) => {
 function round2(n: number): number { return Math.round(n * 100) / 100; }
 
 function formatCurrency(n: number): string {
-  return `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return `$${formatMoney(n)}`;
+}
+
+// Same shape as formatCurrency but without the $ prefix — used for tokens
+// that go into templates which provide their own '$' (e.g. `${{TOKEN}}`).
+function formatMoney(n: number): string {
+  return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 function renderItemTable(itemId: string, inv: {

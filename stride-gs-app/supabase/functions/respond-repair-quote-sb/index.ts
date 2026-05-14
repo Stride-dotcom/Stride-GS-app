@@ -213,7 +213,9 @@ Deno.serve(async (req: Request) => {
             ITEM_TABLE_HTML: itemTableHtml,
             LOCATION:        inv?.location ?? '',
             SIDEMARK:        inv?.sidemark ?? '',
-            QUOTE_AMOUNT:    formatCurrency(Number(quoteAmount)),
+            // Raw number — REPAIR_APPROVED template wraps with `${{...}}`,
+            // so formatCurrency() (which prefixes $) would yield $$X.XX.
+            QUOTE_AMOUNT:    formatMoney(Number(quoteAmount)),
             APP_URL,
           },
           idempotencyKey:    `repair-${decision.toLowerCase()}:${repairId}`,
@@ -256,7 +258,13 @@ Deno.serve(async (req: Request) => {
 });
 
 function formatCurrency(n: number): string {
-  return `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return `$${formatMoney(n)}`;
+}
+
+// Same shape as formatCurrency but without the $ prefix — used for tokens
+// that go into templates which provide their own '$' (e.g. `${{TOKEN}}`).
+function formatMoney(n: number): string {
+  return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 function renderItemTable(itemId: string, inv: {
