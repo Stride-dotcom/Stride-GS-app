@@ -69,6 +69,8 @@ import {
 } from 'lucide-react';
 import { theme } from '../styles/theme';
 import { supabase } from '../lib/supabase';
+import { AttachmentUploadField } from '../components/shared/AttachmentUploadField';
+import { uploadOrderAttachments } from '../lib/orderAttachmentUpload';
 import {
   fetchDeliveryZone,
   fetchDeliveryServicesFromCatalog,
@@ -317,6 +319,16 @@ export function PublicServiceRequest() {
 
   // ── Acknowledgment ──────────────────────────────────────────────────
   const [priceAcknowledged, setPriceAcknowledged] = useState(false);
+
+  // ── Attachments ─────────────────────────────────────────────────────
+  // Photos + docs captured before submit. Held client-side until the
+  // submit_public_request RPC returns the new order id, then flushed
+  // via uploadOrderAttachments(). Anon write policies on item_photos /
+  // documents / storage.objects (migration 20260514150000) gate the
+  // writes to fresh public-form / null-tenant / pending-review orders
+  // within a 1-hour window.
+  const [attachmentFiles, setAttachmentFiles] = useState<File[]>([]);
+  const [attachUploading, setAttachUploading] = useState<{ done: number; total: number } | null>(null);
 
   // ── Submission state ────────────────────────────────────────────────
   const [submitting, setSubmitting] = useState(false);
@@ -945,6 +957,33 @@ export function PublicServiceRequest() {
         throw new Error('We could not submit your request. Please try again, or email us if the problem persists.');
       }
       const orderRow = rpcResult as { id: string; dt_identifier: string };
+
+      // Upload any attachments the submitter picked. AWAITED so the
+      // staff alert email below fires AFTER the files are in (the
+      // alert may include attachment counts in a future enhancement).
+      // Best-effort: a partial failure surfaces as an inline warning
+      // on the success screen but doesn't undo the order.
+      if (attachmentFiles.length > 0) {
+        setAttachUploading({ done: 0, total: attachmentFiles.length });
+        try {
+          const res = await uploadOrderAttachments({
+            orderId: orderRow.id,
+            tenantId: null, // public-form orders carry null tenant
+            uploaderName: contactEmail || null,
+            files: attachmentFiles,
+            onProgress: (done, total) => setAttachUploading({ done, total }),
+          });
+          if (res.failed > 0) {
+            const head = res.errors[0] || 'See console for details';
+            setSubmitError(
+              `Request submitted, but ${res.failed} attachment${res.failed === 1 ? '' : 's'} ` +
+              `failed to upload (${head}). Stride staff will contact you if anything's missing.`,
+            );
+          }
+        } finally {
+          setAttachUploading(null);
+        }
+      }
 
       setSuccess({ identifier: orderRow.dt_identifier });
 
@@ -1826,6 +1865,24 @@ export function PublicServiceRequest() {
               </div>
             </div>
           )}
+
+          {/* Attachments — photos + docs that travel with the order
+              to dispatch and the driver. Sits just above the pricing
+              acknowledgment so it reads as the last bit of content
+              before the final "Submit Request" gesture. */}
+          <div style={{ marginBottom: 16 }}>
+            <AttachmentUploadField
+              files={attachmentFiles}
+              onChange={setAttachmentFiles}
+              uploading={!!attachUploading}
+              uploadingMessage={attachUploading
+                ? `Uploading ${attachUploading.done} of ${attachUploading.total}…`
+                : undefined}
+              disabled={submitting}
+              label="Photos & documents (optional)"
+              helpText="Attach photos of the items, a packing list, or any reference docs so our team and the driver can see what you're sending. Optional — leave blank if you don't have any."
+            />
+          </div>
 
           {/* Acknowledgment */}
           <label style={{
