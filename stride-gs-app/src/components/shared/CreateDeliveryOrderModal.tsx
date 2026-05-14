@@ -2229,7 +2229,20 @@ export function CreateDeliveryOrderModal({
             const code = String(it.dt_item_code || '').trim();
             if (code) return false;
             const ex = (it.extras && typeof it.extras === 'object' ? it.extras : {}) as Record<string, unknown>;
-            return ex.source === 'delivery_free_text';
+            // Accept the two source tags that mark a delivery-leg ad-hoc:
+            //   • 'delivery_free_text' — staff added line via the modal's
+            //                            "Add ad-hoc line" button
+            //   • 'public_form_adhoc'  — submitter typed the line into the
+            //                            public service-request form
+            // Both should hydrate the free-item editor on edit. Pre-2026-05-13
+            // only the staff tag was accepted, so the FIRST edit of a
+            // public-form order opened with an empty items list and
+            // "Still needed: at least one item" blocked save until the
+            // operator manually re-typed what the customer had already
+            // submitted. (Once saved, rows get re-stamped with
+            // 'delivery_free_text' on the next write, so subsequent
+            // reopens worked — first-edit-only bug.)
+            return ex.source === 'delivery_free_text' || ex.source === 'public_form_adhoc';
           })
           .map(it => {
             const ex = (it.extras && typeof it.extras === 'object' ? it.extras : {}) as Record<string, unknown>;
@@ -2303,11 +2316,13 @@ export function CreateDeliveryOrderModal({
           .filter(it => {
             if (String(it.dt_item_code || '').trim()) return false;
             const ex = (it.extras && typeof it.extras === 'object' ? it.extras : {}) as Record<string, unknown>;
-            // Only true delivery-only ad-hoc here. Mirror copies of
-            // pickup ad-hoc carry source='pickup_free_text_delivered'
+            // True delivery-only ad-hoc OR public-form ad-hoc. Mirror
+            // copies of pickup ad-hoc carry 'pickup_free_text_delivered'
             // (new) or 'pickup_free_text' (legacy duplicate-to-both-
-            // legs orders); both are excluded.
-            return ex.source === 'delivery_free_text';
+            // legs orders); both are excluded. See the matching
+            // delivery-only branch above for the public_form_adhoc
+            // first-edit context.
+            return ex.source === 'delivery_free_text' || ex.source === 'public_form_adhoc';
           })
           .map(it => {
             const ex = (it.extras && typeof it.extras === 'object' ? it.extras : {}) as Record<string, unknown>;
