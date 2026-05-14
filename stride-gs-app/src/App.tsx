@@ -63,12 +63,19 @@ export default function App() {
     : null;
   if (intakeMatch) return <ClientIntake linkId={intakeMatch[1]} />;
 
-  // Public photo-share gallery — anon-only view of a curated photo set.
-  // RLS on photo_shares + item_photos + storage gates the data.
-  const sharedPhotosMatch = typeof window !== 'undefined'
-    ? window.location.hash.match(/^#\/shared\/photos\/([A-Za-z0-9_-]+)/)
+  // Public attachment-share gallery — anon-only view of curated photos
+  // + docs for one entity. RLS on photo_shares + item_photos + documents
+  // + storage gates the data. Two URL forms resolve to the same viewer:
+  //   • /#/shared/attachments/<id> — canonical (photos + docs), emitted
+  //     by dt-push-order v23+ for DT's "Attachments" custom field.
+  //   • /#/shared/photos/<id> — legacy photos-only URL kept working so
+  //     pre-v23 links and PhotoShareDialog-generated photo shares don't
+  //     break. The viewer just hides the docs section when doc_ids is
+  //     empty.
+  const sharedAttachmentsMatch = typeof window !== 'undefined'
+    ? window.location.hash.match(/^#\/shared\/(?:attachments|photos)\/([A-Za-z0-9_-]+)/)
     : null;
-  if (sharedPhotosMatch) return <PublicPhotoGallery shareId={sharedPhotosMatch[1]} />;
+  if (sharedAttachmentsMatch) return <PublicPhotoGallery shareId={sharedAttachmentsMatch[1]} />;
 
   // Public service-request form — anon-only intake page that lets
   // anyone submit a delivery / pickup / service request. Anon RLS

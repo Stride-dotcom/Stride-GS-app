@@ -1,5 +1,29 @@
 /**
- * dt-push-order — Supabase Edge Function (Phase 2c) — v22 2026-05-13 PST
+ * dt-push-order — Supabase Edge Function (Phase 2c) — v23 2026-05-14 PST
+ * v23: Unified attachment share — DT's "Attachments" custom field now
+ *      carries ONE short URL per order covering BOTH photos AND docs
+ *      (was: photo-share URL + comma-separated signed doc URLs, capped
+ *      at 255 chars). Driver-app text renderers auto-linkify a single
+ *      URL cleanly; comma-joined URLs were unreliable. Pair migration
+ *      20260514120000_attachment_shares.sql adds doc_ids to
+ *      photo_shares + anon read on documents/storage so the public
+ *      viewer at /#/shared/attachments/<id> resolves the docs the same
+ *      way it resolves photos.
+ *
+ *      Behaviour changes:
+ *        • Share is created/refreshed only when at least one photo OR
+ *          doc is attached. Both empty → no field emitted.
+ *        • entity_context now snapshots {label, title, subtitle}
+ *          (dt_identifier, contact name, service date) so the public
+ *          page header reads cleanly without an entity-lookup round
+ *          trip.
+ *        • tenant_id may be NULL (migration loosened the NOT NULL).
+ *          Public-form orders with no tenant still get a working
+ *          share link.
+ *        • The 255-char cap is now effectively a no-op (one short
+ *          URL ≈ 60 chars) but kept as a safety net.
+ *
+ * v22 2026-05-13 PST:
  * v22: DT custom field #3 ("Attachments") now carries the public photo
  *      share URL + signed document URLs for any files attached to the
  *      order (entity_type='dt_order'). One photo share covers all photos
@@ -333,22 +357,26 @@ function buildOrderDescription(
   return cdataEscape(descParts.join('\n'));
 }
 
-// Build the comma-joined attachments URL list for DT's
-// <additional_field_3> "Attachments" custom field. Best-effort: returns
-// '' on any failure so the order push always proceeds.
+// Build the DT "Attachments" custom field value (<additional_field_3>).
+// Returns a single public URL that resolves to a unified gallery page
+// showing every photo + every doc attached to the order, or '' when the
+// order has no attachments at all.
 //
-// Sources:
-//   • item_photos with entity_type='dt_order' / entity_id=order.id
-//     → reuse the most recent active photo_share for this entity, or
-//       create a fresh one covering every photo. Public URL is
-//       /#/shared/photos/<share_id> on mystridehub.com (the same route
-//       PhotoShareDialog generates client-side).
-//   • documents with context_type='dt_order' / context_id=order.id
-//     → signed Storage URLs valid for 90 days, one per file.
+// One URL — no comma parsing in DT's text renderer, no per-doc click-
+// ability concern, no 255-char cap pressure. Photos and docs are both
+// curated into a single photo_shares row (the table grew a doc_ids
+// column in migration 20260514120000_attachment_shares.sql) and read
+// back through anon RLS at /#/shared/attachments/<share_id>.
 //
-// Caps the joined string at 255 chars (DT's per-field limit). When the
-// full list would overflow, drops trailing URLs and appends "…" so the
-// driver knows there's more in the app.
+// Idempotency: a re-push reuses the order's existing active share. If
+// the set of photo_ids OR doc_ids changed since last push (an op edit
+// added or removed an attachment), the existing row is updated in
+// place so the gallery always reflects current state. Stale lists
+// would silently hide new files from the driver because the anon read
+// RLS gates on `id = ANY(share.<col>)`.
+//
+// Best-effort: any error returns '' so the order push always proceeds
+// — Attachments is a nice-to-have, never a blocker.
 async function buildAttachmentsField(
   // deno-lint-ignore no-explicit-any
   supabase: any,
@@ -356,120 +384,117 @@ async function buildAttachmentsField(
 ): Promise<string> {
   const FIELD_MAX = 255;
   const APP_ORIGIN = 'https://www.mystridehub.com';
-  const urls: string[] = [];
 
   try {
-    // ── Photos: one share link per order ───────────────────────────────
-    const { data: photos } = await supabase
-      .from('item_photos')
-      .select('id')
-      .eq('entity_type', 'dt_order')
-      .eq('entity_id', order.id)
-      .order('created_at', { ascending: true });
-
-    if (Array.isArray(photos) && photos.length > 0 && order.tenant_id) {
-      // photo_shares.tenant_id is NOT NULL — a small slice of dt_orders
-      // (external-customer / public-form submissions) carry tenant_id =
-      // NULL and can't get a share row created. Skip silently for those;
-      // the rest of the attachments field (signed doc URLs) still ships.
-      const photoIds = photos.map((p: { id: string }) => p.id);
-
-      const { data: existingShare } = await supabase
-        .from('photo_shares')
-        .select('share_id, photo_ids')
+    // ── Collect photo and doc ids in one parallel fetch ────────────────
+    const [photosRes, docsRes] = await Promise.all([
+      supabase
+        .from('item_photos')
+        .select('id')
         .eq('entity_type', 'dt_order')
         .eq('entity_id', order.id)
-        .eq('active', true)
-        .order('created_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
+        .order('created_at', { ascending: true }),
+      supabase
+        .from('documents')
+        .select('id')
+        .eq('context_type', 'dt_order')
+        .eq('context_id', order.id)
+        .is('deleted_at', null)
+        .order('created_at', { ascending: true }),
+    ]);
 
-      let shareId: string | undefined = existingShare?.share_id;
+    const photoIds: string[] = Array.isArray(photosRes?.data)
+      ? (photosRes.data as Array<{ id: string }>).map((p) => p.id)
+      : [];
+    const docIds: string[] = Array.isArray(docsRes?.data)
+      ? (docsRes.data as Array<{ id: string }>).map((d) => d.id)
+      : [];
 
-      // Idempotency refresh: if the photo set has changed since the
-      // share was created (someone added/removed photos after the first
-      // push), update the existing share's photo_ids so the public
-      // gallery shows the current set. RLS for anonymous reads (per
-      // `item_photos_anon_read_via_share`) gates on `id = ANY (ps.photo_ids)` —
-      // an out-of-date list silently hides new photos from the driver.
-      if (shareId && existingShare) {
-        const existingIds = Array.isArray(existingShare.photo_ids) ? existingShare.photo_ids : [];
-        const sameSet = existingIds.length === photoIds.length
-          && photoIds.every((id: string) => existingIds.includes(id));
-        if (!sameSet) {
-          await supabase
-            .from('photo_shares')
-            .update({ photo_ids: photoIds })
-            .eq('share_id', shareId);
-        }
-      }
+    // Both empty → no attachments. Also revoke any pre-existing active
+    // share so a previously-published URL stops resolving to stale
+    // content if the op deleted every attachment and re-pushed.
+    if (photoIds.length === 0 && docIds.length === 0) {
+      await supabase
+        .from('photo_shares')
+        .update({ active: false })
+        .eq('entity_type', 'dt_order')
+        .eq('entity_id', order.id)
+        .eq('active', true);
+      return '';
+    }
 
-      if (!shareId) {
-        const newShareId = crypto.randomUUID().replace(/-/g, '').slice(0, 12);
-        const { data: created, error: shareErr } = await supabase
+    // ── Reuse-or-create the unified share row ──────────────────────────
+    // entity_context is snapshotted at write time so the public viewer
+    // never reads dt_orders directly. Keep it minimal: identifier as
+    // the heading + contact name and service date as subhead lines.
+    const entityContext = {
+      label: order.dt_identifier || 'Order',
+      title: order.contact_name || undefined,
+      subtitle: order.local_service_date || undefined,
+    };
+
+    const { data: existingShare } = await supabase
+      .from('photo_shares')
+      .select('share_id, photo_ids, doc_ids')
+      .eq('entity_type', 'dt_order')
+      .eq('entity_id', order.id)
+      .eq('active', true)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    let shareId: string | undefined = existingShare?.share_id;
+
+    if (shareId && existingShare) {
+      // Idempotency refresh: bring photo_ids + doc_ids into sync with
+      // the current attachment set on each push so an op who added or
+      // removed a file after the first push still gets a fresh gallery.
+      // Also keeps entity_context current in case the order's contact /
+      // service date changed.
+      const existingPhotoIds = Array.isArray(existingShare.photo_ids) ? existingShare.photo_ids : [];
+      const existingDocIds   = Array.isArray(existingShare.doc_ids)   ? existingShare.doc_ids   : [];
+      const samePhotos = existingPhotoIds.length === photoIds.length
+        && photoIds.every((id: string) => existingPhotoIds.includes(id));
+      const sameDocs   = existingDocIds.length === docIds.length
+        && docIds.every((id: string) => existingDocIds.includes(id));
+      if (!samePhotos || !sameDocs) {
+        await supabase
           .from('photo_shares')
-          .insert({
-            share_id:        newShareId,
-            entity_type:     'dt_order',
-            entity_id:       order.id,
-            tenant_id:       order.tenant_id,
-            photo_ids:       photoIds,
-            title:           `Order ${order.dt_identifier} attachments`,
-            active:          true,
-            created_by_name: 'dt-push-order',
-          })
-          .select('share_id')
-          .single();
-        if (!shareErr && created?.share_id) shareId = created.share_id;
+          .update({ photo_ids: photoIds, doc_ids: docIds, entity_context: entityContext })
+          .eq('share_id', shareId);
       }
-      if (shareId) urls.push(`${APP_ORIGIN}/#/shared/photos/${shareId}`);
+    } else {
+      const newShareId = crypto.randomUUID().replace(/-/g, '').slice(0, 12);
+      const { data: created, error: shareErr } = await supabase
+        .from('photo_shares')
+        .insert({
+          share_id:        newShareId,
+          entity_type:     'dt_order',
+          entity_id:       order.id,
+          tenant_id:       order.tenant_id, // nullable since 20260514120000
+          photo_ids:       photoIds,
+          doc_ids:         docIds,
+          entity_context:  entityContext,
+          title:           `Order ${order.dt_identifier} attachments`,
+          active:          true,
+          created_by_name: 'dt-push-order',
+        })
+        .select('share_id')
+        .single();
+      if (!shareErr && created?.share_id) shareId = created.share_id;
     }
 
-    // ── Documents: one signed URL per file (90-day TTL) ────────────────
-    const { data: docs } = await supabase
-      .from('documents')
-      .select('storage_key')
-      .eq('context_type', 'dt_order')
-      .eq('context_id', order.id)
-      .is('deleted_at', null)
-      .order('created_at', { ascending: true });
+    if (!shareId) return '';
 
-    if (Array.isArray(docs) && docs.length > 0) {
-      const NINETY_DAYS = 60 * 60 * 24 * 90;
-      for (const doc of docs as Array<{ storage_key: string | null }>) {
-        if (!doc.storage_key) continue;
-        const { data: signed } = await supabase
-          .storage
-          .from('documents')
-          .createSignedUrl(doc.storage_key, NINETY_DAYS);
-        if (signed?.signedUrl) urls.push(signed.signedUrl);
-      }
-    }
+    // Single URL — well under FIELD_MAX (~62 chars). The cap stays as
+    // belt-and-suspenders in case APP_ORIGIN ever grows or DT lowers
+    // the field length on their end.
+    const url = `${APP_ORIGIN}/#/shared/attachments/${shareId}`;
+    return url.length > FIELD_MAX ? url.slice(0, FIELD_MAX) : url;
   } catch (err) {
     console.warn('[dt-push-order] attachments build failed (non-fatal):', (err as Error).message);
     return '';
   }
-
-  if (urls.length === 0) return '';
-
-  // Greedy fit within 255 chars. If we have to drop URLs, append "…"
-  // so dispatch knows there's more attached in-app.
-  const SEP = ',';
-  const TRUNC_MARK = '…';
-  let joined = '';
-  let dropped = false;
-  for (const u of urls) {
-    const next = joined ? `${joined}${SEP}${u}` : u;
-    if (next.length > FIELD_MAX) { dropped = true; break; }
-    joined = next;
-  }
-  if (dropped) {
-    // Leave room for the truncation marker.
-    const room = FIELD_MAX - TRUNC_MARK.length - SEP.length;
-    if (joined.length > room) joined = joined.slice(0, room);
-    joined = `${joined}${SEP}${TRUNC_MARK}`;
-  }
-  return joined;
 }
 
 function buildOrderXml(
