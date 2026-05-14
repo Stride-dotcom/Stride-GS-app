@@ -96,6 +96,13 @@ const SHADOW_REGISTRY: Record<string, ShadowEntry> = {
   // GAS logs {status:{old:'Pending Quote',new:'Quote Sent'}}. See
   // send-repair-quote-shadow/index.ts. (GAS action is 'sendRepairQuote'.)
   sendRepairQuote: { shadow: 'send-repair-quote-shadow', action: 'sendRepairQuote' },
+  // [MIGRATION-P3] respondToRepairQuote — fourth of the cluster. Variable
+  // audit-log shape based on the decision input:
+  //   {decision:'Approve', status:{new:'Approved'}}  or
+  //   {decision:'Decline', status:{new:'Declined'}}.
+  // GAS action key is 'respondToRepairQuote' (camelCase from the React
+  // payload). See respond-repair-quote-shadow/index.ts.
+  respondToRepairQuote: { shadow: 'respond-repair-quote-shadow', action: 'respondToRepairQuote' },
 };
 
 // ─── Helpers ────────────────────────────────────────────────────────────────

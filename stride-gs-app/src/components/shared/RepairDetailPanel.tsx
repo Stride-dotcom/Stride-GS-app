@@ -19,7 +19,7 @@ import { WriteButton } from './WriteButton';
 import { ProcessingOverlay } from './ProcessingOverlay';
 import { BillingPreviewCard } from './BillingPreviewCard';
 import { useEntityAddons } from '../../hooks/useEntityAddons';
-import { postSendRepairQuote, postSendRepairQuoteSb, postRespondToRepairQuote, postCompleteRepair, postStartRepair, postStartRepairSb, postCancelRepair, postCancelRepairSb, postUpdateRepairNotes, postReopenRepair, postCorrectRepairResult, postVoidRepairQuote, isApiConfigured } from '../../lib/api';
+import { postSendRepairQuote, postSendRepairQuoteSb, postRespondToRepairQuote, postRespondRepairQuoteSb, postCompleteRepair, postStartRepair, postStartRepairSb, postCancelRepair, postCancelRepairSb, postUpdateRepairNotes, postReopenRepair, postCorrectRepairResult, postVoidRepairQuote, isApiConfigured } from '../../lib/api';
 import { useFeatureFlag } from '../../contexts/FeatureFlagContext';
 import { generateRepairWorkOrderPdf } from '../../lib/workOrderPdf';
 import { entityEvents } from '../../lib/entityEvents';
@@ -705,17 +705,46 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
     applyRepairPatch?.(repair.repairId, { status: decision === 'Approve' ? 'Approved' : 'Declined' });
     setSubmitting(true);
     try {
-      const resp = await postRespondToRepairQuote({ repairId: repair.repairId, decision }, clientSheetId);
-      if (!resp.ok || !resp.data?.success) {
-        clearRepairPatch?.(repair.repairId); // rollback
-        const errMsg = resp.error || resp.data?.error || `Failed to ${decision.toLowerCase()} repair. Please try again.`;
-        setSubmitError(errMsg);
-        void writeSyncFailed({ tenant_id: clientSheetId, entity_type: 'repair', entity_id: repair.repairId, action_type: 'respond_repair_quote', requested_by: user?.email ?? '', request_id: resp.requestId, payload: { repairId: repair.repairId, decision, clientName: repair.clientName, description: repair.description }, error_message: errMsg });
+      // [MIGRATION-P3] Same flag as sendRepairQuote (sendRepairEmails
+      // covers all non-terminal repair email status changes). Flipping
+      // that flag activates BOTH send-quote and respond-quote in tandem.
+      if (sendRepairEmailsBackend === 'supabase') {
+        const resp = await postRespondRepairQuoteSb({
+          tenantId: clientSheetId,
+          repairId: repair.repairId,
+          decision,
+        });
+        if (!resp.ok) {
+          clearRepairPatch?.(repair.repairId);
+          setSubmitError(resp.error || `Failed to ${decision.toLowerCase()} repair.`);
+        } else {
+          setEffectiveStatus(decision === 'Approve' ? 'Approved' : 'Declined');
+          setRespondResult({
+            success: true,
+            repairId: resp.repairId ?? repair.repairId,
+            decision,
+          } as unknown as RespondToRepairQuoteResponse);
+          onRepairUpdated?.();
+          if (resp.mirrorOk === false) {
+            console.warn('[respondRepairQuote-sb] sheet mirror failed:', resp.mirrorError);
+          }
+          if (resp.emailSent === false) {
+            setSubmitError(`${decision} processed, but email send failed: ${resp.emailError ?? 'unknown'}.`);
+          }
+        }
       } else {
-        setEffectiveStatus(decision === 'Approve' ? 'Approved' : 'Declined');
-        // Don't clear patch on success — let TTL handle it (prevents flicker while refetch loads)
-        setRespondResult(resp.data);
-        onRepairUpdated?.();
+        const resp = await postRespondToRepairQuote({ repairId: repair.repairId, decision }, clientSheetId);
+        if (!resp.ok || !resp.data?.success) {
+          clearRepairPatch?.(repair.repairId); // rollback
+          const errMsg = resp.error || resp.data?.error || `Failed to ${decision.toLowerCase()} repair. Please try again.`;
+          setSubmitError(errMsg);
+          void writeSyncFailed({ tenant_id: clientSheetId, entity_type: 'repair', entity_id: repair.repairId, action_type: 'respond_repair_quote', requested_by: user?.email ?? '', request_id: resp.requestId, payload: { repairId: repair.repairId, decision, clientName: repair.clientName, description: repair.description }, error_message: errMsg });
+        } else {
+          setEffectiveStatus(decision === 'Approve' ? 'Approved' : 'Declined');
+          // Don't clear patch on success — let TTL handle it (prevents flicker while refetch loads)
+          setRespondResult(resp.data);
+          onRepairUpdated?.();
+        }
       }
     } catch (err) {
       clearRepairPatch?.(repair.repairId); // rollback
