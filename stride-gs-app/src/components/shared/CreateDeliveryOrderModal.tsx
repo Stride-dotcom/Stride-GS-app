@@ -2059,6 +2059,23 @@ export function CreateDeliveryOrderModal({
           if (pickupContacts.email)   setPickupEmail(pickupContacts.email as string);
         }
       }
+      // Public-form orders + any other clientless rows (tenant_id=NULL,
+      // typically source='public_form' from the public service-request
+      // form, occasionally source='reconcile'/'webhook_backfill') are
+      // semantically external-customer orders: no warehousing account,
+      // billing/inventory paths inactive, the customer info on
+      // contact_* / bill_to_* is the entire record. Auto-flip the
+      // External Customer toggle on load so the modal:
+      //   • doesn't render the warehouse-client picker
+      //   • passes the missingFields 'client' validation
+      //   • saves with tenant_id NULL (existing externalCustomer code path)
+      // Pre-2026-05-13 this was only set by the staff-side "External
+      // customer" checkbox at modal-create time; editing a public-form
+      // order would force the operator to pick a warehouse client they
+      // didn't actually want to associate, just to satisfy the gate.
+      if (!r.tenant_id || r.source === 'public_form') {
+        setExternalCustomer(true);
+      }
       // Capture the loaded row's review_status — drives whether
       // submit promotes (draft → real order) or just saves changes.
       originalReviewStatusRef.current = (r.review_status as string) || null;
