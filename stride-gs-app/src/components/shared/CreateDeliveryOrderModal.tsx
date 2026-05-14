@@ -1490,9 +1490,26 @@ export function CreateDeliveryOrderModal({
   // symmetrically.
   const buildPDItemRows = (pickupId: string, deliveryId: string): Array<Record<string, unknown>> => {
     const rows: Array<Record<string, unknown>> = [];
+    // v2026-05-14 — every row gets a client-side UUID id.
+    //
+    // Why: Supabase JS batch insert normalizes the JSON shape to the
+    // UNION of keys across all rows in the array. Any row missing a
+    // key that another row has gets that key sent as an explicit NULL,
+    // which OVERRIDES the column's DEFAULT (gen_random_uuid() here)
+    // rather than letting the default fire. Before v2026-05-13 no row
+    // in this builder supplied `id`, so PostgREST omitted the column
+    // entirely and the DEFAULT generated UUIDs. The v2026-05-13 change
+    // added `id: pickupRowId` to the pickup-ad-hoc pickup row so we
+    // could stamp `parent_pickup_item_id` on the mirror row — that
+    // single explicit id then poisoned every other row in the batch
+    // with `id: null` and the table's NOT NULL primary key rejected
+    // the whole insert. Generating ids for every row removes the
+    // mixed-shape trap entirely and is defensive against the same
+    // class of bug on any future column we start setting selectively.
     for (const i of selectedInvItems) {
       const room = effectiveRoom(i.itemId, i.room);
       rows.push({
+        id: crypto.randomUUID(),
         dt_order_id: deliveryId,
         inventory_id: i.inventoryRowId ?? null,
         dt_item_code: i.itemId,
@@ -1562,6 +1579,7 @@ export function CreateDeliveryOrderModal({
         extras: { source: 'pickup_free_text' },
       });
       rows.push({
+        id: crypto.randomUUID(),
         dt_order_id: deliveryId,
         dt_item_code: null,
         description: desc,
@@ -1591,6 +1609,7 @@ export function CreateDeliveryOrderModal({
       // cuft on reopen AND undercounted weight/cube rollups on the
       // delivery leg of P+D orders.
       rows.push({
+        id: crypto.randomUUID(),
         dt_order_id: deliveryId,
         dt_item_code: null,
         description: desc,
