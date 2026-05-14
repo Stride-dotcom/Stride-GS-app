@@ -118,10 +118,10 @@ Match-rate column is the rolling 7-day match rate from `parity_results`.
 | `updateRepair` | gas | 0 | n/a | 0 | n/a | not_started | — |
 | `updateShipment` | gas | 0 | n/a | 0 | n/a | not_started | — |
 | `startTask` | gas | 0 | n/a | 0 | n/a | not_started | — |
-| `startRepair` | gas | 0 | n/a | 0 | n/a | not_started | — |
+| `startRepair` | gas | 0 | n/a | 0 | n/a | **handler_drafted** | 2026-05-13 (PR pending) |
 | `requestRepairQuote` (single-item) | gas | 0 | n/a | 0 | n/a | not_started | 2026-05-13 (feature_flags row seeded) |
 | `respondRepairQuote` | gas | 0 | n/a | 0 | n/a | not_started | 2026-05-13 (feature_flags row seeded) |
-| `cancelRepair` | gas | 0 | n/a | 0 | n/a | **handler_drafted** | 2026-05-13 (PR pending) |
+| `cancelRepair` | gas | 0 | n/a | 0 | n/a | **handler_drafted** | 2026-05-13 (smoke-tested end-to-end via #405) |
 | `createTask` | gas | 0 | n/a | 0 | n/a | not_started | — |
 | `createWillCall` | gas | 0 | n/a | 0 | n/a | not_started | — |
 | `releaseItems` | gas | 0 | n/a | 0 | n/a | not_started | — |

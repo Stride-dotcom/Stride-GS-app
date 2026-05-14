@@ -19,7 +19,7 @@ import { WriteButton } from './WriteButton';
 import { ProcessingOverlay } from './ProcessingOverlay';
 import { BillingPreviewCard } from './BillingPreviewCard';
 import { useEntityAddons } from '../../hooks/useEntityAddons';
-import { postSendRepairQuote, postRespondToRepairQuote, postCompleteRepair, postStartRepair, postCancelRepair, postCancelRepairSb, postUpdateRepairNotes, postReopenRepair, postCorrectRepairResult, postVoidRepairQuote, isApiConfigured } from '../../lib/api';
+import { postSendRepairQuote, postRespondToRepairQuote, postCompleteRepair, postStartRepair, postStartRepairSb, postCancelRepair, postCancelRepairSb, postUpdateRepairNotes, postReopenRepair, postCorrectRepairResult, postVoidRepairQuote, isApiConfigured } from '../../lib/api';
 import { useFeatureFlag } from '../../contexts/FeatureFlagContext';
 import { generateRepairWorkOrderPdf } from '../../lib/workOrderPdf';
 import { entityEvents } from '../../lib/entityEvents';
@@ -64,11 +64,14 @@ const input: React.CSSProperties = { width: '100%', padding: '8px 10px', fontSiz
 
 export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepairPatch, mergeRepairPatch, clearRepairPatch, renderAsPage }: Props) {
   const { user } = useAuth();
-  // [MIGRATION-P3] Resolves to 'gas' or 'supabase' based on
-  // feature_flags.cancelRepair + tenant_scope. See MIGRATION_STATUS.md
-  // MIG-010 for the per-tenant scope semantics. Resolves to 'gas' while
-  // flags are loading — safe default since pre-migration backend.
+  // [MIGRATION-P3] Resolves to 'gas' or 'supabase' based on the
+  // feature_flags row + tenant_scope. See MIGRATION_STATUS.md MIG-010
+  // for the per-tenant scope semantics. Each handler reads its own
+  // flag independently — half the repair lifecycle can flip to SB
+  // while the other half stays on GAS, per the cluster migration plan
+  // in MIG-013.
   const cancelRepairBackend = useFeatureFlag('cancelRepair');
+  const startRepairBackend  = useFeatureFlag('startRepair');
   const { isMobile, isTablet } = useIsMobile();
   const isCompactViewport = isMobile || isTablet;
   // v2026-04-22 — panel frame handled by TabbedDetailPanel shell.
@@ -709,20 +712,43 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
     applyRepairPatch?.(repair.repairId, { status: 'In Progress' });
     entityEvents.emit('repair', repair.repairId);
 
-    // 2. Fire GAS in background. We intentionally don't await here so
-    //    the user can continue working; errors land in the retry
+    // 2. Fire the backend in background. We intentionally don't await
+    //    here so the user can continue working; errors land in the retry
     //    banner without touching the optimistic success state.
+    //    [MIGRATION-P3] Routes to SB when the flag is flipped; otherwise
+    //    legacy GAS. Both paths produce status='In Progress' + start_date
+    //    stamp; only the authority differs.
     void (async () => {
       try {
-        const resp = await postStartRepair({ repairId: repair.repairId }, clientSheetId);
-        if (!resp.ok || !resp.data?.success) {
-          const errMsg = resp.error || resp.data?.error || 'Work order generation failed.';
-          setSubmitError(errMsg + ' Start Repair status flip already applied — you can print the Work Order from the button below.');
-          void writeSyncFailed({ tenant_id: clientSheetId, entity_type: 'repair', entity_id: repair.repairId, action_type: 'start_repair', requested_by: user?.email ?? '', request_id: resp.requestId, payload: { repairId: repair.repairId, clientName: repair.clientName, description: repair.description }, error_message: errMsg });
+        if (startRepairBackend === 'supabase') {
+          const resp = await postStartRepairSb({ tenantId: clientSheetId, repairId: repair.repairId });
+          if (!resp.ok) {
+            const errMsg = resp.error || 'Start Repair failed.';
+            setSubmitError(errMsg + ' Start Repair status flip already applied — you can print the Work Order from the button below.');
+          } else {
+            // SB path doesn't produce a work-order URL — the React-side
+            // generator (lib/workOrderPdf.ts) handles printing. Keep the
+            // optimistic startResult as the banner.
+            onRepairUpdated?.();
+            if (resp.mirrorOk === false) {
+              console.warn('[startRepair-sb] sheet mirror failed:', resp.mirrorError);
+              setSubmitError(
+                `Repair started, but the legacy sheet mirror failed (${resp.mirrorError ?? 'unknown'}). ` +
+                `App state is correct; sheet will catch up on the next full sync.`,
+              );
+            }
+          }
         } else {
-          // Refresh server-shaped data (URL, skipped flag, etc.) into the banner.
-          setStartResult(resp.data);
-          onRepairUpdated?.();
+          const resp = await postStartRepair({ repairId: repair.repairId }, clientSheetId);
+          if (!resp.ok || !resp.data?.success) {
+            const errMsg = resp.error || resp.data?.error || 'Work order generation failed.';
+            setSubmitError(errMsg + ' Start Repair status flip already applied — you can print the Work Order from the button below.');
+            void writeSyncFailed({ tenant_id: clientSheetId, entity_type: 'repair', entity_id: repair.repairId, action_type: 'start_repair', requested_by: user?.email ?? '', request_id: resp.requestId, payload: { repairId: repair.repairId, clientName: repair.clientName, description: repair.description }, error_message: errMsg });
+          } else {
+            // Refresh server-shaped data (URL, skipped flag, etc.) into the banner.
+            setStartResult(resp.data);
+            onRepairUpdated?.();
+          }
         }
       } catch (err) {
         setSubmitError(

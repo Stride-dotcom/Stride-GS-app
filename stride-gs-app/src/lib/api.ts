@@ -3296,6 +3296,35 @@ export async function postCancelRepairSb(
   return data ?? { ok: false, error: 'no response body' };
 }
 
+// [MIGRATION-P3] SB-primary entry point for startRepair. Used when
+// feature_flags.startRepair.active_backend = 'supabase' for the caller's
+// tenant. Otherwise stay on legacy postStartRepair GAS path. Behavior
+// mirrors GAS handleStartRepair_ — accepts 'Approved' (real start) or
+// 'In Progress' / 'Complete' (PDF re-run no-op). The PDF itself is
+// regenerated React-side via lib/workOrderPdf.ts; this function does
+// not touch the work-order doc.
+export interface StartRepairSbResponse {
+  ok: boolean;
+  repairId?: string;
+  previousStatus?: string;
+  alreadyStarted?: boolean;
+  mirrorOk?: boolean;
+  mirrorError?: string;
+  error?: string;
+  errorCode?: string;
+}
+export async function postStartRepairSb(
+  payload: { tenantId: string; repairId: string; requestId?: string }
+): Promise<StartRepairSbResponse> {
+  const { supabase } = await import('./supabase');
+  const { data, error } = await supabase.functions.invoke<StartRepairSbResponse>(
+    'start-repair-sb',
+    { body: payload },
+  );
+  if (error) return { ok: false, error: error.message };
+  return data ?? { ok: false, error: 'no response body' };
+}
+
 // ─── Bulk action batch endpoints (v38.9.0) ────────────────────────────────────
 // Standardized result contract shared across all 4 new batch endpoints AND all
 // loop-based bulk actions (see src/lib/batchLoop.ts). The frontend has exactly
