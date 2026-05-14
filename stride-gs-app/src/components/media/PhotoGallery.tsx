@@ -5,7 +5,7 @@
  * full lifecycle.
  */
 import { useCallback, useMemo, useState } from 'react';
-import { ImageIcon, AlertTriangle, Share2, X } from 'lucide-react';
+import { ImageIcon, AlertTriangle, Share2, X, ArrowDownAZ, Package } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { usePhotos, type Photo, type EntityType, type PhotoType } from '../../hooks/usePhotos';
 import { usePhotoGraphRollup, type RollupContext } from '../../hooks/useGraphRollup';
@@ -62,6 +62,14 @@ export function PhotoGallery({
   rollupCtx,
 }: Props) {
   const [sourceFilter, setSourceFilter] = useState<string>('all');
+  // v2026-05-14 — Polish: sort + grouping. Newest-first by default (matches
+  // existing behavior since usePhotos returns rows ordered by created_at
+  // ascending, then this state-driven sort flips them to descending).
+  // Grouping splits the grid by item_id when there are multiple items
+  // contributing photos — gated to the multi-item scenario via the toggle
+  // visibility below.
+  const [sortOrder, setSortOrder] = useState<'newest' | 'oldest' | 'name'>('newest');
+  const [groupByItem, setGroupByItem] = useState(false);
   // Session 74: `setPrimaryPhoto` is still exported by usePhotos for
   // interface compatibility but no longer consumed here — the "Make
   // Primary" feature was removed from the UI.
@@ -118,10 +126,76 @@ export function PhotoGallery({
   // Filtered list respects the source-entity sub-tab. When filtering is
   // disabled or set to 'all', this is the raw photos list (referentially
   // stable so no extra renders).
-  const filteredPhotos = useMemo(() => {
+  const filteredPhotosRaw = useMemo(() => {
     if (!enableSourceFilter || sourceFilter === 'all' || sourceFilter === '') return photos;
     return photos.filter(p => String(p.entity_type ?? '') === sourceFilter);
   }, [photos, enableSourceFilter, sourceFilter]);
+
+  // v2026-05-14 — Sort applied on top of the filtered list. usePhotos returns
+  // rows ordered by is_primary DESC then created_at ASC; we preserve the
+  // is_primary lead but sort the rest per the user's choice.
+  const filteredPhotos = useMemo(() => {
+    const arr = [...filteredPhotosRaw];
+    const primaries: Photo[] = [];
+    const rest: Photo[] = [];
+    for (const p of arr) (p.is_primary ? primaries : rest).push(p);
+    if (sortOrder === 'newest') {
+      rest.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+    } else if (sortOrder === 'oldest') {
+      rest.sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+    } else {
+      rest.sort((a, b) => (a.file_name || '').toLowerCase().localeCompare((b.file_name || '').toLowerCase()));
+    }
+    return [...primaries, ...rest];
+  }, [filteredPhotosRaw, sortOrder]);
+
+  // v2026-05-14 — Distinct item_ids contributing photos. Used to decide
+  // whether the "Group by item" toggle is meaningful and to drive the
+  // grouped render below.
+  const distinctItemIds = useMemo(() => {
+    const s = new Set<string>();
+    for (const p of filteredPhotos) {
+      const iid = p.item_id ?? '';
+      if (iid) s.add(iid);
+    }
+    return s;
+  }, [filteredPhotos]);
+
+  // Show the grouping toggle only when there's a real choice to make
+  // (≥2 distinct items contributing photos). The single-item case has
+  // nothing to group, so we keep the UI uncluttered.
+  const canGroupByItem = distinctItemIds.size >= 2;
+
+  // Build ordered groups when groupByItem is active. Each group preserves
+  // the sort order applied above. Photos missing item_id fall into a
+  // final "Unassigned" bucket so legacy uploads stay visible.
+  const groupedPhotos = useMemo(() => {
+    if (!groupByItem || !canGroupByItem) return null;
+    const byItem = new Map<string, Photo[]>();
+    const unassigned: Photo[] = [];
+    for (const p of filteredPhotos) {
+      const iid = p.item_id ?? '';
+      if (!iid) { unassigned.push(p); continue; }
+      const existing = byItem.get(iid);
+      if (existing) existing.push(p);
+      else byItem.set(iid, [p]);
+    }
+    const groups: Array<{ key: string; label: string; photos: Photo[] }> = [];
+    // Preserve first-seen-in-list order — typically that's the primary's
+    // item first, which is what staff usually expects.
+    const seenOrder: string[] = [];
+    for (const p of filteredPhotos) {
+      const iid = p.item_id ?? '';
+      if (!iid) continue;
+      if (!seenOrder.includes(iid)) seenOrder.push(iid);
+    }
+    for (const iid of seenOrder) {
+      const photos = byItem.get(iid);
+      if (photos) groups.push({ key: iid, label: iid, photos });
+    }
+    if (unassigned.length > 0) groups.push({ key: '__unassigned__', label: 'Unassigned', photos: unassigned });
+    return groups;
+  }, [filteredPhotos, groupByItem, canGroupByItem]);
 
   // Resolve the upload target based on the active source-filter sub-tab.
   // - 'all' or filter matching the host entity → upload to the host entity.
@@ -279,10 +353,102 @@ export function PhotoGallery({
         />
       )}
 
-      {/* Grid */}
+      {/* v2026-05-14 — Sort + Group controls. Sort always available when
+          there are ≥2 photos; group only when ≥2 distinct items contribute
+          photos (otherwise grouping is a no-op). Kept minimal — small chip-
+          style controls anchored right so they don't push the grid down on
+          single-photo views. */}
+      {filteredPhotos.length >= 2 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
+          <label
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 4,
+              fontSize: 11, color: theme.v2.colors.textSecondary,
+              background: '#fff', border: `1px solid ${theme.v2.colors.border}`,
+              borderRadius: 8, padding: '4px 8px',
+            }}
+          >
+            <ArrowDownAZ size={12} />
+            <select
+              value={sortOrder}
+              onChange={e => setSortOrder(e.target.value as 'newest' | 'oldest' | 'name')}
+              style={{
+                border: 'none', outline: 'none', background: 'transparent',
+                fontSize: 11, fontFamily: 'inherit', color: theme.v2.colors.text,
+                cursor: 'pointer',
+              }}
+            >
+              <option value="newest">Newest first</option>
+              <option value="oldest">Oldest first</option>
+              <option value="name">Filename A–Z</option>
+            </select>
+          </label>
+          {canGroupByItem && (
+            <button
+              type="button"
+              onClick={() => setGroupByItem(g => !g)}
+              title={groupByItem ? 'Show one combined grid' : 'Group photos by item ID'}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 4,
+                fontSize: 11, fontWeight: 600,
+                color: groupByItem ? '#fff' : theme.v2.colors.textSecondary,
+                background: groupByItem ? theme.v2.colors.accent : '#fff',
+                border: `1px solid ${groupByItem ? theme.v2.colors.accent : theme.v2.colors.border}`,
+                borderRadius: 8, padding: '4px 10px', cursor: 'pointer',
+                fontFamily: 'inherit',
+              }}
+            >
+              <Package size={12} /> Group by item
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Grid — single grid when ungrouped, or one grid per item group when
+          groupByItem is active. Each group gets a small header with the
+          item ID + count. Lightbox indices stay aligned with filteredPhotos
+          so arrow navigation walks the same ordered list whether grouping
+          is on or off. */}
       {loading && filteredPhotos.length === 0 && photos.length === 0 ? (
         <div style={{ padding: 24, textAlign: 'center', color: theme.v2.colors.textMuted, fontSize: 12 }}>
           Loading photos…
+        </div>
+      ) : groupedPhotos ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {groupedPhotos.map(group => (
+            <div key={group.key}>
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 6,
+                fontSize: 11, fontWeight: 600, color: theme.v2.colors.textSecondary,
+                textTransform: 'uppercase', letterSpacing: '0.05em',
+                marginBottom: 6,
+              }}>
+                <Package size={11} />
+                <span style={{ fontFamily: 'monospace', textTransform: 'none', letterSpacing: 0, color: theme.v2.colors.text }}>{group.label}</span>
+                <span style={{
+                  fontSize: 10, padding: '1px 6px', borderRadius: 99,
+                  background: theme.v2.colors.bgCard, color: theme.v2.colors.textMuted,
+                  letterSpacing: 0,
+                }}>{group.photos.length}</span>
+              </div>
+              <PhotoGrid
+                photos={group.photos}
+                compact={compact}
+                onPhotoClick={(p) => {
+                  // Map back to the flat filteredPhotos index so the lightbox
+                  // walks the full ordered list, not just the active group.
+                  const idx = filteredPhotos.findIndex(x => x.id === p.id);
+                  setLightboxIndex(idx >= 0 ? idx : null);
+                }}
+                onToggleAttention={readOnly ? undefined : (p: Photo, next: boolean) => toggleNeedsAttention(p.id, next)}
+                onToggleRepair={readOnly ? undefined : (p: Photo, next: boolean) => toggleRepair(p.id, next)}
+                onDelete={readOnly ? undefined : (p: Photo) => deletePhoto(p.id)}
+                selectionMode={selectionMode}
+                selectedIds={selectedIds}
+                onToggleSelect={toggleSelect}
+              />
+            </div>
+          ))}
         </div>
       ) : (
         <PhotoGrid

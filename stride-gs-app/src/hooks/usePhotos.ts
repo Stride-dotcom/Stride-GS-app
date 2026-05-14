@@ -25,6 +25,10 @@ export interface Photo {
   tenant_id: string;
   entity_type: EntityType;
   entity_id: string;
+  /** Parent inventory item ID — stamped on every upload since v38.93.0 so
+   *  cross-entity rollups by item work. Older rows uploaded before that
+   *  release may be null. */
+  item_id: string | null;
   storage_key: string;
   storage_url: string | null;
   thumbnail_key: string | null;
