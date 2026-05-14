@@ -39,8 +39,12 @@ export interface PhotoShare {
   shareId: string;
   entityType: EntityType;
   entityId: string;
-  tenantId: string;
+  /** Nullable on dt_order shares for public-form orders with no tenant. */
+  tenantId: string | null;
   photoIds: string[];
+  /** Optional curated document set — non-empty on dt_order attachment
+   *  shares created by the dt-push-order edge function (v23+). */
+  docIds: string[];
   entityContext: EntityShareContext;
   title: string | null;
   createdBy: string | null;
@@ -55,8 +59,9 @@ interface ShareRow {
   share_id: string;
   entity_type: string;
   entity_id: string;
-  tenant_id: string;
+  tenant_id: string | null;
   photo_ids: string[];
+  doc_ids: string[] | null;
   entity_context: EntityShareContext | null;
   title: string | null;
   created_by: string | null;
@@ -74,6 +79,7 @@ function rowToShare(row: ShareRow): PhotoShare {
     entityId: row.entity_id,
     tenantId: row.tenant_id,
     photoIds: row.photo_ids,
+    docIds: row.doc_ids ?? [],
     entityContext: row.entity_context ?? { label: row.entity_id },
     title: row.title,
     createdBy: row.created_by,

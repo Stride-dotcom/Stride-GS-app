@@ -1,18 +1,22 @@
 /**
- * PublicPhotoGallery — no-auth shareable photo gallery page.
+ * PublicPhotoGallery — no-auth shareable attachment gallery page.
  *
- * Rendered directly from App.tsx when the URL hash matches
- * #/shared/photos/:shareId — bypasses the auth gate entirely. The
- * page uses the Supabase anon key, which the photo_shares /
- * item_photos / storage RLS policies allow for active, non-expired
- * shares (see migration 20260426120000_photo_shares.sql).
+ * Rendered directly from App.tsx when the URL hash matches either of
+ *   #/shared/attachments/:shareId   (canonical — photos + docs)
+ *   #/shared/photos/:shareId        (legacy alias — photos-only links)
+ * Bypasses the auth gate entirely. The page uses the Supabase anon
+ * key, which the photo_shares / item_photos / documents / storage
+ * RLS policies allow for active, non-expired shares (see migrations
+ * 20260426120000_photo_shares.sql + 20260514120000_attachment_shares.sql).
  *
- * Header info is read straight from photo_shares.entity_context (a
- * snapshot taken at share-creation time) so the public page never
- * needs to query inventory_cache, shipments, etc.
+ * Header info is read from photo_shares.entity_context (a snapshot
+ * taken at share-creation time) so the public page never needs to
+ * query inventory_cache, shipments, dt_orders, etc.
  */
 import { useEffect, useMemo, useState } from 'react';
-import { ImageIcon, AlertTriangle, Wrench, Loader2 } from 'lucide-react';
+import {
+  ImageIcon, AlertTriangle, Wrench, Loader2, FileText, Download, Paperclip,
+} from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import {
   fetchPublicPhotoShare,
@@ -23,8 +27,29 @@ import { PhotoGrid } from '../components/media/PhotoGrid';
 import { PhotoLightbox } from '../components/media/PhotoLightbox';
 import type { Photo } from '../hooks/usePhotos';
 
-const BUCKET = 'photos';
+const PHOTOS_BUCKET = 'photos';
+const DOCS_BUCKET = 'documents';
 const SIGNED_URL_TTL = 60 * 60; // 1 hour — page refresh re-mints
+
+interface SharedDoc {
+  id: string;
+  storage_key: string;
+  file_name: string | null;
+  mime_type: string | null;
+  file_size: number | null;
+  page_count: number | null;
+  created_at: string;
+  uploaded_by_name: string | null;
+  signed_url?: string;
+}
+
+function formatBytes(bytes: number | null): string {
+  if (!bytes || bytes < 0) return '';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
 
 interface Props {
   shareId: string;
@@ -33,6 +58,13 @@ interface Props {
 export function PublicPhotoGallery({ shareId }: Props) {
   const [share, setShare] = useState<PhotoShare | null | undefined>(undefined); // undefined = loading
   const [photos, setPhotos] = useState<Photo[]>([]);
+  const [docs, setDocs] = useState<SharedDoc[]>([]);
+  // Loaded flags differentiate "haven't fetched yet" from "fetched and
+  // got nothing back" — without these the docs section can show
+  // "Loading documents…" forever when anon RLS legitimately returns
+  // zero rows (e.g. every referenced doc was soft-deleted).
+  const [photosLoaded, setPhotosLoaded] = useState(false);
+  const [docsLoaded, setDocsLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
 
@@ -40,6 +72,9 @@ export function PublicPhotoGallery({ shareId }: Props) {
     let cancelled = false;
     setShare(undefined);
     setPhotos([]);
+    setDocs([]);
+    setPhotosLoaded(false);
+    setDocsLoaded(false);
     setError(null);
 
     (async () => {
@@ -51,63 +86,17 @@ export function PublicPhotoGallery({ shareId }: Props) {
       }
       setShare(s);
 
-      // Load the photo rows whose ids are in the share, then mint signed
-      // URLs for both originals + thumbnails. Same shape as usePhotos's
-      // refetch — kept inline here so the public page has zero dependency
-      // on the auth-aware hook.
-      try {
-        // Explicit column list — the anon role only has SELECT on the
-        // public-safe subset (see migration
-        // 20260426130000_photo_shares_narrow_anon_columns.sql). `select('*')`
-        // would 401 on the restricted columns.
-        const { data, error: err } = await supabase
-          .from('item_photos')
-          .select('id, storage_key, thumbnail_key, file_name, photo_type, needs_attention, is_repair, created_at, uploaded_by_name')
-          .in('id', s.photoIds);
-        if (cancelled) return;
-        if (err) {
-          setError(err.message);
-          return;
-        }
-        const rows = ((data || []) as Photo[]).slice();
-        // Preserve the order the sharer chose so the gallery doesn't shuffle
-        // by created_at — the shared link should feel curated, not random.
-        const orderIdx: Record<string, number> = {};
-        s.photoIds.forEach((id, i) => { orderIdx[id] = i; });
-        rows.sort((a, b) => (orderIdx[a.id] ?? 0) - (orderIdx[b.id] ?? 0));
-
-        const originalKeys = rows.map(r => r.storage_key).filter(Boolean);
-        const thumbKeys = rows.map(r => r.thumbnail_key).filter((k): k is string => !!k);
-        const [origSigned, thumbSigned] = await Promise.all([
-          originalKeys.length
-            ? supabase.storage.from(BUCKET).createSignedUrls(originalKeys, SIGNED_URL_TTL)
-            : Promise.resolve({ data: [] as Array<{ path: string | null; signedUrl: string }>, error: null }),
-          thumbKeys.length
-            ? supabase.storage.from(BUCKET).createSignedUrls(thumbKeys, SIGNED_URL_TTL)
-            : Promise.resolve({ data: [] as Array<{ path: string | null; signedUrl: string }>, error: null }),
-        ]);
-        const origMap: Record<string, string> = {};
-        for (const item of origSigned.data || []) {
-          if (item.path && item.signedUrl) origMap[item.path] = item.signedUrl;
-        }
-        const thumbMap: Record<string, string> = {};
-        for (const item of thumbSigned.data || []) {
-          if (item.path && item.signedUrl) thumbMap[item.path] = item.signedUrl;
-        }
-        for (const r of rows) {
-          const oSigned = origMap[r.storage_key];
-          if (oSigned) r.storage_url = oSigned;
-          if (r.thumbnail_key) {
-            const tSigned = thumbMap[r.thumbnail_key];
-            if (tSigned) r.thumbnail_url = tSigned;
-          } else if (oSigned) {
-            r.thumbnail_url = oSigned;
-          }
-        }
-        if (!cancelled) setPhotos(rows);
-      } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load photos');
-      }
+      // Load photos + docs in parallel. Each side is independent — a
+      // failure on one shouldn't blank out the other, so errors are
+      // collected and surfaced inline rather than thrown.
+      await Promise.all([
+        loadPhotos(s, () => cancelled, setPhotos, setError).finally(() => {
+          if (!cancelled) setPhotosLoaded(true);
+        }),
+        loadDocs(s, () => cancelled, setDocs, setError).finally(() => {
+          if (!cancelled) setDocsLoaded(true);
+        }),
+      ]);
     })();
 
     return () => { cancelled = true; };
@@ -117,6 +106,15 @@ export function PublicPhotoGallery({ shareId }: Props) {
     () => share?.entityContext ?? null,
     [share],
   );
+
+  const hasPhotos = (share?.photoIds.length ?? 0) > 0;
+  const hasDocs   = (share?.docIds.length ?? 0) > 0;
+  const headerLabel = hasPhotos && hasDocs ? 'Shared attachments'
+    : hasDocs ? 'Shared documents'
+    : 'Shared photos';
+  const HeaderIcon = hasPhotos && hasDocs ? Paperclip
+    : hasDocs ? FileText
+    : ImageIcon;
 
   // ── Render states ────────────────────────────────────────────────────
   if (share === undefined) {
@@ -156,7 +154,7 @@ export function PublicPhotoGallery({ shareId }: Props) {
             letterSpacing: '0.12em', textTransform: 'uppercase',
             marginBottom: 6,
           }}>
-            <ImageIcon size={14} /> Shared photos
+            <HeaderIcon size={14} /> {headerLabel}
           </div>
           <h1 style={{
             margin: 0, fontSize: 24, fontWeight: 700,
@@ -219,23 +217,108 @@ export function PublicPhotoGallery({ shareId }: Props) {
           }}>{error}</div>
         )}
 
-        {photos.length === 0 && !error ? (
+        {hasPhotos && (
+          !photosLoaded ? (
+            <div style={{
+              background: '#fff', border: '1px solid #E5E7EB', borderRadius: 12,
+              padding: '40px 20px', textAlign: 'center', color: '#6B7280', fontSize: 13,
+            }}>Loading photos…</div>
+          ) : photos.length === 0 ? (
+            <div style={{
+              background: '#fff', border: '1px solid #E5E7EB', borderRadius: 12,
+              padding: '40px 20px', textAlign: 'center', color: '#6B7280', fontSize: 13,
+            }}>No photos available.</div>
+          ) : (
+            <PhotoGrid
+              photos={photos}
+              onPhotoClick={(_, i) => setLightboxIndex(i)}
+            />
+          )
+        )}
+
+        {hasDocs && (
+          <section style={{ marginTop: hasPhotos ? 32 : 0 }}>
+            <div style={{
+              fontSize: 11, fontWeight: 700, color: '#6B7280',
+              letterSpacing: '0.12em', textTransform: 'uppercase',
+              marginBottom: 10,
+            }}>Documents</div>
+            {!docsLoaded ? (
+              <div style={{
+                background: '#fff', border: '1px solid #E5E7EB', borderRadius: 12,
+                padding: '24px 20px', textAlign: 'center', color: '#6B7280', fontSize: 13,
+              }}>Loading documents…</div>
+            ) : docs.length === 0 ? (
+              <div style={{
+                background: '#fff', border: '1px solid #E5E7EB', borderRadius: 12,
+                padding: '24px 20px', textAlign: 'center', color: '#6B7280', fontSize: 13,
+              }}>No documents available.</div>
+            ) : (
+              <ul style={{
+                listStyle: 'none', margin: 0, padding: 0,
+                background: '#fff', border: '1px solid #E5E7EB', borderRadius: 12,
+                overflow: 'hidden',
+              }}>
+                {docs.map((d, i) => (
+                  <li key={d.id} style={{
+                    display: 'flex', alignItems: 'center', gap: 12,
+                    padding: '12px 16px',
+                    borderTop: i === 0 ? 'none' : '1px solid #F3F4F6',
+                  }}>
+                    <FileText size={20} color="#6B7280" style={{ flexShrink: 0 }} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{
+                        fontSize: 14, fontWeight: 600, color: '#1F2937',
+                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      }}>{d.file_name || 'Document'}</div>
+                      <div style={{ fontSize: 11, color: '#9CA3AF', marginTop: 2 }}>
+                        {[
+                          d.mime_type,
+                          formatBytes(d.file_size),
+                          d.page_count ? `${d.page_count} page${d.page_count === 1 ? '' : 's'}` : null,
+                        ].filter(Boolean).join(' • ')}
+                      </div>
+                    </div>
+                    {d.signed_url ? (
+                      <a
+                        href={d.signed_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        download={d.file_name || undefined}
+                        style={{
+                          display: 'inline-flex', alignItems: 'center', gap: 6,
+                          background: '#E85D2D', color: '#fff',
+                          padding: '6px 12px', borderRadius: 6,
+                          fontSize: 12, fontWeight: 600, textDecoration: 'none',
+                          flexShrink: 0,
+                        }}
+                      >
+                        <Download size={13} /> Open
+                      </a>
+                    ) : (
+                      <span style={{ fontSize: 11, color: '#9CA3AF', flexShrink: 0 }}>
+                        <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />
+                      </span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        )}
+
+        {!hasPhotos && !hasDocs && !error && (
           <div style={{
             background: '#fff', border: '1px solid #E5E7EB', borderRadius: 12,
             padding: '40px 20px', textAlign: 'center', color: '#6B7280', fontSize: 13,
-          }}>Loading photos…</div>
-        ) : (
-          <PhotoGrid
-            photos={photos}
-            onPhotoClick={(_, i) => setLightboxIndex(i)}
-          />
+          }}>No attachments in this share.</div>
         )}
 
         <footer style={{
           marginTop: 32, padding: '16px 0',
           fontSize: 11, color: '#9CA3AF', textAlign: 'center',
         }}>
-          Right-click a photo to download. Powered by Stride Logistics.
+          {hasPhotos && 'Right-click a photo to download. '}Powered by Stride Logistics.
         </footer>
       </main>
 
@@ -249,6 +332,109 @@ export function PublicPhotoGallery({ shareId }: Props) {
       )}
     </div>
   );
+}
+
+// ── Data loaders (extracted so the effect stays readable) ────────────
+// Both are no-ops when the share carries an empty id list, which is
+// the common case for photos-only or docs-only shares.
+
+async function loadPhotos(
+  s: PhotoShare,
+  isCancelled: () => boolean,
+  setPhotos: (p: Photo[]) => void,
+  setError: (e: string | null) => void,
+): Promise<void> {
+  if (s.photoIds.length === 0) return;
+  try {
+    // Explicit column list — anon role has SELECT on a narrow subset
+    // only (migration 20260426130000). select('*') would 401.
+    const { data, error: err } = await supabase
+      .from('item_photos')
+      .select('id, storage_key, thumbnail_key, file_name, photo_type, needs_attention, is_repair, created_at, uploaded_by_name')
+      .in('id', s.photoIds);
+    if (isCancelled()) return;
+    if (err) { setError(err.message); return; }
+    const rows = ((data || []) as Photo[]).slice();
+    // Preserve the curator's chosen order — don't shuffle by created_at.
+    const orderIdx: Record<string, number> = {};
+    s.photoIds.forEach((id, i) => { orderIdx[id] = i; });
+    rows.sort((a, b) => (orderIdx[a.id] ?? 0) - (orderIdx[b.id] ?? 0));
+
+    const originalKeys = rows.map(r => r.storage_key).filter(Boolean);
+    const thumbKeys = rows.map(r => r.thumbnail_key).filter((k): k is string => !!k);
+    const [origSigned, thumbSigned] = await Promise.all([
+      originalKeys.length
+        ? supabase.storage.from(PHOTOS_BUCKET).createSignedUrls(originalKeys, SIGNED_URL_TTL)
+        : Promise.resolve({ data: [] as Array<{ path: string | null; signedUrl: string }>, error: null }),
+      thumbKeys.length
+        ? supabase.storage.from(PHOTOS_BUCKET).createSignedUrls(thumbKeys, SIGNED_URL_TTL)
+        : Promise.resolve({ data: [] as Array<{ path: string | null; signedUrl: string }>, error: null }),
+    ]);
+    const origMap: Record<string, string> = {};
+    for (const item of origSigned.data || []) {
+      if (item.path && item.signedUrl) origMap[item.path] = item.signedUrl;
+    }
+    const thumbMap: Record<string, string> = {};
+    for (const item of thumbSigned.data || []) {
+      if (item.path && item.signedUrl) thumbMap[item.path] = item.signedUrl;
+    }
+    for (const r of rows) {
+      const oSigned = origMap[r.storage_key];
+      if (oSigned) r.storage_url = oSigned;
+      if (r.thumbnail_key) {
+        const tSigned = thumbMap[r.thumbnail_key];
+        if (tSigned) r.thumbnail_url = tSigned;
+      } else if (oSigned) {
+        r.thumbnail_url = oSigned;
+      }
+    }
+    if (!isCancelled()) setPhotos(rows);
+  } catch (e) {
+    if (!isCancelled()) setError(e instanceof Error ? e.message : 'Failed to load photos');
+  }
+}
+
+async function loadDocs(
+  s: PhotoShare,
+  isCancelled: () => boolean,
+  setDocs: (d: SharedDoc[]) => void,
+  setError: (e: string | null) => void,
+): Promise<void> {
+  if (s.docIds.length === 0) return;
+  try {
+    // Narrow column set matches the anon GRANT in
+    // 20260514120000_attachment_shares.sql.
+    const { data, error: err } = await supabase
+      .from('documents')
+      .select('id, storage_key, file_name, mime_type, file_size, page_count, created_at, uploaded_by_name')
+      .in('id', s.docIds);
+    if (isCancelled()) return;
+    if (err) { setError(err.message); return; }
+    const rows = ((data || []) as SharedDoc[]).slice();
+    // Preserve the order the share was built with (push-order's
+    // chronological list of attachments).
+    const orderIdx: Record<string, number> = {};
+    s.docIds.forEach((id, i) => { orderIdx[id] = i; });
+    rows.sort((a, b) => (orderIdx[a.id] ?? 0) - (orderIdx[b.id] ?? 0));
+
+    const keys = rows.map(r => r.storage_key).filter(Boolean);
+    if (keys.length > 0) {
+      const { data: signed } = await supabase.storage
+        .from(DOCS_BUCKET)
+        .createSignedUrls(keys, SIGNED_URL_TTL);
+      const urlMap: Record<string, string> = {};
+      for (const item of signed || []) {
+        if (item.path && item.signedUrl) urlMap[item.path] = item.signedUrl;
+      }
+      for (const r of rows) {
+        const u = urlMap[r.storage_key];
+        if (u) r.signed_url = u;
+      }
+    }
+    if (!isCancelled()) setDocs(rows);
+  } catch (e) {
+    if (!isCancelled()) setError(e instanceof Error ? e.message : 'Failed to load documents');
+  }
 }
 
 function legendStyle(color: string): React.CSSProperties {
