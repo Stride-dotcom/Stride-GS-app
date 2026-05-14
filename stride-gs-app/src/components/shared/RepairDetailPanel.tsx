@@ -179,9 +179,15 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
         const list = taxRes.data as TaxArea[];
         setTaxAreas(list);
         // If the repair didn't carry a tax area selection (new quote) and
-        // we have areas, pick the first one as a sensible default — admin
-        // can switch before sending.
-        if (!taxAreaId && list.length > 0) setTaxAreaId(list[0].id);
+        // we have areas, default to Kent (Stride's home tax jurisdiction —
+        // CLAUDE.md owner-loc is "Stride Logistics, Kent WA"; the warehouse
+        // physically performs repairs there, so Kent's rate applies to most
+        // repair quotes unless staff explicitly switch). Fall back to the
+        // first listed area if Kent isn't in the catalog for some reason.
+        if (!taxAreaId && list.length > 0) {
+          const kent = list.find(a => a.name.trim().toLowerCase() === 'kent');
+          setTaxAreaId(kent?.id ?? list[0].id);
+        }
       }
     })();
     return () => { cancelled = true; };
