@@ -19,7 +19,7 @@
  * Any of the three blocks can be omitted.
  */
 import { useState, useMemo } from 'react';
-import { ChevronDown, ChevronRight, ImageIcon, FileText, StickyNote } from 'lucide-react';
+import { ChevronDown, ChevronRight, ImageIcon, FileText, StickyNote, ArrowDownAZ, Package } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { PhotoGallery } from '../media/PhotoGallery';
 import { DocumentList } from '../media/DocumentList';
@@ -516,6 +516,168 @@ function PinnedSystemNote({ label, text }: { label: string; text: string }) {
 }
 
 /**
+ * v2026-05-14 — Reusable sort + group controls for note rollup views.
+ * Returns the sorted/grouped list ready for render. Group toggle is
+ * suppressed when fewer than two distinct items contribute notes, so
+ * the control only appears when grouping is actually useful.
+ */
+function useSortedGroupedNotes(notes: EntityNote[]): {
+  sortOrder: 'newest' | 'oldest';
+  setSortOrder: (v: 'newest' | 'oldest') => void;
+  groupByItem: boolean;
+  setGroupByItem: (v: boolean) => void;
+  canGroupByItem: boolean;
+  sortedNotes: EntityNote[];
+  groupedNotes: Array<{ key: string; label: string; notes: EntityNote[] }> | null;
+} {
+  const [sortOrder, setSortOrder] = useState<'newest' | 'oldest'>('newest');
+  const [groupByItem, setGroupByItem] = useState(false);
+
+  const sortedNotes = useMemo(() => {
+    const arr = [...notes];
+    if (sortOrder === 'newest') {
+      arr.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+    } else {
+      arr.sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''));
+    }
+    return arr;
+  }, [notes, sortOrder]);
+
+  const canGroupByItem = useMemo(() => {
+    const s = new Set<string>();
+    for (const n of sortedNotes) if (n.itemId) s.add(n.itemId);
+    return s.size >= 2;
+  }, [sortedNotes]);
+
+  const groupedNotes = useMemo(() => {
+    if (!groupByItem || !canGroupByItem) return null;
+    const byItem = new Map<string, EntityNote[]>();
+    const unassigned: EntityNote[] = [];
+    const seenOrder: string[] = [];
+    for (const n of sortedNotes) {
+      if (!n.itemId) { unassigned.push(n); continue; }
+      const existing = byItem.get(n.itemId);
+      if (existing) existing.push(n);
+      else { byItem.set(n.itemId, [n]); seenOrder.push(n.itemId); }
+    }
+    const groups: Array<{ key: string; label: string; notes: EntityNote[] }> = [];
+    for (const iid of seenOrder) {
+      const arr = byItem.get(iid);
+      if (arr) groups.push({ key: iid, label: iid, notes: arr });
+    }
+    if (unassigned.length > 0) groups.push({ key: '__unassigned__', label: 'Unassigned', notes: unassigned });
+    return groups;
+  }, [sortedNotes, groupByItem, canGroupByItem]);
+
+  return { sortOrder, setSortOrder, groupByItem, setGroupByItem, canGroupByItem, sortedNotes, groupedNotes };
+}
+
+/**
+ * Renders the sort + group control bar. Only renders when there are ≥2 notes
+ * (so the controls aren't noise on empty / single-note views).
+ */
+function NoteSortGroupControls({
+  visible, sortOrder, setSortOrder, groupByItem, setGroupByItem, canGroupByItem,
+}: {
+  visible: boolean;
+  sortOrder: 'newest' | 'oldest';
+  setSortOrder: (v: 'newest' | 'oldest') => void;
+  groupByItem: boolean;
+  setGroupByItem: (v: boolean) => void;
+  canGroupByItem: boolean;
+}) {
+  if (!visible) return null;
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+      <label
+        style={{
+          display: 'inline-flex', alignItems: 'center', gap: 4,
+          fontSize: 11, color: theme.v2.colors.textSecondary,
+          background: '#fff', border: `1px solid ${theme.v2.colors.border}`,
+          borderRadius: 8, padding: '4px 8px',
+        }}
+      >
+        <ArrowDownAZ size={12} />
+        <select
+          value={sortOrder}
+          onChange={e => setSortOrder(e.target.value as 'newest' | 'oldest')}
+          style={{
+            border: 'none', outline: 'none', background: 'transparent',
+            fontSize: 11, fontFamily: 'inherit', color: theme.v2.colors.text,
+            cursor: 'pointer',
+          }}
+        >
+          <option value="newest">Newest first</option>
+          <option value="oldest">Oldest first</option>
+        </select>
+      </label>
+      {canGroupByItem && (
+        <button
+          type="button"
+          onClick={() => setGroupByItem(!groupByItem)}
+          title={groupByItem ? 'Show one combined timeline' : 'Group notes by item ID'}
+          style={{
+            display: 'inline-flex', alignItems: 'center', gap: 4,
+            fontSize: 11, fontWeight: 600,
+            color: groupByItem ? '#fff' : theme.v2.colors.textSecondary,
+            background: groupByItem ? theme.v2.colors.accent : '#fff',
+            border: `1px solid ${groupByItem ? theme.v2.colors.accent : theme.v2.colors.border}`,
+            borderRadius: 8, padding: '4px 10px', cursor: 'pointer',
+            fontFamily: 'inherit',
+          }}
+        >
+          <Package size={12} /> Group by item
+        </button>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Renders notes as a flat list or a list of per-item groups, depending on
+ * which one is provided. Hands the row to RollupNoteRow either way.
+ */
+function NoteListBody({
+  groupedNotes, sortedNotes,
+}: {
+  groupedNotes: Array<{ key: string; label: string; notes: EntityNote[] }> | null;
+  sortedNotes: EntityNote[];
+}) {
+  if (groupedNotes) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {groupedNotes.map(g => (
+          <div key={g.key}>
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 6,
+              fontSize: 11, fontWeight: 600, color: theme.v2.colors.textSecondary,
+              textTransform: 'uppercase', letterSpacing: '0.05em',
+              marginBottom: 6,
+            }}>
+              <Package size={11} />
+              <span style={{ fontFamily: 'monospace', textTransform: 'none', letterSpacing: 0, color: theme.v2.colors.text }}>{g.label}</span>
+              <span style={{
+                fontSize: 10, padding: '1px 6px', borderRadius: 99,
+                background: theme.v2.colors.bgCard, color: theme.v2.colors.textMuted,
+                letterSpacing: 0,
+              }}>{g.notes.length}</span>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {g.notes.map(n => <RollupNoteRow key={n.id} note={n} />)}
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  }
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      {sortedNotes.map(n => <RollupNoteRow key={n.id} note={n} />)}
+    </div>
+  );
+}
+
+/**
  * NotesRollupView — read view for cross-entity rollup + composer that writes
  * to the primary entity. Loads every entity_notes row with item_id=itemId,
  * shows source sub-tabs (All / Item / Task / Repair / ...), and renders a
@@ -542,6 +704,7 @@ function NotesRollupView({
     () => (filter === 'all' ? rolled : rolled.filter(n => n.entityType === filter)),
     [rolled, filter],
   );
+  const sortGroup = useSortedGroupedNotes(visible);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -556,6 +719,15 @@ function NotesRollupView({
         />
       )}
 
+      <NoteSortGroupControls
+        visible={visible.length >= 2}
+        sortOrder={sortGroup.sortOrder}
+        setSortOrder={sortGroup.setSortOrder}
+        groupByItem={sortGroup.groupByItem}
+        setGroupByItem={sortGroup.setGroupByItem}
+        canGroupByItem={sortGroup.canGroupByItem}
+      />
+
       {rollupLoading && rolled.length === 0 ? (
         <div style={{ fontSize: 12, color: theme.colors.textMuted, padding: '12px 0' }}>
           Loading notes…
@@ -567,9 +739,7 @@ function NotesRollupView({
             : `No ${ENTITY_LABEL[filter] ?? filter} notes for this item.`}
         </div>
       ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {visible.map(n => <RollupNoteRow key={n.id} note={n} />)}
-        </div>
+        <NoteListBody groupedNotes={sortGroup.groupedNotes} sortedNotes={sortGroup.sortedNotes} />
       )}
 
       {/* Composer — always posts to the primary entity. useEntityNotes stamps
@@ -617,6 +787,7 @@ function NotesGraphRollupView({
     () => (filter === 'all' ? rolled : rolled.filter(n => n.entityType === filter)),
     [rolled, filter],
   );
+  const sortGroup = useSortedGroupedNotes(visible);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -625,6 +796,15 @@ function NotesGraphRollupView({
         activeType={filter}
         onChange={setFilter}
         variant="note"
+      />
+
+      <NoteSortGroupControls
+        visible={visible.length >= 2}
+        sortOrder={sortGroup.sortOrder}
+        setSortOrder={sortGroup.setSortOrder}
+        groupByItem={sortGroup.groupByItem}
+        setGroupByItem={sortGroup.setGroupByItem}
+        canGroupByItem={sortGroup.canGroupByItem}
       />
 
       {rollupLoading && rolled.length === 0 ? (
@@ -638,9 +818,7 @@ function NotesGraphRollupView({
             : `No ${ENTITY_LABEL[filter] ?? filter} notes here.`}
         </div>
       ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {visible.map(n => <RollupNoteRow key={n.id} note={n} />)}
-        </div>
+        <NoteListBody groupedNotes={sortGroup.groupedNotes} sortedNotes={sortGroup.sortedNotes} />
       )}
 
       <div style={{ borderTop: `1px solid ${theme.colors.border}`, paddingTop: 12, marginTop: 4 }}>
