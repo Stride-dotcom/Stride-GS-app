@@ -3417,6 +3417,44 @@ export async function postCompleteRepairSb(
   return data ?? { ok: false, error: 'no response body' };
 }
 
+// [MIGRATION-P3] SB-primary entry for re-quoting an existing repair.
+// Allowed only when status in ('Pending Quote', 'Quote Sent') — Approved /
+// In Progress / Complete / Cancelled / Declined are cancel-and-rebuild.
+// Atomic via RPC: delete existing repair_items + insert new + UPDATE
+// repairs (status='Pending Quote', clear quote_*, approved=false, new
+// primary item_id) + audit-log. After success, staff invokes the
+// standard sendRepairQuote flow to re-issue the customer-facing quote
+// email with the new item list.
+export interface ReQuoteRepairPayload {
+  tenantId: string;
+  repairId: string;
+  newItemIds: string[];
+  requestId?: string;
+}
+export interface ReQuoteRepairResponse {
+  ok: boolean;
+  repairId?: string;
+  itemCount?: number;
+  oldItemIds?: string[];
+  newItemIds?: string[];
+  previousStatus?: string;
+  mirrorOk?: boolean;
+  mirrorError?: string;
+  error?: string;
+  errorCode?: string;
+}
+export async function postReQuoteRepair(
+  payload: ReQuoteRepairPayload
+): Promise<ReQuoteRepairResponse> {
+  const { supabase } = await import('./supabase');
+  const { data, error } = await supabase.functions.invoke<ReQuoteRepairResponse>(
+    're-quote-repair',
+    { body: payload },
+  );
+  if (error) return { ok: false, error: error.message };
+  return data ?? { ok: false, error: 'no response body' };
+}
+
 // [MIGRATION-P3] SB-primary entry for respondToRepairQuote.
 // Approve → status='Approved', approved=true, REPAIR_APPROVED email.
 // Decline → status='Declined', REPAIR_DECLINED email.
