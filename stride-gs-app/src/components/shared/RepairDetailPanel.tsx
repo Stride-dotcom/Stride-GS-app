@@ -31,6 +31,7 @@ import { useIsMobile } from '../../hooks/useIsMobile';
 import { FloatingActionMenu, type FABAction } from './FloatingActionMenu';
 import { ClientAcceptAsIsAction } from '../notes/ClientAcceptAsIsAction';
 import { EntityNotesInline } from '../notes/EntityNotesInline';
+import { ReQuoteRepairModal } from './ReQuoteRepairModal';
 
 import type { Repair } from '../../lib/types';
 interface Props {
@@ -99,6 +100,9 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   const [repairNotes, setRepairNotes] = useState(repair.repairNotes || '');
   const [showResultPrompt, setShowResultPrompt] = useState<'fail' | null>(null);
   const [completed, setCompleted] = useState(false);
+  // v2026-05-14 — Edit Items modal (re-quote flow). Gated to Pending Quote /
+  // Quote Sent statuses below at the button render site.
+  const [showReQuoteModal, setShowReQuoteModal] = useState(false);
 
   // ─── Quote builder state (v38.120.0 multi-line) ──────────────────────────
   // The Quote Tool model (already established for ad-hoc customer quotes)
@@ -963,9 +967,25 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
                   <Package size={14} color={theme.colors.orange} />
                   <span style={{ fontSize: 12, fontWeight: 600 }}>Items</span>
                 </div>
-                <span style={{ fontSize: 11, color: theme.colors.textMuted }}>
-                  {repair.items.length} items
-                </span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <span style={{ fontSize: 11, color: theme.colors.textMuted }}>
+                    {repair.items.length} items
+                  </span>
+                  {(effectiveStatus === 'Pending Quote' || effectiveStatus === 'Quote Sent') && (
+                    <button
+                      onClick={() => setShowReQuoteModal(true)}
+                      title="Add or remove items — resets the quote so you can re-issue with the new list"
+                      style={{
+                        display: 'inline-flex', alignItems: 'center', gap: 4,
+                        padding: '3px 10px', borderRadius: 6,
+                        border: `1px solid ${theme.colors.borderDefault}`, background: '#fff',
+                        fontSize: 11, fontWeight: 600, color: theme.colors.textPrimary, cursor: 'pointer',
+                      }}
+                    >
+                      <Pencil size={11} /> Edit Items
+                    </button>
+                  )}
+                </div>
               </div>
               <div style={{ overflowX: 'auto' }}>
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
@@ -1008,7 +1028,23 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
               for single-item repairs this is the primary item view. */}
           {repair.itemId && (!repair.items || repair.items.length <= 1) && (
             <div style={{ background: theme.colors.bgSubtle, border: `1px solid ${theme.colors.border}`, borderRadius: 10, padding: 14, marginBottom: 16 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}><Package size={14} color={theme.colors.orange} /><span style={{ fontSize: 12, fontWeight: 600 }}>Item</span></div>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}><Package size={14} color={theme.colors.orange} /><span style={{ fontSize: 12, fontWeight: 600 }}>Item</span></div>
+                {(effectiveStatus === 'Pending Quote' || effectiveStatus === 'Quote Sent') && (
+                  <button
+                    onClick={() => setShowReQuoteModal(true)}
+                    title="Add more items to this repair — resets the quote so you can re-issue with the new list"
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 4,
+                      padding: '3px 10px', borderRadius: 6,
+                      border: `1px solid ${theme.colors.borderDefault}`, background: '#fff',
+                      fontSize: 11, fontWeight: 600, color: theme.colors.textPrimary, cursor: 'pointer',
+                    }}
+                  >
+                    <Pencil size={11} /> Edit Items
+                  </button>
+                )}
+              </div>
               <div style={{ fontSize: 13, fontWeight: 600, display: 'inline-flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
                 <DeepLink kind="inventory" id={repair.itemId} clientSheetId={repair.clientSheetId} />
                 <ItemIdBadges
@@ -2190,6 +2226,39 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
     </>
   );
 
+  // Build a shared ReQuoteRepairModal element so both render branches mount it identically.
+  const reQuoteModal = (showReQuoteModal && repair.clientSheetId) ? (
+    <ReQuoteRepairModal
+      tenantId={repair.clientSheetId}
+      repairId={repair.repairId}
+      currentItems={
+        (repair.items && repair.items.length > 0)
+          ? repair.items.map(it => ({
+              itemId: it.itemId,
+              description: it.description ?? null,
+              vendor: it.vendor ?? null,
+              sidemark: it.sidemark ?? null,
+              location: it.location ?? null,
+              status: null,
+            }))
+          : (repair.itemId ? [{
+              itemId: repair.itemId,
+              description: repair.description ?? null,
+              vendor: repair.vendor ?? null,
+              sidemark: repair.sidemark ?? null,
+              location: repair.location ?? null,
+              status: null,
+            }] : [])
+      }
+      onClose={() => setShowReQuoteModal(false)}
+      onSuccess={() => {
+        setShowReQuoteModal(false);
+        setEffectiveStatus('Pending Quote');
+        onRepairUpdated?.();
+      }}
+    />
+  ) : null;
+
   if (renderAsPage) {
     return (
       <>
@@ -2205,43 +2274,47 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
           footer={pageFooter}
         />
         <FloatingActionMenu show={isCompactViewport} actions={fabActions} />
+        {reQuoteModal}
       </>
     );
   }
 
   return (
-    <TabbedDetailPanel
-      title={repair.repairId}
-      clientName={repair.clientName}
-      sidemark={repair.sidemark}
-      idBadges={repair.itemId ? (
-        <ItemIdBadges
-          itemId={repair.itemId}
-          inspOpenItems={inspOpenItems}
-          inspDoneItems={inspDoneItems}
-          asmOpenItems={asmOpenItems}
-          asmDoneItems={asmDoneItems}
-          repairOpenItems={repairOpenItems}
-          repairDoneItems={repairDoneItems}
-          wcOpenItems={wcOpenItems}
-          wcDoneItems={wcDoneItems}
-        />
-      ) : undefined}
-      belowId={belowIdContent}
-      headerActions={headerActions}
-      statusStrip={statusStrip}
-      overlay={<ProcessingOverlay
-        visible={submitting}
-        message="Hold tight — saving your repair update"
-        subMessage="Updating the repair record and any linked billing. You can leave this open."
-      />}
-      tabs={tabs}
-      builtInTabs={builtInTabsCfg}
-      footer={footer}
-      onClose={onClose}
-      resizeKey="repair"
-      defaultWidth={460}
-    />
+    <>
+      <TabbedDetailPanel
+        title={repair.repairId}
+        clientName={repair.clientName}
+        sidemark={repair.sidemark}
+        idBadges={repair.itemId ? (
+          <ItemIdBadges
+            itemId={repair.itemId}
+            inspOpenItems={inspOpenItems}
+            inspDoneItems={inspDoneItems}
+            asmOpenItems={asmOpenItems}
+            asmDoneItems={asmDoneItems}
+            repairOpenItems={repairOpenItems}
+            repairDoneItems={repairDoneItems}
+            wcOpenItems={wcOpenItems}
+            wcDoneItems={wcDoneItems}
+          />
+        ) : undefined}
+        belowId={belowIdContent}
+        headerActions={headerActions}
+        statusStrip={statusStrip}
+        overlay={<ProcessingOverlay
+          visible={submitting}
+          message="Hold tight — saving your repair update"
+          subMessage="Updating the repair record and any linked billing. You can leave this open."
+        />}
+        tabs={tabs}
+        builtInTabs={builtInTabsCfg}
+        footer={footer}
+        onClose={onClose}
+        resizeKey="repair"
+        defaultWidth={460}
+      />
+      {reQuoteModal}
+    </>
   );
 }
 

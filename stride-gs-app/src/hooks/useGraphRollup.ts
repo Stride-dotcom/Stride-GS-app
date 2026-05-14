@@ -58,6 +58,7 @@ interface PhotoRow {
   tenant_id: string;
   entity_type: string;
   entity_id: string;
+  item_id: string | null;
   storage_key: string;
   storage_url: string | null;
   thumbnail_key: string | null;
@@ -151,6 +152,7 @@ function rowToPhoto(r: PhotoRow): Photo {
     tenant_id: r.tenant_id,
     entity_type: r.entity_type as Photo['entity_type'],
     entity_id: r.entity_id,
+    item_id: r.item_id,
     storage_key: r.storage_key,
     storage_url: r.storage_url,
     thumbnail_key: r.thumbnail_key,
