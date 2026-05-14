@@ -41472,12 +41472,20 @@ function reconcileCbFromBilling_(invoiceNos) {
   //    Field map: public.billing column → CB Consolidated_Ledger header.
   //    Anything not in this map is left untouched on the CB row (e.g., the
   //    QBO INVOICE ID / QBO STATUS columns the QBO push writes back).
+  // Field map: public.billing column → CB Consolidated_Ledger header.
+  // Anything not in this map is left untouched on UPDATE (e.g. QBO INVOICE
+  // ID / QBO STATUS / QBO INVOICE # which the QBO push writes back later;
+  // Email Status which the email-send path stamps and handleResendInvoice_
+  // reads). On APPEND those columns land empty — acceptable trade-off,
+  // since a reconciler-appended row is by definition one CB never had, so
+  // there's no prior Email Status to recover anyway.
   var FIELD_MAP = [
     { sb: "status",          cb: "Status" },
     { sb: "invoice_no",      cb: "Invoice #" },
     { sb: "client_name",     cb: "Client" },
     { sb: "tenant_id",       cb: "Client Sheet ID" },
     { sb: "date",            cb: "Date" },
+    { sb: "invoice_date",    cb: "Invoice Date" },
     { sb: "svc_code",        cb: "Svc Code" },
     { sb: "svc_name",        cb: "Svc Name" },
     { sb: "item_id",         cb: "Item ID" },
@@ -41507,6 +41515,9 @@ function reconcileCbFromBilling_(invoiceNos) {
   // in one setValues per row instead of one setValue per cell.
   var updates = [];
   var appends = [];
+  var tenantMismatches = [];  // CB row's Client Sheet ID disagrees with public.billing.tenant_id
+
+  var clientSheetIdCol = hdrCB["Client Sheet ID"];  // for the cross-tenant guard
 
   for (var bi = 0; bi < sel.rows.length; bi++) {
     var b = sel.rows[bi];
@@ -41518,6 +41529,29 @@ function reconcileCbFromBilling_(invoiceNos) {
       // mapped columns, leave QBO INVOICE ID / QBO STATUS / etc. alone.
       var sheetRow = cbIndex[lid2].sheetRow;
       var existing = cbValues[sheetRow - 2].slice();  // copy
+
+      // Defensive cross-tenant guard. public.billing's UNIQUE is
+      // (tenant_id, ledger_row_id), not ledger_row_id alone — so an LRID
+      // *can* technically appear under two tenants. CB has no such
+      // constraint and the index above is LRID-only. If the existing CB
+      // row's Client Sheet ID disagrees with the incoming tenant_id, skip
+      // the update and log — overwriting would clobber tenant A's CB row
+      // with tenant B's invoice. Never expected to fire in practice
+      // (LRIDs encode entity-id prefixes that don't collide across tenants
+      // today) but cheap insurance.
+      if (clientSheetIdCol) {
+        var existingTenant = String(existing[clientSheetIdCol - 1] || "").trim();
+        var incomingTenant = String(b.tenant_id || "").trim();
+        if (existingTenant && incomingTenant && existingTenant !== incomingTenant) {
+          tenantMismatches.push({
+            ledgerRowId:    lid2,
+            existingTenant: existingTenant,
+            incomingTenant: incomingTenant
+          });
+          continue;  // skip this row — do not clobber the other tenant's CB row
+        }
+      }
+
       for (var fi = 0; fi < FIELD_MAP.length; fi++) {
         var fm = FIELD_MAP[fi];
         setCB_(existing, fm.cb, b[fm.sb]);
@@ -41535,9 +41569,14 @@ function reconcileCbFromBilling_(invoiceNos) {
     }
   }
 
-  // 5. Apply updates — one setValues per row (cheap; the typical batch is
-  //    O(10s) of rows, not thousands). Could be optimized with a clustered
-  //    setValues if/when call volume grows.
+  // 5. Apply updates — one setValues per row.
+  //    TODO(scale): the typical batch is 7 invoices × ~50 rows = ~350
+  //    setValues calls × ~100ms = ~35s. Fine for the 2026-05-14 cleanup
+  //    and ordinary weekly cycles. At ~200 invoices × ~50 rows = ~10000
+  //    round-trips the call would blow the 6-min Apps Script execution
+  //    limit; cluster updates into contiguous-row batched setValues at
+  //    that point (same pattern as rollbackByInvoiceNo_'s v38.185.0
+  //    optimization). Don't pre-optimize — measure first.
   for (var ui = 0; ui < updates.length; ui++) {
     var u = updates[ui];
     consolSh.getRange(u.sheetRow, 1, 1, ncolsCB).setValues([u.rowArr]);
@@ -41549,13 +41588,21 @@ function reconcileCbFromBilling_(invoiceNos) {
     consolSh.getRange(insertStart, 1, appends.length, ncolsCB).setValues(appends);
   }
 
+  // 7. Flush so the caller (handleQboCreateInvoice_'s grouping pass) sees
+  //    post-reconcile state immediately. Apps Script generally consolidates
+  //    state across openById() calls in one execution, but the codebase
+  //    flushes defensively in the parallel CB-write paths
+  //    (handleCreateInvoice_, rollback path) and we should match.
+  SpreadsheetApp.flush();
+
   return {
     success: true,
     invoiceNos: safeInvoiceNos,
     billingRowCount: sel.rows.length,
     updatedCount: updates.length,
     appendedCount: appends.length,
-    duplicateLrids: duplicateLrids
+    duplicateLrids: duplicateLrids,
+    tenantMismatches: tenantMismatches
   };
 }
 
