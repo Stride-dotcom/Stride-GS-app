@@ -28,7 +28,6 @@ import { PhotoLightbox } from '../components/media/PhotoLightbox';
 import type { Photo } from '../hooks/usePhotos';
 
 const PHOTOS_BUCKET = 'photos';
-const DOCS_BUCKET = 'documents';
 const SIGNED_URL_TTL = 60 * 60; // 1 hour — page refresh re-mints
 
 interface SharedDoc {
@@ -69,10 +68,11 @@ export function PublicPhotoGallery({ shareId }: Props) {
   const [docBusyId, setDocBusyId] = useState<string | null>(null);
   const [docErrors, setDocErrors] = useState<Record<string, string>>({});
 
-  // Fetch the document bytes on demand through the anon storage client.
-  // This goes through documents_storage_anon_read_via_share, the same
-  // share-scoped RLS policy createSignedUrls relied on — but a denial
-  // here surfaces as a real error instead of an endless spinner.
+  // Fetch the document bytes on demand through the get-shared-doc
+  // Edge Function. Anon storage RLS (documents_storage_anon_read_via_share)
+  // is not reliably live in prod, so the bytes are served by a
+  // service-role proxy whose only gate is the share itself. Any
+  // failure surfaces as a real inline error instead of a hung spinner.
   async function openDoc(d: SharedDoc) {
     setDocBusyId(d.id);
     setDocErrors(prev => {
@@ -82,10 +82,21 @@ export function PublicPhotoGallery({ shareId }: Props) {
       return next;
     });
     try {
-      const { data, error: dErr } = await supabase.storage
-        .from(DOCS_BUCKET)
-        .download(d.storage_key);
-      if (dErr || !data) throw dErr ?? new Error('Document unavailable');
+      const base = import.meta.env.VITE_SUPABASE_URL as string;
+      if (!base) throw new Error('Document service unavailable');
+      const proxyUrl = `${base}/functions/v1/get-shared-doc`
+        + `?share_id=${encodeURIComponent(shareId)}`
+        + `&doc_id=${encodeURIComponent(d.id)}`;
+      const res = await fetch(proxyUrl);
+      if (!res.ok) {
+        let msg = `Document unavailable (${res.status})`;
+        try {
+          const body = await res.json();
+          if (body?.error) msg = body.error;
+        } catch { /* non-JSON error body — keep status message */ }
+        throw new Error(msg);
+      }
+      const data = await res.blob();
       const url = URL.createObjectURL(data);
       const a = document.createElement('a');
       a.href = url;
@@ -467,13 +478,12 @@ async function loadDocs(
     s.docIds.forEach((id, i) => { orderIdx[id] = i; });
     rows.sort((a, b) => (orderIdx[a.id] ?? 0) - (orderIdx[b.id] ?? 0));
 
-    // Bytes are fetched lazily per-click via supabase.storage.download()
-    // (see openDoc). Pre-minting signed URLs here failed silently for
-    // anon on the private documents bucket — the createSignedUrls
-    // (/object/sign) path doesn't surface the storage RLS denial, so
-    // the row hung on a spinner forever. download() goes through the
-    // same documents_storage_anon_read_via_share policy but returns a
-    // real error we can show the driver instead of hanging.
+    // Only metadata is loaded here (anon SELECT on documents via
+    // documents_anon_read_via_share, which IS live). The bytes are
+    // fetched lazily per-click through the get-shared-doc Edge
+    // Function (see openDoc) — anon storage RLS for the documents
+    // bucket is not reliably live, so a service-role proxy serves
+    // the file with the share as the only authorization gate.
     if (!isCancelled()) setDocs(rows);
   } catch (e) {
     if (!isCancelled()) setError(e instanceof Error ? e.message : 'Failed to load documents');
