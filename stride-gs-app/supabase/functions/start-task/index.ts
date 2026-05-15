@@ -88,9 +88,13 @@ Deno.serve(async (req: Request) => {
     const supabase = createClient(supabaseUrl, serviceKey);
 
     // ── 1. Load current task state ─────────────────────────────────────
+    // task_folder_url passed through to the response so the React caller's
+    // "Open Folder" affordance doesn't regress when cutover flips
+    // active_backend to supabase (handleStartTask_'s response includes
+    // folderUrl, which TaskDetailPanel renders via activeFolderUrl).
     const { data: existing, error: existingErr } = await supabase
       .from('tasks')
-      .select('task_id, status, started_at, assigned_to')
+      .select('task_id, status, started_at, assigned_to, task_folder_url')
       .eq('tenant_id', tenantId)
       .eq('task_id', taskId)
       .maybeSingle();
@@ -100,6 +104,7 @@ Deno.serve(async (req: Request) => {
     const previousStatus   = String(existing.status ?? '').trim();
     const previousStarted  = (existing.started_at ?? '').toString().trim();
     const existingAssignee = String(existing.assigned_to ?? '').trim();
+    const taskFolderUrl    = String(existing.task_folder_url ?? '').trim();
 
     // ── 2. Idempotency — already started ──────────────────────────────
     if (previousStarted) {
@@ -112,6 +117,7 @@ Deno.serve(async (req: Request) => {
         taskId, previousStatus,
         startedAt: previousStarted,
         assignedTo: existingAssignee,
+        folderUrl: taskFolderUrl,
         message: 'Task already started',
       });
     }
@@ -173,19 +179,25 @@ Deno.serve(async (req: Request) => {
       // the SB-side result.
       void (async () => {
         try {
-          const res = await fetch(
-            `${gasUrl}?action=startTask&token=${encodeURIComponent(gasToken)}&clientSheetId=${encodeURIComponent(tenantId)}`,
-            {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                taskId,
-                assignedTo: assignedTo || undefined,
-                forceOverride: forceOverride || undefined,
-                requestId,
-              }),
-            },
-          );
+          // callerEmail is REQUIRED on the query string — StrideAPI's
+          // withClientIsolation_ guard rejects with AUTH_ERROR when it's
+          // missing. We pass the verified caller (from the operator's
+          // JWT) so the GAS-side audit row attributes correctly and the
+          // request is not rejected. Caught at code-review B1.
+          const writeBackUrl = `${gasUrl}?action=startTask`
+            + `&token=${encodeURIComponent(gasToken)}`
+            + `&clientSheetId=${encodeURIComponent(tenantId)}`
+            + `&callerEmail=${encodeURIComponent(callerEmail)}`;
+          const res = await fetch(writeBackUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              taskId,
+              assignedTo: assignedTo || undefined,
+              forceOverride: forceOverride || undefined,
+              requestId,
+            }),
+          });
           const text = await res.text();
           let parsed: { success?: boolean; error?: string } = {};
           try { parsed = JSON.parse(text); } catch { parsed = { error: `non-JSON: ${text.slice(0, 200)}` }; }
@@ -223,6 +235,7 @@ Deno.serve(async (req: Request) => {
       taskId, previousStatus,
       startedAt: startedAtNow,
       assignedTo: (assignedTo && (!existingAssignee || forceOverride)) ? assignedTo : existingAssignee,
+      folderUrl: taskFolderUrl,  // pre-existing (per-task folder no longer auto-created since v38.141.0)
       gasWriteBack,
       requestId,
     });
