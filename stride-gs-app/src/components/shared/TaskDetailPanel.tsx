@@ -18,6 +18,8 @@ import { fmtDate, fmtDateTime, toDateInputValue } from '../../lib/constants';
 import { WriteButton } from './WriteButton';
 import { postCompleteTask, postStartTask, postUpdateTaskNotes, postUpdateTaskCustomPrice, postRequestRepairQuote, postRequestRepairQuoteSb, postCancelTask, postCorrectTaskResult, postReopenTask, postUpdateInventoryItem, postUpdateTaskPriority, postUpdateTaskDueDate, isApiConfigured } from '../../lib/api';
 import { useFeatureFlag } from '../../contexts/FeatureFlagContext';
+import { apiCall } from '../../lib/apiCall';
+import { supabase } from '../../lib/supabase';
 import { generateTaskWorkOrderPdf } from '../../lib/workOrderPdf';
 import { writeSyncFailed } from '../../lib/syncEvents';
 import { entityEvents } from '../../lib/entityEvents';
@@ -498,12 +500,63 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
 
     if (!apiConfigured || !clientSheetId) return;  // Demo mode — UI already reflects start.
 
-    // 2. Background GAS
+    // 2. Background call routed through the migration apiCall wrapper.
+    // Behavior:
+    //   • active_backend='gas' (current): postStartTask runs as primary;
+    //     supabase.functions.invoke('start-task') fires in background as
+    //     the shadow (parity_enabled on feature_flags.startTask), no
+    //     user-facing impact.
+    //   • active_backend='supabase' (future): the SB edge function runs
+    //     as primary; postStartTask fires as the GAS write-back shadow.
+    // The sbFn callable maps the SB response shape into the
+    // ApiResponse<StartTaskResponse> shape the React handler already
+    // consumes — keeps the call-site logic unchanged.
     void (async () => {
       try {
-        const resp = await postStartTask(
-          { taskId: task.taskId, assignedTo: user?.email || undefined, forceOverride },
-          clientSheetId
+        const resp = await apiCall(
+          'startTask',
+          () => postStartTask(
+            { taskId: task.taskId, assignedTo: user?.email || undefined, forceOverride },
+            clientSheetId,
+          ),
+          async () => {
+            const { data, error } = await supabase.functions.invoke('start-task', {
+              body: {
+                tenantId: clientSheetId,
+                taskId: task.taskId,
+                assignedTo: user?.email || undefined,
+                forceOverride,
+              },
+            });
+            if (error) throw error;
+            const sb = (data ?? {}) as {
+              ok?: boolean; noOp?: boolean; conflict?: boolean;
+              taskId?: string; startedAt?: string; assignedTo?: string;
+              message?: string; error?: string;
+            };
+            return {
+              ok: sb.ok ?? false,
+              data: {
+                success: sb.ok ?? false,
+                noOp: sb.noOp,
+                conflict: sb.conflict,
+                started: !!sb.ok && !sb.noOp,
+                taskId: sb.taskId,
+                folderUrl: '',
+                pdfCreated: false,
+                startedAt: sb.startedAt,
+                assignedTo: sb.assignedTo,
+                message: sb.message,
+                error: sb.error,
+              },
+              error: sb.error,
+            } as Awaited<ReturnType<typeof postStartTask>>;
+          },
+          {
+            tenantId: clientSheetId,
+            inputSummary: `startTask: ${task.taskId}`,
+            callId: task.taskId,
+          },
         );
 
         if (resp.ok && resp.data && !resp.data.success && resp.data.conflict) {
