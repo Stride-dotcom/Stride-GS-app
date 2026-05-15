@@ -40,7 +40,6 @@ interface SharedDoc {
   page_count: number | null;
   created_at: string;
   uploaded_by_name: string | null;
-  signed_url?: string;
 }
 
 function formatBytes(bytes: number | null): string {
@@ -67,6 +66,45 @@ export function PublicPhotoGallery({ shareId }: Props) {
   const [docsLoaded, setDocsLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+  const [docBusyId, setDocBusyId] = useState<string | null>(null);
+  const [docErrors, setDocErrors] = useState<Record<string, string>>({});
+
+  // Fetch the document bytes on demand through the anon storage client.
+  // This goes through documents_storage_anon_read_via_share, the same
+  // share-scoped RLS policy createSignedUrls relied on — but a denial
+  // here surfaces as a real error instead of an endless spinner.
+  async function openDoc(d: SharedDoc) {
+    setDocBusyId(d.id);
+    setDocErrors(prev => {
+      if (!(d.id in prev)) return prev;
+      const next = { ...prev };
+      delete next[d.id];
+      return next;
+    });
+    try {
+      const { data, error: dErr } = await supabase.storage
+        .from(DOCS_BUCKET)
+        .download(d.storage_key);
+      if (dErr || !data) throw dErr ?? new Error('Document unavailable');
+      const url = URL.createObjectURL(data);
+      const a = document.createElement('a');
+      a.href = url;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      // Revoke late so the opened tab has time to load the blob.
+      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (e) {
+      setDocErrors(prev => ({
+        ...prev,
+        [d.id]: e instanceof Error ? e.message : 'Could not open document',
+      }));
+    } finally {
+      setDocBusyId(null);
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -279,27 +317,39 @@ export function PublicPhotoGallery({ shareId }: Props) {
                         ].filter(Boolean).join(' • ')}
                       </div>
                     </div>
-                    {d.signed_url ? (
-                      <a
-                        href={d.signed_url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        download={d.file_name || undefined}
+                    <div style={{
+                      display: 'flex', flexDirection: 'column',
+                      alignItems: 'flex-end', gap: 4, flexShrink: 0,
+                    }}>
+                      <button
+                        type="button"
+                        onClick={() => openDoc(d)}
+                        disabled={docBusyId === d.id}
                         style={{
                           display: 'inline-flex', alignItems: 'center', gap: 6,
                           background: '#E85D2D', color: '#fff',
                           padding: '6px 12px', borderRadius: 6,
-                          fontSize: 12, fontWeight: 600, textDecoration: 'none',
-                          flexShrink: 0,
+                          fontSize: 12, fontWeight: 600, border: 'none',
+                          cursor: docBusyId === d.id ? 'default' : 'pointer',
+                          opacity: docBusyId === d.id ? 0.7 : 1,
                         }}
                       >
-                        <Download size={13} /> Open
-                      </a>
-                    ) : (
-                      <span style={{ fontSize: 11, color: '#9CA3AF', flexShrink: 0 }}>
-                        <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />
-                      </span>
-                    )}
+                        {docBusyId === d.id ? (
+                          <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />
+                        ) : (
+                          <Download size={13} />
+                        )}
+                        {docBusyId === d.id ? 'Opening…' : 'Open'}
+                      </button>
+                      {docErrors[d.id] && (
+                        <span role="alert" style={{
+                          fontSize: 11, color: '#B91C1C',
+                          maxWidth: 220, textAlign: 'right',
+                        }}>
+                          {docErrors[d.id]}
+                        </span>
+                      )}
+                    </div>
                   </li>
                 ))}
               </ul>
@@ -417,20 +467,13 @@ async function loadDocs(
     s.docIds.forEach((id, i) => { orderIdx[id] = i; });
     rows.sort((a, b) => (orderIdx[a.id] ?? 0) - (orderIdx[b.id] ?? 0));
 
-    const keys = rows.map(r => r.storage_key).filter(Boolean);
-    if (keys.length > 0) {
-      const { data: signed } = await supabase.storage
-        .from(DOCS_BUCKET)
-        .createSignedUrls(keys, SIGNED_URL_TTL);
-      const urlMap: Record<string, string> = {};
-      for (const item of signed || []) {
-        if (item.path && item.signedUrl) urlMap[item.path] = item.signedUrl;
-      }
-      for (const r of rows) {
-        const u = urlMap[r.storage_key];
-        if (u) r.signed_url = u;
-      }
-    }
+    // Bytes are fetched lazily per-click via supabase.storage.download()
+    // (see openDoc). Pre-minting signed URLs here failed silently for
+    // anon on the private documents bucket — the createSignedUrls
+    // (/object/sign) path doesn't surface the storage RLS denial, so
+    // the row hung on a spinner forever. download() goes through the
+    // same documents_storage_anon_read_via_share policy but returns a
+    // real error we can show the driver instead of hanging.
     if (!isCancelled()) setDocs(rows);
   } catch (e) {
     if (!isCancelled()) setError(e instanceof Error ? e.message : 'Failed to load documents');
