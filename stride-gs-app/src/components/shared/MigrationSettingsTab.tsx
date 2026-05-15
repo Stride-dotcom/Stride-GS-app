@@ -323,6 +323,7 @@ export function MigrationSettingsTab() {
                     <th style={thStyle}>Active</th>
                     <th style={thStyle}>Parity</th>
                     <th style={thStyle}>Tenant scope</th>
+                    <th style={thStyle}>Match rate</th>
                     <th style={thStyle}>Mismatches (7d)</th>
                     <th style={thStyle}>Last check</th>
                   </tr>
@@ -420,6 +421,23 @@ export function MigrationSettingsTab() {
                                 </button>
                               </div>
                             </div>
+                          )}
+                        </td>
+                        <td style={tdStyle}>
+                          {f.total_checks > 0 && f.match_rate !== null ? (
+                            <div title={`${f.total_checks - f.mismatch_count} matches / ${f.total_checks} checks (lifetime)`}>
+                              <div style={{
+                                fontWeight: 700,
+                                color: f.match_rate >= 99.5 ? '#16A34A'
+                                     : f.match_rate >= 95   ? '#CA8A04'
+                                     : '#DC2626',
+                              }}>{f.match_rate.toFixed(2)}%</div>
+                              <div style={{ fontSize: 11, color: theme.colors.textMuted }}>
+                                {f.total_checks.toLocaleString()} check{f.total_checks === 1 ? '' : 's'}
+                              </div>
+                            </div>
+                          ) : (
+                            <span style={{ color: theme.colors.textMuted, fontSize: 12 }}>—</span>
                           )}
                         </td>
                         <td style={{ ...tdStyle, fontWeight: hasMismatches ? 700 : 400, color: hasMismatches ? '#DC2626' : theme.colors.textMuted }}>
