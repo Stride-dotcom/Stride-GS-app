@@ -108,35 +108,29 @@ function clipSerialized(s: string): string {
   return s.slice(0, MAX_SERIALIZED_BYTES - 20) + '…<truncated>';
 }
 
-/** Best-effort PATCH on feature_flags' lifetime counters. The
- *  generated match_rate column updates automatically. Optimistic-
- *  concurrency-safe in the trivial sense that two concurrent +1s
- *  will both PATCH the same value (last write wins); we accept that
- *  loss given the alternative is a transactional RPC for every
- *  shadow run. The 7-day rolling counter (mismatch_count_7d) is left
- *  to the future replay/reaper job — it's a separate aggregation
- *  problem and shadowRunner is purely additive. */
+/** Atomic counter bump via SECURITY DEFINER RPC. Three reasons we
+ *  call the RPC instead of a direct PATCH on feature_flags:
+ *
+ *    1. RLS: `feature_flags_write_admin` allows only admin / service_
+ *       role to write. A staff operator's direct UPDATE silently
+ *       no-ops (returns zero rows affected, no error), so counters
+ *       would stay at 0 forever for staff-driven canary runs. The
+ *       RPC runs as definer and bypasses this.
+ *    2. Race: read-then-PATCH loses bumps under contention (two
+ *       concurrent shadow runs both read N, both write N+1). The
+ *       RPC's single `UPDATE ... SET total_checks = total_checks + 1`
+ *       is atomic at the row level.
+ *    3. last_parity_check ownership: the parity_results_rollup
+ *       AFTER INSERT trigger writes last_parity_check from the row's
+ *       server-clock created_at, transactionally with the INSERT. A
+ *       client-side PATCH would race the trigger and use wall-clock.
+ *       The RPC deliberately does NOT touch that column.
+ */
 async function bumpFlagCounters(key: string, mismatched: boolean): Promise<void> {
-  // Read-then-PATCH. The window between read and write is small
-  // (single ms) and a missed bump under contention shows up as
-  // slightly lower total_checks — not load-bearing. A future RPC
-  // (`bump_parity_counters(key, mismatched)`) would close this gap.
-  const { data: row } = await supabase
-    .from('feature_flags')
-    .select('total_checks, mismatch_count')
-    .eq('function_key', key)
-    .maybeSingle();
-  if (!row) return; // unknown key — caller bug, don't insert a counter for it
-  const total = Number(row.total_checks || 0) + 1;
-  const miss = Number(row.mismatch_count || 0) + (mismatched ? 1 : 0);
-  await supabase
-    .from('feature_flags')
-    .update({
-      total_checks: total,
-      mismatch_count: miss,
-      last_parity_check: new Date().toISOString(),
-    })
-    .eq('function_key', key);
+  await supabase.rpc('bump_parity_counters', {
+    p_key:        key,
+    p_mismatched: mismatched,
+  });
 }
 
 /**

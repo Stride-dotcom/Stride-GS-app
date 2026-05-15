@@ -141,7 +141,52 @@ BEGIN
   END IF;
 END $$;
 
--- ── 3. Seed the missing function_keys from Justin's canonical 24 ────────
+-- ── 3. Atomic counter-bump RPC ──────────────────────────────────────────
+-- The React-side shadowRunner needs to UPDATE feature_flags.total_checks
+-- + mismatch_count on every parity run. Two reasons this can't be a
+-- direct table UPDATE from the operator's JWT:
+--   (a) `feature_flags_write_admin` only allows admin / service_role; a
+--       staff operator's direct UPDATE silently no-ops (RLS rejects the
+--       row, returns 0 rows affected, no error) — counters stay at 0
+--       forever for staff-driven canary runs.
+--   (b) Read-then-PATCH races: two concurrent shadow runs lose one bump
+--       each (they both read total_checks=N, both write N+1).
+--
+-- A SECURITY DEFINER function fixes both. It runs as the postgres role
+-- (bypassing RLS) and uses a single UPDATE with the increment in the
+-- SET clause (no read-then-write).
+--
+-- We deliberately DO NOT touch last_parity_check here — the
+-- parity_results_rollup AFTER INSERT trigger already maintains it from
+-- the freshly-inserted row's created_at (server clock, transactional
+-- with the row itself). Writing it again from the client would race
+-- against the trigger and use the operator's wall-clock instead.
+CREATE OR REPLACE FUNCTION public.bump_parity_counters(
+  p_key        text,
+  p_mismatched boolean
+)
+RETURNS void
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+  UPDATE public.feature_flags
+     SET total_checks   = total_checks   + 1,
+         mismatch_count = mismatch_count + CASE WHEN p_mismatched THEN 1 ELSE 0 END,
+         updated_at     = now()
+   WHERE function_key = p_key;
+$$;
+
+COMMENT ON FUNCTION public.bump_parity_counters(text, boolean) IS
+  'Atomically increments feature_flags.total_checks and (when '
+  'p_mismatched) mismatch_count for the given function_key. '
+  'SECURITY DEFINER so authenticated staff/admin can call without '
+  'broadening the existing feature_flags_write_admin RLS. Does NOT '
+  'touch last_parity_check — parity_results_rollup trigger owns it.';
+
+GRANT EXECUTE ON FUNCTION public.bump_parity_counters(text, boolean) TO authenticated;
+
+-- ── 4. Seed the missing function_keys from Justin's canonical 24 ────────
 -- ON CONFLICT DO NOTHING — preserves any active_backend decision already
 -- in production. The two explicit overrides (updateShipment +
 -- generateStorageCharges → supabase) get a separate UPDATE below.
