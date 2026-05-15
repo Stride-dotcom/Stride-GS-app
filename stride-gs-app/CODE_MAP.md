@@ -268,3 +268,4 @@ Standalone quote builder with PDF generation and Supabase-backed storage.
 | `src/pages/Dashboard.tsx` | Landing page — uses `useDashboardSummary` |
 | `src/pages/DetailPanelMockup.tsx` | Design mockup, not in routed nav |
 | `src/pages/PublicRates.tsx` | Public-facing rate sheet |
+| `src/pages/PublicPhotoGallery.tsx` | No-auth shared photo/document gallery (`#/shared/attachments/:shareId`, `#/shared/photos/:shareId`); doc bytes served via the `get-shared-doc` Edge Function (`supabase/functions/get-shared-doc/index.ts` — service-role share-gated proxy, deploy with `--no-verify-jwt`); photo bytes via anon signed URLs |
