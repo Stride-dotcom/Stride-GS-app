@@ -180,14 +180,16 @@ Client intake form → admin review → onboarding → T&C signing → first she
 
 ## Settings
 
-App settings: API connection, email/doc templates, users, integrations.
+App settings: API connection, email/doc templates, users, integrations, GAS→Supabase migration tab.
 
 | Layer | Files |
 |---|---|
 | Pages | `src/pages/Settings.tsx` |
 | Hooks | `src/hooks/useUsers.ts`, `src/hooks/useEmailTemplates.ts`, `src/hooks/useProfiles.ts`, `src/hooks/useSidebarOrder.ts` |
-| Components | `src/components/shared/TemplateEditor.tsx`, `src/components/shared/ChangePasswordModal.tsx`, `src/components/shared/SetNewPassword.tsx` |
-| Migrations | `20260415180100_users_cache_table.sql` (user/role cache), `20260419120000_email_templates.sql` (template storage), `20260420040000_doc_quote_template_seed.sql` (doc template seed), `20260420050000_doc_quote_match_invoice_style.sql`, `20260420060000_doc_invoice_line_items_html_token.sql`, `20260420070000_doc_quote_browser_printable_rebuild.sql`, `20260420090000_doc_quote_column_reorder.sql`, `20260422030000_email_templates_remove_photos_add_sidemark.sql` |
+| Components | `src/components/shared/TemplateEditor.tsx`, `src/components/shared/ChangePasswordModal.tsx`, `src/components/shared/SetNewPassword.tsx`, `src/components/shared/MigrationSettingsTab.tsx` (admin-only Migration tab — per-flag backend toggle, parity toggle, tenant-scope editor, match-rate dashboard, master-switch emergency revert) |
+| Contexts | `src/contexts/FeatureFlagContext.tsx` (app-level realtime-subscribed `feature_flags` resolver + module-level snapshot accessor for non-hook callers) |
+| Lib | `src/lib/shadowRunner.ts` (background parity check — hashes both backends' results, writes `parity_results`, bumps lifetime counters), `src/lib/apiCall.ts` (`apiCall(key, gasFn, sbFn?, opts?)` routing wrapper — routes by flag, fires shadow when `parity_enabled` + `shadow_backend` are set) |
+| Migrations | `20260415180100_users_cache_table.sql` (user/role cache), `20260419120000_email_templates.sql` (template storage), `20260420040000_doc_quote_template_seed.sql` (doc template seed), `20260420050000_doc_quote_match_invoice_style.sql`, `20260420060000_doc_invoice_line_items_html_token.sql`, `20260420070000_doc_quote_browser_printable_rebuild.sql`, `20260420090000_doc_quote_column_reorder.sql`, `20260422030000_email_templates_remove_photos_add_sidemark.sql`, `20260514170000_parity_infra_phase1_extend.sql` (Phase 1 parity infra — adds `total_checks` / `mismatch_count` / GENERATED `match_rate` to `feature_flags`, `input_summary` to `parity_results`, FK between them, authenticated INSERT for parity rows, realtime publication, seeds Justin's canonical 24 function_keys) |
 | Apps Script | `AppScripts/stride-client-inventory/src/RemoteAdmin.gs` (user mgmt, settings sync), `AppScripts/stride-client-inventory/src/Triggers.gs` (per-client trigger setup) |
 
 ---
