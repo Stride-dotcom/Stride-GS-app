@@ -1549,6 +1549,52 @@ export function postCompleteTask(
   );
 }
 
+// [MIGRATION-P4a] SB-primary entry for completeTask. Atomic via
+// complete_task_atomic RPC: tasks.status='Completed' + completed_at +
+// result + task_notes + custom_price + billing row ({SVCCODE}-TASK-{id})
+// + addon flush + GAS-shape audit log. Email is DRY-RUN on the SB side
+// (payload computed + returned, not sent — live mail stays on GAS while
+// the flag is gas). Routed only when useFeatureFlag('completeTask')
+// resolves to 'supabase'; ships gas-default so this never runs live
+// until the MIG-007 three-layer gate passes.
+export interface CompleteTaskSbPayload {
+  tenantId: string;
+  taskId: string;
+  result: 'Pass' | 'Fail';
+  taskNotes?: string | null;
+  /** number = set override, null = clear, omit = no change (GAS trichotomy). */
+  customPrice?: number | null;
+  requestId?: string;
+}
+export interface CompleteTaskSbResponse {
+  ok: boolean;
+  taskId?: string;
+  result?: 'Pass' | 'Fail';
+  skipped?: boolean;
+  skipReason?: string;
+  billingCount?: number;
+  addonCount?: number;
+  ledgerRowIds?: string[];
+  missingRate?: boolean;
+  mirroredCount?: number;
+  mirrorOk?: boolean;
+  mirrorError?: string;
+  emailDryRun?: { templateKey: string; tokens: Record<string, string> } | null;
+  error?: string;
+  errorCode?: string;
+}
+export async function postCompleteTaskSb(
+  payload: CompleteTaskSbPayload
+): Promise<CompleteTaskSbResponse> {
+  const { supabase } = await import('./supabase');
+  const { data, error } = await supabase.functions.invoke<CompleteTaskSbResponse>(
+    'complete-task',
+    { body: payload },
+  );
+  if (error) return { ok: false, error: error.message };
+  return data ?? { ok: false, error: 'no response body' };
+}
+
 // ─── requestRepairQuote — create a new Repair row from inventory item ────────
 
 export interface RequestRepairQuotePayload { itemId: string; sourceTaskId?: string; notes?: string; }

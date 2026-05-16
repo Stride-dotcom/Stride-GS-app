@@ -16,7 +16,7 @@ import { buildDeepLinkUrl } from '../../lib/deepLinks';
 import { theme } from '../../styles/theme';
 import { fmtDate, fmtDateTime, toDateInputValue } from '../../lib/constants';
 import { WriteButton } from './WriteButton';
-import { postCompleteTask, postStartTask, postUpdateTaskNotes, postUpdateTaskCustomPrice, postRequestRepairQuote, postRequestRepairQuoteSb, postCancelTask, postCorrectTaskResult, postReopenTask, postUpdateInventoryItem, postUpdateTaskPriority, postUpdateTaskDueDate, isApiConfigured } from '../../lib/api';
+import { postCompleteTask, postCompleteTaskSb, postStartTask, postUpdateTaskNotes, postUpdateTaskCustomPrice, postRequestRepairQuote, postRequestRepairQuoteSb, postCancelTask, postCorrectTaskResult, postReopenTask, postUpdateInventoryItem, postUpdateTaskPriority, postUpdateTaskDueDate, isApiConfigured } from '../../lib/api';
 import { useFeatureFlag } from '../../contexts/FeatureFlagContext';
 import { apiCall } from '../../lib/apiCall';
 import { supabase } from '../../lib/supabase';
@@ -87,6 +87,11 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
   // [MIGRATION-P3] flag-routed Request Repair Quote — SB path creates ONE
   // repair with item + sourceTaskId stamped; legacy GAS path same shape.
   const requestRepairQuoteBackend = useFeatureFlag('requestRepairQuote');
+  // [MIGRATION-P4a] completeTask backend selector. Ships gas-default
+  // (fleet on GAS until the MIG-007 three-layer gate passes), so this
+  // resolves to 'gas' for every caller today — the SB branch below is
+  // wired but inert. Routes the same end-state either way.
+  const completeTaskBackend = useFeatureFlag('completeTask');
   const isCompactViewport = isMobile || isTablet;
 
   const [notes, setNotes] = useState(task.taskNotes || task.notes || '');
@@ -426,9 +431,49 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
     // Demo mode: no API or no client sheet — stop here, UI already reflects completion.
     if (!apiConfigured || !clientSheetId) return;
 
-    // 2. Background GAS
+    // 2. Background completion. [MIGRATION-P4a] flag-routed: both paths
+    // produce the same end-state (tasks.status='Completed' + billing
+    // row + addon flush + audit log). Only the authority differs. The
+    // flag is gas fleet-wide today, so the SB branch is inert until the
+    // MIG-007 gate passes — wired now so the cutover is a flag flip.
     void (async () => {
       try {
+        if (completeTaskBackend === 'supabase') {
+          const sb = await postCompleteTaskSb({
+            tenantId: clientSheetId,
+            taskId:   task.taskId,
+            result,
+            taskNotes: notes || null,
+          });
+          if (!sb.ok) {
+            const errMsg = sb.error || 'Completion failed.';
+            setSubmitError(errMsg + ' Refresh to reconcile, or retry.');
+            if (isDisposal && itemIdForPatch) clearItemPatch?.(itemIdForPatch);
+            void writeSyncFailed({
+              tenant_id: clientSheetId, entity_type: 'task', entity_id: task.taskId,
+              action_type: 'complete_task', requested_by: user?.email ?? '',
+              request_id: sb.requestId ?? undefined,
+              payload: { taskId: task.taskId, result, taskNotes: notes || undefined, clientName: task.clientName, description: task.description, sidemark: task.sidemark, itemId: task.itemId },
+              error_message: errMsg,
+            });
+          } else if (sb.skipped) {
+            setSubmitError(`Task already ${sb.skipReason ?? 'completed'}. Refresh to see current state.`);
+          } else {
+            // Synthesize a CompleteTaskResponse-shaped object for the banner.
+            setSubmitResult({
+              success: true,
+              taskId: sb.taskId ?? task.taskId,
+              result,
+              billingCreated: (sb.billingCount ?? 0) > 0,
+            } as unknown as CompleteTaskResponse);
+            onTaskUpdated?.();
+            if (sb.mirrorOk === false) {
+              console.warn('[completeTask-sb] sheet mirror failed:', sb.mirrorError);
+              setSubmitError(`Task completed, but legacy sheet mirror failed (${sb.mirrorError ?? 'unknown'}). App state is correct; sheet will catch up on the next full sync.`);
+            }
+          }
+          return;
+        }
         const resp = await postCompleteTask(
           {
             taskId: task.taskId,
