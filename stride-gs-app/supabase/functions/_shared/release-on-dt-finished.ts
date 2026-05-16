@@ -114,10 +114,16 @@ export async function releaseInventoryOnDtFinished(
   // ── 2. Load items + classify ─────────────────────────────────────
   const { data: items } = await supabase
     .from('dt_order_items')
-    .select('inventory_id, dt_item_code, delivered')
+    .select('inventory_id, dt_item_code, delivered, delivered_quantity, quantity')
     .eq('dt_order_id', o.id);
 
-  type ItemRow = { inventory_id: string | null; dt_item_code: string | null; delivered: boolean | null };
+  type ItemRow = {
+    inventory_id: string | null;
+    dt_item_code: string | null;
+    delivered: boolean | null;
+    delivered_quantity: number | null;
+    quantity: number | null;
+  };
   const rows = (items ?? []) as ItemRow[];
   if (rows.length === 0) return skip('no_items');
 
@@ -129,7 +135,21 @@ export async function releaseInventoryOnDtFinished(
       if (r.dt_item_code) skippedNoInventoryCount += 1;
       continue;
     }
-    if (r.delivered === true) {
+    // An item counts as delivered when the driver flipped the
+    // boolean, OR recorded a delivered_quantity that covers the FULL
+    // ordered quantity. Some DT workflows stamp the quantity without
+    // the boolean (qty-based completion) — we want those released.
+    // But a SHORT/partial delivery (delivered_quantity < quantity,
+    // boolean false) must NOT release: the helper's contract is that
+    // refused/short items stay Active and get a staff note, and
+    // release_date feeds storage billing. Comparing against the
+    // ordered quantity keeps the qty-based-completion win without
+    // the partial-release regression flagged in code review.
+    const dq = r.delivered_quantity;
+    const oq = r.quantity;
+    const fullyByQty = dq != null && oq != null && oq > 0 && dq >= oq;
+    const isDelivered = r.delivered === true || fullyByQty;
+    if (isDelivered) {
       eligibleInvIds.push(r.inventory_id);
     } else {
       skippedNotDeliveredItemIds.push(r.dt_item_code ?? r.inventory_id);

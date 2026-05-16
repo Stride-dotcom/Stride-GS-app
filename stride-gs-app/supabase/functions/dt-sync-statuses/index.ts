@@ -1,5 +1,27 @@
 /**
- * dt-sync-statuses — Supabase Edge Function — v16 2026-05-13 PST
+ * dt-sync-statuses — Supabase Edge Function — v17 2026-05-14 PST
+ *
+ * v17: Two changes for the stranded-order auto-release gap.
+ *      (a) Secondary sweep: in addition to the primary
+ *          dt_identifier-keyed query, also pull every order with a
+ *          non-null dt_dispatch_id but a NULL local_service_date.
+ *          Legacy webhook-ingested rows can have only the numeric
+ *          dispatch id (dt_identifier NULL), so the primary query's
+ *          `.not('dt_identifier','is',null)` filter skipped them —
+ *          they never synced, never got a service date, never
+ *          auto-released. The two result sets are merged + deduped
+ *          by id; the per-order loop already falls back to
+ *          dt_dispatch_id for the DT lookup.
+ *      (b) local_service_date backfill: the per-order patch now
+ *          stamps local_service_date from DT's scheduled_at when the
+ *          order has none. Without this the secondary sweep is inert
+ *          (releaseInventoryOnDtFinished bails on
+ *          local_service_date_missing). Never overwrites an
+ *          operator-set date.
+ *      Companion shared-helper change (release-on-dt-finished.ts):
+ *          an item now counts as delivered when delivered === true
+ *          OR delivered_quantity > 0 (qty-based DT completions were
+ *          previously stranded as never-released).
  *
  * v16: dt_order_items reconcile now ALSO matches local rows by the
  *      first 8 hex chars of dt_order_items.id (case-insensitive),
@@ -184,9 +206,11 @@ Deno.serve(async (req) => {
   // v9: sync every row with a dt_identifier that isn't already in a
   // terminal status. Drops the previous pushed_to_dt_at filter so
   // legacy reconciled rows (source='reconcile') also pull statuses.
+  const SELECT_COLS = 'id, dt_identifier, dt_dispatch_id, status_id, last_synced_at, tenant_id, paid_at, order_type, linked_order_id, local_service_date';
+
   let query = supabase
     .from('dt_orders')
-    .select('id, dt_identifier, dt_dispatch_id, status_id, last_synced_at, tenant_id, paid_at, order_type, linked_order_id')
+    .select(SELECT_COLS)
     .not('dt_identifier', 'is', null);
 
   if (singleOrderId) {
@@ -205,21 +229,61 @@ Deno.serve(async (req) => {
 
   const result = {
     ok: true,
-    checked: orders?.length ?? 0,
+    checked: 0,
     updated: 0,
     completed: 0,
     errors: [] as string[],
     note: '',
   };
 
-  if (!orders || orders.length === 0) {
+  // ── Secondary sweep: dt_dispatch_id present but no local_service_date ──
+  // Webhook-ingested orders can land with a numeric dt_dispatch_id and
+  // NULL dt_identifier (legacy ingest path) — the primary query's
+  // `.not('dt_identifier','is',null)` filter skips those entirely, so
+  // they never pull their export.xml, never get a service date, and
+  // therefore never become eligible for auto-release (the helper
+  // bails on `local_service_date_missing`). They'd sit stranded
+  // forever. This sweep pulls any order with a dispatch id but no
+  // service date so the per-order loop below can sync it and the
+  // patch can backfill local_service_date from DT's scheduled date.
+  // Skipped when a single order was explicitly requested (targeted
+  // sync — caller already named the row).
+  const orderById = new Map<string, NonNullable<typeof orders>[number]>();
+  for (const o of orders ?? []) orderById.set(o.id, o);
+  if (!singleOrderId) {
+    // Recency guard: a stranded order DT genuinely has no scheduled
+    // date for (service-only, never-scheduled, public-form orphan)
+    // would otherwise be re-pulled from DT export.xml every poll
+    // forever, since local_service_date never gets backfilled. Cap
+    // each such row to at most one sweep per 24h by excluding rows
+    // synced within the last day. Newly-stranded rows (last_synced_at
+    // NULL) are always included. Matches the daily-ish sync cadence.
+    const oneDayAgoIso = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const { data: strandedOrders, error: strandedErr } = await supabase
+      .from('dt_orders')
+      .select(SELECT_COLS)
+      .not('dt_dispatch_id', 'is', null)
+      .is('local_service_date', null)
+      .or(`last_synced_at.is.null,last_synced_at.lt.${oneDayAgoIso}`);
+    if (strandedErr) {
+      result.errors.push(`Secondary (no-service-date) fetch failed: ${strandedErr.message}`);
+    } else {
+      for (const o of strandedOrders ?? []) {
+        if (!orderById.has(o.id)) orderById.set(o.id, o);
+      }
+    }
+  }
+  const mergedOrders = Array.from(orderById.values());
+  result.checked = mergedOrders.length;
+
+  if (mergedOrders.length === 0) {
     result.note = 'No pushed orders need syncing.';
     return json(result);
   }
 
   if (!haveCreds) {
     const nowIso = new Date().toISOString();
-    const ids = orders.map(o => o.id);
+    const ids = mergedOrders.map(o => o.id);
     const { error: touchErr } = await supabase.from('dt_orders').update({ last_synced_at: nowIso }).in('id', ids);
     if (touchErr) result.errors.push(`Timestamp update failed: ${touchErr.message}`);
     result.ok = false;
@@ -230,7 +294,7 @@ Deno.serve(async (req) => {
   const baseUrl = String(cred!.api_base_url).replace(/\/+$/, '');
   const apiKey  = String(cred!.auth_token_encrypted);
 
-  for (const o of orders) {
+  for (const o of mergedOrders) {
     try {
       // DT's `service_order_id` parameter accepts the Order_Number
       // (human identifier) per the XML API spec. Prefer dt_identifier;
@@ -238,12 +302,15 @@ Deno.serve(async (req) => {
       // only have the numeric ID.
       const lookupId = o.dt_identifier || (o.dt_dispatch_id != null ? String(o.dt_dispatch_id) : '');
       if (!lookupId) { result.errors.push(`${o.id}: no dt_identifier or dt_dispatch_id`); continue; }
+      // Secondary-sweep rows have a NULL dt_identifier — fall back to
+      // lookupId (the dispatch id) so error lines are identifiable.
+      const label = o.dt_identifier || lookupId;
       const url = `${baseUrl}/orders/api/export.xml?code=expressinstallation&api_key=${encodeURIComponent(apiKey)}&service_order_id=${encodeURIComponent(lookupId)}`;
       const resp = await fetch(url, { method: 'POST', headers: { 'Accept': 'application/xml' } });
-      if (!resp.ok) { result.errors.push(`${o.dt_identifier}: HTTP ${resp.status}`); continue; }
+      if (!resp.ok) { result.errors.push(`${label}: HTTP ${resp.status}`); continue; }
       const xml = await resp.text();
       const parsed = parseExportOrder(xml);
-      if (!parsed) { result.errors.push(`${o.dt_identifier}: empty/invalid export response`); continue; }
+      if (!parsed) { result.errors.push(`${label}: empty/invalid export response`); continue; }
 
       // ── status code → status_id resolution ───────────────────────────
       const dtStatusCode = (parsed.status || '').toUpperCase();
@@ -258,7 +325,7 @@ Deno.serve(async (req) => {
             finalStatusId = STATUS_COLLECTED;
           }
         } else {
-          result.errors.push(`${o.dt_identifier}: unknown DT status "${dtStatusCode}"`);
+          result.errors.push(`${label}: unknown DT status "${dtStatusCode}"`);
         }
       }
 
@@ -287,8 +354,21 @@ Deno.serve(async (req) => {
         if (category === 'completed') result.completed += 1;
       }
 
+      // Backfill the scheduled service date for orders that arrived
+      // without one (primarily the secondary-sweep rows). Only set
+      // it when the order currently has NO local_service_date AND DT
+      // gave us a scheduled timestamp — never overwrite an operator-
+      // set date. This is what makes a stranded webhook order finally
+      // eligible for the auto-release block below (the helper bails
+      // on local_service_date_missing).
+      const existingServiceDate = (o as { local_service_date?: string | null }).local_service_date;
+      if (existingServiceDate == null) {
+        const schedIso = toIso(parsed.scheduled_at);
+        if (schedIso) patch.local_service_date = schedIso.slice(0, 10);
+      }
+
       const { error: updErr } = await supabase.from('dt_orders').update(patch).eq('id', o.id);
-      if (updErr) { result.errors.push(`${o.dt_identifier}: ${updErr.message}`); continue; }
+      if (updErr) { result.errors.push(`${label}: ${updErr.message}`); continue; }
       result.updated += 1;
 
       // "Is finished now" signal for the post-reconcile auto-release.
@@ -740,7 +820,7 @@ Deno.serve(async (req) => {
         }
       }
     } catch (e) {
-      result.errors.push(`${o.dt_identifier}: ${e instanceof Error ? e.message : String(e)}`);
+      result.errors.push(`${o.dt_identifier || o.dt_dispatch_id || o.id}: ${e instanceof Error ? e.message : String(e)}`);
     }
     await new Promise(r => setTimeout(r, 100));
   }
