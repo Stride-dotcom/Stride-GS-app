@@ -251,11 +251,20 @@ Deno.serve(async (req) => {
   const orderById = new Map<string, NonNullable<typeof orders>[number]>();
   for (const o of orders ?? []) orderById.set(o.id, o);
   if (!singleOrderId) {
+    // Recency guard: a stranded order DT genuinely has no scheduled
+    // date for (service-only, never-scheduled, public-form orphan)
+    // would otherwise be re-pulled from DT export.xml every poll
+    // forever, since local_service_date never gets backfilled. Cap
+    // each such row to at most one sweep per 24h by excluding rows
+    // synced within the last day. Newly-stranded rows (last_synced_at
+    // NULL) are always included. Matches the daily-ish sync cadence.
+    const oneDayAgoIso = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     const { data: strandedOrders, error: strandedErr } = await supabase
       .from('dt_orders')
       .select(SELECT_COLS)
       .not('dt_dispatch_id', 'is', null)
-      .is('local_service_date', null);
+      .is('local_service_date', null)
+      .or(`last_synced_at.is.null,last_synced_at.lt.${oneDayAgoIso}`);
     if (strandedErr) {
       result.errors.push(`Secondary (no-service-date) fetch failed: ${strandedErr.message}`);
     } else {
@@ -293,12 +302,15 @@ Deno.serve(async (req) => {
       // only have the numeric ID.
       const lookupId = o.dt_identifier || (o.dt_dispatch_id != null ? String(o.dt_dispatch_id) : '');
       if (!lookupId) { result.errors.push(`${o.id}: no dt_identifier or dt_dispatch_id`); continue; }
+      // Secondary-sweep rows have a NULL dt_identifier — fall back to
+      // lookupId (the dispatch id) so error lines are identifiable.
+      const label = o.dt_identifier || lookupId;
       const url = `${baseUrl}/orders/api/export.xml?code=expressinstallation&api_key=${encodeURIComponent(apiKey)}&service_order_id=${encodeURIComponent(lookupId)}`;
       const resp = await fetch(url, { method: 'POST', headers: { 'Accept': 'application/xml' } });
-      if (!resp.ok) { result.errors.push(`${o.dt_identifier}: HTTP ${resp.status}`); continue; }
+      if (!resp.ok) { result.errors.push(`${label}: HTTP ${resp.status}`); continue; }
       const xml = await resp.text();
       const parsed = parseExportOrder(xml);
-      if (!parsed) { result.errors.push(`${o.dt_identifier}: empty/invalid export response`); continue; }
+      if (!parsed) { result.errors.push(`${label}: empty/invalid export response`); continue; }
 
       // ── status code → status_id resolution ───────────────────────────
       const dtStatusCode = (parsed.status || '').toUpperCase();
@@ -313,7 +325,7 @@ Deno.serve(async (req) => {
             finalStatusId = STATUS_COLLECTED;
           }
         } else {
-          result.errors.push(`${o.dt_identifier}: unknown DT status "${dtStatusCode}"`);
+          result.errors.push(`${label}: unknown DT status "${dtStatusCode}"`);
         }
       }
 
@@ -356,7 +368,7 @@ Deno.serve(async (req) => {
       }
 
       const { error: updErr } = await supabase.from('dt_orders').update(patch).eq('id', o.id);
-      if (updErr) { result.errors.push(`${o.dt_identifier}: ${updErr.message}`); continue; }
+      if (updErr) { result.errors.push(`${label}: ${updErr.message}`); continue; }
       result.updated += 1;
 
       // "Is finished now" signal for the post-reconcile auto-release.
@@ -808,7 +820,7 @@ Deno.serve(async (req) => {
         }
       }
     } catch (e) {
-      result.errors.push(`${o.dt_identifier}: ${e instanceof Error ? e.message : String(e)}`);
+      result.errors.push(`${o.dt_identifier || o.dt_dispatch_id || o.id}: ${e instanceof Error ? e.message : String(e)}`);
     }
     await new Promise(r => setTimeout(r, 100));
   }
