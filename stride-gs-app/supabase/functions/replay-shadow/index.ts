@@ -116,6 +116,12 @@ const SHADOW_REGISTRY: Record<string, ShadowEntry> = {
   // one logical transaction (handled by complete_repair_atomic RPC).
   // See complete-repair-shadow/index.ts.
   completeRepair: { shadow: 'complete-repair-shadow', action: 'completeRepair' },
+  // [MIGRATION-P4a] completeTask — billing-core, atomic via
+  // complete_task_atomic RPC (MIG-004). Audit-changes parity shape:
+  //   { status: { old: 'In Progress', new: 'Completed' }, result }
+  // (task carries status.old; repair logs only status.new.)
+  // See complete-task-shadow/index.ts.
+  completeTask: { shadow: 'complete-task-shadow', action: 'completeTask' },
 };
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
