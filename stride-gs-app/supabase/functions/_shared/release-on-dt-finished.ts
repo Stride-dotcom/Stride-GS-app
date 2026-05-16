@@ -114,10 +114,15 @@ export async function releaseInventoryOnDtFinished(
   // ── 2. Load items + classify ─────────────────────────────────────
   const { data: items } = await supabase
     .from('dt_order_items')
-    .select('inventory_id, dt_item_code, delivered')
+    .select('inventory_id, dt_item_code, delivered, delivered_quantity')
     .eq('dt_order_id', o.id);
 
-  type ItemRow = { inventory_id: string | null; dt_item_code: string | null; delivered: boolean | null };
+  type ItemRow = {
+    inventory_id: string | null;
+    dt_item_code: string | null;
+    delivered: boolean | null;
+    delivered_quantity: number | null;
+  };
   const rows = (items ?? []) as ItemRow[];
   if (rows.length === 0) return skip('no_items');
 
@@ -129,7 +134,13 @@ export async function releaseInventoryOnDtFinished(
       if (r.dt_item_code) skippedNoInventoryCount += 1;
       continue;
     }
-    if (r.delivered === true) {
+    // An item counts as delivered when the driver flipped the
+    // boolean OR recorded a positive delivered_quantity. Some DT
+    // workflows stamp the quantity without the boolean (partial /
+    // qty-based completion), so the boolean-only check stranded
+    // those as never-released.
+    const isDelivered = r.delivered === true || (r.delivered_quantity ?? 0) > 0;
+    if (isDelivered) {
       eligibleInvIds.push(r.inventory_id);
     } else {
       skippedNotDeliveredItemIds.push(r.dt_item_code ?? r.inventory_id);
