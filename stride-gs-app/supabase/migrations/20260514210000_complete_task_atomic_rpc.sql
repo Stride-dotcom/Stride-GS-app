@@ -188,7 +188,17 @@ BEGIN
   -- (a literal 0 there falls through to the catalog/discount path).
 
   -- ── Service-catalog rate lookup (api_lookupRateFromSupabase_) ───
-  v_svc_code    := UPPER(COALESCE(NULLIF(v_task.type, ''), ''));
+  -- CODE-REVIEW FIX (Critical #1): GAS stores the RAW, un-uppercased
+  -- svcCode in the ledger row id + billing.svc_code/svc_name
+  -- (handleCompleteTask_:17163 `svcCode = getVal("Svc Code")||getVal("Type")`
+  -- — never uppercased). api_lookupRateFromSupabase_ uppercases ONLY
+  -- for the catalog WHERE/cache key, not for storage. Uppercasing the
+  -- stored key here would make the SB ledger_row_id miss the GAS-era
+  -- row at cutover and append a duplicate (the 2026-05-05 landmine #4
+  -- class). So: v_svc_code = raw trimmed type for storage/ledger;
+  -- v_upper_code = uppercased ONLY for the catalog lookup.
+  v_svc_code    := trim(COALESCE(NULLIF(v_task.type, ''), ''));
+  v_upper_code  := UPPER(v_svc_code);
   v_upper_class := UPPER(COALESCE(v_inv.item_class, ''));
   v_bill_if_pass := true;   -- defaults when no catalog row
   v_bill_if_fail := false;
@@ -199,7 +209,7 @@ BEGIN
            active, bill_if_pass, bill_if_fail
       INTO v_svc
       FROM public.service_catalog
-      WHERE UPPER(code) = v_svc_code
+      WHERE UPPER(code) = v_upper_code
       LIMIT 1;
     IF FOUND AND v_svc.active IS NOT FALSE THEN
       IF v_svc.billing = 'class_based' THEN
@@ -325,7 +335,7 @@ BEGIN
     ON CONFLICT (tenant_id, ledger_row_id) DO NOTHING;
     UPDATE public.addons
       SET billed = true, billed_at = now(), ledger_row_id = v_addon_id, updated_at = now()
-      WHERE id = v_addon.id;
+      WHERE id = v_addon.id AND tenant_id = p_tenant_id;  -- tenant-scoped (defense-in-depth, matches repair RPC)
     v_ledger_ids := array_append(v_ledger_ids, v_addon_id);
   END LOOP;
   v_billing_ct := v_billing_ct + v_addon_ct;
@@ -345,7 +355,24 @@ BEGIN
     updated_at   = now()
   WHERE tenant_id = p_tenant_id AND task_id = p_task_id;
 
-  -- ── Audit log — exact GAS shape (StrideAPI.gs:7987) ─────────────
+  -- ── Audit log — GAS shape (StrideAPI.gs:7987) ──────────────────
+  -- PARITY-NORMALIZER NOTE (code-review Important #2 + #3, for the
+  -- future MIG-007 gate session — NOT a runtime bug; active_backend
+  -- stays 'gas' so nothing live depends on this yet):
+  --   #2 GAS router logs `result: payload.resultValue || ""`. The task
+  --      client (TaskDetailPanel/CompleteTaskPayload) sends `result`,
+  --      never `resultValue`, so GAS's historical audit answer-key has
+  --      result="" for completeTask. complete-task-shadow mirrors the
+  --      router byte-for-byte (emits payload.resultValue ?? "") so the
+  --      shadow↔GAS diff is clean. THIS RPC intentionally records the
+  --      future-correct validated p_result (Pass/Fail) — the parity
+  --      comparator comparing the SB-primary audit row against GAS
+  --      must normalize the GAS router quirk, not this row.
+  --   #3 GAS writes billing Total="Missing Rate" (string sentinel) when
+  --      missing_rate; numeric public.billing.total can't, so we store
+  --      0 + the 'MISSING RATE - ' item_notes prefix (same convention
+  --      as complete_repair_atomic). Comparator must map GAS
+  --      "Missing Rate" → 0.
   INSERT INTO public.entity_audit_log (
     entity_type, entity_id, tenant_id, action, changes, performed_by, source
   ) VALUES (

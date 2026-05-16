@@ -39,15 +39,28 @@ interface CompleteTaskShadowResult {
 export function runCompleteTaskShadow(payload: CompleteTaskPayload): CompleteTaskShadowResult {
   const taskId = String(payload?.taskId ?? '').trim();
   if (!taskId) return { ok: false, error: 'taskId is required', errorCode: 'INVALID_PARAMS' };
+
+  // Validate the actual completion result the handler acts on
+  // (handleCompleteTask_ reads payload.result).
   const result = String(payload?.result ?? payload?.resultValue ?? '').trim();
   if (result !== 'Pass' && result !== 'Fail') {
     return { ok: false, error: "result must be 'Pass' or 'Fail'", errorCode: 'INVALID_PARAMS' };
   }
+
+  // PARITY-CRITICAL: the answer key is the GAS *router* audit call at
+  // StrideAPI.gs:7987, which logs `result: payload.resultValue || ""`
+  // — the ROUTER-level `resultValue` field, NOT the handler's
+  // `payload.result`. The task client never sends `resultValue`
+  // (CompleteTaskPayload uses `result`), so GAS's historical audit
+  // rows carry result="". Mirror that field + fallback exactly so the
+  // shadow↔GAS diff is clean. (Repair differs: RepairDetailPanel DOES
+  // send resultValue, which is why complete-repair-shadow can echo it.)
+  const auditResult = String(payload?.resultValue ?? '');
   return {
     ok: true,
     changes: {
       status: { old: 'In Progress', new: 'Completed' },
-      result,
+      result: auditResult,
     },
   };
 }
