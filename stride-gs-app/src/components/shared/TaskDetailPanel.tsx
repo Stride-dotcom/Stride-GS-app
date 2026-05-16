@@ -439,11 +439,13 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
     void (async () => {
       try {
         if (completeTaskBackend === 'supabase') {
+          const sbRequestId = crypto.randomUUID();
           const sb = await postCompleteTaskSb({
             tenantId: clientSheetId,
             taskId:   task.taskId,
             result,
             taskNotes: notes || null,
+            requestId: sbRequestId,
           });
           if (!sb.ok) {
             const errMsg = sb.error || 'Completion failed.';
@@ -452,7 +454,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
             void writeSyncFailed({
               tenant_id: clientSheetId, entity_type: 'task', entity_id: task.taskId,
               action_type: 'complete_task', requested_by: user?.email ?? '',
-              request_id: sb.requestId ?? undefined,
+              request_id: sbRequestId,
               payload: { taskId: task.taskId, result, taskNotes: notes || undefined, clientName: task.clientName, description: task.description, sidemark: task.sidemark, itemId: task.itemId },
               error_message: errMsg,
             });
