@@ -59,15 +59,15 @@ interface TransferItemsShadowResult {
 export function runTransferItemsShadow(
   payload: TransferItemsPayload,
 ): TransferItemsShadowResult {
-  if (!Array.isArray(payload?.itemIds) || payload.itemIds.length === 0) {
-    return { ok: false, error: 'itemIds is required (non-empty array)', errorCode: 'INVALID_PARAMS' };
-  }
-  // Mirror the router's exact derivation: String(... || "").trim().
+  // ZERO added validation — mirror the GAS source-tenant audit row
+  // byte-for-byte (StrideAPI.gs:8288):
+  //   { status: { new: "Transferred" }, destinationTenant: destId }
+  // where destId = String(payload.destinationClientSheetId || "").trim().
+  // GAS gates the audit write on `destId && txIds.length`, so a call with
+  // no destId / no items produced NO audit row → replay-shadow sees
+  // no_audit_row and skips before this shadow is even invoked. Rejecting
+  // here would only ever manufacture a false mismatch, never add signal.
   const destId = String(payload?.destinationClientSheetId ?? '').trim();
-  if (!destId) {
-    return { ok: false, error: 'destinationClientSheetId is required', errorCode: 'INVALID_PARAMS' };
-  }
-
   return {
     ok: true,
     changes: {

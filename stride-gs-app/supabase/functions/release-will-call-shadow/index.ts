@@ -44,12 +44,12 @@ interface ReleaseWillCallShadowResult {
 }
 
 export function runReleaseWillCallShadow(
-  payload: ProcessWcReleasePayload,
+  _payload: ProcessWcReleasePayload,
 ): ReleaseWillCallShadowResult {
-  const wcNumber = String(payload?.wcNumber ?? '').trim();
-  if (!wcNumber) {
-    return { ok: false, error: 'wcNumber is required', errorCode: 'INVALID_PARAMS' };
-  }
+  // ZERO added validation — GAS logs the FIXED dict regardless of payload
+  // (StrideAPI.gs:8187). Any stricter check would create false
+  // `shadow_rejected_but_gas_accepted` mismatches. `wcNumber` is the audit
+  // row's entity_id, not part of `changes`, so it's irrelevant to parity.
   return {
     ok: true,
     changes: { summary: 'Will call released' },

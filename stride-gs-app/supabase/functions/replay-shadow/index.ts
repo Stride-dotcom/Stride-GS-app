@@ -79,76 +79,90 @@ interface ReplayCallResult {
 interface ShadowEntry {
   shadow: string;       // Edge Function name
   action: string;       // gas_call_log.action filter value
+  entity: string;       // entity_audit_log.entity_type for the answer-key
+                        // fetch — the 1st arg of the GAS api_auditLog_ call
+                        // ('inventory' | 'task' | 'repair' | 'will_call' …).
+                        // Was hardcoded 'inventory' (updateItem-only MVP);
+                        // now per-entry so non-inventory shadows can score.
+  // When true, the GAS audit `changes` keys ARE request-payload field
+  // names (updateItem's "payload minus identifiers" shape), so the
+  // partial-redaction skip applies — a redacted input field that GAS
+  // logged a change for means the corpus row can't be faithfully
+  // replayed. When false/omitted (fixed- or derived-shape shadows whose
+  // changes are constants or computed values, e.g. {summary:"…"} or
+  // {itemCount:n}), that skip would wrongly drop EVERY call, so it's
+  // bypassed and the call goes straight to shadow-invoke + diff.
+  inputShapedChanges?: boolean;
 }
 const SHADOW_REGISTRY: Record<string, ShadowEntry> = {
-  updateItem: { shadow: 'update-item-shadow', action: 'updateInventoryItem' },
+  updateItem: { shadow: 'update-item-shadow', action: 'updateInventoryItem', entity: 'inventory', inputShapedChanges: true },
   // [MIGRATION-P3] cancelRepair — first of the repair P3 cluster. Shadow
   // is pure (no DB writes), mirrors the fixed-shape audit log GAS produces
   // ({status:{new:'Cancelled'}}). See cancel-repair-shadow/index.ts and
   // MIGRATION_STATUS.md "Per-function migration table".
-  cancelRepair: { shadow: 'cancel-repair-shadow', action: 'cancelRepair' },
+  cancelRepair: { shadow: 'cancel-repair-shadow', action: 'cancelRepair', entity: 'repair' },
   // [MIGRATION-P3] startRepair — second of the repair P3 cluster. Same
   // pure-shadow shape; GAS logs {status:{new:'In Progress'}} on every
   // start (incl. re-runs after status is already In Progress / Complete
   // for PDF regen). See start-repair-shadow/index.ts.
-  startRepair:  { shadow: 'start-repair-shadow',  action: 'startRepair'  },
+  startRepair:  { shadow: 'start-repair-shadow',  action: 'startRepair', entity: 'repair' },
   // [MIGRATION-P3] sendRepairQuote — third of the repair P3 cluster.
   // GAS logs {status:{old:'Pending Quote',new:'Quote Sent'}}. See
   // send-repair-quote-shadow/index.ts. (GAS action is 'sendRepairQuote'.)
-  sendRepairQuote: { shadow: 'send-repair-quote-shadow', action: 'sendRepairQuote' },
+  sendRepairQuote: { shadow: 'send-repair-quote-shadow', action: 'sendRepairQuote', entity: 'repair' },
   // [MIGRATION-P3] respondToRepairQuote — fourth of the cluster. Variable
   // audit-log shape based on the decision input:
   //   {decision:'Approve', status:{new:'Approved'}}  or
   //   {decision:'Decline', status:{new:'Declined'}}.
   // GAS action key is 'respondToRepairQuote' (camelCase from the React
   // payload). See respond-repair-quote-shadow/index.ts.
-  respondToRepairQuote: { shadow: 'respond-repair-quote-shadow', action: 'respondToRepairQuote' },
+  respondToRepairQuote: { shadow: 'respond-repair-quote-shadow', action: 'respondToRepairQuote', entity: 'repair' },
   // [MIGRATION-P3] requestRepairQuote — fifth + final repair P3 entry
   // (multi-item was net-new and doesn't go through parity). Variable
   // shape — items array stringified into a `summary` string. Note:
   // entity_id=='' for this audit row because the legacy GAS path
   // created N repairs (one per item) so the audit doesn't bind to a
   // single repair_id. See request-repair-quote-shadow/index.ts.
-  requestRepairQuote: { shadow: 'request-repair-quote-shadow', action: 'requestRepairQuote' },
+  requestRepairQuote: { shadow: 'request-repair-quote-shadow', action: 'requestRepairQuote', entity: 'repair' },
   // [MIGRATION-P4a] completeRepair — sixth + final repair handler.
   //   { status: { new: 'Complete' }, result: 'Pass'|'Fail' }
   // Per MIG-004 status flip + billing + addon flush + email are all
   // one logical transaction (handled by complete_repair_atomic RPC).
   // See complete-repair-shadow/index.ts.
-  completeRepair: { shadow: 'complete-repair-shadow', action: 'completeRepair' },
+  completeRepair: { shadow: 'complete-repair-shadow', action: 'completeRepair', entity: 'repair' },
   // [MIGRATION-P4a] completeTask — billing-core, atomic via
   // complete_task_atomic RPC (MIG-004). Audit-changes parity shape:
   //   { status: { old: 'In Progress', new: 'Completed' }, result }
   // (task carries status.old; repair logs only status.new.)
   // See complete-task-shadow/index.ts.
-  completeTask: { shadow: 'complete-task-shadow', action: 'completeTask' },
+  completeTask: { shadow: 'complete-task-shadow', action: 'completeTask', entity: 'task' },
   // [MIGRATION-P3] createWillCall — GAS logs (gated on handler success)
   //   { pickupParty: payload.pickupParty||"", itemCount: itemIds.length }
   // Pure function of the payload. See create-will-call-shadow/index.ts.
-  createWillCall: { shadow: 'create-will-call-shadow', action: 'createWillCall' },
+  createWillCall: { shadow: 'create-will-call-shadow', action: 'createWillCall', entity: 'will_call' },
   // [MIGRATION-P3] releaseWillCall — feature_flags key is `releaseWillCall`
   // but the gas_call_log action is `processWcRelease` (the doPost case).
   // Fixed dict { summary: "Will call released" } regardless of partial vs
   // full release. See release-will-call-shadow/index.ts.
-  releaseWillCall: { shadow: 'release-will-call-shadow', action: 'processWcRelease' },
+  releaseWillCall: { shadow: 'release-will-call-shadow', action: 'processWcRelease', entity: 'will_call' },
   // [MIGRATION-P3] createTask — no `createTask` doPost case; the React app
   // creates tasks (single or many) only via `batchCreateTasks`. GAS writes
   // one audit row per taskId, all with the IDENTICAL dict
   //   { summary: "Task created", svcCodes: payload.svcCodes.join(",") }.
   // One-call-fans-to-N-rows, same precedent as requestRepairQuote. See
   // create-task-shadow/index.ts.
-  createTask: { shadow: 'create-task-shadow', action: 'batchCreateTasks' },
+  createTask: { shadow: 'create-task-shadow', action: 'batchCreateTasks', entity: 'task' },
   // [MIGRATION-P3] releaseItems — GAS loops payload.itemIds, one audit row
   // per item, all the IDENTICAL fixed dict { status: { new: "Released" } }.
   // See release-items-shadow/index.ts.
-  releaseItems: { shadow: 'release-items-shadow', action: 'releaseItems' },
+  releaseItems: { shadow: 'release-items-shadow', action: 'releaseItems', entity: 'inventory' },
   // [MIGRATION-P5] transferItems — per item GAS writes a source-tenant
   // `transfer` row { status:{new:'Transferred'}, destinationTenant } and a
   // dest-tenant `transfer_in` row. Shadow models the source `transfer`
   // shape (the corpus row carries the source tenant_id); the transfer_in
   // row is the same N-rows tolerance as above. See
   // transfer-items-shadow/index.ts.
-  transferItems: { shadow: 'transfer-items-shadow', action: 'transferItems' },
+  transferItems: { shadow: 'transfer-items-shadow', action: 'transferItems', entity: 'inventory' },
 };
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -266,6 +280,8 @@ serve(async (req: Request): Promise<Response> => {
   }
   const shadowName = entry.shadow;
   const actionFilter = entry.action;
+  const entityFilter = entry.entity;
+  const inputShapedChanges = entry.inputShapedChanges === true;
 
   const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
   const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
@@ -312,14 +328,18 @@ serve(async (req: Request): Promise<Response> => {
     const tenantId = (row.tenant_id ?? null) as string | null;
     const input = (row.input_redacted ?? {}) as Record<string, unknown>;
 
-    // Fetch the corresponding entity_audit_log row(s). For updateInventoryItem
-    // there's exactly one (inventory entity_type) — but we LEFT JOIN logically
-    // so missing audit rows become "no_audit_row" rather than crashes.
+    // Fetch the corresponding entity_audit_log row(s). entity_type is the
+    // 1st arg of the GAS api_auditLog_ call, taken per-SHADOW_REGISTRY-entry
+    // — no longer hardcoded 'inventory' (that was the updateItem-only MVP,
+    // and it silently starved every non-inventory shadow — repair / task /
+    // will_call — of answer-key rows, classifying them all as
+    // no_audit_row). Logical LEFT JOIN: a missing audit row becomes
+    // "no_audit_row", not a crash.
     const { data: auditRows, error: auditErr } = await sb
       .from('entity_audit_log')
       .select('entity_id, action, changes')
       .eq('correlation_id', callId)
-      .eq('entity_type', 'inventory');
+      .eq('entity_type', entityFilter);
 
     if (auditErr) {
       errorCount++;
@@ -350,8 +370,18 @@ serve(async (req: Request): Promise<Response> => {
     // a field change that doesn't appear in input_redacted. Pre-v38.207.0
     // captures will hit this commonly for location/vendor/description/etc.
     // Post-v38.207.0 captures should all pass through.
+    //
+    // This guard is ONLY meaningful when the audit `changes` keys ARE
+    // request-payload field names (updateItem's "payload minus
+    // identifiers" shape — inputShapedChanges:true). For fixed- or
+    // derived-shape shadows the changes keys are constants/computed values
+    // (e.g. {summary:"Will call released"}, {itemCount:n},
+    // {status:{new:"Released"}}) that are NEVER input keys, so this check
+    // would mark EVERY call skip_partial_input and the shadow would never
+    // be exercised. Bypass it for those — they go straight to
+    // shadow-invoke + diff.
     const gasChangedKeys = Object.keys(gasChanges);
-    const inputHasAllChangedFields = gasChangedKeys.every(
+    const inputHasAllChangedFields = !inputShapedChanges || gasChangedKeys.every(
       k => k === 'itemId' || Object.prototype.hasOwnProperty.call(input, k),
     );
     if (!inputHasAllChangedFields) {

@@ -48,18 +48,20 @@ interface CreateWillCallShadowResult {
 export function runCreateWillCallShadow(
   payload: CreateWillCallPayload,
 ): CreateWillCallShadowResult {
-  // itemIds is the only structurally-required field — a will call with no
-  // items can't be created, and the harness's shadow_error path (separate
-  // from parity diff) covers a malformed payload.
-  if (!Array.isArray(payload?.itemIds) || payload.itemIds.length === 0) {
-    return { ok: false, error: 'itemIds is required (non-empty array)', errorCode: 'INVALID_PARAMS' };
-  }
-
+  // ZERO added validation — mirror the GAS router's audit construction
+  // byte-for-byte (StrideAPI.gs:8173):
+  //   { pickupParty: payload.pickupParty || "",
+  //     itemCount:   (payload.itemIds || []).length }
+  // Per the update-item-shadow precedent, any check stricter than GAS
+  // (e.g. rejecting empty itemIds — which GAS does NOT do at the audit
+  // layer; it logs itemCount:0) would surface as a false
+  // `shadow_rejected_but_gas_accepted` mismatch in replay-shadow.
+  const itemIds = Array.isArray(payload?.itemIds) ? payload.itemIds : [];
   return {
     ok: true,
     changes: {
-      pickupParty: payload.pickupParty || '',
-      itemCount: payload.itemIds.length,
+      pickupParty: payload?.pickupParty || '',
+      itemCount: itemIds.length,
     },
   };
 }

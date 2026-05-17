@@ -44,11 +44,12 @@ interface ReleaseItemsShadowResult {
 }
 
 export function runReleaseItemsShadow(
-  payload: ReleaseItemsPayload,
+  _payload: ReleaseItemsPayload,
 ): ReleaseItemsShadowResult {
-  if (!Array.isArray(payload?.itemIds) || payload.itemIds.length === 0) {
-    return { ok: false, error: 'itemIds is required (non-empty array)', errorCode: 'INVALID_PARAMS' };
-  }
+  // ZERO added validation — GAS logs the FIXED per-item dict
+  // (StrideAPI.gs:8258) regardless of payload. itemIds is the audit row's
+  // entity_id, not part of `changes`. Any stricter check would create
+  // false `shadow_rejected_but_gas_accepted` mismatches.
   return {
     ok: true,
     changes: { status: { new: 'Released' } },

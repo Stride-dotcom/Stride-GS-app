@@ -52,17 +52,17 @@ interface CreateTaskShadowResult {
 export function runCreateTaskShadow(
   payload: BatchCreateTasksPayload,
 ): CreateTaskShadowResult {
-  // A batch with no service codes can't produce task rows; fail fast so
-  // the harness routes it to shadow_error rather than a false mismatch.
-  if (!Array.isArray(payload?.svcCodes) || payload.svcCodes.length === 0) {
-    return { ok: false, error: 'svcCodes is required (non-empty array)', errorCode: 'INVALID_PARAMS' };
-  }
-
+  // ZERO added validation — mirror the GAS audit construction
+  // byte-for-byte (StrideAPI.gs:8605/8613):
+  //   svcCodes: Array.isArray(payload.svcCodes) ? payload.svcCodes.join(",") : ""
+  // GAS itself tolerates a non-array svcCodes (→ ""), so the shadow must
+  // too; rejecting it would be a false `shadow_rejected_but_gas_accepted`
+  // mismatch.
   return {
     ok: true,
     changes: {
       summary: 'Task created',
-      svcCodes: payload.svcCodes.join(','),
+      svcCodes: Array.isArray(payload?.svcCodes) ? payload.svcCodes.join(',') : '',
     },
   };
 }
