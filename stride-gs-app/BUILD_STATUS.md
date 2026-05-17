@@ -30,6 +30,24 @@
 
 ---
 
+## Recent Changes (2026-05-16, [MIGRATION-P3/P5] 5 operational shadow Edge Functions)
+
+`feat/migration/p3-ops-shadows` — shipped 5 pure (Path-C, read-only) shadow Edge Functions that mirror the GAS `api_auditLog_` answer-key shape for the next batch of operational handlers, feeding the existing replay → `parity_results` → rollup → Settings→Migration pipeline:
+
+- `supabase/functions/create-will-call-shadow/index.ts` — action `createWillCall` → `{ pickupParty: payload.pickupParty||"", itemCount: itemIds.length }` (pure from payload; GAS gates the audit row on handler success, so failed historical calls correctly replay as `no_audit_row`/skip).
+- `supabase/functions/release-will-call-shadow/index.ts` — feature_flags key `releaseWillCall`, gas action `processWcRelease` → fixed `{ summary: "Will call released" }`.
+- `supabase/functions/create-task-shadow/index.ts` — feature_flags key `createTask`, gas action `batchCreateTasks` (no `createTask` doPost case exists) → per-task identical `{ summary:"Task created", svcCodes: payload.svcCodes.join(",") }`.
+- `supabase/functions/release-items-shadow/index.ts` — action `releaseItems` → per-item identical `{ status:{new:"Released"} }`.
+- `supabase/functions/transfer-items-shadow/index.ts` — action `transferItems` → source-tenant `{ status:{new:"Transferred"}, destinationTenant: payload.destinationClientSheetId }` (dest `transfer_in` row deferred under the same one-call-fans-to-N-rows tolerance the harness already uses for create-task / requestRepairQuote).
+
+`replay-shadow/index.ts` SHADOW_REGISTRY extended from 6 → 11 entries. Migration `supabase/migrations/20260516120000_p3_ops_shadow_feature_flags.sql` flips `shadow_backend='supabase'`+`parity_enabled=true` for the 5 keys, guarded by `active_backend='gas'` so the fleet stays on GAS (MIG-007); `active_backend` and `tenant_scope` untouched.
+
+**NOT deployed by this session** — the builder environment has no `SUPABASE_ACCESS_TOKEN`/Supabase MCP. The 6 `supabase functions deploy` commands (5 new + `replay-shadow` re-deploy for the registry change) and the `apply_migration` SQL are in MIGRATION_STATUS.md → "Pending user actions". Code review: locked-in Stride reviewer (Opus, read-only).
+
+**Deliberately not built blind** (no clean `entity_audit_log` answer key, no `gas_call_log` corpus, or owned by another in-flight worktree): `reissueInvoice` (stateful audit, stride-mig-invoice P4a), `commitStorageCharges` (no audit row), `onboardClient` (no `api_auditLog_`), `updateTask`/`updateRepair` (no single doPost action), `sendShipmentEmail`/`sendTaskCompleteEmail`/`sendWillCallEmails` (moved to the `send-email` Resend Edge Function — no replay corpus), `receiveShipment` (no `receiveShipment` case). Rationale + per-handler design notes in MIGRATION_STATUS.md "Open questions / blockers".
+
+---
+
 ## Recent Changes (2026-05-15, shared-doc service-role proxy — closes #443/#444 open risk)
 
 `fix/fix/shared-doc-proxy` — resolves the **Open risk** left by PR #443/#444: anon storage RLS for the `documents` bucket (`documents_storage_anon_read_via_share`, migration `20260514120000`) is not reliably live in prod, so the public shared-attachments page (`/#/shared/attachments/{shareId}`) still failed to open PDFs (anon `.download()` → `new row violates row-level security policy`). New Deno Edge Function `supabase/functions/get-shared-doc/index.ts` serves the file bytes with the **service role**, gated solely by the share itself — it re-implements the exact anon RLS predicate (`photo_shares.active=true` AND `expires_at` NULL-or-future AND `doc_id ∈ doc_ids` AND `documents.deleted_at IS NULL`), returns a single generic 404 for every deny case (no share/doc enumeration oracle), validates `doc_id` as a UUID, sanitizes the `Content-Disposition` filename, and sets `Cache-Control: no-store` so a revoked share can't be served from cache. `src/pages/PublicPhotoGallery.tsx` `openDoc()` now `fetch()`es `{VITE_SUPABASE_URL}/functions/v1/get-shared-doc?share_id=…&doc_id=…`, surfacing HTTP/JSON errors inline (same `role="alert"` UX, no regression to the photos path; metadata loader unchanged). **DEPLOY REQUIREMENT:** the function must be deployed with `--no-verify-jwt` (the browser opens it directly with no Authorization header). Code review (locked-in Stride reviewer, Opus): no Critical; one Important — wildcard CORS on service-role-served bytes — judged acceptable (128-bit hex slug is the gate, parity with the prior anon path, consistent with repo edge-fn convention) and accepted as a conscious decision. React side shipped via `npm run deploy`. **Edge function NOT yet deployed** — this builder environment has no Supabase MCP / `SUPABASE_ACCESS_TOKEN`; deploy command handed to Justin (see Pending User Actions).
