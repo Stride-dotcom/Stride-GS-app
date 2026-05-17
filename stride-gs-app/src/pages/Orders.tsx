@@ -69,6 +69,30 @@ function fmtDate(iso: string): string {
   catch { return iso; }
 }
 
+// Effective service date for the date-range filter. Mirrors the Service
+// Date column's precedence exactly (lines below): the operator-picked
+// local_service_date wins; otherwise DT's scheduled_at rendered in
+// Pacific. Returns a YYYY-MM-DD string (lexicographically comparable, so
+// plain string `<` / `>` work for range bounds) or null for rows with no
+// date yet (drafts), which a set range excludes.
+function orderServiceDateISO(o: DtOrderForUI): string | null {
+  if (o.localServiceDate) return o.localServiceDate;
+  if (o.scheduledAt) {
+    const d = new Date(o.scheduledAt);
+    // en-CA yields YYYY-MM-DD; Pacific keeps it consistent with how the
+    // Service Date column renders a DT-scheduled timestamp.
+    if (!isNaN(d.getTime())) return d.toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+  }
+  return null;
+}
+
+// "Today" in Pacific — Justin operates in Kent WA and the Service Date
+// column already renders DT timestamps in America/Los_Angeles, so the
+// quick-filter button should anchor to the same day the operator sees.
+function todayPacificISO(): string {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+}
+
 // ─── Export ───────────────────────────────────────────────────────────────────
 
 function exportCsv(rows: DtOrderForUI[]) {
@@ -182,6 +206,24 @@ export function Orders() {
     (next: string[]) => setStatusFilterRaw(next.join(',')),
     [setStatusFilterRaw]
   );
+  // Service-date range filter, persisted in the URL as ?from=YYYY-MM-DD
+  // &to=YYYY-MM-DD so clicking into an order and pressing browser-back
+  // returns to the same date-filtered list (same rationale as the
+  // client/status/search filters above — the URL is the back-button
+  // contract). Default push so each range pick is its own history entry;
+  // empty string clears the param (useUrlState convention). Filters the
+  // already-loaded rows client-side — no extra Supabase query.
+  const [fromDate, setFromDate] = useUrlState('from', '');
+  const [toDate, setToDate] = useUrlState('to', '');
+  const setTodayRange = useCallback(() => {
+    const t = todayPacificISO();
+    setFromDate(t);
+    setToDate(t);
+  }, [setFromDate, setToDate]);
+  const clearDateRange = useCallback(() => {
+    setFromDate('');
+    setToDate('');
+  }, [setFromDate, setToDate]);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [shareDialog, setShareDialog] = useState<null | 'orders' | 'availability'>(null);
   // When set, the create modal opens in edit-existing-draft mode and
@@ -433,6 +475,23 @@ export function Orders() {
     return filteredByNeedsReview.filter(o => set.has(o.statusName));
   }, [filteredByNeedsReview, statusFilter]);
 
+  // Service-date range — last link in the filter chain before the table.
+  // Inclusive on both bounds; either bound may be omitted (open-ended
+  // range). Rows with no service date (drafts) drop out once any bound is
+  // set, which matches the intent of "show me orders scheduled in this
+  // window". Comparisons are plain string `<` / `>` on YYYY-MM-DD, valid
+  // because that format sorts lexicographically by calendar date.
+  const filteredByDate = useMemo(() => {
+    if (!fromDate && !toDate) return filteredByStatus;
+    return filteredByStatus.filter(o => {
+      const d = orderServiceDateISO(o);
+      if (!d) return false;
+      if (fromDate && d < fromDate) return false;
+      if (toDate && d > toDate) return false;
+      return true;
+    });
+  }, [filteredByStatus, fromDate, toDate]);
+
   const categoryCounts = useMemo(() => {
     const counts: Record<string, number> = {};
     for (const o of clientFilteredOrders) {
@@ -593,7 +652,7 @@ export function Orders() {
   ], [user?.role, refetch]);
 
   const table = useReactTable({
-    data: filteredByStatus,
+    data: filteredByDate,
     columns,
     // Stable row identity — see Inventory.tsx note.
     getRowId: row => row.id,
@@ -673,6 +732,11 @@ export function Orders() {
   const td: React.CSSProperties = {
     padding: '10px 12px', borderBottom: `1px solid ${theme.colors.borderLight}`,
     fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+  };
+  const dateInputStyle: React.CSSProperties = {
+    padding: '7px 10px', fontSize: 12, border: '1px solid rgba(0,0,0,0.08)',
+    borderRadius: 8, outline: 'none', background: '#fff', fontFamily: 'inherit',
+    color: theme.colors.textSecondary, colorScheme: 'light',
   };
 
   return (
@@ -857,12 +921,58 @@ export function Orders() {
               placeholder="All statuses"
               disabled={availableStatuses.length === 0}
             />
+
+            {/* Service-date range filter. Filters by the same date the
+                Service Date column shows (operator-picked local date, or
+                DT's scheduled date in Pacific). Persisted in the URL so
+                back-from-detail restores it. */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+              <span style={{ fontSize: 10, fontWeight: 600, color: '#888', textTransform: 'uppercase', letterSpacing: '1px' }}>
+                Service Date
+              </span>
+              <input
+                type="date"
+                aria-label="Service date from"
+                value={fromDate}
+                max={toDate || undefined}
+                onChange={e => setFromDate(e.target.value)}
+                style={dateInputStyle}
+              />
+              <span style={{ fontSize: 12, color: theme.colors.textMuted }}>–</span>
+              <input
+                type="date"
+                aria-label="Service date to"
+                value={toDate}
+                min={fromDate || undefined}
+                onChange={e => setToDate(e.target.value)}
+                style={dateInputStyle}
+              />
+              <button
+                type="button"
+                onClick={setTodayRange}
+                title="Show only orders with today's service date"
+                style={{ padding: '7px 12px', fontSize: 12, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: theme.colors.textSecondary }}
+              >
+                <Calendar size={13} /> Today
+              </button>
+              {(fromDate || toDate) && (
+                <button
+                  type="button"
+                  onClick={clearDateRange}
+                  title="Clear the date range"
+                  style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 10px', borderRadius: 8, border: `1px solid ${theme.colors.border}`, background: '#fff', cursor: 'pointer', fontSize: 11, color: theme.colors.textSecondary, fontFamily: 'inherit', whiteSpace: 'nowrap' }}
+                >
+                  <X size={12} /> Clear dates
+                </button>
+              )}
+            </div>
+
             <div style={{ flex: 1 }} />
             <span style={{ fontSize: 12, color: theme.colors.textMuted, alignSelf: 'center' }}>
               Showing <strong>{rows.length}</strong> of <strong>{clientFilteredOrders.length}</strong> orders
             </span>
-            {(categoryFilter || statusFilter.length > 0 || globalFilter || sorting.length > 0) && (
-              <button onClick={() => { setCategoryFilter(''); setStatusFilter([]); setGlobalFilter(''); setSorting([]); }} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 10px', borderRadius: 8, border: `1px solid ${theme.colors.border}`, background: '#fff', cursor: 'pointer', fontSize: 11, color: theme.colors.textSecondary, fontFamily: 'inherit', whiteSpace: 'nowrap' }}>
+            {(categoryFilter || statusFilter.length > 0 || globalFilter || sorting.length > 0 || fromDate || toDate) && (
+              <button onClick={() => { setCategoryFilter(''); setStatusFilter([]); setGlobalFilter(''); setSorting([]); clearDateRange(); }} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 10px', borderRadius: 8, border: `1px solid ${theme.colors.border}`, background: '#fff', cursor: 'pointer', fontSize: 11, color: theme.colors.textSecondary, fontFamily: 'inherit', whiteSpace: 'nowrap' }}>
                 <X size={12} />Clear filters
               </button>
             )}
@@ -908,8 +1018,22 @@ export function Orders() {
             </div>
           )}
 
+          {/* Filters (date range / status / category / search / needs-action)
+              narrowed everything out even though the selected clients DO
+              have orders. Without this the operator just sees an empty grid
+              — most reachable now via a stray "Today" click on a quiet day. */}
+          {!loading && !error && clientFilter.length > 0 && clientFilteredOrders.length > 0 && rows.length === 0 && (
+            <div style={{ padding: 40, textAlign: 'center', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, color: theme.colors.textMuted }}>
+              <Calendar size={36} opacity={0.3} />
+              <div style={{ fontSize: 15, fontWeight: 600 }}>No orders match the current filters</div>
+              <div style={{ fontSize: 13 }}>
+                {(fromDate || toDate) ? 'Try widening or clearing the service-date range.' : 'Adjust or clear the filters above.'}
+              </div>
+            </div>
+          )}
+
           {/* Table */}
-          {clientFilter.length > 0 && clientFilteredOrders.length > 0 && (
+          {clientFilter.length > 0 && clientFilteredOrders.length > 0 && rows.length > 0 && (
             <div style={{ border: `1px solid ${theme.colors.border}`, borderRadius: 12, overflow: 'hidden', background: '#fff' }}>
               <div ref={containerRef} style={{ overflowY: 'auto', overflowX: 'auto', maxHeight: 'calc(100dvh - 360px)', WebkitOverflowScrolling: 'touch' }}>
                 {/* tableLayout: 'fixed' locks column widths to the
