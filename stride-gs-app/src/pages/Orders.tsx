@@ -1018,8 +1018,22 @@ export function Orders() {
             </div>
           )}
 
+          {/* Filters (date range / status / category / search / needs-action)
+              narrowed everything out even though the selected clients DO
+              have orders. Without this the operator just sees an empty grid
+              — most reachable now via a stray "Today" click on a quiet day. */}
+          {!loading && !error && clientFilter.length > 0 && clientFilteredOrders.length > 0 && rows.length === 0 && (
+            <div style={{ padding: 40, textAlign: 'center', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, color: theme.colors.textMuted }}>
+              <Calendar size={36} opacity={0.3} />
+              <div style={{ fontSize: 15, fontWeight: 600 }}>No orders match the current filters</div>
+              <div style={{ fontSize: 13 }}>
+                {(fromDate || toDate) ? 'Try widening or clearing the service-date range.' : 'Adjust or clear the filters above.'}
+              </div>
+            </div>
+          )}
+
           {/* Table */}
-          {clientFilter.length > 0 && clientFilteredOrders.length > 0 && (
+          {clientFilter.length > 0 && clientFilteredOrders.length > 0 && rows.length > 0 && (
             <div style={{ border: `1px solid ${theme.colors.border}`, borderRadius: 12, overflow: 'hidden', background: '#fff' }}>
               <div ref={containerRef} style={{ overflowY: 'auto', overflowX: 'auto', maxHeight: 'calc(100dvh - 360px)', WebkitOverflowScrolling: 'touch' }}>
                 {/* tableLayout: 'fixed' locks column widths to the
