@@ -122,6 +122,20 @@ const SHADOW_REGISTRY: Record<string, ShadowEntry> = {
   // (task carries status.old; repair logs only status.new.)
   // See complete-task-shadow/index.ts.
   completeTask: { shadow: 'complete-task-shadow', action: 'completeTask' },
+  // [MIGRATION-P6] payment shadows — COMPUTE-ONLY (no QBO/Stax API ever
+  // called; MIG-008 vacuously satisfied — no payment client constructed).
+  // These don't write parity_dryrun: the parity-meaningful artifact is
+  // the computed would-be payload returned in the response body
+  // (customer/line-items/totals/eligibility), not a state diff. The
+  // harness still captures the call into parity_results so the Settings
+  // → Migration tab surfaces them. Documented structural omissions per
+  // function (skippedDupe/apiErrors/charge-outcomes are Stax/QBO-API-only
+  // and stay 0) are in each function's header.
+  qboCreateInvoice:   { shadow: 'qbo-create-invoice-sb',   action: 'qboCreateInvoice'   },
+  createStaxInvoices: { shadow: 'create-stax-invoices-sb', action: 'createStaxInvoices' },
+  runStaxCharges:     { shadow: 'run-stax-charges-sb',     action: 'runStaxCharges'     },
+  // GAS action is 'importIIF'; feature_flags.function_key is 'importIif'.
+  importIif:          { shadow: 'import-iif-sb',           action: 'importIIF'          },
 };
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
