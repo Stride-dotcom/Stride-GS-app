@@ -359,14 +359,14 @@ function buildInvoiceLineItemsHtml(rows: string[][]): string {
   return out.join('');
 }
 
-// api_esc_ (StrideAPI.gs:28877) — HTML-escape
+// api_esc_ (StrideAPI.gs:28877) — HTML-escape. Byte-faithful: GAS uses
+// String(s || "") (falsy → "") and escapes ONLY [&<>"] — it does NOT
+// escape the single quote. Adding &#39; here would false-mismatch every
+// invoice line carrying an apostrophe (O'Brien, Children's, etc.).
 function esc(s: unknown): string {
-  return String(s == null ? '' : s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+  return String(s || '').replace(/[&<>"]/g, c => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' } as Record<string, string>
+  )[c]);
 }
 
 // GAS uses Utilities.formatDate(d, "America/Los_Angeles", "MM/dd/yyyy").
