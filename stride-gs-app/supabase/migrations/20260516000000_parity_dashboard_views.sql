@@ -62,7 +62,15 @@ LEFT JOIN LATERAL (
   FROM public.parity_results r
   WHERE r.function_key = ff.function_key
     AND r.created_at >= now() - interval '7 days'
-) pr7 ON true;
+) pr7 ON true
+-- feature_flags is authenticated-read, so without this predicate any
+-- authenticated JWT (incl. the client role) could read the full migration
+-- topology + free-text ff.notes via PostgREST. parity_results RLS already
+-- zeroes the metric columns for non-staff, but the rows themselves must
+-- not be exposed. security_invoker = on makes auth.jwt()/auth.role()
+-- evaluate as the querying user here.
+WHERE (auth.jwt() -> 'user_metadata' ->> 'role') IN ('admin', 'staff')
+   OR auth.role() = 'service_role';
 
 GRANT SELECT ON public.parity_summary TO authenticated, service_role;
 
@@ -92,6 +100,11 @@ WHERE r.function_key IN (
   'completeTask', 'completeRepair', 'processWcRelease', 'commitStorageCharges',
   'createInvoice', 'voidInvoice', 'reissueInvoice',
   'createStaxInvoices', 'runStaxCharges', 'qboCreateInvoice'
-);
+)
+-- Defense-in-depth: parity_results RLS already yields zero rows for
+-- non-staff, but keep the gate explicit + symmetric with parity_summary
+-- since input_summary surfaces redacted GAS billing payloads.
+AND ((auth.jwt() -> 'user_metadata' ->> 'role') IN ('admin', 'staff')
+     OR auth.role() = 'service_role');
 
 GRANT SELECT ON public.parity_billing_shadow TO authenticated, service_role;

@@ -294,6 +294,7 @@ export function ParityDashboard() {
   const [billing, setBilling] = useState<BillingShadowRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [billingError, setBillingError] = useState<string | null>(null);
   const [lastFetched, setLastFetched] = useState<Date | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const mountedRef = useRef(true);
@@ -335,6 +336,7 @@ export function ParityDashboard() {
       notes: (r.notes as string) ?? null,
     }));
     setRows(mapped);
+    setBillingError(billingRes.error ? billingRes.error.message : null);
     setBilling(billingRes.error ? [] : ((billingRes.data ?? []) as BillingShadowRow[]));
     setLastFetched(new Date());
     setLoading(false);
@@ -540,8 +542,10 @@ export function ParityDashboard() {
             </thead>
             <tbody>
               {billing.length === 0 && (
-                <tr><td style={{ ...td, textAlign: 'center', color: theme.colors.textMuted }} colSpan={6}>
-                  {error ? 'Unavailable.' : 'No billing shadow runs recorded yet.'}
+                <tr><td style={{ ...td, textAlign: 'center', color: billingError ? theme.colors.statusRed : theme.colors.textMuted }} colSpan={6}>
+                  {billingError
+                    ? `Could not load billing shadow runs: ${billingError}`
+                    : 'No billing shadow runs recorded yet.'}
                 </td></tr>
               )}
               {billing.map(b => (
