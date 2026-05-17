@@ -51,8 +51,8 @@ Stax payment integration: invoicing, charging, auto-pay, catalog sync. React rea
 | Pages | `src/pages/Payments.tsx` |
 | Hooks | `src/hooks/usePaymentTerms.ts`, `src/hooks/useQBO.ts` |
 | Components | `src/components/shared/PaymentDetailPanel.tsx`, `src/components/shared/PreChargeValidationModal.tsx` |
-| Edge Functions | `supabase/functions/stax-catalog-sync/index.ts` (sync service_catalog → Stax items) |
-| Migrations | `20260416120000_stax_invoices_cache_table.sql` (stax_invoices cache), `20260416120001_stax_charges_exceptions_customers_runlog_cache.sql` (charges/exceptions/customers/runlog cache) |
+| Edge Functions | `supabase/functions/stax-catalog-sync/index.ts` (sync service_catalog → Stax items); **[MIGRATION-P6] shadows (compute-only, no payment API):** `supabase/functions/qbo-create-invoice-sb/index.ts` (shadow of GAS `handleQboCreateInvoice_`), `supabase/functions/create-stax-invoices-sb/index.ts` (`handleCreateStaxInvoices_`), `supabase/functions/run-stax-charges-sb/index.ts` (`handleRunStaxCharges_`), `supabase/functions/import-iif-sb/index.ts` (`handleImportIIF_`); shared GAS-ported pure helpers `supabase/functions/_shared/stax-iif-shadow.ts` |
+| Migrations | `20260416120000_stax_invoices_cache_table.sql` (stax_invoices cache), `20260416120001_stax_charges_exceptions_customers_runlog_cache.sql` (charges/exceptions/customers/runlog cache), `20260516000000_p6_payments_shadow_feature_flags.sql` ([MIGRATION-P6] parity-on for qbo/stax handlers + new `importIif` flag; active_backend stays gas) |
 | Apps Script | `AppScripts/stax-auto-pay/StaxAutoPay.gs` (auto-pay charge creation + retry) |
 
 ---
