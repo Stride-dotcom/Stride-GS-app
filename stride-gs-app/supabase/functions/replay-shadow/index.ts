@@ -122,6 +122,33 @@ const SHADOW_REGISTRY: Record<string, ShadowEntry> = {
   // (task carries status.old; repair logs only status.new.)
   // See complete-task-shadow/index.ts.
   completeTask: { shadow: 'complete-task-shadow', action: 'completeTask' },
+  // [MIGRATION-P3] createWillCall — GAS logs (gated on handler success)
+  //   { pickupParty: payload.pickupParty||"", itemCount: itemIds.length }
+  // Pure function of the payload. See create-will-call-shadow/index.ts.
+  createWillCall: { shadow: 'create-will-call-shadow', action: 'createWillCall' },
+  // [MIGRATION-P3] releaseWillCall — feature_flags key is `releaseWillCall`
+  // but the gas_call_log action is `processWcRelease` (the doPost case).
+  // Fixed dict { summary: "Will call released" } regardless of partial vs
+  // full release. See release-will-call-shadow/index.ts.
+  releaseWillCall: { shadow: 'release-will-call-shadow', action: 'processWcRelease' },
+  // [MIGRATION-P3] createTask — no `createTask` doPost case; the React app
+  // creates tasks (single or many) only via `batchCreateTasks`. GAS writes
+  // one audit row per taskId, all with the IDENTICAL dict
+  //   { summary: "Task created", svcCodes: payload.svcCodes.join(",") }.
+  // One-call-fans-to-N-rows, same precedent as requestRepairQuote. See
+  // create-task-shadow/index.ts.
+  createTask: { shadow: 'create-task-shadow', action: 'batchCreateTasks' },
+  // [MIGRATION-P3] releaseItems — GAS loops payload.itemIds, one audit row
+  // per item, all the IDENTICAL fixed dict { status: { new: "Released" } }.
+  // See release-items-shadow/index.ts.
+  releaseItems: { shadow: 'release-items-shadow', action: 'releaseItems' },
+  // [MIGRATION-P5] transferItems — per item GAS writes a source-tenant
+  // `transfer` row { status:{new:'Transferred'}, destinationTenant } and a
+  // dest-tenant `transfer_in` row. Shadow models the source `transfer`
+  // shape (the corpus row carries the source tenant_id); the transfer_in
+  // row is the same N-rows tolerance as above. See
+  // transfer-items-shadow/index.ts.
+  transferItems: { shadow: 'transfer-items-shadow', action: 'transferItems' },
 };
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
