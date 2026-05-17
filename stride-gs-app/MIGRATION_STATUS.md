@@ -384,7 +384,7 @@ Per its own "How to keep this doc current" section: add/update/remove rows as pa
 
 ## Pending user actions
 
-(empty — sync from BUILD_STATUS as P1 sub-tasks ship)
+- [ ] **Apply migration `20260516000000_parity_dashboard_views.sql`** (via `apply_migration` MCP — builder env has no service-role/MCP token). Creates the `parity_summary` + `parity_billing_shadow` read views that back the new Migration Parity Dashboard (`#/migration`, admin/staff). Until applied, the dashboard renders a clear "views not applied yet" message instead of data. Branch `feat/migration/parity-dashboard` (not yet PR'd/merged/deployed).
 
 ---
 

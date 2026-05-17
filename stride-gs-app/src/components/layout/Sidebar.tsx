@@ -23,6 +23,7 @@ import {
   Receipt,
   MessageSquare,
   KeyRound,
+  GitCompare,
 } from 'lucide-react';
 import { ChangePasswordModal } from '../shared/ChangePasswordModal';
 import { theme } from '../../styles/theme';
@@ -50,6 +51,7 @@ const ADMIN_NAV = [
   { id: 'marketing', label: 'Marketing', path: '/marketing', icon: Mail },
   { id: 'scanner', label: 'QR Scanner', path: '/scanner', icon: ScanLine },
   { id: 'labels', label: 'Labels', path: '/labels', icon: Tag },
+  { id: 'migration', label: 'Migration', path: '/migration', icon: GitCompare },
 ];
 
 // Staff: no billing, claims, payments, or settings — has scanner + labels
@@ -64,6 +66,7 @@ const STAFF_NAV = [
   { id: 'willcalls', label: 'Will Calls', path: '/will-calls', icon: Truck },
   { id: 'scanner', label: 'QR Scanner', path: '/scanner', icon: ScanLine },
   { id: 'labels', label: 'Labels', path: '/labels', icon: Tag },
+  { id: 'migration', label: 'Migration', path: '/migration', icon: GitCompare },
 ];
 
 // Client: own data only — dashboard, inventory, shipments, tasks, repairs, will calls, claims

@@ -28,6 +28,7 @@ const ShipmentPage = React.lazy(() => import('./pages/ShipmentPage').then(m => (
 const OrderPage = React.lazy(() => import('./pages/OrderPage').then(m => ({ default: m.OrderPage })));
 const InvoicePage = React.lazy(() => import('./pages/InvoicePage').then(m => ({ default: m.InvoicePage })));
 const DetailPanelMockup = React.lazy(() => import('./pages/DetailPanelMockup').then(m => ({ default: m.DetailPanelMockup })));
+const ParityDashboard = React.lazy(() => import('./pages/ParityDashboard').then(m => ({ default: m.ParityDashboard })));
 import { Orders } from './pages/Orders';
 import { QuoteTool } from './pages/QuoteTool';
 import { PriceList } from './pages/PriceList';
@@ -139,6 +140,7 @@ export default function App() {
           <Route path="/receiving" element={<RoleGuard allowed={['admin', 'staff']}><Receiving /></RoleGuard>} />
           <Route path="/scanner" element={<RoleGuard allowed={['admin', 'staff']}><Scanner /></RoleGuard>} />
           <Route path="/labels" element={<RoleGuard allowed={['admin', 'staff']}><Labels /></RoleGuard>} />
+          <Route path="/migration" element={<RoleGuard allowed={['admin', 'staff']}><React.Suspense fallback={<div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }}>Loading...</div>}><ParityDashboard /></React.Suspense></RoleGuard>} />
           {/* Admin + client only */}
           <Route path="/claims" element={<RoleGuard allowed={['admin', 'client']}><Claims /></RoleGuard>} />
           {/* Admin only */}
