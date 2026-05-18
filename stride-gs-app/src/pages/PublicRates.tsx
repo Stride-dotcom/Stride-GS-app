@@ -10,6 +10,7 @@ import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { fetchPublicShare, type PriceListShare } from '../hooks/usePriceListShares';
 import type { CatalogService } from '../hooks/useServiceCatalog';
+import { fmtDate } from '../lib/constants';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -528,7 +529,7 @@ export function PublicRates({ shareId }: Props) {
             <div style={{ fontSize: 14, fontWeight: 600, color: '#FFFFFF', letterSpacing: '0.5px' }}>{share.title}</div>
             {share.expiresAt && (
               <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)', marginTop: 2 }}>
-                Expires {new Date(share.expiresAt).toLocaleDateString()}
+                Expires {fmtDate(share.expiresAt)}
               </div>
             )}
           </div>

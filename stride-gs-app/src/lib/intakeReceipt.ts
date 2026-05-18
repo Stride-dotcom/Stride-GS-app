@@ -80,7 +80,7 @@ export async function sendIntakeReceipt(input: IntakeReceiptInput): Promise<Send
 
   const signedAtDate = input.signedAt ? new Date(input.signedAt) : new Date();
   const signedDateLabel = signedAtDate.toLocaleDateString('en-US', {
-    year: 'numeric', month: 'long', day: 'numeric',
+    month: '2-digit', day: '2-digit', year: 'numeric',
   });
 
   // Reference number — first 8 chars of intake UUID (or linkId fallback),

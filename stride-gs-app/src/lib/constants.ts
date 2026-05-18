@@ -121,6 +121,14 @@ export function fmtDate(d?: string | null): string {
   return dt.toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
 }
 
+/** Format a Date object to MM/DD/YYYY using its LOCAL calendar date.
+ *  Use this for Date instances — never fmtDate(d.toISOString()), which
+ *  would shift evening timestamps to the next day via the UTC conversion. */
+export function fmtDateLocal(d: Date): string {
+  if (isNaN(d.getTime())) return '—';
+  return d.toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
+}
+
 /** Format ISO datetime ("YYYY-MM-DD HH:mm:ss" or "YYYY-MM-DDTHH:mm:ss")
  *  to MM/DD/YYYY HH:mm for display. Falls back to date-only if no time. */
 export function fmtDateTime(d?: string | null): string {

@@ -49,8 +49,8 @@ export async function generateSignedTcPdf(params: SignedTcPdfParams): Promise<vo
   }
 
   const signedDate = params.signedAt
-    ? new Date(params.signedAt).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
-    : new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+    ? new Date(params.signedAt).toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' })
+    : new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
 
   const coverageLabel = INSURANCE_LABELS[params.insuranceChoice] ?? params.insuranceChoice ?? '—';
 
@@ -106,7 +106,7 @@ export async function generateTcPreviewPdf(): Promise<void> {
     return;
   }
 
-  const previewDate = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+  const previewDate = new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
 
   // Token substitution — use neutral placeholders so the unsigned
   // preview reads as a generic copy of the agreement.

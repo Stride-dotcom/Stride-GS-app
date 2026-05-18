@@ -19,7 +19,7 @@ import { useEntityCompleters, shortEmail } from '../hooks/useEntityCompleters';
 import type { SummaryTask, SummaryRepair, SummaryWillCall } from '../hooks/useDashboardSummary';
 import { entityEvents } from '../lib/entityEvents';
 import { useTablePreferences } from '../hooks/useTablePreferences';
-import { fmtDate } from '../lib/constants';
+import { fmtDate, fmtDateTime } from '../lib/constants';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { useAuth } from '../contexts/AuthContext';
 import { FolderButton } from '../components/shared/FolderButton';
@@ -396,7 +396,7 @@ function TasksTab({ tasks, onNavigate, indicators, canEditPriority }: { tasks: S
         return (
           <span
             style={{ fontSize: 12, color: theme.colors.text, fontStyle: 'italic' }}
-            title={`${c.action === 'cancel' ? 'Cancelled' : 'Completed'} by ${c.performedBy} on ${new Date(c.performedAt).toLocaleString()}`}
+            title={`${c.action === 'cancel' ? 'Cancelled' : 'Completed'} by ${c.performedBy} on ${fmtDateTime(c.performedAt)}`}
           >
             {shortEmail(c.performedBy)}
           </span>

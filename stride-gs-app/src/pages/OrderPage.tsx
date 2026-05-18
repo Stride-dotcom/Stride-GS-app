@@ -130,7 +130,7 @@ function fmtCurrency(n: number) { return `$${n.toFixed(2)}`; }
 
 function fmtDate(iso: string): string {
   if (!iso) return '—';
-  try { return new Date(iso + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' }); }
+  try { return new Date(iso + 'T00:00:00').toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' }); }
   catch { return iso; }
 }
 
@@ -289,7 +289,7 @@ function ResubmitBanner({ order }: { order: DtOrderForUI }) {
   if (!order.lastResubmitAt || !order.lastResubmitDiff) return null;
   const entries = Object.entries(order.lastResubmitDiff);
   if (entries.length === 0) return null;
-  const when = new Date(order.lastResubmitAt).toLocaleString();
+  const when = fmtDateTime(order.lastResubmitAt);
   const who = order.lastResubmitBy || 'Client';
   return (
     <div style={{
@@ -359,10 +359,7 @@ function LinkedPickupBanner({
   pickupOrderId: string | null;
   pickupIdentifier: string | null;
 }) {
-  const when = new Date(finishedAt).toLocaleString('en-US', {
-    weekday: 'short', month: 'short', day: 'numeric',
-    hour: 'numeric', minute: '2-digit',
-  });
+  const when = fmtDateTime(finishedAt);
   const driverText = driverName && driverName.trim()
     ? ` by ${driverName.trim()}`
     : '';
@@ -765,7 +762,7 @@ function DetailsTab({
                                 fontSize: 10, fontWeight: 600,
                                 color: '#166534',
                               }}
-                              title={`Picked up ${new Date(item.pickedUpAt).toLocaleString()}`}
+                              title={`Picked up ${fmtDateTime(item.pickedUpAt)}`}
                             >
                               <PackageCheck size={11} aria-hidden /> Picked up
                             </div>
@@ -1084,7 +1081,13 @@ function DetailsTab({
 
 function fmtDateTime(iso: string | null): string {
   if (!iso) return '—';
-  try { return new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); }
+  try {
+    const dt = new Date(iso);
+    if (isNaN(dt.getTime())) return iso;
+    const date = dt.toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
+    const time = dt.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+    return `${date} ${time}`;
+  }
   catch { return iso; }
 }
 
@@ -1974,16 +1977,16 @@ export function OrderPage() {
               />
             )}
             {order.reviewNotes  && <Field label="Review Notes" value={order.reviewNotes} />}
-            {order.createdAt    && <Field label="Created At"   value={new Date(order.createdAt).toLocaleString()} />}
+            {order.createdAt    && <Field label="Created At"   value={fmtDateTime(order.createdAt)} />}
             {/* Last Edited only when updated_at differs from created_at —
                 Postgres bumps updated_at on every UPDATE so a brand-new
                 row would otherwise show two identical timestamps. */}
             {order.updatedAt && order.updatedAt !== order.createdAt && (
-              <Field label="Last Edited" value={new Date(order.updatedAt).toLocaleString()} />
+              <Field label="Last Edited" value={fmtDateTime(order.updatedAt)} />
             )}
-            {order.reviewedAt   && <Field label="Reviewed At"  value={new Date(order.reviewedAt).toLocaleString()} />}
-            {order.pushedToDtAt && <Field label="Pushed to DT" value={new Date(order.pushedToDtAt).toLocaleString()} />}
-            {order.lastSyncedAt && <Field label="Last Synced"  value={new Date(order.lastSyncedAt).toLocaleString()} />}
+            {order.reviewedAt   && <Field label="Reviewed At"  value={fmtDateTime(order.reviewedAt)} />}
+            {order.pushedToDtAt && <Field label="Pushed to DT" value={fmtDateTime(order.pushedToDtAt)} />}
+            {order.lastSyncedAt && <Field label="Last Synced"  value={fmtDateTime(order.lastSyncedAt)} />}
           </EPCard>
           <EPCard>
             <SectionTitle>Activity Timeline</SectionTitle>

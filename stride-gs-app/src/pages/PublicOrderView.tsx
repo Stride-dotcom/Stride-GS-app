@@ -99,7 +99,7 @@ function fmtDate(s: string | null | undefined): string | null {
   if (!s) return null;
   const d = new Date(s.length === 10 ? s + 'T12:00:00' : s);
   if (isNaN(d.getTime())) return null;
-  return d.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+  return d.toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
 }
 
 export function PublicOrderView({ orderId }: { orderId: string }) {

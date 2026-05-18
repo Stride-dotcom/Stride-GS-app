@@ -38,6 +38,7 @@ import { supabase } from '../../lib/supabase';
 import { useServiceCatalog, type CatalogService } from '../../hooks/useServiceCatalog';
 import type { EntityAddon, AddEntityAddonInput } from '../../hooks/useEntityAddons';
 import { AddTaskServiceModal } from './AddTaskServiceModal';
+import { fmtDate as fmtDateMMDDYYYY } from '../../lib/constants';
 
 export type BillingPreviewEntity = 'task' | 'repair' | 'will_call';
 
@@ -130,10 +131,7 @@ function fmtMoney(n: number | null | undefined): string {
 }
 
 function fmtDate(s: string | null | undefined): string {
-  if (!s) return '—';
-  const d = new Date(s);
-  if (isNaN(d.getTime())) return s;
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  return fmtDateMMDDYYYY(s);
 }
 
 // ─── Component ───────────────────────────────────────────────────────────

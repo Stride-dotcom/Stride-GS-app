@@ -8,7 +8,7 @@ import { supabase } from '../../lib/supabase';
 import { LinkifiedText } from './LinkifiedText';
 import { AutocompleteInput } from './AutocompleteInput';
 import { theme } from '../../styles/theme';
-import { fmtDate } from '../../lib/constants';
+import { fmtDate, fmtDateTime } from '../../lib/constants';
 import { useReceivingAddons } from '../../hooks/useReceivingAddons';
 import { postUpdateInventoryItem, fetchItemMoveHistory, postRequestRepairQuote, postRequestRepairQuoteSb, postAddItemAddon, postRemoveItemAddon, isApiConfigured } from '../../lib/api';
 import { useFeatureFlag } from '../../contexts/FeatureFlagContext';
@@ -379,7 +379,7 @@ function AuditSubTimeline({ entries }: { entries: AuditEntry[] }) {
           }
           if (e.changes.result) detail += (detail ? ' · ' : '') + String(e.changes.result);
         }
-        const time = (() => { try { const d = new Date(e.performed_at); return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ' ' + d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }); } catch { return ''; } })();
+        const time = (() => { try { return fmtDateTime(e.performed_at); } catch { return ''; } })();
         return (
           <div key={e.id} style={{ fontSize: 10, color: '#64748B', padding: '2px 0', display: 'flex', gap: 6, alignItems: 'baseline' }}>
             <span style={{ color: cfg.color, fontWeight: 700, fontSize: 9, textTransform: 'uppercase', flexShrink: 0 }}>{cfg.label}</span>

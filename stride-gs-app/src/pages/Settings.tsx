@@ -35,6 +35,7 @@ import { useClientTcSendHistory, formatTcSendTitle } from '../hooks/useClientTcS
 import { IntakeEmailModal } from '../components/shared/IntakeEmailModal';
 import { supabase } from '../lib/supabase';
 import { sendEmail } from '../lib/email';
+import { fmtDate } from '../lib/constants';
 
 type Tab = 'general' | 'clients' | 'users' | 'pricing' | 'emails' | 'integrations' | 'notifications' | 'maintenance' | 'migration';
 
@@ -827,7 +828,7 @@ export function Settings() {
       const linkRow = data as { link_id: string; expires_at: string | null };
       const intakeUrl = `https://www.mystridehub.com/#/intake/${linkRow.link_id}`;
       const expiresStr = linkRow.expires_at
-        ? new Date(linkRow.expires_at).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
+        ? fmtDate(linkRow.expires_at)
         : 'no expiry date';
 
       const tRes = await apiFetch<{ templates: Array<{ key: string; subject: string; bodyHtml: string }> }>('getEmailTemplates');
@@ -2761,7 +2762,7 @@ export function Settings() {
                           if (tcRec) {
                             return (
                               <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 8, background: '#F0FDF4', color: '#15803D', fontWeight: 600 }}
-                                title={`T&C signed ${new Date(tcRec.signedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`}>
+                                title={`T&C signed ${fmtDate(tcRec.signedAt)}`}>
                                 ✓ T&amp;C Signed
                               </span>
                             );

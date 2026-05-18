@@ -24,6 +24,7 @@ import { MultiSelectFilter } from '../components/shared/MultiSelectFilter';
 import { useClients } from '../hooks/useClients';
 import { SyncBanner } from '../components/shared/SyncBanner';
 import { supabase } from '../lib/supabase';
+import { fmtDate as fmtDateCanonical } from '../lib/constants';
 
 type OrdersTab = 'orders' | 'review' | 'availability';
 
@@ -64,9 +65,7 @@ const globalFilterFn = tanstackGlobalFilter as FilterFn<DtOrderForUI>;
 const ch = createColumnHelper<DtOrderForUI>();
 
 function fmtDate(iso: string): string {
-  if (!iso) return '—';
-  try { return new Date(iso + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }); }
-  catch { return iso; }
+  return fmtDateCanonical(iso);
 }
 
 // Effective service date for the date-range filter. Mirrors the Service
@@ -543,10 +542,8 @@ export function Orders() {
             // another zone.
             const d = new Date(sched);
             if (!isNaN(d.getTime())) {
-              return d.toLocaleDateString('en-US', {
-                month: 'short', day: 'numeric', year: 'numeric',
-                timeZone: 'America/Los_Angeles',
-              });
+              // Resolve the Pacific calendar date first, then format MM/DD/YYYY.
+              return fmtDate(d.toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' }));
             }
           } catch { /* fall through to dash */ }
         }
@@ -563,7 +560,7 @@ export function Orders() {
         if (!v) return <span style={{ color: theme.colors.textMuted }}>—</span>;
         const d = new Date(v);
         if (isNaN(d.getTime())) return v;
-        const dateStr = d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+        const dateStr = fmtDate(v);
         const timeStr = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
         return (
           <div style={{ lineHeight: 1.2 }}>

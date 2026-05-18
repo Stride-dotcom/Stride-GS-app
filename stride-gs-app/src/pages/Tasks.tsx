@@ -22,7 +22,7 @@ import { useScrollRestoration } from '../hooks/useScrollRestoration';
 import { useClientFilterUrlSync } from '../hooks/useClientFilterUrlSync';
 import { useClientFilterPersisted } from '../hooks/useClientFilterPersisted';
 import { theme } from '../styles/theme';
-import { fmtDate } from '../lib/constants';
+import { fmtDate, fmtDateTime } from '../lib/constants';
 import { tanstackGlobalFilter } from '../lib/searchFilters';
 import { useItemIndicators } from '../hooks/useItemIndicators';
 import { ItemIdBadges } from '../components/shared/ItemIdBadges';
@@ -197,7 +197,7 @@ function cols(
         return (
           <span
             style={{ fontSize: 12, color: theme.colors.text, fontStyle: 'italic' }}
-            title={`${c.action === 'cancel' ? 'Cancelled' : 'Completed'} by ${c.performedBy} on ${new Date(c.performedAt).toLocaleString()}`}
+            title={`${c.action === 'cancel' ? 'Cancelled' : 'Completed'} by ${c.performedBy} on ${fmtDateTime(c.performedAt)}`}
           >
             {shortEmail(c.performedBy)}
           </span>

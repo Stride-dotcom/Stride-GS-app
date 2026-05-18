@@ -12,6 +12,7 @@ import { useDocuments } from '../../hooks/useDocuments';
 import { useClientInsurance } from '../../hooks/useClientInsurance';
 import { Shield } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
+import { fmtDate } from '../../lib/constants';
 
 export interface OnboardClientFormData {
   // Identity
@@ -426,7 +427,7 @@ export function OnboardClientModal({ mode = 'create', existingClient = null, all
             }}>
               <div style={{ fontWeight: 700, marginBottom: 4 }}>
                 <Info size={13} style={{ marginRight: 6, verticalAlign: 'text-bottom' }} />
-                Reviewing changes from intake submitted {new Date(pendingIntake.submittedAt).toLocaleDateString()}
+                Reviewing changes from intake submitted {fmtDate(pendingIntake.submittedAt)}
               </div>
               <div style={{ color: theme.colors.textSecondary, fontSize: 12, lineHeight: 1.5 }}>
                 The fields below are <strong>previewing</strong> the client's submitted updates. Click <strong>Save &amp; Sync</strong> at the bottom to apply them.
@@ -1207,11 +1208,11 @@ function InsuranceBlock({ tenantId, clientName }: { tenantId: string; clientName
           {isCancelled ? 'Cancelled' : 'Active'}
         </span>
         <span style={{ fontSize: 11, color: theme.colors.textMuted }}>
-          Next billing: <strong style={{ color: theme.colors.text }}>{row.nextBillingDate}</strong>
+          Next billing: <strong style={{ color: theme.colors.text }}>{fmtDate(row.nextBillingDate)}</strong>
         </span>
         {row.lastBilledAt && (
           <span style={{ fontSize: 11, color: theme.colors.textMuted }}>
-            · Last billed: <strong style={{ color: theme.colors.text }}>{new Date(row.lastBilledAt).toLocaleDateString()}</strong>
+            · Last billed: <strong style={{ color: theme.colors.text }}>{fmtDate(row.lastBilledAt)}</strong>
           </span>
         )}
       </div>
@@ -1258,7 +1259,7 @@ function InsuranceBlock({ tenantId, clientName }: { tenantId: string; clientName
         background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: 8,
         fontSize: 11, color: '#92400E', lineHeight: 1.4,
       }}>
-        <strong>Heads up:</strong> Changes to declared value take effect on the next 30-day billing anniversary, not immediately. Mid-cycle edits are not prorated — the new rate first applies on <strong>{row.nextBillingDate}</strong>.
+        <strong>Heads up:</strong> Changes to declared value take effect on the next 30-day billing anniversary, not immediately. Mid-cycle edits are not prorated — the new rate first applies on <strong>{fmtDate(row.nextBillingDate)}</strong>.
       </div>
 
       {/* Action row */}
@@ -1357,7 +1358,7 @@ function InsuranceBlock({ tenantId, clientName }: { tenantId: string; clientName
         <div style={{ ...lbl, marginBottom: 6 }}>Billing history</div>
         {history.length === 0 ? (
           <div style={{ fontSize: 11, color: theme.colors.textMuted, padding: '6px 0' }}>
-            No charges yet — the first charge will appear on {row.nextBillingDate}.
+            No charges yet — the first charge will appear on {fmtDate(row.nextBillingDate)}.
           </div>
         ) : (
           <div style={{ overflowX: 'auto' }}>
@@ -1678,7 +1679,7 @@ function TaxExemptBlock({
                   <CheckCircle size={14} /> Resale certificate on file
                 </div>
                 <div style={{ fontSize: 11, color: theme.colors.textSecondary, marginBottom: 8 }}>
-                  {certUploadedAt && <>Uploaded {new Date(certUploadedAt).toLocaleDateString()}</>}
+                  {certUploadedAt && <>Uploaded {fmtDate(certUploadedAt)}</>}
                 </div>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                   <a href={certUrl} target="_blank" rel="noopener noreferrer"

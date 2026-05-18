@@ -42,6 +42,7 @@ import {
 import { generateSignedTcPdf, generateTcPreviewPdf } from '../lib/intakePdf';
 import { sendIntakeReceipt } from '../lib/intakeReceipt';
 import { useIsMobile } from '../hooks/useIsMobile';
+import { fmtDate, fmtDateLocal } from '../lib/constants';
 
 // Style tokens — copied verbatim from PublicRates so the public-side
 // pages stay visually coherent without pulling the authed app's theme.
@@ -1159,7 +1160,7 @@ function StepTerms({ draft, setDraft, tcHtml, tcLoading, coverageNotes, sig, sig
               </div>
             )}
             <div style={{ fontSize: 11, color: TEXT_MUT, marginTop: 10 }}>
-              Signed: {new Date().toLocaleDateString()} · Electronic signatures are legally binding under the ESIGN Act and Washington's UETA.
+              Signed: {fmtDateLocal(new Date())} · Electronic signatures are legally binding under the ESIGN Act and Washington's UETA.
             </div>
           </div>
         </div>
@@ -1397,7 +1398,7 @@ function StepDocuments({ draft, setDraft, isRefresh, refreshPrefill }: StepProps
               <div style={{ fontWeight: 700, color: TEXT, marginBottom: 4 }}>Currently on file</div>
               {refreshPrefill.resaleCertCurrentUrl ? (
                 <div>
-                  Cert uploaded {refreshPrefill.resaleCertUploadedAt ? new Date(refreshPrefill.resaleCertUploadedAt).toLocaleDateString() : '(date unknown)'}
+                  Cert uploaded {refreshPrefill.resaleCertUploadedAt ? fmtDate(refreshPrefill.resaleCertUploadedAt) : '(date unknown)'}
                   {refreshPrefill.resaleCertExpires ? ` · expires ${refreshPrefill.resaleCertExpires}` : ''}
                   . Upload a new copy below to replace it.
                 </div>
@@ -1755,7 +1756,7 @@ function replaceTokens(html: string, draft: Draft, coverageNotes: PublicCoverage
   const noteFor = (id: string): string => byId.get(id) || '—';
   return html
     .replace(/\{\{BUSINESS_NAME\}\}/g, escapeHtml(draft.businessName || '[Business Name]'))
-    .replace(/\{\{SIGNED_DATE\}\}/g, escapeHtml(new Date().toLocaleDateString()))
+    .replace(/\{\{SIGNED_DATE\}\}/g, escapeHtml(fmtDateLocal(new Date())))
     .replace(/\{\{COVERAGE_STANDARD_NOTE\}\}/g, escapeHtml(noteFor('standard')))
     .replace(/\{\{COVERAGE_FND_NOTE\}\}/g, escapeHtml(noteFor('fnd')))
     .replace(/\{\{COVERAGE_FWD_NOTE\}\}/g, escapeHtml(noteFor('fwd')))

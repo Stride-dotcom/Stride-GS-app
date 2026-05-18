@@ -4,6 +4,7 @@ import { X, CheckCircle2, AlertTriangle } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { WriteButton } from './WriteButton';
 import type { StaxInvoice } from '../../lib/api';
+import { fmtDate } from '../../lib/constants';
 
 interface Props {
   invoices: StaxInvoice[];
@@ -137,7 +138,7 @@ export function PreChargeValidationModal({ invoices, onConfirm, onClose, dryRun 
                         </td>
                         <td style={{ ...td, borderBottomColor: '#BBF7D0' }}>{inv.customer}</td>
                         <td style={{ ...td, fontWeight: 600, color: '#15803D', borderBottomColor: '#BBF7D0' }}>${inv.amount.toFixed(2)}</td>
-                        <td style={{ ...td, color: theme.colors.textSecondary, borderBottomColor: '#BBF7D0' }}>{inv.dueDate}</td>
+                        <td style={{ ...td, color: theme.colors.textSecondary, borderBottomColor: '#BBF7D0' }}>{fmtDate(inv.dueDate)}</td>
                         <td style={{ ...td, fontFamily: 'monospace', fontSize: 11, color: theme.colors.textMuted, borderBottomColor: '#BBF7D0' }}>{inv.staxId}</td>
                       </tr>
                     ))}
@@ -173,7 +174,7 @@ export function PreChargeValidationModal({ invoices, onConfirm, onClose, dryRun 
                         <td style={{ ...td, fontWeight: 600, borderBottomColor: '#FED7AA', color: theme.colors.textMuted }}>{inv.invNo}</td>
                         <td style={{ ...td, borderBottomColor: '#FED7AA', color: theme.colors.textMuted }}>{inv.customer}</td>
                         <td style={{ ...td, borderBottomColor: '#FED7AA', color: theme.colors.textMuted }}>${inv.amount.toFixed(2)}</td>
-                        <td style={{ ...td, color: theme.colors.textMuted, borderBottomColor: '#FED7AA' }}>{inv.dueDate}</td>
+                        <td style={{ ...td, color: theme.colors.textMuted, borderBottomColor: '#FED7AA' }}>{fmtDate(inv.dueDate)}</td>
                         <td style={{ ...td, borderBottomColor: '#FED7AA' }}>
                           <span style={{ display: 'inline-block', padding: '2px 8px', borderRadius: 8, fontSize: 11, fontWeight: 600, background: '#FEF2F2', color: '#DC2626' }}>
                             {inv.reason}
