@@ -479,7 +479,7 @@ export function Billing() {
   const { connected: qboConnected, pushInvoice: qboPushInvoice } = useQBO();
 
   // ─── Top-level tab state ──────────────────────────────────────────────────
-  // Active tab persisted in the URL (?tab=report|storage|review|parity|activity|coverage)
+  // Active tab persisted in the URL (?tab=report|storage|activity|coverage)
   // so back/forward navigates between tab visits and shareable URLs reflect
   // the user's exact view.
   type BillingTab = 'report' | 'storage' | 'activity' | 'coverage';
