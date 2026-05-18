@@ -1711,27 +1711,31 @@ export function CreateDeliveryOrderModal({
   // saved rate to the entire pre-tax subtotal. v1 does NOT split per-line
   // by service_catalog.taxable; the whole DO is treated as a taxable
   // delivery service. Per-line gating lands with 8b (billing-ledger writer).
-  const taxAmount = useMemo(() => {
-    if (subtotalBeforeTax == null) return 0;
-
-    // COD (customer_collect): the end customer pays the driver on delivery,
-    // so this is a direct-to-consumer sale that is ALWAYS taxable — the
-    // client's resale exemption does not apply to it. Use the client's saved
-    // rate when usable, otherwise fall back to the Kent, WA default.
+  // Effective sales-tax rate (% — not fraction), or null when the sale is
+  // not taxable. Single source of truth so the math, the persisted snapshot,
+  // and the displayed breakdown can never disagree.
+  //   • COD (customer_collect): the end customer pays the driver on delivery,
+  //     so this is a direct-to-consumer sale that is ALWAYS taxable — the
+  //     client's resale exemption does not apply. Use the client's saved
+  //     rate when usable, else fall back to the Kent, WA default.
+  //   • bill_to_client: respect the client's tax-exempt flag (unchanged).
+  const effectiveTaxRatePct = useMemo<number | null>(() => {
     if (billingMethod === 'customer_collect') {
       const savedRate = clientTaxInfo?.taxRatePct;
-      const rate = Number.isFinite(savedRate) && (savedRate as number) > 0
+      return Number.isFinite(savedRate) && (savedRate as number) > 0
         ? (savedRate as number)
         : DEFAULT_TAX_RATE;
-      return subtotalBeforeTax * (rate / 100);
     }
-
-    // bill_to_client: respect the client's tax-exempt flag (unchanged).
-    if (!clientTaxInfo || clientTaxInfo.taxExempt) return 0;
+    if (!clientTaxInfo || clientTaxInfo.taxExempt) return null;
     const rate = clientTaxInfo.taxRatePct;
-    if (!Number.isFinite(rate) || rate <= 0) return 0;
-    return subtotalBeforeTax * (rate / 100);
-  }, [subtotalBeforeTax, clientTaxInfo, billingMethod]);
+    if (!Number.isFinite(rate) || rate <= 0) return null;
+    return rate;
+  }, [clientTaxInfo, billingMethod]);
+
+  const taxAmount = useMemo(() => {
+    if (subtotalBeforeTax == null || effectiveTaxRatePct == null) return 0;
+    return subtotalBeforeTax * (effectiveTaxRatePct / 100);
+  }, [subtotalBeforeTax, effectiveTaxRatePct]);
 
   const orderTotal = useMemo(() => {
     if (subtotalBeforeTax == null) return null;
@@ -2857,16 +2861,14 @@ export function CreateDeliveryOrderModal({
     // tax_amount is null (rather than 0) when the customer is exempt — the
     // billing-ledger writer can short-circuit on null without doing math.
     const isCod = billingMethod === 'customer_collect';
-    const codRate = Number.isFinite(clientTaxInfo?.taxRatePct) && (clientTaxInfo?.taxRatePct as number) > 0
-      ? (clientTaxInfo!.taxRatePct as number)
-      : DEFAULT_TAX_RATE;
     const taxFields = isCod
       ? {
           // COD is always a taxable direct-to-consumer sale — the row must
           // record the collected tax and an explicit non-exempt flag even
           // when the client is resale-exempt for their own bill_to orders.
+          // effectiveTaxRatePct is never null on the COD branch.
           tax_amount: taxAmount,
-          tax_rate_pct: codRate,
+          tax_rate_pct: effectiveTaxRatePct ?? DEFAULT_TAX_RATE,
           customer_tax_exempt: false,
         }
       : {
@@ -5694,7 +5696,7 @@ export function CreateDeliveryOrderModal({
                   <span style={{ fontWeight: 500 }}>{coverageCharge > 0 ? `$${coverageCharge.toFixed(2)}` : 'Included'}</span>
                 </div>
               )}
-              {clientTaxInfo && !clientTaxInfo.taxExempt && subtotalBeforeTax != null && (
+              {effectiveTaxRatePct != null && subtotalBeforeTax != null && (
                 <>
                   <div style={{
                     display: 'flex', justifyContent: 'space-between',
@@ -5705,7 +5707,11 @@ export function CreateDeliveryOrderModal({
                     <span style={{ fontWeight: 500 }}>${subtotalBeforeTax.toFixed(2)}</span>
                   </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
-                    <span>Sales Tax ({clientTaxInfo.taxRatePct.toFixed(3)}%)</span>
+                    <span>
+                      Sales Tax ({effectiveTaxRatePct.toFixed(3)}%)
+                      {billingMethod === 'customer_collect' && clientTaxInfo?.taxExempt
+                        ? ' — collected on COD' : ''}
+                    </span>
                     <span style={{ fontWeight: 500 }}>${taxAmount.toFixed(2)}</span>
                   </div>
                 </>
