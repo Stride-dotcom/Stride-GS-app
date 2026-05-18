@@ -274,6 +274,13 @@ interface SelectedAccessorial {
 // Constant is the lookup code only; the rate and threshold are live.
 const EXTRA_PIECE_CODE = 'XTRA_PC';
 
+// Fallback sales-tax rate for COD (customer_collect) orders when the client
+// record has no usable tax_rate_pct. COD = the customer pays the driver on
+// delivery, so tax is always collected regardless of the client's resale
+// exemption (the exemption covers the client's own purchases, not a
+// direct-to-consumer sale they're collecting on). Kent, WA combined rate.
+const DEFAULT_TAX_RATE = 10.4;
+
 function genUid(): string {
   return Math.random().toString(36).slice(2, 10);
 }
@@ -1706,11 +1713,25 @@ export function CreateDeliveryOrderModal({
   // delivery service. Per-line gating lands with 8b (billing-ledger writer).
   const taxAmount = useMemo(() => {
     if (subtotalBeforeTax == null) return 0;
+
+    // COD (customer_collect): the end customer pays the driver on delivery,
+    // so this is a direct-to-consumer sale that is ALWAYS taxable — the
+    // client's resale exemption does not apply to it. Use the client's saved
+    // rate when usable, otherwise fall back to the Kent, WA default.
+    if (billingMethod === 'customer_collect') {
+      const savedRate = clientTaxInfo?.taxRatePct;
+      const rate = Number.isFinite(savedRate) && (savedRate as number) > 0
+        ? (savedRate as number)
+        : DEFAULT_TAX_RATE;
+      return subtotalBeforeTax * (rate / 100);
+    }
+
+    // bill_to_client: respect the client's tax-exempt flag (unchanged).
     if (!clientTaxInfo || clientTaxInfo.taxExempt) return 0;
     const rate = clientTaxInfo.taxRatePct;
     if (!Number.isFinite(rate) || rate <= 0) return 0;
     return subtotalBeforeTax * (rate / 100);
-  }, [subtotalBeforeTax, clientTaxInfo]);
+  }, [subtotalBeforeTax, clientTaxInfo, billingMethod]);
 
   const orderTotal = useMemo(() => {
     if (subtotalBeforeTax == null) return null;
@@ -2835,11 +2856,24 @@ export function CreateDeliveryOrderModal({
     // order row is self-describing for audit + downstream billing (Task 8b).
     // tax_amount is null (rather than 0) when the customer is exempt — the
     // billing-ledger writer can short-circuit on null without doing math.
-    const taxFields = {
-      tax_amount: clientTaxInfo && !clientTaxInfo.taxExempt ? taxAmount : null,
-      tax_rate_pct: clientTaxInfo ? clientTaxInfo.taxRatePct : null,
-      customer_tax_exempt: clientTaxInfo ? clientTaxInfo.taxExempt : null,
-    };
+    const isCod = billingMethod === 'customer_collect';
+    const codRate = Number.isFinite(clientTaxInfo?.taxRatePct) && (clientTaxInfo?.taxRatePct as number) > 0
+      ? (clientTaxInfo!.taxRatePct as number)
+      : DEFAULT_TAX_RATE;
+    const taxFields = isCod
+      ? {
+          // COD is always a taxable direct-to-consumer sale — the row must
+          // record the collected tax and an explicit non-exempt flag even
+          // when the client is resale-exempt for their own bill_to orders.
+          tax_amount: taxAmount,
+          tax_rate_pct: codRate,
+          customer_tax_exempt: false,
+        }
+      : {
+          tax_amount: clientTaxInfo && !clientTaxInfo.taxExempt ? taxAmount : null,
+          tax_rate_pct: clientTaxInfo ? clientTaxInfo.taxRatePct : null,
+          customer_tax_exempt: clientTaxInfo ? clientTaxInfo.taxExempt : null,
+        };
 
     // Edit-existing-row path. When the modal was opened on an existing
     // draft (or auto-saved one mid-build), or on a real order via the
