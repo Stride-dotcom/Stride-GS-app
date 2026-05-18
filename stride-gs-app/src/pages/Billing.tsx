@@ -18,7 +18,7 @@ import { BillingCoverageTab } from '../components/billing/BillingCoverageTab';
 import { useVirtualRows } from '../hooks/useVirtualRows';
 import { theme } from '../styles/theme';
 import { BtnSpinner } from '../components/ui/BtnSpinner';
-import { fmtDate } from '../lib/constants';
+import { fmtDate, fmtDateLocal } from '../lib/constants';
 import { tanstackGlobalFilter } from '../lib/searchFilters';
 import { WriteButton } from '../components/shared/WriteButton';
 import { MultiSelectFilter } from '../components/shared/MultiSelectFilter';
@@ -241,7 +241,7 @@ function summarizeStorageRowsForInvoice(rows: UnbilledReportRow[], groupSidemark
     const start = parsedDates[0];
     const end   = parsedDates[parsedDates.length - 1];
     if (start.toDateString() === end.toDateString()) {
-      periodLabel = fmtDate(start.toISOString().slice(0, 10));
+      periodLabel = fmtDateLocal(start);
     } else if (start.getFullYear() === end.getFullYear() && start.getMonth() === end.getMonth()) {
       // Same month → "Apr 1-30, 2026". Built directly; no dead-code
       // fallback (v1 had `.replace(/.../,m=>m) || monthYear` which was a
