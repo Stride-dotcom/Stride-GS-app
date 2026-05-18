@@ -214,7 +214,8 @@ Login, role-based route guards, role-based sidebar nav. Three tiers: admin, staf
 | Pages | `src/pages/Login.tsx`, `src/pages/AccessDenied.tsx` |
 | Components | `src/components/layout/Sidebar.tsx` (role-filtered nav), `src/App.tsx` (`RoleGuard` route wrapper, defined inline) |
 | Hooks | `src/hooks/useUsers.ts` (user/role lookups), `src/hooks/useProfiles.ts` |
-| Lib | `src/lib/supabase.ts` (auth session) |
+| Lib | `src/lib/supabase.ts` (auth session), `src/contexts/AuthContext.tsx` (login-time `user_metadata` sync — authoritative for role/clientSheetId/accessibleClientSheetIds/childClientSheetIds; `inSync` 4-key check) |
+| Apps Script | `AppScripts/stride-api/StrideAPI.gs` → auth-user creation cluster (v38.223.0): `createSupabaseAuthUser_` (stamps `user_metadata` on GoTrue admin create + 422 self-heal), `api_buildAuthUserMetadata_` (centralizes the AuthContext metadata contract), `api_backfillAuthUserMetadata_` + `api_findAuthUserByEmail_` (retroactive repair of empty-metadata users). Five create sites: `api_upsertClientUser_`, `handleCreateUser_`, `handleEnsureAuthUser_`, `handleAdminSetUserPassword_`, the helper. RLS field contract: `role` / `clientSheetId` / `accessibleClientSheetIds` (NOT `tenantId`) |
 
 ---
 
