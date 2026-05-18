@@ -2140,9 +2140,16 @@ function api_generateTempPassword_() {
  * @param {string} email
  * @param {string} [password] — optional; if omitted a random UUID-based fallback is used.
  *   Pass the output of api_generateTempPassword_() so the user can log in with a readable passphrase.
- * @returns {{ success: boolean, id?: string, tempPassword?: string, alreadyExists?: boolean, error?: string }}
+ * @param {{role?:string,clientName?:string,clientSheetId?:string,accessibleClientSheetIds?:string[]}} [metadata]
+ *   — written to the auth user's user_metadata (→ raw_user_meta_data). REQUIRED for the
+ *   app to function: every RLS policy + AuthContext keys off `user_metadata.role` /
+ *   `user_metadata.clientSheetId` / `user_metadata.accessibleClientSheetIds`. A user
+ *   created without these is invisible everywhere (the 2026-04-11 onboarding bug — 73
+ *   client users created with empty metadata since the onboarding path stopped passing
+ *   it). Field names match the AuthContext sync contract exactly — NOT `tenantId`.
+ * @returns {{ success: boolean, id?: string, tempPassword?: string, alreadyExists?: boolean, metadataStamped?: boolean, error?: string }}
  */
-function createSupabaseAuthUser_(email, password) {
+function createSupabaseAuthUser_(email, password, metadata) {
   var supabaseUrl = prop_("SUPABASE_URL");
   var serviceKey  = prop_("SUPABASE_SERVICE_ROLE_KEY");
   if (!supabaseUrl || !serviceKey) {
@@ -2153,6 +2160,16 @@ function createSupabaseAuthUser_(email, password) {
   // Use provided passphrase or fall back to random UUID (legacy paths that haven't been updated yet)
   var pw = password || (Utilities.getUuid().replace(/-/g, "") + "Aa1!");
 
+  var hasMeta = metadata && typeof metadata === "object" && Object.keys(metadata).length > 0;
+
+  var createBody = {
+    email: email.toLowerCase(),
+    password: pw,
+    email_confirm: true
+  };
+  // raw_user_meta_data is populated from the user_metadata key on the admin create.
+  if (hasMeta) createBody.user_metadata = metadata;
+
   var url = supabaseUrl + "/auth/v1/admin/users";
   var resp = UrlFetchApp.fetch(url, {
     method: "POST",
@@ -2162,11 +2179,7 @@ function createSupabaseAuthUser_(email, password) {
       "Content-Type": "application/json"
     },
     muteHttpExceptions: true,
-    payload: JSON.stringify({
-      email: email.toLowerCase(),
-      password: pw,
-      email_confirm: true
-    })
+    payload: JSON.stringify(createBody)
   });
 
   var code = resp.getResponseCode();
@@ -2174,18 +2187,133 @@ function createSupabaseAuthUser_(email, password) {
 
   if (code === 200 || code === 201) {
     var result = JSON.parse(body);
-    Logger.log("createSupabaseAuthUser_: created " + email + " (id=" + result.id + ")");
-    return { success: true, id: result.id, tempPassword: pw };
+    Logger.log("createSupabaseAuthUser_: created " + email + " (id=" + result.id + ", meta=" + (hasMeta ? "yes" : "no") + ")");
+    return { success: true, id: result.id, tempPassword: pw, metadataStamped: hasMeta };
   }
 
-  // 422 = "User already registered" — treat as success (password unchanged on existing users)
+  // 422 = "User already registered". The account already exists — but it may be
+  // one of the pre-fix users created with EMPTY user_metadata (the 2026-04-11
+  // bug). Self-heal: if caller supplied metadata and the existing user is
+  // missing `role`, stamp it now. Idempotent — a user that already has role is
+  // left untouched so a legitimate metadata refresh on login isn't clobbered.
   if (code === 422) {
-    Logger.log("createSupabaseAuthUser_: " + email + " already exists in Supabase — OK");
-    return { success: true, id: null, alreadyExists: true };
+    var stamped = false;
+    if (hasMeta) {
+      try {
+        stamped = api_backfillAuthUserMetadata_(supabaseUrl, serviceKey, email, metadata);
+      } catch (healErr) {
+        Logger.log("createSupabaseAuthUser_: metadata self-heal failed for " + email + " (non-fatal): " + healErr);
+      }
+    }
+    Logger.log("createSupabaseAuthUser_: " + email + " already exists in Supabase — OK (metadataStamped=" + stamped + ")");
+    return { success: true, id: null, alreadyExists: true, metadataStamped: stamped };
   }
 
   Logger.log("createSupabaseAuthUser_: failed (" + code + ") — " + body);
   return { success: false, error: "Supabase " + code + ": " + body };
+}
+
+/**
+ * Find an existing auth user by email and, if their user_metadata is missing a
+ * `role`, merge the supplied metadata onto it. Used to retroactively repair the
+ * users created with empty raw_user_meta_data (2026-04-11 onboarding bug) when
+ * onboarding / ensureAuthUser / set-password re-runs for them.
+ *
+ * Idempotent: only writes when role is absent/blank, and merges (never blanks
+ * existing keys like full_name).
+ *
+ * @returns {boolean} true if a stamp write was performed.
+ */
+function api_backfillAuthUserMetadata_(supabaseUrl, serviceKey, email, metadata) {
+  var target = api_findAuthUserByEmail_(supabaseUrl, serviceKey, email);
+  if (!target || !target.id) {
+    Logger.log("api_backfillAuthUserMetadata_: " + email + " not found in auth.users — skip");
+    return false;
+  }
+
+  var existing = (target.user_metadata && typeof target.user_metadata === "object")
+    ? target.user_metadata : {};
+  var existingRole = String(existing.role || "").trim();
+  if (existingRole) {
+    // Already has a role — assume metadata is intact / current. Don't trample
+    // it (login-time AuthContext.updateUser keeps it authoritative).
+    return false;
+  }
+
+  // Merge: keep any pre-existing keys (full_name etc.), overlay our fields.
+  var merged = {};
+  for (var k in existing) { if (existing.hasOwnProperty(k)) merged[k] = existing[k]; }
+  for (var m in metadata) { if (metadata.hasOwnProperty(m)) merged[m] = metadata[m]; }
+
+  var putResp = UrlFetchApp.fetch(supabaseUrl + "/auth/v1/admin/users/" + encodeURIComponent(target.id), {
+    method: "PUT",
+    headers: {
+      "Authorization": "Bearer " + serviceKey,
+      "apikey": serviceKey,
+      "Content-Type": "application/json"
+    },
+    muteHttpExceptions: true,
+    payload: JSON.stringify({ user_metadata: merged })
+  });
+  var pc = putResp.getResponseCode();
+  if (pc < 200 || pc >= 300) {
+    Logger.log("api_backfillAuthUserMetadata_: PUT failed for " + email + " (" + pc + "): " + putResp.getContentText().substring(0, 200));
+    return false;
+  }
+  Logger.log("api_backfillAuthUserMetadata_: stamped metadata for pre-fix user " + email);
+  return true;
+}
+
+/**
+ * Resolve an auth user by email via the GoTrue admin API. GoTrue's ?email=
+ * filter isn't reliable across versions, so page through like
+ * handleAdminSetUserPassword_ / handleResyncUsers_ do (up to 5000 users).
+ * Returns the raw GoTrue user object or null.
+ */
+function api_findAuthUserByEmail_(supabaseUrl, serviceKey, email) {
+  var lower = String(email || "").trim().toLowerCase();
+  if (!lower) return null;
+  for (var page = 1; page <= 5; page++) {
+    var resp = UrlFetchApp.fetch(supabaseUrl + "/auth/v1/admin/users?page=" + page + "&per_page=1000", {
+      method: "GET",
+      headers: { "Authorization": "Bearer " + serviceKey, "apikey": serviceKey },
+      muteHttpExceptions: true
+    });
+    if (resp.getResponseCode() < 200 || resp.getResponseCode() >= 300) return null;
+    var json;
+    try { json = JSON.parse(resp.getContentText()); } catch (_) { json = {}; }
+    var users = json.users || [];
+    if (users.length === 0) break;
+    for (var i = 0; i < users.length; i++) {
+      if (String(users[i].email || "").toLowerCase() === lower) return users[i];
+    }
+    if (users.length < 1000) break;
+  }
+  return null;
+}
+
+/**
+ * Build the user_metadata object an auth user needs from a CB Users-style
+ * record. Centralizes the AuthContext contract (role / clientName /
+ * clientSheetId / accessibleClientSheetIds) so every auth-create call site
+ * stamps the SAME shape. `clientSpreadsheetId` may be a comma-separated list
+ * (multi-client access) — first ID is the primary clientSheetId, the full
+ * list is accessibleClientSheetIds (mirrors AuthContext + RLS expectations).
+ *
+ * @returns {object|null} metadata object, or null if role can't be determined.
+ */
+function api_buildAuthUserMetadata_(role, clientName, clientSpreadsheetId) {
+  var r = String(role || "").trim().toLowerCase();
+  if (!r) return null;
+  var meta = { role: r };
+  var name = String(clientName || "").trim();
+  if (name) meta.clientName = name;
+  var ids = parseCSV_(String(clientSpreadsheetId || ""));
+  if (ids.length > 0) {
+    meta.clientSheetId = ids[0];
+    meta.accessibleClientSheetIds = ids;
+  }
+  return meta;
 }
 
 // ─── Supabase Phase 2 Notification Helpers ───────────────────────────────────
