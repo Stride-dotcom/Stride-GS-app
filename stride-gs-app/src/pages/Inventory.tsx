@@ -33,6 +33,7 @@ import {
   Filter,
   Package,
   Wrench,
+  BadgePercent,
 } from 'lucide-react';
 import { useVirtualRows } from '../hooks/useVirtualRows';
 import { useScrollRestoration } from '../hooks/useScrollRestoration';
@@ -45,6 +46,7 @@ import { CreateWillCallModal } from '../components/shared/CreateWillCallModal';
 import { CreateDeliveryOrderModal } from '../components/shared/CreateDeliveryOrderModal';
 import { TransferItemsModal } from '../components/shared/TransferItemsModal';
 import { ReleaseItemsModal } from '../components/shared/ReleaseItemsModal';
+import { StorageCreditModal } from '../components/shared/StorageCreditModal';
 import { CreateTaskModal } from '../components/shared/CreateTaskModal';
 import { AddToWillCallModal } from '../components/shared/AddToWillCallModal';
 import type { InventoryItem, InventoryStatus } from '../lib/types';
@@ -833,6 +835,7 @@ export function Inventory() {
   const [showCreateTaskModal, setShowCreateTaskModal] = useState(false);
   const [showAddToWCModal, setShowAddToWCModal] = useState(false);
   const [showReleaseModal, setShowReleaseModal] = useState(false);
+  const [showStorageCreditModal, setShowStorageCreditModal] = useState(false);
   const [showDeliveryModal, setShowDeliveryModal] = useState(false);
 
   // Detail panel action items — when user triggers action from detail panel, we use these
@@ -2457,29 +2460,32 @@ export function Inventory() {
               released item). Transfer / Print Labels / Export Selected
               still make sense and stay visible. */}
           {!allSelectedReleased && (
-            <WriteButton label="Create Will Call" variant="ghost" size="sm" onClick={async () => { const guard = checkBatchClientGuard(selectedRows.map(r => r.original)); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Create Will Call'); return; } setShowWCModal(true); }} />
+            <WriteButton label="Will Call" variant="ghost" size="sm" onClick={async () => { const guard = checkBatchClientGuard(selectedRows.map(r => r.original)); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Create Will Call'); return; } setShowWCModal(true); }} />
           )}
           {!allSelectedReleased && (
-            <WriteButton label="Add to Will Call" variant="ghost" size="sm" onClick={async () => { const guard = checkBatchClientGuard(selectedRows.map(r => r.original)); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Add to Will Call'); return; } setShowAddToWCModal(true); }} />
+            <WriteButton label="Add to WC" variant="ghost" size="sm" onClick={async () => { const guard = checkBatchClientGuard(selectedRows.map(r => r.original)); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Add to Will Call'); return; } setShowAddToWCModal(true); }} />
           )}
           {!allSelectedReleased && user?.role !== 'staff' && (
-            <WriteButton label="Create Delivery" variant="ghost" size="sm" onClick={async () => { const guard = checkBatchClientGuard(selectedRows.map(r => r.original)); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Create Delivery'); return; } setShowDeliveryModal(true); }} />
+            <WriteButton label="Delivery" variant="ghost" size="sm" onClick={async () => { const guard = checkBatchClientGuard(selectedRows.map(r => r.original)); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Create Delivery'); return; } setShowDeliveryModal(true); }} />
           )}
           {!allSelectedReleased && (
-            <WriteButton label="Create Task" variant="ghost" size="sm" onClick={async () => { const guard = checkBatchClientGuard(selectedRows.map(r => r.original)); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Create Task'); return; } setShowCreateTaskModal(true); }} />
+            <WriteButton label="Task" variant="ghost" size="sm" onClick={async () => { const guard = checkBatchClientGuard(selectedRows.map(r => r.original)); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Create Task'); return; } setShowCreateTaskModal(true); }} />
           )}
           {(user?.role === 'staff' || user?.role === 'admin' || user?.isParent) && (
             <WriteButton label="Transfer" variant="ghost" size="sm" onClick={async () => { const guard = checkBatchClientGuard(selectedRows.map(r => r.original)); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Transfer'); return; } setShowTransferModal(true); }} />
           )}
           {!allSelectedReleased && (
-            <WriteButton label="Request Repair Quote" variant="ghost" size="sm" onClick={async () => { const items = selectedRows.map(r => r.original); const guard = checkBatchClientGuard(items); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Request Repair Quote'); return; } await handleBulkRequestRepairQuote(items.map(i => ({ itemId: i.itemId, clientId: i.clientId }))); setRowSelection({}); }} />
+            <WriteButton label="Repair" variant="ghost" size="sm" onClick={async () => { const items = selectedRows.map(r => r.original); const guard = checkBatchClientGuard(items); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Request Repair Quote'); return; } await handleBulkRequestRepairQuote(items.map(i => ({ itemId: i.itemId, clientId: i.clientId }))); setRowSelection({}); }} />
           )}
           {!allSelectedReleased && (user?.role === 'staff' || user?.role === 'admin') && (
-            <WriteButton label="Release Items" variant="ghost" size="sm" onClick={async () => { const items = selectedRows.map(r => r.original); const activeItems = items.filter(i => i.status === 'Active'); if (!activeItems.length) { showToast('No active items selected — only Active items can be released'); return; } const guard = checkBatchClientGuard(activeItems); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Release Items'); return; } setShowReleaseModal(true); }} />
+            <WriteButton label="Release" variant="ghost" size="sm" onClick={async () => { const items = selectedRows.map(r => r.original); const activeItems = items.filter(i => i.status === 'Active'); if (!activeItems.length) { showToast('No active items selected — only Active items can be released'); return; } const guard = checkBatchClientGuard(activeItems); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Release Items'); return; } setShowReleaseModal(true); }} />
+          )}
+          {user?.role === 'admin' && (
+            <WriteButton label="Credit" variant="ghost" size="sm" onClick={async () => { const items = selectedRows.map(r => r.original); if (!items.length) { showToast('Select items first to credit'); return; } const guard = checkBatchClientGuard(items); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Storage Credit'); return; } setShowStorageCreditModal(true); }} />
           )}
           {(user?.role === 'staff' || user?.role === 'admin') && (
             <WriteButton
-              label="Print Labels"
+              label="Labels"
               variant="ghost"
               size="sm"
               onClick={async () => {
@@ -2510,7 +2516,7 @@ export function Inventory() {
             onMouseEnter={e => (e.currentTarget.style.background = theme.colors.primaryHover)}
             onMouseLeave={e => (e.currentTarget.style.background = theme.colors.primary)}
           >
-            <Download size={13} /> Export Selected
+            <Download size={13} /> Export
           </button>
         </div>
       )}
@@ -2645,6 +2651,18 @@ export function Inventory() {
         />
       )}
 
+      {/* ── Storage Credit Modal (admin) ── */}
+      {showStorageCreditModal && (detailActionItem || selectedRows.length > 0) && (
+        <StorageCreditModal
+          items={(detailActionItem ? [detailActionItem] : selectedRows.map(r => r.original)).map(i => ({ itemId: i.itemId, description: i.description }))}
+          clientName={detailActionItem?.clientName || selectedRows[0]?.original.clientName || ''}
+          clientSheetId={detailActionItem?.clientId || selectedRows[0]?.original.clientId || ''}
+          createdBy={user?.email || 'unknown'}
+          onClose={() => { setShowStorageCreditModal(false); setDetailActionItem(null); }}
+          onSuccess={(n) => { showToast(`Storage credit added to ${n} item${n !== 1 ? 's' : ''}`); setRowSelection({}); setDetailActionItem(null); }}
+        />
+      )}
+
       {/* ── Transfer Items Modal ── */}
       {showTransferModal && (detailActionItem || selectedRows.length > 0) && (
         <TransferItemsModal
@@ -2700,20 +2718,20 @@ export function Inventory() {
           // actions that don't apply to already-released items from the
           // mobile FAB. Transfer / Print Labels / Export Selected stay.
           const list: FABAction[] = [
-            ...(allSelectedReleased ? [] : [{ label: `Create Will Call${selectedRows.length ? ` (${selectedRows.length})` : ''}`, icon: <Package size={16} />, onClick: requireSel('Create Will Call', () => setShowWCModal(true)) }]),
-            ...(allSelectedReleased ? [] : [{ label: 'Add to Will Call', icon: <Package size={16} />, onClick: requireSel('Add to Will Call', () => setShowAddToWCModal(true)) }]),
-            ...((!allSelectedReleased && user?.role !== 'staff') ? [{ label: 'Create Delivery', icon: <Truck size={16} />, onClick: requireSel('Create Delivery', () => setShowDeliveryModal(true)) }] : []),
-            ...(allSelectedReleased ? [] : [{ label: 'Create Task', icon: <ClipboardList size={16} />, onClick: requireSel('Create Task', () => setShowCreateTaskModal(true)) }]),
+            ...(allSelectedReleased ? [] : [{ label: `Will Call${selectedRows.length ? ` (${selectedRows.length})` : ''}`, icon: <Package size={16} />, onClick: requireSel('Create Will Call', () => setShowWCModal(true)) }]),
+            ...(allSelectedReleased ? [] : [{ label: 'Add to WC', icon: <Package size={16} />, onClick: requireSel('Add to Will Call', () => setShowAddToWCModal(true)) }]),
+            ...((!allSelectedReleased && user?.role !== 'staff') ? [{ label: 'Delivery', icon: <Truck size={16} />, onClick: requireSel('Create Delivery', () => setShowDeliveryModal(true)) }] : []),
+            ...(allSelectedReleased ? [] : [{ label: 'Task', icon: <ClipboardList size={16} />, onClick: requireSel('Create Task', () => setShowCreateTaskModal(true)) }]),
             ...((user?.role === 'staff' || user?.role === 'admin' || user?.isParent)
               ? [{ label: 'Transfer', icon: <Truck size={16} />, onClick: requireSel('Transfer', () => setShowTransferModal(true)) }]
               : []),
-            ...(allSelectedReleased ? [] : [{ label: 'Request Repair', icon: <Wrench size={16} />, onClick: requireSel('Request Repair', async () => {
+            ...(allSelectedReleased ? [] : [{ label: 'Repair', icon: <Wrench size={16} />, onClick: requireSel('Request Repair', async () => {
               const items = selectedRows.map(r => r.original);
               await handleBulkRequestRepairQuote(items.map(i => ({ itemId: i.itemId, clientId: i.clientId })));
               setRowSelection({});
             }) }]),
             ...((user?.role === 'staff' || user?.role === 'admin') ? [
-              ...(allSelectedReleased ? [] : [{ label: 'Release Items', icon: <Package size={16} />, onClick: () => {
+              ...(allSelectedReleased ? [] : [{ label: 'Release', icon: <Package size={16} />, onClick: () => {
                 if (selectedRows.length === 0) { showToast('Select items first to release'); return; }
                 const items = selectedRows.map(r => r.original);
                 const activeItems = items.filter(i => i.status === 'Active');
@@ -2722,7 +2740,14 @@ export function Inventory() {
                 if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Release Items'); return; }
                 setShowReleaseModal(true);
               } }]),
-              { label: 'Print Labels', icon: <Printer size={16} />, onClick: () => {
+              ...(user?.role === 'admin' ? [{ label: 'Credit', icon: <BadgePercent size={16} />, onClick: () => {
+                if (selectedRows.length === 0) { showToast('Select items first to credit'); return; }
+                const items = selectedRows.map(r => r.original);
+                const guard = checkBatchClientGuard(items);
+                if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Storage Credit'); return; }
+                setShowStorageCreditModal(true);
+              } }] : []),
+              { label: 'Labels', icon: <Printer size={16} />, onClick: () => {
                 // Sort-order-aware ids — see Print Labels button above.
                 const ids = table.getSortedRowModel().rows
                   .filter(r => r.getIsSelected())
@@ -2731,7 +2756,7 @@ export function Inventory() {
                 navigate(`/labels?ids=${encodeURIComponent(ids.join(','))}`);
               } },
             ] : []),
-            { label: 'Export Selected', icon: <Download size={16} />, onClick: () => {
+            { label: 'Export', icon: <Download size={16} />, onClick: () => {
               if (selectedRows.length === 0) { showToast('Select items first to export'); return; }
               doExportSelected();
             } },

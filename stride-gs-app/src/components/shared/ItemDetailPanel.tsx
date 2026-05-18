@@ -1,5 +1,6 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
-import { X, Package, Calendar, FileText, ClipboardList, Wrench, Truck, ExternalLink, DollarSign, Ship, AlertCircle, MapPin, CheckCircle2, Pencil, Save, Loader2, FolderOpen, Plus, ChevronDown, Shield, Image as ImageIcon, StickyNote, Activity } from 'lucide-react';
+import { X, Package, Calendar, FileText, ClipboardList, Wrench, Truck, ExternalLink, DollarSign, Ship, AlertCircle, MapPin, CheckCircle2, Pencil, Save, Loader2, FolderOpen, Plus, ChevronDown, Shield, Image as ImageIcon, StickyNote, Activity, BadgePercent } from 'lucide-react';
+import { StorageCreditsSection } from './StorageCreditsSection';
 import { FolderButton } from './FolderButton';
 import { ItemIdBadges } from './ItemIdBadges';
 import { useItemIndicators } from '../../hooks/useItemIndicators';
@@ -1153,27 +1154,41 @@ export function ItemDetailPanel({
   );
 
   const renderActivityTab = () => (
-    <Section icon={Calendar} title="Item History" count={historyCount || undefined}>
-      {historyCount === 0 ? (
-        <div style={{ fontSize: 12, color: theme.colors.textMuted, padding: '4px 0', fontStyle: 'italic' }}>
-          No history found for this item.
-        </div>
-      ) : (
-        <ItemHistory
-          tasks={itemTasks}
-          repairs={itemRepairs}
-          willCalls={itemWillCalls}
-          billing={itemBilling}
-          moves={combinedMoves}
-          shipmentNumber={item.shipmentNumber}
-          receiveDate={item.receiveDate}
-          shipmentCarrier={itemShipment?.carrier}
-          shipmentTracking={itemShipment?.trackingNo}
-          auditByEntity={auditByEntity}
-          clientSheetId={clientSheetId}
-        />
+    <>
+      <Section icon={Calendar} title="Item History" count={historyCount || undefined}>
+        {historyCount === 0 ? (
+          <div style={{ fontSize: 12, color: theme.colors.textMuted, padding: '4px 0', fontStyle: 'italic' }}>
+            No history found for this item.
+          </div>
+        ) : (
+          <ItemHistory
+            tasks={itemTasks}
+            repairs={itemRepairs}
+            willCalls={itemWillCalls}
+            billing={itemBilling}
+            moves={combinedMoves}
+            shipmentNumber={item.shipmentNumber}
+            receiveDate={item.receiveDate}
+            shipmentCarrier={itemShipment?.carrier}
+            shipmentTracking={itemShipment?.trackingNo}
+            auditByEntity={auditByEntity}
+            clientSheetId={clientSheetId}
+          />
+        )}
+      </Section>
+      {/* admin/staff only — mirrors the storage_credits RLS read policy.
+          Clients would otherwise get an RLS-empty list rendered as a
+          misleading "no credits" message. */}
+      {clientSheetId && item.itemId && (userRole === 'admin' || userRole === 'staff') && (
+        <Section icon={BadgePercent} title="Storage Credits">
+          <StorageCreditsSection
+            tenantId={clientSheetId}
+            itemId={item.itemId}
+            isAdmin={userRole === 'admin'}
+          />
+        </Section>
       )}
-    </Section>
+    </>
   );
 
   // ── Header components: status pill + Actions dropdown ──────────────────
