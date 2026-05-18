@@ -46,6 +46,7 @@ import { CreateWillCallModal } from '../components/shared/CreateWillCallModal';
 import { CreateDeliveryOrderModal } from '../components/shared/CreateDeliveryOrderModal';
 import { TransferItemsModal } from '../components/shared/TransferItemsModal';
 import { ReleaseItemsModal } from '../components/shared/ReleaseItemsModal';
+import { StorageCreditModal } from '../components/shared/StorageCreditModal';
 import { CreateTaskModal } from '../components/shared/CreateTaskModal';
 import { AddToWillCallModal } from '../components/shared/AddToWillCallModal';
 import type { InventoryItem, InventoryStatus } from '../lib/types';
@@ -834,6 +835,7 @@ export function Inventory() {
   const [showCreateTaskModal, setShowCreateTaskModal] = useState(false);
   const [showAddToWCModal, setShowAddToWCModal] = useState(false);
   const [showReleaseModal, setShowReleaseModal] = useState(false);
+  const [showStorageCreditModal, setShowStorageCreditModal] = useState(false);
   const [showDeliveryModal, setShowDeliveryModal] = useState(false);
 
   // Detail panel action items — when user triggers action from detail panel, we use these
@@ -2646,6 +2648,18 @@ export function Inventory() {
           onSuccess={() => { showToast('Items released'); setRowSelection({}); setDetailActionItem(null); refetch(); }}
           applyItemPatch={applyItemPatch}
           clearItemPatch={clearItemPatch}
+        />
+      )}
+
+      {/* ── Storage Credit Modal (admin) ── */}
+      {showStorageCreditModal && (detailActionItem || selectedRows.length > 0) && (
+        <StorageCreditModal
+          items={(detailActionItem ? [detailActionItem] : selectedRows.map(r => r.original)).map(i => ({ itemId: i.itemId, description: i.description }))}
+          clientName={detailActionItem?.clientName || selectedRows[0]?.original.clientName || ''}
+          clientSheetId={detailActionItem?.clientId || selectedRows[0]?.original.clientId || ''}
+          createdBy={user?.email || 'unknown'}
+          onClose={() => { setShowStorageCreditModal(false); setDetailActionItem(null); }}
+          onSuccess={(n) => { showToast(`Storage credit added to ${n} item${n !== 1 ? 's' : ''}`); setRowSelection({}); setDetailActionItem(null); }}
         />
       )}
 
