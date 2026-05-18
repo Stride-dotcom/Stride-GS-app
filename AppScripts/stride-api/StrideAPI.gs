@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.222.0 — 2026-05-14 PST — [BILLING bridge] CB Consolidated_Ledger auto-reconcile from public.billing on every QBO push. Closes the silent-drop class that bit INV-001152 (and the six other stuck invoices from the 2026-05-05 / 2026-05-06 cycle): handleCreateInvoice_'s CB dedup-skip at ~line 25303, plus the symmetry gaps in handleVoidInvoice_ / handleReopenTask_ (open backlog #5 / #7), let CB Consolidated_Ledger drift behind per-tenant Billing_Ledger + public.billing. handleQboCreateInvoice_ reads CB for the grouping pass, so any row that diverged got silently dropped from the push payload (React sent N invoices, GAS grouped <N). New helper `reconcileCbFromBilling_(invoiceNos)` reads public.billing as the source of truth, indexes CB by Ledger Row ID, and either UPDATEs the matching CB row in place (Status / Invoice # / Sidemark / Client / svc fields) or APPENDs a fresh CB row for IDs missing from CB. Idempotent — re-running is a no-op when state matches. handleQboCreateInvoice_ derives the set of invoice numbers covered by the incoming ledger_row_ids (one supabaseSelect_ on public.billing.invoice_no), calls the reconciler before reading CB, then proceeds with the existing grouping pass against the post-reconcile state. Wrapped in try/catch so a Supabase outage degrades to the prior behavior (silent skip of drifted rows) instead of blocking the push. NOT a structural fix — the underlying CB-symmetry bugs are intentionally left in place per MIG-005 (CB is retired in P4b). This is a transitional bridge that keeps billing accurate during the migration window.
+   StrideAPI.gs — v38.223.0 — 2026-05-18 PST — [CRITICAL auth fix] Onboarding created Supabase auth users with EMPTY raw_user_meta_data — broken since 2026-04-11 (73 client users affected). Root cause: createSupabaseAuthUser_ never sent user_metadata on the admin create, so every RLS policy (which keys off auth.jwt()->'user_metadata'->>'role' / ->>'clientSheetId') filtered these users out and they were invisible everywhere in the app. The apply-intake-on-submit Edge Function does NOT create auth users (only deactivates the intake link + propagates refresh-mode client data) so the bug is entirely GAS-side. Fix: createSupabaseAuthUser_ gains an optional `metadata` param and POSTs it as user_metadata; new helper api_buildAuthUserMetadata_(role, clientName, clientSpreadsheetId) centralizes the AuthContext contract — { role, clientName, clientSheetId, accessibleClientSheetIds } (NOT `tenantId` as first hypothesized — RLS + AuthContext.tsx both key off `clientSheetId` / `accessibleClientSheetIds`; a `tenantId` field would not have unblocked RLS). All FIVE auth-user-creation sites now stamp it: api_upsertClientUser_ (onboarding — the primary bug), handleCreateUser_ (admin add user), handleEnsureAuthUser_ (gap-fill), handleAdminSetUserPassword_ create branch, plus the helper itself. Remediation for the existing 73: createSupabaseAuthUser_'s 422 "already exists" branch now self-heals via api_backfillAuthUserMetadata_ — finds the user by email and merges metadata ONLY when their existing user_metadata has no `role` (idempotent; never trampling a live login-synced metadata). Re-running onboarding or clicking ensureAuthUser for any pre-fix user repairs them; a bulk remediation can also iterate handleEnsureAuthUser_ over the cohort. No schema/migration/React change.
+   v38.222.0 — 2026-05-14 PST — [BILLING bridge] CB Consolidated_Ledger auto-reconcile from public.billing on every QBO push. Closes the silent-drop class that bit INV-001152 (and the six other stuck invoices from the 2026-05-05 / 2026-05-06 cycle): handleCreateInvoice_'s CB dedup-skip at ~line 25303, plus the symmetry gaps in handleVoidInvoice_ / handleReopenTask_ (open backlog #5 / #7), let CB Consolidated_Ledger drift behind per-tenant Billing_Ledger + public.billing. handleQboCreateInvoice_ reads CB for the grouping pass, so any row that diverged got silently dropped from the push payload (React sent N invoices, GAS grouped <N). New helper `reconcileCbFromBilling_(invoiceNos)` reads public.billing as the source of truth, indexes CB by Ledger Row ID, and either UPDATEs the matching CB row in place (Status / Invoice # / Sidemark / Client / svc fields) or APPENDs a fresh CB row for IDs missing from CB. Idempotent — re-running is a no-op when state matches. handleQboCreateInvoice_ derives the set of invoice numbers covered by the incoming ledger_row_ids (one supabaseSelect_ on public.billing.invoice_no), calls the reconciler before reading CB, then proceeds with the existing grouping pass against the post-reconcile state. Wrapped in try/catch so a Supabase outage degrades to the prior behavior (silent skip of drifted rows) instead of blocking the push. NOT a structural fix — the underlying CB-symmetry bugs are intentionally left in place per MIG-005 (CB is retired in P4b). This is a transitional bridge that keeps billing accurate during the migration window.
    v38.221.0 — 2026-05-14 PST — [MIGRATION-P3 SB→Sheet mirror for repairs] Extends __writeThroughReverseRepairs_ to support op='insert' (treats both 'insert' and 'update' as upserts: find row by Repair ID, append if missing, update if present — same idempotency invariants either way). Extends REVERSE_REPAIR_FIELDS_ with created_date / created_by / item_notes / task_notes / source_task_id so a fresh sheet row built by the insert path has the full create state. New admin function runBackfillSbOnlyRepairsToSheet(tenantIdArg?) (and the runBackfillSevaRepairsToSheet convenience wrapper) walks active CB clients, fetches every public.repairs row for the tenant, and inserts the missing ones into the per-tenant Repairs sheet via the writer — idempotent, so re-running is harmless. Companion edge function change in request-repair-quote-sb fires the writer with op='insert' after the RPC, so new multi-item repairs land on the sheet immediately instead of being SB-only and invisible to legacy readers. Closes the symmetric gap to v38.220.0: that PR stopped the GAS sync from DELETING SB-only rows; this PR stops the multi-item create flow from leaving them SB-only in the first place.
    v38.220.0 — 2026-05-14 PST — [MIGRATION-P3 SB-primary preserves SB-only repairs] api_fullClientSync_ no longer calls supabaseDeleteStaleRows_ on the repairs entity. With all six repair feature flags now at active_backend='supabase' fleet-wide (cancelRepair / startRepair / sendRepairEmails / completeRepair / requestRepairQuote / respondRepairQuote — flipped 2026-05-14 19:32 UTC), public.repairs is the authoritative store. The SB-only multi-item create path (request-repair-quote-sb, PR #397) intentionally never writes to the per-tenant Repairs sheet — so the stale-delete sweep was nuking legitimate SB rows on every full-sync (caught 2026-05-14 19:43 UTC when Seva Home's RPR-63280-1778715634749 lost its parent row mid-quote-send; reconstructed manually via SQL; this fix prevents a recurrence). Sheet edits still upsert to SB via supabaseBatchUpsert_; only the destructive delete sweep is dropped.
    v38.219.0 — 2026-05-14 PST — handleProcessWcRelease_ now reads Qty + Sidemark when building allUnreleasedItems. Pre-fix the per-row object only carried itemId/wcFee/itemClass/description/location/vendor, so the downstream releaseItemsForTable.map produced rows with qty=undefined and sidemark=undefined — every WC release email rendered "Qty 1" regardless of the actual quantity on the WC_Items row, and the Sidemark column was blank for every line. Fix is two added field reads at the push() site — `qty: Number(...||1)` mirrors the inventory release email's safe default, `sidemark: String(...||"").trim()` matches the existing description/vendor coercion. releaseItemsForTable already references r.qty and r.sidemark so no downstream change needed. Pure data-plumbing fix; no schema or RLS change; no React/Supabase change.
@@ -9925,6 +9926,18 @@ function handleAdminSetUserPassword_(data, callerEmail) {
   //     them with the admin-provided password. This lets this endpoint act
   //     as both "set" and "reset".
   if (!target || !target.id) {
+    // v38.223.0 — Stamp user_metadata on this create path too (it's a fifth
+    // auth-user-creation site). Resolve role/client scope from the CB Users row.
+    var spLookup = lookupUser_(targetEmail);
+    var spCreateBody = {
+      email: targetEmail,
+      password: newPassword,
+      email_confirm: true
+    };
+    var spMeta = spLookup.user
+      ? api_buildAuthUserMetadata_(spLookup.user.role, spLookup.user.clientName, spLookup.user.clientSheetId)
+      : null;
+    if (spMeta) spCreateBody.user_metadata = spMeta;
     var createResp = UrlFetchApp.fetch(url + "/auth/v1/admin/users", {
       method: "POST",
       headers: {
@@ -9932,11 +9945,7 @@ function handleAdminSetUserPassword_(data, callerEmail) {
         "apikey": key,
         "Content-Type": "application/json"
       },
-      payload: JSON.stringify({
-        email: targetEmail,
-        password: newPassword,
-        email_confirm: true
-      }),
+      payload: JSON.stringify(spCreateBody),
       muteHttpExceptions: true
     });
     var createCode = createResp.getResponseCode();
@@ -9994,12 +10003,21 @@ function handleEnsureAuthUser_(data, callerEmail) {
   var targetEmail = String((data && data.email) || "").trim().toLowerCase();
   if (!targetEmail) return errorResponse_("email is required", "VALIDATION_ERROR");
 
-  var sbResult = createSupabaseAuthUser_(targetEmail);
+  // v38.223.0 — Resolve the CB Users row so the gap-filled auth user gets its
+  // role/client scope stamped into user_metadata. This is also the remediation
+  // lever for the 2026-04-11 cohort: running ensureAuthUser for a pre-fix user
+  // hits the 422 self-heal path in createSupabaseAuthUser_ and backfills them.
+  var targetLookup = lookupUser_(targetEmail);
+  var ensureMeta = targetLookup.user
+    ? api_buildAuthUserMetadata_(targetLookup.user.role, targetLookup.user.clientName, targetLookup.user.clientSheetId)
+    : null;
+
+  var sbResult = createSupabaseAuthUser_(targetEmail, null, ensureMeta);
   if (!sbResult.success) {
     return errorResponse_("Auth user creation failed: " + (sbResult.error || "unknown"), "UPSTREAM_ERROR");
   }
 
-  Logger.log("handleEnsureAuthUser_: admin=" + callerEmail + " ensured auth for " + targetEmail + " (alreadyExists=" + (!!sbResult.alreadyExists) + ")");
+  Logger.log("handleEnsureAuthUser_: admin=" + callerEmail + " ensured auth for " + targetEmail + " (alreadyExists=" + (!!sbResult.alreadyExists) + ", metadataStamped=" + (!!sbResult.metadataStamped) + ")");
   return jsonResponse_({
     success: true,
     email: targetEmail,
@@ -10396,8 +10414,14 @@ function handleCreateUser_(params, callerEmail) {
 
   // v38.108.0 — Generate a human-readable passphrase, create Supabase auth user with it
   // so the user can log in immediately rather than requiring a "Forgot Password" flow.
+  // v38.223.0 — Stamp user_metadata at creation (role + client scope) so RLS
+  // can see the user. clientSheetId may be a CSV for multi-client access.
   var generatedPassword = api_generateTempPassword_();
-  var sbResult = createSupabaseAuthUser_(email, generatedPassword);
+  var sbResult = createSupabaseAuthUser_(
+    email,
+    generatedPassword,
+    api_buildAuthUserMetadata_(role, clientName, clientSheetId)
+  );
   var supabaseWarning = "";
   var returnedTempPassword = "";
   if (!sbResult.success) {
@@ -26413,8 +26437,15 @@ function api_upsertClientUser_(cbSS, email, clientName, clientSheetId) {
     Logger.log("api_upsertClientUser_: created user row for " + email);
 
     // v38.108.0 — Generate a readable passphrase for Supabase auth so the client can log in directly.
+    // v38.223.0 — Stamp role/clientName/clientSheetId/accessibleClientSheetIds into
+    // user_metadata at creation. Without this the user is invisible to every RLS
+    // policy (the 2026-04-11 bug). New onboarded users get single-client access.
     var onboardTempPwd = api_generateTempPassword_();
-    var sbResult = createSupabaseAuthUser_(email, onboardTempPwd);
+    var sbResult = createSupabaseAuthUser_(
+      email,
+      onboardTempPwd,
+      api_buildAuthUserMetadata_("client", clientName, clientSheetId)
+    );
     if (!sbResult.success) {
       Logger.log("api_upsertClientUser_: Supabase auth creation failed for " + email + ": " + sbResult.error);
       onboardTempPwd = ""; // don't include an unset password in the email
