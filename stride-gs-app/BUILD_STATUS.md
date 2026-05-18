@@ -194,7 +194,7 @@
 **Versions deployed live:**
 | Layer | Version |
 |---|---|
-| StrideAPI Web App | v38.223.0 / v513 |
+| StrideAPI Web App | v38.223.0 / v518 |
 | `cancel-repair-sb` | v1 |
 | `cancel-repair-shadow` | v1 |
 | `start-repair-sb` | v1 |
