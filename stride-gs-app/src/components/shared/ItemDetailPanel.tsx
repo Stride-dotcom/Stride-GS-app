@@ -1176,7 +1176,10 @@ export function ItemDetailPanel({
           />
         )}
       </Section>
-      {clientSheetId && item.itemId && (
+      {/* admin/staff only — mirrors the storage_credits RLS read policy.
+          Clients would otherwise get an RLS-empty list rendered as a
+          misleading "no credits" message. */}
+      {clientSheetId && item.itemId && (userRole === 'admin' || userRole === 'staff') && (
         <Section icon={BadgePercent} title="Storage Credits">
           <StorageCreditsSection
             tenantId={clientSheetId}
