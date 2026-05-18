@@ -877,53 +877,6 @@ export function syncSingleServiceToSheet(code: string, signal?: AbortSignal) {
   );
 }
 
-// ─── Pricing Parity Monitor (v38.81.0, admin-only) ──────────────────────────
-export type ParityClass = 'XS' | 'S' | 'M' | 'L' | 'XL' | 'XXL';
-export type ParityClassRates = Record<ParityClass, number>;
-
-export interface ParityServiceSide {
-  rates: ParityClassRates;
-  flatRate: number;
-  active: boolean;
-}
-
-export interface ParityService {
-  code: string;
-  name: string;
-  category: string;
-  billing: 'class_based' | 'flat' | string;
-  /** 'both' | 'sheet' | 'supabase' — which sources the service appears in */
-  source: 'both' | 'sheet' | 'supabase';
-  active: boolean;
-  sheet: ParityServiceSide | null;
-  supabase: ParityServiceSide | null;
-  match: boolean;
-}
-
-export interface ParityClassVolumes {
-  sheet: Partial<Record<ParityClass, number>>;
-  supabase: Partial<Record<ParityClass, number>>;
-  match: boolean;
-}
-
-export interface PricingParityResponse {
-  services: ParityService[];
-  classVolumes: ParityClassVolumes;
-  summary: {
-    total: number;
-    matching: number;
-    mismatched: number;
-    sheetOnly: number;
-    supabaseOnly: number;
-  };
-  supabaseReachable: boolean;
-  generatedAt: string;
-}
-
-export function fetchPricingParity(signal?: AbortSignal) {
-  return apiFetch<PricingParityResponse>('getPricingParity', undefined, { signal });
-}
-
 // ─── Doc Template Preview (v38.84.0, admin-only) ────────────────────────────
 export interface TestGenerateDocResponse {
   success: boolean;
