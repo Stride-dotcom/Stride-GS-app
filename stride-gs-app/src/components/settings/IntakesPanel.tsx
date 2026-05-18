@@ -12,7 +12,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Copy, CheckCircle2, Link2, Plus, Trash2, FileText, UserPlus, Eye, X, AlertTriangle, ExternalLink, Loader2, Mail } from 'lucide-react';
 import { theme } from '../../styles/theme';
-import { fmtDateTime } from '../../lib/constants';
+import { fmtDate, fmtDateTime } from '../../lib/constants';
 import { useIntakeAdmin, copyIntakeDocsToClient, seedClientInsuranceFromIntake, type IntakeRow, type IntakeLinkRow } from '../../hooks/useIntakeAdmin';
 // Reference for future wiring — keep the helper in the import graph
 // without tripping noUnusedLocals.
@@ -620,7 +620,7 @@ function GenerateLinkBlock({ links, generateLink, revokeLink }: {
     if (!tcTemplate || !modalFresh) return { subject: '', body: '' };
     const intakeUrl = url(modalFresh.linkId);
     const expiresStr = modalFresh.expiresAt
-      ? new Date(modalFresh.expiresAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
+      ? fmtDate(modalFresh.expiresAt)
       : 'no expiry date';
     return {
       subject: substituteTokens(tcTemplate.subject, intakeUrl, expiresStr),

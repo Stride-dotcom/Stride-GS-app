@@ -37,14 +37,21 @@ function fmtDate(iso: string | null | undefined): string {
   if (!iso) return '—';
   try {
     return new Date(iso + 'T00:00:00').toLocaleDateString('en-US', {
-      weekday: 'short', month: 'short', day: 'numeric', year: 'numeric',
+      month: '2-digit', day: '2-digit', year: 'numeric',
     });
   } catch { return iso; }
 }
 
 function fmtDateTime(iso: string | null | undefined): string {
   if (!iso) return '—';
-  try { return new Date(iso).toLocaleString('en-US'); } catch { return iso; }
+  try {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return iso;
+    const date = d.toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mi = String(d.getMinutes()).padStart(2, '0');
+    return `${date} ${hh}:${mi}`;
+  } catch { return iso; }
 }
 
 function fmtWindow(start: string, end: string, tz: string): string {
@@ -220,7 +227,7 @@ function buildPricingTable(order: DtOrderForUI): string {
 function buildOrderPrintShell(order: DtOrderForUI): string {
   const orderNumber = order.dtIdentifier || order.id.slice(0, 8).toUpperCase();
   const statusLabel = order.statusName || order.statusCode || '—';
-  const generated = new Date().toLocaleString('en-US');
+  const generated = fmtDateTime(new Date().toISOString());
   const docTypeLabel = order.isPickup ? 'Pickup Order' : 'Delivery Order';
 
   const sections = [

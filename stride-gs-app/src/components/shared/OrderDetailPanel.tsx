@@ -13,6 +13,7 @@ import type { DtOrderForUI, DtOrderItemForUI } from '../../lib/supabaseQueries';
 import { createPortal } from 'react-dom';
 import { generateOrderPdf } from '../../lib/orderPdf';
 import { Printer } from 'lucide-react';
+import { fmtDate, fmtDateTime } from '../../lib/constants';
 
 // Human-readable labels + chip config for review workflow states
 const REVIEW_CFG: Record<string, { bg: string; color: string; label: string; icon: React.ReactNode }> = {
@@ -161,7 +162,7 @@ function formatWindow(start: string, end: string, tz: string): string {
 function formatDate(iso: string): string {
   if (!iso) return '—';
   try {
-    return new Date(iso + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+    return fmtDate(iso);
   } catch { return iso; }
 }
 
@@ -519,7 +520,7 @@ export function OrderDetailPanel({ order, onClose, onUpdated }: Props) {
                           </div>
                           {order.paymentCollectedAt && (
                             <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 4 }}>
-                              Collected: {new Date(order.paymentCollectedAt).toLocaleString()}
+                              Collected: {fmtDateTime(order.paymentCollectedAt)}
                             </div>
                           )}
                         </>
@@ -565,8 +566,8 @@ export function OrderDetailPanel({ order, onClose, onUpdated }: Props) {
                   )}
                   {order.createdByRole && <Field label="Submitter Role" value={order.createdByRole} />}
                   {order.reviewNotes   && <Field label="Review Notes" value={order.reviewNotes} />}
-                  {order.reviewedAt    && <Field label="Reviewed At"  value={new Date(order.reviewedAt).toLocaleString()} />}
-                  {order.pushedToDtAt  && <Field label="Pushed to DT" value={new Date(order.pushedToDtAt).toLocaleString()} />}
+                  {order.reviewedAt    && <Field label="Reviewed At"  value={fmtDateTime(order.reviewedAt)} />}
+                  {order.pushedToDtAt  && <Field label="Pushed to DT" value={fmtDateTime(order.pushedToDtAt)} />}
                 </>
               )
             )}
@@ -636,7 +637,7 @@ export function OrderDetailPanel({ order, onClose, onUpdated }: Props) {
 
           {!editing && order.lastSyncedAt && (
             <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 8 }}>
-              Last synced: {new Date(order.lastSyncedAt).toLocaleString()}
+              Last synced: {fmtDateTime(order.lastSyncedAt)}
             </div>
           )}
         </div>

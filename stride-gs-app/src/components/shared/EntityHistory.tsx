@@ -14,6 +14,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { ChevronDown, ChevronRight, Clock, User } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { theme } from '../../styles/theme';
+import { fmtDateTime } from '../../lib/constants';
 
 interface AuditEntry {
   id: string;
@@ -61,9 +62,7 @@ const ACTION_LABELS: Record<string, { label: string; color: string }> = {
 
 function formatTime(iso: string): string {
   try {
-    const d = new Date(iso);
-    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) +
-      ' ' + d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+    return fmtDateTime(iso);
   } catch { return iso; }
 }
 

@@ -1833,7 +1833,7 @@ export function Inventory() {
           {printSelectedOnly && ` — ${selectedRows.length} selected`}
         </div>
         <div style={{ fontSize: 11, color: '#666', marginTop: 2 }}>
-          Printed {new Date().toLocaleDateString('en-US')} — {printSelectedOnly ? selectedRows.length : filteredCount} items
+          Printed {fmtDate(new Date().toISOString().slice(0, 10))} — {printSelectedOnly ? selectedRows.length : filteredCount} items
         </div>
       </div>
 

@@ -10,6 +10,7 @@
 import { useCallback, useState } from 'react';
 import { FileText, Image as ImageIcon, File as FileIcon, Trash2, ExternalLink, Download, Loader2, AlertTriangle } from 'lucide-react';
 import { theme } from '../../styles/theme';
+import { fmtDateTime } from '../../lib/constants';
 import { useDocuments, type DocumentContextType, type DocumentRow } from '../../hooks/useDocuments';
 
 interface Props {
@@ -39,8 +40,7 @@ function fmtBytes(n: number | null): string {
 function fmtDate(iso: string | null): string {
   if (!iso) return '—';
   try {
-    const d = new Date(iso);
-    return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return fmtDateTime(iso);
   } catch { return iso; }
 }
 

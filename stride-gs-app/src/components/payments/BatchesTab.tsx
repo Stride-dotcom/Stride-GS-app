@@ -20,6 +20,7 @@ import {
   type StaxInvoiceBatchRow,
 } from '../../lib/api';
 import { theme } from '../../styles/theme';
+import { fmtDateTime } from '../../lib/constants';
 
 interface BatchesTabProps {
   onJumpToReview: (batchId: string) => void;
@@ -79,7 +80,7 @@ export function BatchesTab({ onJumpToReview }: BatchesTabProps) {
   const fmtCurrency = (n: number) => `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   const fmtDate = (iso: string) => {
     if (!iso) return '—';
-    try { return new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }); }
+    try { return fmtDateTime(iso); }
     catch { return iso; }
   };
 

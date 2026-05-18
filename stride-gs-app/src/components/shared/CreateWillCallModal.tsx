@@ -10,6 +10,7 @@ import { useAuth } from '../../contexts/AuthContext';
 import { entityEvents } from '../../lib/entityEvents';
 import type { WillCall } from '../../lib/types';
 import { ProcessingOverlay } from './ProcessingOverlay';
+import { fmtDate } from '../../lib/constants';
 
 interface Props {
   onClose: () => void;
@@ -336,7 +337,7 @@ export function CreateWillCallModal({ onClose, onSubmit, preSelectedItemIds = []
                   <div><div style={{ fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Pickup Party</div><div style={{ fontWeight: 600, marginTop: 2 }}>{pickupParty}</div></div>
                   <div><div style={{ fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Phone</div><div style={{ marginTop: 2 }}>{pickupPhone || '\u2014'}</div></div>
                   <div><div style={{ fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Requested By</div><div style={{ marginTop: 2 }}>{requestedBy || '\u2014'}</div></div>
-                  <div><div style={{ fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Est. Pickup</div><div style={{ marginTop: 2 }}>{estDate || '\u2014'}</div></div>
+                  <div><div style={{ fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Est. Pickup</div><div style={{ marginTop: 2 }}>{estDate ? fmtDate(estDate) : '\u2014'}</div></div>
                   <div><div style={{ fontSize: 10, color: theme.colors.textMuted, textTransform: 'uppercase' }}>Items</div><div style={{ fontWeight: 600, marginTop: 2 }}>{selectedIds.size}</div></div>
                 </div>
                 {cod && <div style={{ marginTop: 10, fontSize: 13 }}><span style={{ background: '#FEF3C7', color: '#B45309', padding: '2px 8px', borderRadius: 8, fontSize: 11, fontWeight: 600 }}>COD: ${codAmount || '0'}</span></div>}

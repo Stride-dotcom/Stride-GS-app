@@ -7,6 +7,7 @@ import { useInventory } from '../../hooks/useInventory';
 import { useClients } from '../../hooks/useClients';
 import { isApiConfigured, postTransferItems, type TransferItemsResponse } from '../../lib/api';
 import type { InventoryItem } from '../../lib/types';
+import { fmtDate } from '../../lib/constants';
 import { ProcessingOverlay } from './ProcessingOverlay';
 
 interface Props {
@@ -253,8 +254,8 @@ export function TransferItemsModal({
                   }}
                 />
                 <div style={{ fontSize: 10, color: '#92400E', marginTop: 6, lineHeight: 1.4 }}>
-                  Source bills storage through {transferDate ? new Date(transferDate + 'T00:00:00').toLocaleDateString('en-US') : 'this date'} (day before cutover).
-                  Destination bills from {transferDate ? new Date(transferDate + 'T00:00:00').toLocaleDateString('en-US') : 'this date'} forward with a fresh free-storage period.
+                  Source bills storage through {transferDate ? fmtDate(transferDate) : 'this date'} (day before cutover).
+                  Destination bills from {transferDate ? fmtDate(transferDate) : 'this date'} forward with a fresh free-storage period.
                   Past dates allowed for backfill. Future dates not yet supported.
                 </div>
               </div>

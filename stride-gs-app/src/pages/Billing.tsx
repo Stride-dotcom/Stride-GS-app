@@ -241,7 +241,7 @@ function summarizeStorageRowsForInvoice(rows: UnbilledReportRow[], groupSidemark
     const start = parsedDates[0];
     const end   = parsedDates[parsedDates.length - 1];
     if (start.toDateString() === end.toDateString()) {
-      periodLabel = fmt(start);
+      periodLabel = fmtDate(start.toISOString().slice(0, 10));
     } else if (start.getFullYear() === end.getFullYear() && start.getMonth() === end.getMonth()) {
       // Same month → "Apr 1-30, 2026". Built directly; no dead-code
       // fallback (v1 had `.replace(/.../,m=>m) || monthYear` which was a

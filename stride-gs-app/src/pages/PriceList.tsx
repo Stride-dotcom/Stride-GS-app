@@ -11,6 +11,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Plus, Search, Tag, Download, Share2, Check, Copy, X, ChevronDown, ChevronRight, ArrowUp, ArrowDown, RefreshCw, Loader2 } from 'lucide-react';
 import { theme } from '../styles/theme';
+import { fmtDate } from '../lib/constants';
 import { useServiceCatalog, type CatalogService, type ServiceCategory } from '../hooks/useServiceCatalog';
 import { ServiceRow } from '../components/pricelist/ServiceRow';
 import { AddServiceModal } from '../components/pricelist/AddServiceModal';
@@ -863,7 +864,7 @@ function GeneratedLinkCard({ share, onClose }: { share: PriceListShare; onClose:
           <div>
             <div style={{ fontSize: 16, fontWeight: 700, color: v2.colors.text }}>Link generated</div>
             <div style={{ fontSize: 12, color: v2.colors.textSecondary, marginTop: 2 }}>
-              {share.tabs.join(', ')}{share.expiresAt ? ` · Expires ${new Date(share.expiresAt).toLocaleDateString()}` : ' · Never expires'}
+              {share.tabs.join(', ')}{share.expiresAt ? ` · Expires ${fmtDate(share.expiresAt)}` : ' · Never expires'}
             </div>
           </div>
         </div>

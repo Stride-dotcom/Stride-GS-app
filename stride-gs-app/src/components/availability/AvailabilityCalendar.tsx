@@ -10,6 +10,7 @@
 import React, { useState, useCallback, useMemo } from 'react';
 import { Loader2 } from 'lucide-react';
 import { theme } from '../../styles/theme';
+import { fmtDateTime } from '../../lib/constants';
 import { useAvailabilityCalendar, type AvailabilityStatus } from '../../hooks/useAvailabilityCalendar';
 
 // ── Constants ───────────────────────────────────────────────────────────
@@ -92,9 +93,7 @@ function isPast(dateStr: string): boolean {
 
 function formatLastUpdated(isoStr: string | null): string {
   if (!isoStr) return 'Never';
-  const d = new Date(isoStr);
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-    + ' at ' + d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  return fmtDateTime(isoStr);
 }
 
 function getVisibleMonths(view: ViewMode): { year: number; month: number }[] {

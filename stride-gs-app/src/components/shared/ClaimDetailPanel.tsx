@@ -5,7 +5,7 @@ import {
   Upload, ExternalLink,
 } from 'lucide-react';
 import { theme } from '../../styles/theme';
-import { fmtDate } from '../../lib/constants';
+import { fmtDate, fmtDateTime } from '../../lib/constants';
 import { DetailHeader } from './DetailHeader';
 import { WriteButton } from './WriteButton';
 import { getPanelContainerStyle, panelBackdropStyle } from './panelStyles';
@@ -109,7 +109,7 @@ function fmtMoney(n?: number | null) {
 function fmtTimestamp(ts?: string) {
   if (!ts) return '—';
   try {
-    return new Date(ts).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    return fmtDateTime(ts);
   } catch { return ts; }
 }
 

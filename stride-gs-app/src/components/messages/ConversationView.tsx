@@ -8,6 +8,7 @@
  */
 import { useEffect, useMemo, useRef } from 'react';
 import { theme } from '../../styles/theme';
+import { fmtDate } from '../../lib/constants';
 import { MessageBubble } from './MessageBubble';
 import type { Message } from '../../hooks/useMessages';
 
@@ -28,7 +29,7 @@ function formatDateLabel(iso: string): string {
   if (d.toDateString() === yest.toDateString()) return 'Yesterday';
   const ageDays = (now.getTime() - d.getTime()) / 86400000;
   if (ageDays < 7) return d.toLocaleDateString([], { weekday: 'long' });
-  return d.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+  return fmtDate(d.toISOString());
 }
 
 interface DisplayItem {

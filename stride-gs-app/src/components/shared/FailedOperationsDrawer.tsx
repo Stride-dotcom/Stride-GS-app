@@ -14,17 +14,13 @@ import { useState, useCallback } from 'react';
 import { X, RefreshCw, CheckCircle, AlertCircle, Loader, ChevronRight } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { ACTION_LABELS, ENTITY_LABELS, type SyncEvent } from '../../hooks/useFailedOperations';
+import { fmtDateTime } from '../../lib/constants';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function fmtDate(iso: string): string {
   try {
-    const d = new Date(iso);
-    return (
-      d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) +
-      ' ' +
-      d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })
-    );
+    return fmtDateTime(iso);
   } catch {
     return iso;
   }

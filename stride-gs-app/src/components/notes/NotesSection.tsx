@@ -19,6 +19,7 @@ import { useMemo, useState } from 'react';
 import { Send, Trash2, Info, Lock, AlertTriangle } from 'lucide-react';
 import { BtnSpinner } from '../ui/BtnSpinner';
 import { theme } from '../../styles/theme';
+import { fmtDate } from '../../lib/constants';
 import { useAuth } from '../../contexts/AuthContext';
 import {
   useEntityNotes, type EntityNote, type NoteVisibility,
@@ -63,7 +64,7 @@ function formatTimestamp(iso: string): string {
   if (same) return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   const diff = (now.getTime() - d.getTime()) / 86400000;
   if (diff < 7) return d.toLocaleDateString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' });
-  return d.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+  return fmtDate(d.toISOString());
 }
 
 function initialsFromName(name: string): string {

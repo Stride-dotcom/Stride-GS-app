@@ -9,7 +9,7 @@ import { useApiData } from '../hooks/useApiData';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { ProcessingOverlay } from '../components/shared/ProcessingOverlay';
 import { InfoTooltip } from '../components/shared/InfoTooltip';
-import { fmtDate } from '../lib/constants';
+import { fmtDate, fmtDateTime as fmtDateTimeCanonical } from '../lib/constants';
 import { setNextFetchNoCache } from '../lib/api';
 import type {
   MarketingCampaign, MarketingContact, MarketingTemplate,
@@ -275,11 +275,7 @@ const MERGE_TOKENS = [
 // ─── Helper: format date/time for display ───────────────────────────────────
 
 function fmtDateTime(d?: string | null): string {
-  if (!d) return '\u2014';
-  const dt = new Date(d);
-  if (isNaN(dt.getTime())) return fmtDate(d);
-  return dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: '2-digit' }) + ' ' +
-    dt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+  return fmtDateTimeCanonical(d);
 }
 
 function pct(num: number, denom: number): string {

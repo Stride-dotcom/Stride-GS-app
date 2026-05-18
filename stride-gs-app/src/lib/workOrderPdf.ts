@@ -121,7 +121,7 @@ function esc(s: string | number | null | undefined): string {
 }
 
 function fmtDateMMDDYYYY(iso: string | null | undefined): string {
-  if (!iso) return new Date().toLocaleDateString('en-US');
+  if (!iso) return new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
   try {
     const d = new Date(iso.length <= 10 ? iso + 'T00:00:00' : iso);
     if (isNaN(d.getTime())) return String(iso);

@@ -37,14 +37,12 @@ import { theme } from '../../styles/theme';
 import { useAuth } from '../../contexts/AuthContext';
 import { useEntityNotes } from '../../hooks/useEntityNotes';
 import { BtnSpinner } from '../ui/BtnSpinner';
+import { fmtDateTime } from '../../lib/constants';
 
 const ACCEPT_PREFIX = '✓ Accepted as-is';
 
 function formatAcceptanceDate(iso: string): string {
-  const d = new Date(iso);
-  return d.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })
-    + ' at '
-    + d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  return fmtDateTime(iso);
 }
 
 interface Props {
