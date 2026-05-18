@@ -9,7 +9,7 @@
 import { useMemo, useState } from 'react';
 import { Search, Trash2 } from 'lucide-react';
 import { theme } from '../../styles/theme';
-import { fmtDate } from '../../lib/constants';
+import { fmtDateLocal } from '../../lib/constants';
 import type { Conversation } from '../../hooks/useMessages';
 
 interface Props {
@@ -43,7 +43,7 @@ function formatRelative(iso: string): string {
   if (sameDay) return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   const diffDays = (now.getTime() - d.getTime()) / 86400000;
   if (diffDays < 7) return d.toLocaleDateString([], { weekday: 'short' });
-  return fmtDate(d.toISOString());
+  return fmtDateLocal(d);
 }
 
 export function MessageList({ conversations, activeKey, loading = false, onSelect, onDelete }: Props) {

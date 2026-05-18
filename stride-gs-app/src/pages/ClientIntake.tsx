@@ -42,7 +42,7 @@ import {
 import { generateSignedTcPdf, generateTcPreviewPdf } from '../lib/intakePdf';
 import { sendIntakeReceipt } from '../lib/intakeReceipt';
 import { useIsMobile } from '../hooks/useIsMobile';
-import { fmtDate } from '../lib/constants';
+import { fmtDate, fmtDateLocal } from '../lib/constants';
 
 // Style tokens — copied verbatim from PublicRates so the public-side
 // pages stay visually coherent without pulling the authed app's theme.
@@ -1160,7 +1160,7 @@ function StepTerms({ draft, setDraft, tcHtml, tcLoading, coverageNotes, sig, sig
               </div>
             )}
             <div style={{ fontSize: 11, color: TEXT_MUT, marginTop: 10 }}>
-              Signed: {fmtDate(new Date().toISOString())} · Electronic signatures are legally binding under the ESIGN Act and Washington's UETA.
+              Signed: {fmtDateLocal(new Date())} · Electronic signatures are legally binding under the ESIGN Act and Washington's UETA.
             </div>
           </div>
         </div>
@@ -1756,7 +1756,7 @@ function replaceTokens(html: string, draft: Draft, coverageNotes: PublicCoverage
   const noteFor = (id: string): string => byId.get(id) || '—';
   return html
     .replace(/\{\{BUSINESS_NAME\}\}/g, escapeHtml(draft.businessName || '[Business Name]'))
-    .replace(/\{\{SIGNED_DATE\}\}/g, escapeHtml(fmtDate(new Date().toISOString())))
+    .replace(/\{\{SIGNED_DATE\}\}/g, escapeHtml(fmtDateLocal(new Date())))
     .replace(/\{\{COVERAGE_STANDARD_NOTE\}\}/g, escapeHtml(noteFor('standard')))
     .replace(/\{\{COVERAGE_FND_NOTE\}\}/g, escapeHtml(noteFor('fnd')))
     .replace(/\{\{COVERAGE_FWD_NOTE\}\}/g, escapeHtml(noteFor('fwd')))

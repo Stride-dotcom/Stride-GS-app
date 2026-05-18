@@ -38,7 +38,7 @@ import {
 import { useVirtualRows } from '../hooks/useVirtualRows';
 import { useScrollRestoration } from '../hooks/useScrollRestoration';
 import { theme } from '../styles/theme';
-import { fmtDate } from '../lib/constants';
+import { fmtDate, fmtDateLocal } from '../lib/constants';
 import { tanstackGlobalFilter, rowMatchesSearch } from '../lib/searchFilters';
 import { ItemDetailPanel } from '../components/shared/ItemDetailPanel';
 import { ItemIdBadges } from '../components/shared/ItemIdBadges';
@@ -1833,7 +1833,7 @@ export function Inventory() {
           {printSelectedOnly && ` — ${selectedRows.length} selected`}
         </div>
         <div style={{ fontSize: 11, color: '#666', marginTop: 2 }}>
-          Printed {fmtDate(new Date().toISOString().slice(0, 10))} — {printSelectedOnly ? selectedRows.length : filteredCount} items
+          Printed {fmtDateLocal(new Date())} — {printSelectedOnly ? selectedRows.length : filteredCount} items
         </div>
       </div>
 
