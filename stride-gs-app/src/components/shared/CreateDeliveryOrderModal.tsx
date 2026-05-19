@@ -863,7 +863,7 @@ export function CreateDeliveryOrderModal({
           taxExemptReason: data.tax_exempt_reason || null,
           resaleCertExpires: data.resale_cert_expires || null,
           resaleCertUrl: data.resale_cert_url || null,
-          taxRatePct: data.tax_rate_pct != null ? Number(data.tax_rate_pct) : 10.1,
+          taxRatePct: data.tax_rate_pct != null ? Number(data.tax_rate_pct) : DEFAULT_TAX_RATE,
         });
       });
     return () => { cancelled = true; };
