@@ -48,6 +48,8 @@ import { useIsMobile } from '../hooks/useIsMobile';
 import { FloatingActionMenu, type FABAction } from '../components/shared/FloatingActionMenu';
 import { generateOrderPdf } from '../lib/orderPdf';
 import { logDtOrderAudit } from '../lib/dtOrderAudit';
+import { ConfirmDialog } from '../components/shared/ConfirmDialog';
+import { summarizeDtChanges, DT_GROUP_LABEL, type DtFieldGroup, type DtChangeSummary } from '../lib/dtSelectivePush';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -1464,6 +1466,14 @@ export function OrderPage() {
   // the Review queue.
   const [pushingDt, setPushingDt] = useState(false);
   const [pushDtError, setPushDtError] = useState<string | null>(null);
+  // Re-push confirmation (Save & Resync on an already-pushed order).
+  // Holds the diff summary while the operator decides whether to
+  // re-push. null = dialog closed. The Supabase save has ALREADY
+  // happened by the time this is set — confirming only gates the
+  // scoped dt-push-order invoke; cancelling leaves the order saved
+  // locally without touching DT (so DT keeps its route/schedule).
+  const [resyncConfirm, setResyncConfirm] = useState<DtChangeSummary | null>(null);
+  const [resyncPushing, setResyncPushing] = useState(false);
   // Manual inventory release — inline panel (WC-style), Supabase-direct
   // writes. The panel opens when the operator clicks "Release Items..."
   // in the footer; releasing flips inventory.status + release_date via
@@ -1581,10 +1591,20 @@ export function OrderPage() {
   // invocation, error-extraction, and audit-log logging the footer
   // already does. Returns the parsed result on success, throws on
   // any failure so callers can decide how to surface it.
-  const pushOrderToDt = useCallback(async (): Promise<{ dtIdentifier?: string; linkedIdentifier?: string }> => {
+  const pushOrderToDt = useCallback(async (
+    changedFields?: DtFieldGroup[],
+  ): Promise<{ dtIdentifier?: string; linkedIdentifier?: string }> => {
     if (!order) throw new Error('No order loaded');
+    // changedFields scopes a re-push to only the groups the operator
+    // edited (Save & Resync). Omitted (footer Republish) → full push.
+    // Never send an empty array: the edge function reads [] as a full
+    // push, so callers must skip the invoke entirely when nothing
+    // DT-relevant changed.
     const { data, error: invokeErr } = await supabase.functions.invoke('dt-push-order', {
-      body: { orderId: order.id },
+      body: {
+        orderId: order.id,
+        ...(changedFields && changedFields.length > 0 ? { changedFields } : {}),
+      },
     });
     if (invokeErr) {
       let detailed = invokeErr.message;
@@ -1806,13 +1826,17 @@ export function OrderPage() {
   // has (harmless no-op). Push failure surfaces a "saved locally but
   // DT push failed" message so the operator knows the local edit
   // landed and can retry the push from the footer.
-  const handleSaveAndResync = useCallback(async () => {
+  // The actual scoped re-push, run only after the operator confirms in
+  // the dialog. Supabase is already saved at this point; this only
+  // propagates the changed groups to DT.
+  const performResync = useCallback(async (groups: DtFieldGroup[]) => {
     if (!order) return;
-    await handleSave();
+    setResyncConfirm(null);
     try {
       lastMutationAtRef.current = Date.now();
+      setResyncPushing(true);
       setSaving(true);
-      await pushOrderToDt();
+      await pushOrderToDt(groups);
       const fresh = await fetchDtOrderByIdFromSupabase(order.id);
       if (fresh) setLocalOrder(fresh);
       refetch();
@@ -1821,9 +1845,75 @@ export function OrderPage() {
       console.error('[OrderPage] Save & Resync push failed:', msg);
       setSaveError(`Saved locally, but DT push failed: ${msg}. Use Republish to DT in the footer to retry.`);
     } finally {
+      setResyncPushing(false);
       setSaving(false);
     }
-  }, [order, handleSave, pushOrderToDt, refetch]);
+  }, [order, pushOrderToDt, refetch]);
+
+  // Operator cancelled the re-push: the Supabase save already landed,
+  // so just refresh local state. DT keeps its current route/schedule.
+  const cancelResync = useCallback(async () => {
+    setResyncConfirm(null);
+    if (!order) return;
+    const fresh = await fetchDtOrderByIdFromSupabase(order.id);
+    if (fresh) setLocalOrder(fresh);
+    refetch();
+  }, [order, refetch]);
+
+  const handleSaveAndResync = useCallback(async () => {
+    if (!order) return;
+
+    // Diff the form against the loaded order BEFORE saving (handleSave
+    // flips editing off + refetches). Only DT-relevant columns the
+    // inline edit can touch are compared — items can't be edited here,
+    // so itemsChanged is always false. windowStart/End are normalized
+    // to HH:MM on both sides so a storage HH:MM:SS round-trip doesn't
+    // read as a change.
+    const w5 = (s: string | null | undefined) => (s ?? '').slice(0, 5);
+    const snapshot: Record<string, unknown> = {
+      contact_name: order.contactName, contact_address: order.contactAddress,
+      contact_city: order.contactCity, contact_state: order.contactState,
+      contact_zip: order.contactZip, contact_phone: order.contactPhone,
+      contact_email: order.contactEmail,
+      local_service_date: order.localServiceDate,
+      window_start_local: w5(order.windowStartLocal),
+      window_end_local: w5(order.windowEndLocal),
+      details: order.details, driver_notes: order.driverNotes,
+      internal_notes: order.internalNotes, sidemark: order.sidemark,
+      client_reference: order.clientReference,
+    };
+    const payload: Record<string, unknown> = {
+      contact_name: edit.contactName.trim(), contact_address: edit.contactAddress.trim(),
+      contact_city: edit.contactCity.trim(), contact_state: edit.contactState.trim(),
+      contact_zip: edit.contactZip.trim(), contact_phone: edit.contactPhone.trim(),
+      contact_email: edit.contactEmail.trim(),
+      local_service_date: edit.localServiceDate,
+      window_start_local: w5(edit.windowStartLocal),
+      window_end_local: w5(edit.windowEndLocal),
+      details: edit.details.trim(), driver_notes: edit.driverNotes.trim(),
+      internal_notes: edit.internalNotes.trim(), sidemark: edit.sidemark.trim(),
+      client_reference: edit.clientReference.trim(),
+    };
+    const summary = summarizeDtChanges(snapshot, payload, false);
+
+    await handleSave();
+
+    // Nothing that reaches DT changed (e.g. only review status/notes or
+    // pricing) → save only, never touch DT. An empty changedFields would
+    // be read by the edge function as a FULL push, so we MUST skip the
+    // invoke here rather than push with an empty scope.
+    if (summary.groups.length === 0) {
+      const fresh = await fetchDtOrderByIdFromSupabase(order.id);
+      if (fresh) setLocalOrder(fresh);
+      refetch();
+      return;
+    }
+
+    // Order is already live in DT (the button only renders when
+    // pushedToDtAt is set) → confirm before re-pushing so the operator
+    // sees exactly what will propagate and can decide.
+    setResyncConfirm(summary);
+  }, [order, edit, handleSave, refetch]);
 
   // ── Loading / error states ─────────────────────────────────────────────────
 
@@ -2437,6 +2527,40 @@ export function OrderPage() {
           direct write path. Supabase realtime fans the inventory
           status change through the Status column + button gate, so no
           modal-close refetch is needed here. */}
+      <ConfirmDialog
+        open={!!resyncConfirm}
+        title="Re-push to DispatchTrack?"
+        variant="danger"
+        confirmLabel="Save & Re-push"
+        cancelLabel="Save only"
+        processing={resyncPushing}
+        onConfirm={() => { if (resyncConfirm) void performResync(resyncConfirm.groups); }}
+        onCancel={cancelResync}
+        message={
+          <div>
+            <p style={{ margin: '0 0 10px' }}>
+              This order is already in DispatchTrack. Saving will re-push and may
+              affect route assignments. Only the changed fields below will be sent
+              — everything else DT has stays as-is.
+            </p>
+            <div style={{ fontWeight: 700, fontSize: 12, marginBottom: 4 }}>Changes:</div>
+            <ul style={{ margin: 0, paddingLeft: 18 }}>
+              {(resyncConfirm?.changes ?? []).map((c, i) => (
+                <li key={i} style={{ marginBottom: 2 }}>
+                  <strong>{c.label}:</strong> {c.from} → {c.to}
+                </li>
+              ))}
+            </ul>
+            <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 10 }}>
+              Field groups re-pushed:{' '}
+              {(resyncConfirm?.groups ?? []).map(g => DT_GROUP_LABEL[g]).join(', ')}
+            </div>
+            <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 6 }}>
+              “Save only” keeps your edits in Stride without touching DispatchTrack.
+            </div>
+          </div>
+        }
+      />
     </>
   );
 }
