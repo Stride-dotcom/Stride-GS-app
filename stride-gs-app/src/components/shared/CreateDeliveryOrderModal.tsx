@@ -106,6 +106,7 @@ import { supabase } from '../../lib/supabase';
 import { useCoverageOptions, type CoverageOption } from '../../hooks/useCoverageOptions';
 import { useItemClasses } from '../../hooks/useItemClasses';
 import { useServiceCatalog } from '../../hooks/useServiceCatalog';
+import { useDefaultTaxRate } from '../../hooks/useDefaultTaxRate';
 import { ProcessingOverlay } from './ProcessingOverlay';
 import { AttachmentUploadField } from './AttachmentUploadField';
 import { uploadOrderAttachments } from '../../lib/orderAttachmentUpload';
@@ -282,12 +283,11 @@ interface SelectedAccessorial {
 // Constant is the lookup code only; the rate and threshold are live.
 const EXTRA_PIECE_CODE = 'XTRA_PC';
 
-// Fallback sales-tax rate for COD (customer_collect) orders when the client
-// record has no usable tax_rate_pct. COD = the customer pays the driver on
-// delivery, so tax is always collected regardless of the client's resale
-// exemption (the exemption covers the client's own purchases, not a
-// direct-to-consumer sale they're collecting on). Kent, WA combined rate.
-const DEFAULT_TAX_RATE = 10.4;
+// The default sales-tax rate is no longer a hardcoded literal — it is
+// read from public.tax_jurisdictions via useDefaultTaxRate() (managed in
+// Settings → Pricing → Tax Rates). Used as the COD fallback (customer
+// pays the driver on delivery, so tax is always collected regardless of
+// the client's resale exemption) and when a client has no tax_rate_pct.
 
 function genUid(): string {
   return Math.random().toString(36).slice(2, 10);
@@ -834,6 +834,11 @@ export function CreateDeliveryOrderModal({
   }, [initialClientName, clientName]);
   const clientSheetId = apiClients.find(c => c.name === clientName)?.spreadsheetId || '';
 
+  // System default sales-tax rate (Settings → Pricing → Tax Rates).
+  // Fetched once on mount; falls back to 10.4 if unreadable. Per-client
+  // tax_rate_pct still overrides this where the client record has one.
+  const defaultTax = useDefaultTaxRate();
+
   // ── Tax info for the selected client (Task 8a) ──────────────────────────
   // Most clients are wholesale resellers (tax_exempt=true) and pay no sales
   // tax. For direct-to-consumer customers we compute tax = subtotal × rate
@@ -863,11 +868,11 @@ export function CreateDeliveryOrderModal({
           taxExemptReason: data.tax_exempt_reason || null,
           resaleCertExpires: data.resale_cert_expires || null,
           resaleCertUrl: data.resale_cert_url || null,
-          taxRatePct: data.tax_rate_pct != null ? Number(data.tax_rate_pct) : DEFAULT_TAX_RATE,
+          taxRatePct: data.tax_rate_pct != null ? Number(data.tax_rate_pct) : defaultTax.rate,
         });
       });
     return () => { cancelled = true; };
-  }, [clientSheetId]);
+  }, [clientSheetId, defaultTax.rate]);
 
   // ── Address Book ────────────────────────────────────────────────────────
   const [addressBook, setAddressBook] = useState<AddressBookContact[]>([]);
@@ -1754,13 +1759,13 @@ export function CreateDeliveryOrderModal({
       const savedRate = clientTaxInfo?.taxRatePct;
       return Number.isFinite(savedRate) && (savedRate as number) > 0
         ? (savedRate as number)
-        : DEFAULT_TAX_RATE;
+        : defaultTax.rate;
     }
     if (!clientTaxInfo || clientTaxInfo.taxExempt) return null;
     const rate = clientTaxInfo.taxRatePct;
     if (!Number.isFinite(rate) || rate <= 0) return null;
     return rate;
-  }, [clientTaxInfo, billingMethod]);
+  }, [clientTaxInfo, billingMethod, defaultTax.rate]);
 
   // The taxable base: only selected accessorials whose service_catalog
   // row has taxable=true. quotePending lines are skipped (their subtotal
@@ -2938,7 +2943,7 @@ export function CreateDeliveryOrderModal({
           // when the client is resale-exempt for their own bill_to orders.
           // effectiveTaxRatePct is never null on the COD branch.
           tax_amount: taxAmount,
-          tax_rate_pct: effectiveTaxRatePct ?? DEFAULT_TAX_RATE,
+          tax_rate_pct: effectiveTaxRatePct ?? defaultTax.rate,
           customer_tax_exempt: false,
           // Audit: the base tax was actually applied to (taxable
           // accessorials only), not the full order subtotal.

@@ -69,6 +69,7 @@ import {
 } from 'lucide-react';
 import { theme } from '../styles/theme';
 import { supabase } from '../lib/supabase';
+import { useDefaultTaxRate } from '../hooks/useDefaultTaxRate';
 import { AttachmentUploadField } from '../components/shared/AttachmentUploadField';
 import { uploadOrderAttachments } from '../lib/orderAttachmentUpload';
 import {
@@ -109,10 +110,11 @@ interface CoverageOptionRow {
 }
 
 // ── Constants ──────────────────────────────────────────────────────────
-// Kent, WA combined sales tax — public form default. Staff overrides on
-// review when the billable client turns out to be tax-exempt or in a
-// different jurisdiction.
-const TAX_RATE_PCT = 10.4;
+// The public-form sales-tax default is no longer a literal — it comes
+// from public.tax_jurisdictions via useDefaultTaxRate() (managed in
+// Settings → Pricing → Tax Rates), falling back to 10.4 if the anon
+// read fails. Staff still override on review when the billable client
+// turns out to be tax-exempt or in a different jurisdiction.
 // Orders over this piece count flip to "may require quote review" — the
 // per-piece tier doesn't reflect labor / truck-space reality past this.
 // Matches the modal's hardcoded cap; a future cleanup can surface both
@@ -213,6 +215,12 @@ function AddressFields({
 
 // ── Main Component ─────────────────────────────────────────────────────
 export function PublicServiceRequest() {
+  // System default sales-tax rate (Settings → Pricing → Tax Rates).
+  // Anon read; falls back to 10.4 if RLS/network blocks it so the tax
+  // snapshot is never silently dropped.
+  const defaultTax = useDefaultTaxRate();
+  const TAX_RATE_PCT = defaultTax.rate;
+
   // ── Contact info (replaces client selector) ─────────────────────────
   const [contactName, setContactName] = useState('');
   const [contactCompany, setContactCompany] = useState('');
@@ -586,7 +594,7 @@ export function PublicServiceRequest() {
   const taxAmount = useMemo(() => {
     if (subtotalBeforeTax == null) return 0;
     return subtotalBeforeTax * (TAX_RATE_PCT / 100);
-  }, [subtotalBeforeTax]);
+  }, [subtotalBeforeTax, TAX_RATE_PCT]);
 
   const orderTotal = useMemo<number | null>(() => {
     if (subtotalBeforeTax == null) return null;
