@@ -12,6 +12,7 @@ import { useEmailTemplates } from '../hooks/useEmailTemplates';
 import { useUrlState } from '../hooks/useUrlState';
 import { ConfirmDialog } from '../components/shared/ConfirmDialog';
 import { MigrationSettingsTab } from '../components/shared/MigrationSettingsTab';
+import { TaxJurisdictionsPanel } from '../components/shared/TaxJurisdictionsPanel';
 import { useAuth } from '../contexts/AuthContext';
 import { AutocompleteInput } from '../components/shared/AutocompleteInput';
 import type { ApiClient, OnboardClientResponse, UpdateClientResponse, SyncSettingsResponse, RefreshCachesResponse, RunOnClientsResponse, TestSendResult } from '../lib/api';
@@ -3603,7 +3604,12 @@ export function Settings() {
             </>
           )}
 
-          {tab === 'pricing' && <PriceList embedded />}
+          {tab === 'pricing' && (
+            <>
+              <PriceList embedded />
+              {isAdmin && <TaxJurisdictionsPanel />}
+            </>
+          )}
 
           {tab === 'emails' && (
             <>
