@@ -45,7 +45,10 @@ export function useDefaultTaxRate(): DefaultTaxRate {
     fetchDefaultTaxJurisdiction()
       .then(j => {
         if (!alive) return;
-        if (j && Number.isFinite(j.ratePct) && j.ratePct > 0) {
+        // >= 0: a configured 0% default (e.g. an out-of-state, no-sales-
+        // tax jurisdiction) is a deliberate setting, not a fetch failure —
+        // honor it instead of snapping back to the 10.4 fallback.
+        if (j && Number.isFinite(j.ratePct) && j.ratePct >= 0) {
           setState({
             rate: j.ratePct,
             city: j.city,
