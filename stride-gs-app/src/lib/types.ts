@@ -9,6 +9,12 @@ export interface Client {
 }
 
 export interface InventoryItem {
+  /** Postgres UUID of the source inventory row — distinct from itemId
+   *  (the human Stride code, which is NOT unique across tenants once an
+   *  item is transferred). Carried so consumers can key/match on the
+   *  unique row identity instead of the ambiguous itemId. Absent on the
+   *  legacy GAS payload (only fetchInventoryFromSupabase populates it). */
+  inventoryRowId?: string;
   itemId: string;
   clientId: string;
   clientName: string;

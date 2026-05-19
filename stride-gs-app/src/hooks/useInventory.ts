@@ -48,6 +48,7 @@ function mapToAppItem(api: ApiInventoryItem): InventoryItem {
     : 'Active';
 
   return {
+    inventoryRowId: api.inventoryRowId,
     itemId: api.itemId,
     clientId: api.clientSheetId,
     clientName: api.clientName,
@@ -159,6 +160,7 @@ export function useInventory(autoFetch = true, filterClientSheetId?: string | st
   const apiItems = useMemo(() => {
     if (batchEnabled && batchData) {
       return batchData.inventory.map(b => ({
+        inventoryRowId: (b as { inventoryRowId?: string }).inventoryRowId,
         itemId: b.itemId,
         clientName: (b as any).clientName || '',
         clientSheetId: b.clientSheetId,
