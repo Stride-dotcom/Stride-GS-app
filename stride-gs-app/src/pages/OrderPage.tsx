@@ -2534,7 +2534,7 @@ export function OrderPage() {
         confirmLabel="Save & Re-push"
         cancelLabel="Save only"
         processing={resyncPushing}
-        onConfirm={() => resyncConfirm && performResync(resyncConfirm.groups)}
+        onConfirm={() => { if (resyncConfirm) void performResync(resyncConfirm.groups); }}
         onCancel={cancelResync}
         message={
           <div>
