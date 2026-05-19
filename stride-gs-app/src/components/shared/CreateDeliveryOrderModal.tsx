@@ -759,6 +759,7 @@ export function CreateDeliveryOrderModal({
   const liveItems: LiveItem[] = useMemo(() => {
     if (liveItemsProp.length > 0) return liveItemsProp;
     return invHookResult.items.map(i => ({
+      inventoryRowId: i.inventoryRowId,
       itemId: i.itemId, clientName: i.clientName, clientId: i.clientId,
       vendor: i.vendor || '', description: i.description || '',
       location: i.location || '', sidemark: i.sidemark || '',
@@ -1078,10 +1079,28 @@ export function CreateDeliveryOrderModal({
     });
     return sorted;
   }, [activeItems, itemSearch, itemSort]);
-  const selectedInvItems = useMemo(
-    () => liveItems.filter(i => selectedIds.has(i.itemId)),
-    [liveItems, selectedIds]
-  );
+  // Resolve selections against the picker's own Active+client-scoped
+  // list, NOT raw liveItems. itemId is NOT unique once an item is
+  // transferred: the same item_id exists as an Active row under the
+  // receiving tenant AND a Transferred row under the originating tenant,
+  // and the staff/admin inventory fetch is un-scoped so both land in
+  // liveItems. Filtering raw liveItems by itemId matched BOTH rows,
+  // double-counting every transferred item — wrong piece count → wrong
+  // extra-items billing (2026-05-19 ALL-00100-FAHRINGER: 3 items billed
+  // as 6). activeItems already enforces status==='Active' + client
+  // match, so each selected itemId resolves to exactly the Active row;
+  // location, qty, and inventoryRowId are all sourced from that row.
+  // The Map de-dupes defensively in case any residual duplicate slips
+  // through (e.g. a liveItemsProp passed with dup rows).
+  const selectedInvItems = useMemo(() => {
+    const byItemId = new Map<string, typeof activeItems[number]>();
+    for (const i of activeItems) {
+      if (selectedIds.has(i.itemId) && !byItemId.has(i.itemId)) {
+        byItemId.set(i.itemId, i);
+      }
+    }
+    return Array.from(byItemId.values());
+  }, [activeItems, selectedIds]);
   const toggleItemSort = (col: string) => {
     setItemSort(prev => prev.col === col ? { col, desc: !prev.desc } : { col, desc: false });
   };
