@@ -1,151 +1,158 @@
 /**
- * PublicPhotoGallery — no-auth shareable attachment gallery page.
+ * PublicPhotoGallery — no-auth shareable photo gallery page.
  *
- * Rendered directly from App.tsx when the URL hash matches either of
- *   #/shared/attachments/:shareId   (canonical — photos + docs)
- *   #/shared/photos/:shareId        (legacy alias — photos-only links)
- * Bypasses the auth gate entirely. The page uses the Supabase anon
- * key, which the photo_shares / item_photos / documents / storage
- * RLS policies allow for active, non-expired shares (see migrations
- * 20260426120000_photo_shares.sql + 20260514120000_attachment_shares.sql).
+ * Rendered directly from App.tsx when the URL hash matches
+ * #/shared/photos/:shareId — bypasses the auth gate entirely.
  *
- * Header info is read from photo_shares.entity_context (a snapshot
- * taken at share-creation time) so the public page never needs to
- * query inventory_cache, shipments, dt_orders, etc.
+ * All data (share row + per-photo signed URLs) is fetched through the
+ * `get-shared-photos` Edge Function with the service role. The browser
+ * never tries to mint signed URLs itself: the anon role can read the
+ * `item_photos` rows via the narrow-column public policy, but cannot
+ * call `storage.createSignedUrls` on the private `photos` bucket — that
+ * silently returned empty URLs for every client opening a share link.
+ *
+ * Header info comes straight from photo_shares.entity_context (a snapshot
+ * taken at share-creation time) so the public page never needs to query
+ * inventory_cache, shipments, etc.
  */
 import { useEffect, useMemo, useState } from 'react';
-import {
-  ImageIcon, AlertTriangle, Wrench, Loader2, FileText, Download, Paperclip,
-} from 'lucide-react';
-import { supabase } from '../lib/supabase';
-import {
-  fetchPublicPhotoShare,
-  type PhotoShare,
-  type EntityShareContext,
-} from '../hooks/usePhotoShares';
+import { ImageIcon, AlertTriangle, Wrench, Loader2 } from 'lucide-react';
+import type { EntityShareContext } from '../hooks/usePhotoShares';
 import { PhotoGrid } from '../components/media/PhotoGrid';
 import { PhotoLightbox } from '../components/media/PhotoLightbox';
-import type { Photo } from '../hooks/usePhotos';
-
-const PHOTOS_BUCKET = 'photos';
-const SIGNED_URL_TTL = 60 * 60; // 1 hour — page refresh re-mints
-
-interface SharedDoc {
-  id: string;
-  storage_key: string;
-  file_name: string | null;
-  mime_type: string | null;
-  file_size: number | null;
-  page_count: number | null;
-  created_at: string;
-  uploaded_by_name: string | null;
-}
-
-function formatBytes(bytes: number | null): string {
-  if (!bytes || bytes < 0) return '';
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
-}
+import type { Photo, PhotoType, EntityType } from '../hooks/usePhotos';
 
 interface Props {
   shareId: string;
 }
 
+// Narrow render-time shape. We only need entityContext from the share row —
+// the full PhotoShare object is irrelevant here.
+interface PublicShareView {
+  entityContext: EntityShareContext;
+}
+
+// What the Edge Function returns per photo. camelCase keys; we accept
+// snake_case fallbacks so the page stays robust if the EF ever standardizes
+// on the DB column names.
+interface EdgePhoto {
+  id: string;
+  signedUrl?: string | null;
+  storageUrl?: string | null;
+  storage_url?: string | null;
+  thumbnailUrl?: string | null;
+  thumbnail_url?: string | null;
+  fileName?: string | null;
+  file_name?: string | null;
+  fileSize?: number | null;
+  file_size?: number | null;
+  mimeType?: string | null;
+  mime_type?: string | null;
+  photoType?: PhotoType | null;
+  photo_type?: PhotoType | null;
+  needsAttention?: boolean | null;
+  needs_attention?: boolean | null;
+  isRepair?: boolean | null;
+  is_repair?: boolean | null;
+  isPrimary?: boolean | null;
+  is_primary?: boolean | null;
+  createdAt?: string | null;
+  created_at?: string | null;
+  uploadedByName?: string | null;
+  uploaded_by_name?: string | null;
+}
+
+interface EdgeResponse {
+  ok: boolean;
+  share?: { entity_context?: EntityShareContext | null } | null;
+  photos?: EdgePhoto[];
+  error?: string;
+}
+
+function mapEdgePhoto(p: EdgePhoto): Photo {
+  const storageUrl = p.signedUrl ?? p.storageUrl ?? p.storage_url ?? null;
+  const thumbnailUrl = p.thumbnailUrl ?? p.thumbnail_url ?? storageUrl;
+  return {
+    id: p.id,
+    // Fields the UI never reads but the Photo type requires.
+    tenant_id: '',
+    entity_type: 'inventory' as EntityType,
+    entity_id: '',
+    item_id: null,
+    storage_key: '',
+    storage_url: storageUrl,
+    thumbnail_key: null,
+    thumbnail_url: thumbnailUrl,
+    file_name: p.fileName ?? p.file_name ?? '',
+    file_size: p.fileSize ?? p.file_size ?? null,
+    mime_type: p.mimeType ?? p.mime_type ?? null,
+    is_primary: p.isPrimary ?? p.is_primary ?? false,
+    needs_attention: p.needsAttention ?? p.needs_attention ?? false,
+    is_repair: p.isRepair ?? p.is_repair ?? false,
+    photo_type: (p.photoType ?? p.photo_type ?? 'general') as PhotoType,
+    uploaded_by: null,
+    uploaded_by_name: p.uploadedByName ?? p.uploaded_by_name ?? null,
+    created_at: p.createdAt ?? p.created_at ?? '',
+    updated_at: p.createdAt ?? p.created_at ?? '',
+  };
+}
+
 export function PublicPhotoGallery({ shareId }: Props) {
-  const [share, setShare] = useState<PhotoShare | null | undefined>(undefined); // undefined = loading
+  const [share, setShare] = useState<PublicShareView | null | undefined>(undefined); // undefined = loading
   const [photos, setPhotos] = useState<Photo[]>([]);
-  const [docs, setDocs] = useState<SharedDoc[]>([]);
-  // Loaded flags differentiate "haven't fetched yet" from "fetched and
-  // got nothing back" — without these the docs section can show
-  // "Loading documents…" forever when anon RLS legitimately returns
-  // zero rows (e.g. every referenced doc was soft-deleted).
-  const [photosLoaded, setPhotosLoaded] = useState(false);
-  const [docsLoaded, setDocsLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
-  const [docBusyId, setDocBusyId] = useState<string | null>(null);
-  const [docErrors, setDocErrors] = useState<Record<string, string>>({});
-
-  // Fetch the document bytes on demand through the get-shared-doc
-  // Edge Function. Anon storage RLS (documents_storage_anon_read_via_share)
-  // is not reliably live in prod, so the bytes are served by a
-  // service-role proxy whose only gate is the share itself. Any
-  // failure surfaces as a real inline error instead of a hung spinner.
-  async function openDoc(d: SharedDoc) {
-    setDocBusyId(d.id);
-    setDocErrors(prev => {
-      if (!(d.id in prev)) return prev;
-      const next = { ...prev };
-      delete next[d.id];
-      return next;
-    });
-    try {
-      const base = import.meta.env.VITE_SUPABASE_URL as string;
-      if (!base) throw new Error('Document service unavailable');
-      const proxyUrl = `${base}/functions/v1/get-shared-doc`
-        + `?share_id=${encodeURIComponent(shareId)}`
-        + `&doc_id=${encodeURIComponent(d.id)}`;
-      const res = await fetch(proxyUrl);
-      if (!res.ok) {
-        let msg = `Document unavailable (${res.status})`;
-        try {
-          const body = await res.json();
-          if (body?.error) msg = body.error;
-        } catch { /* non-JSON error body — keep status message */ }
-        throw new Error(msg);
-      }
-      const data = await res.blob();
-      const url = URL.createObjectURL(data);
-      const a = document.createElement('a');
-      a.href = url;
-      a.target = '_blank';
-      a.rel = 'noopener noreferrer';
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      // Revoke late so the opened tab has time to load the blob.
-      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
-    } catch (e) {
-      setDocErrors(prev => ({
-        ...prev,
-        [d.id]: e instanceof Error ? e.message : 'Could not open document',
-      }));
-    } finally {
-      setDocBusyId(null);
-    }
-  }
 
   useEffect(() => {
     let cancelled = false;
     setShare(undefined);
     setPhotos([]);
-    setDocs([]);
-    setPhotosLoaded(false);
-    setDocsLoaded(false);
     setError(null);
 
     (async () => {
-      const s = await fetchPublicPhotoShare(shareId);
-      if (cancelled) return;
-      if (!s) {
-        setShare(null);
+      // The Edge Function runs with the service role and bypasses storage
+      // RLS, so it can mint signed URLs for anon visitors. verify_jwt=false
+      // on the function, but Supabase's gateway still requires an apikey
+      // header — the anon key works for that.
+      const projectUrl = (import.meta.env.VITE_SUPABASE_URL || '').replace(/\/$/, '');
+      const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
+      if (!projectUrl || !anonKey) {
+        if (!cancelled) {
+          setError('Service not configured. Refresh the page or contact the sender.');
+          setShare(null);
+        }
         return;
       }
-      setShare(s);
 
-      // Load photos + docs in parallel. Each side is independent — a
-      // failure on one shouldn't blank out the other, so errors are
-      // collected and surfaced inline rather than thrown.
-      await Promise.all([
-        loadPhotos(s, () => cancelled, setPhotos, setError).finally(() => {
-          if (!cancelled) setPhotosLoaded(true);
-        }),
-        loadDocs(s, () => cancelled, setDocs, setError).finally(() => {
-          if (!cancelled) setDocsLoaded(true);
-        }),
-      ]);
+      try {
+        const url = `${projectUrl}/functions/v1/get-shared-photos?shareId=${encodeURIComponent(shareId)}`;
+        const res = await fetch(url, {
+          method: 'GET',
+          headers: { apikey: anonKey, Authorization: `Bearer ${anonKey}` },
+        });
+        if (cancelled) return;
+
+        if (!res.ok) {
+          // 404/410/etc — surface the "no longer available" empty state,
+          // same as the prior fetchPublicPhotoShare(null) path.
+          setShare(null);
+          return;
+        }
+        const json = (await res.json()) as EdgeResponse;
+        if (cancelled) return;
+        if (!json.ok || !json.share) {
+          setShare(null);
+          return;
+        }
+
+        const ctx: EntityShareContext = json.share.entity_context ?? { label: 'Shared photos' };
+        setShare({ entityContext: ctx });
+
+        const mapped = (json.photos ?? []).map(mapEdgePhoto);
+        setPhotos(mapped);
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load photos');
+      }
     })();
 
     return () => { cancelled = true; };
@@ -155,15 +162,6 @@ export function PublicPhotoGallery({ shareId }: Props) {
     () => share?.entityContext ?? null,
     [share],
   );
-
-  const hasPhotos = (share?.photoIds.length ?? 0) > 0;
-  const hasDocs   = (share?.docIds.length ?? 0) > 0;
-  const headerLabel = hasPhotos && hasDocs ? 'Shared attachments'
-    : hasDocs ? 'Shared documents'
-    : 'Shared photos';
-  const HeaderIcon = hasPhotos && hasDocs ? Paperclip
-    : hasDocs ? FileText
-    : ImageIcon;
 
   // ── Render states ────────────────────────────────────────────────────
   if (share === undefined) {
@@ -203,12 +201,12 @@ export function PublicPhotoGallery({ shareId }: Props) {
             letterSpacing: '0.12em', textTransform: 'uppercase',
             marginBottom: 6,
           }}>
-            <HeaderIcon size={14} /> {headerLabel}
+            <ImageIcon size={14} /> Shared photos
           </div>
           <h1 style={{
             margin: 0, fontSize: 24, fontWeight: 700,
             color: '#111827',
-          }}>{ctx?.label || share.entityId}</h1>
+          }}>{ctx?.label || 'Shared photos'}</h1>
           {ctx?.title && (
             <div style={{ marginTop: 6, fontSize: 15, color: '#374151' }}>{ctx.title}</div>
           )}
@@ -266,120 +264,23 @@ export function PublicPhotoGallery({ shareId }: Props) {
           }}>{error}</div>
         )}
 
-        {hasPhotos && (
-          !photosLoaded ? (
-            <div style={{
-              background: '#fff', border: '1px solid #E5E7EB', borderRadius: 12,
-              padding: '40px 20px', textAlign: 'center', color: '#6B7280', fontSize: 13,
-            }}>Loading photos…</div>
-          ) : photos.length === 0 ? (
-            <div style={{
-              background: '#fff', border: '1px solid #E5E7EB', borderRadius: 12,
-              padding: '40px 20px', textAlign: 'center', color: '#6B7280', fontSize: 13,
-            }}>No photos available.</div>
-          ) : (
-            <PhotoGrid
-              photos={photos}
-              onPhotoClick={(_, i) => setLightboxIndex(i)}
-            />
-          )
-        )}
-
-        {hasDocs && (
-          <section style={{ marginTop: hasPhotos ? 32 : 0 }}>
-            <div style={{
-              fontSize: 11, fontWeight: 700, color: '#6B7280',
-              letterSpacing: '0.12em', textTransform: 'uppercase',
-              marginBottom: 10,
-            }}>Documents</div>
-            {!docsLoaded ? (
-              <div style={{
-                background: '#fff', border: '1px solid #E5E7EB', borderRadius: 12,
-                padding: '24px 20px', textAlign: 'center', color: '#6B7280', fontSize: 13,
-              }}>Loading documents…</div>
-            ) : docs.length === 0 ? (
-              <div style={{
-                background: '#fff', border: '1px solid #E5E7EB', borderRadius: 12,
-                padding: '24px 20px', textAlign: 'center', color: '#6B7280', fontSize: 13,
-              }}>No documents available.</div>
-            ) : (
-              <ul style={{
-                listStyle: 'none', margin: 0, padding: 0,
-                background: '#fff', border: '1px solid #E5E7EB', borderRadius: 12,
-                overflow: 'hidden',
-              }}>
-                {docs.map((d, i) => (
-                  <li key={d.id} style={{
-                    display: 'flex', alignItems: 'center', gap: 12,
-                    padding: '12px 16px',
-                    borderTop: i === 0 ? 'none' : '1px solid #F3F4F6',
-                  }}>
-                    <FileText size={20} color="#6B7280" style={{ flexShrink: 0 }} />
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{
-                        fontSize: 14, fontWeight: 600, color: '#1F2937',
-                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                      }}>{d.file_name || 'Document'}</div>
-                      <div style={{ fontSize: 11, color: '#9CA3AF', marginTop: 2 }}>
-                        {[
-                          d.mime_type,
-                          formatBytes(d.file_size),
-                          d.page_count ? `${d.page_count} page${d.page_count === 1 ? '' : 's'}` : null,
-                        ].filter(Boolean).join(' • ')}
-                      </div>
-                    </div>
-                    <div style={{
-                      display: 'flex', flexDirection: 'column',
-                      alignItems: 'flex-end', gap: 4, flexShrink: 0,
-                    }}>
-                      <button
-                        type="button"
-                        onClick={() => openDoc(d)}
-                        disabled={docBusyId === d.id}
-                        style={{
-                          display: 'inline-flex', alignItems: 'center', gap: 6,
-                          background: '#E85D2D', color: '#fff',
-                          padding: '6px 12px', borderRadius: 6,
-                          fontSize: 12, fontWeight: 600, border: 'none',
-                          cursor: docBusyId === d.id ? 'default' : 'pointer',
-                          opacity: docBusyId === d.id ? 0.7 : 1,
-                        }}
-                      >
-                        {docBusyId === d.id ? (
-                          <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />
-                        ) : (
-                          <Download size={13} />
-                        )}
-                        {docBusyId === d.id ? 'Opening…' : 'Open'}
-                      </button>
-                      {docErrors[d.id] && (
-                        <span role="alert" style={{
-                          fontSize: 11, color: '#B91C1C',
-                          maxWidth: 220, textAlign: 'right',
-                        }}>
-                          {docErrors[d.id]}
-                        </span>
-                      )}
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
-        )}
-
-        {!hasPhotos && !hasDocs && !error && (
+        {photos.length === 0 && !error ? (
           <div style={{
             background: '#fff', border: '1px solid #E5E7EB', borderRadius: 12,
             padding: '40px 20px', textAlign: 'center', color: '#6B7280', fontSize: 13,
-          }}>No attachments in this share.</div>
+          }}>Loading photos…</div>
+        ) : (
+          <PhotoGrid
+            photos={photos}
+            onPhotoClick={(_, i) => setLightboxIndex(i)}
+          />
         )}
 
         <footer style={{
           marginTop: 32, padding: '16px 0',
           fontSize: 11, color: '#9CA3AF', textAlign: 'center',
         }}>
-          {hasPhotos && 'Right-click a photo to download. '}Powered by Stride Logistics.
+          Right-click a photo to download. Powered by Stride Logistics.
         </footer>
       </main>
 
@@ -393,101 +294,6 @@ export function PublicPhotoGallery({ shareId }: Props) {
       )}
     </div>
   );
-}
-
-// ── Data loaders (extracted so the effect stays readable) ────────────
-// Both are no-ops when the share carries an empty id list, which is
-// the common case for photos-only or docs-only shares.
-
-async function loadPhotos(
-  s: PhotoShare,
-  isCancelled: () => boolean,
-  setPhotos: (p: Photo[]) => void,
-  setError: (e: string | null) => void,
-): Promise<void> {
-  if (s.photoIds.length === 0) return;
-  try {
-    // Explicit column list — anon role has SELECT on a narrow subset
-    // only (migration 20260426130000). select('*') would 401.
-    const { data, error: err } = await supabase
-      .from('item_photos')
-      .select('id, storage_key, thumbnail_key, file_name, photo_type, needs_attention, is_repair, created_at, uploaded_by_name')
-      .in('id', s.photoIds);
-    if (isCancelled()) return;
-    if (err) { setError(err.message); return; }
-    const rows = ((data || []) as Photo[]).slice();
-    // Preserve the curator's chosen order — don't shuffle by created_at.
-    const orderIdx: Record<string, number> = {};
-    s.photoIds.forEach((id, i) => { orderIdx[id] = i; });
-    rows.sort((a, b) => (orderIdx[a.id] ?? 0) - (orderIdx[b.id] ?? 0));
-
-    const originalKeys = rows.map(r => r.storage_key).filter(Boolean);
-    const thumbKeys = rows.map(r => r.thumbnail_key).filter((k): k is string => !!k);
-    const [origSigned, thumbSigned] = await Promise.all([
-      originalKeys.length
-        ? supabase.storage.from(PHOTOS_BUCKET).createSignedUrls(originalKeys, SIGNED_URL_TTL)
-        : Promise.resolve({ data: [] as Array<{ path: string | null; signedUrl: string }>, error: null }),
-      thumbKeys.length
-        ? supabase.storage.from(PHOTOS_BUCKET).createSignedUrls(thumbKeys, SIGNED_URL_TTL)
-        : Promise.resolve({ data: [] as Array<{ path: string | null; signedUrl: string }>, error: null }),
-    ]);
-    const origMap: Record<string, string> = {};
-    for (const item of origSigned.data || []) {
-      if (item.path && item.signedUrl) origMap[item.path] = item.signedUrl;
-    }
-    const thumbMap: Record<string, string> = {};
-    for (const item of thumbSigned.data || []) {
-      if (item.path && item.signedUrl) thumbMap[item.path] = item.signedUrl;
-    }
-    for (const r of rows) {
-      const oSigned = origMap[r.storage_key];
-      if (oSigned) r.storage_url = oSigned;
-      if (r.thumbnail_key) {
-        const tSigned = thumbMap[r.thumbnail_key];
-        if (tSigned) r.thumbnail_url = tSigned;
-      } else if (oSigned) {
-        r.thumbnail_url = oSigned;
-      }
-    }
-    if (!isCancelled()) setPhotos(rows);
-  } catch (e) {
-    if (!isCancelled()) setError(e instanceof Error ? e.message : 'Failed to load photos');
-  }
-}
-
-async function loadDocs(
-  s: PhotoShare,
-  isCancelled: () => boolean,
-  setDocs: (d: SharedDoc[]) => void,
-  setError: (e: string | null) => void,
-): Promise<void> {
-  if (s.docIds.length === 0) return;
-  try {
-    // Narrow column set matches the anon GRANT in
-    // 20260514120000_attachment_shares.sql.
-    const { data, error: err } = await supabase
-      .from('documents')
-      .select('id, storage_key, file_name, mime_type, file_size, page_count, created_at, uploaded_by_name')
-      .in('id', s.docIds);
-    if (isCancelled()) return;
-    if (err) { setError(err.message); return; }
-    const rows = ((data || []) as SharedDoc[]).slice();
-    // Preserve the order the share was built with (push-order's
-    // chronological list of attachments).
-    const orderIdx: Record<string, number> = {};
-    s.docIds.forEach((id, i) => { orderIdx[id] = i; });
-    rows.sort((a, b) => (orderIdx[a.id] ?? 0) - (orderIdx[b.id] ?? 0));
-
-    // Only metadata is loaded here (anon SELECT on documents via
-    // documents_anon_read_via_share, which IS live). The bytes are
-    // fetched lazily per-click through the get-shared-doc Edge
-    // Function (see openDoc) — anon storage RLS for the documents
-    // bucket is not reliably live, so a service-role proxy serves
-    // the file with the share as the only authorization gate.
-    if (!isCancelled()) setDocs(rows);
-  } catch (e) {
-    if (!isCancelled()) setError(e instanceof Error ? e.message : 'Failed to load documents');
-  }
 }
 
 function legendStyle(color: string): React.CSSProperties {
