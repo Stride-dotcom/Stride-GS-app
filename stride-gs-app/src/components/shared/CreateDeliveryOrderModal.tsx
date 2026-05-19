@@ -2821,6 +2821,13 @@ export function CreateDeliveryOrderModal({
   // running the edit path's delete-then-insert twice and doubling
   // dt_order_items. A ref flips synchronously and blocks that window.
   const submitInFlightRef = useRef(false);
+  // Set once the order row + items are durably written but the modal is
+  // intentionally kept open (DT republish failed — the user must Close
+  // and Republish from the order page, NOT re-submit). Re-submitting
+  // would re-run the edit path's delete-then-insert and double the
+  // lines again — the exact ALL-00097 incident. Latches the Submit
+  // button off for the rest of this modal's life.
+  const [orderSaveLocked, setOrderSaveLocked] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [createResult, setCreateResult] = useState<{ dtIdentifier: string; linkedIdentifier?: string; orderId: string } | null>(null);
   const [orderPaid, setOrderPaid] = useState(false);
@@ -3170,6 +3177,7 @@ export function CreateDeliveryOrderModal({
             `Converted to Pickup + Delivery, but DT republish failed for ${convPushFailures.length} leg(s): ${summary}. ` +
             `Close this dialog and click Republish to DT manually on the affected order(s).`,
           );
+          setOrderSaveLocked(true);
           setSubmitting(false);
           return;  // keep modal open so the error renders
         }
@@ -3391,6 +3399,7 @@ export function CreateDeliveryOrderModal({
             `Saved, but auto-republish to DT failed for ${pdPushFailures.length} leg(s): ${summary}. ` +
             `Close this dialog and click Republish to DT manually on the affected order(s).`,
           );
+          setOrderSaveLocked(true);
           setSubmitting(false);
           return;  // keep modal open so the error renders
         }
@@ -3588,7 +3597,12 @@ export function CreateDeliveryOrderModal({
             });
           const itemRows = [...invRows, ...adhocRows];
           if (itemRows.length > 0) {
-            await supabase.from('dt_order_items').insert(itemRows);
+            // Must throw on failure: the delete above already ran, so a
+            // swallowed insert error = silent line loss, and it would
+            // also hide a dt_order_items_order_code_active_uniq rejection
+            // (the DB backstop) behind a false "saved" success.
+            const { error: iErr } = await supabase.from('dt_order_items').insert(itemRows);
+            if (iErr) throw new Error(`Single-leg edit items insert failed: ${iErr.message}`);
           }
         } else if (mode === 'pickup') {
           // Pickup-only edit/promote was missing this branch — items
@@ -3653,6 +3667,7 @@ export function CreateDeliveryOrderModal({
             `Saved, but auto-republish to DT failed for ${f.identifier}: ${f.error}. ` +
             `Close this dialog and click Republish to DT manually.`,
           );
+          setOrderSaveLocked(true);
           setSubmitting(false);
           return;  // keep modal open so the error renders
         }
@@ -5975,7 +5990,7 @@ export function CreateDeliveryOrderModal({
             </button>
             <WriteButton
               onClick={handleSubmit}
-              disabled={!canSubmit || submitting}
+              disabled={!canSubmit || submitting || orderSaveLocked}
               label={
                 !editingDraftRowIdRef.current
                   ? 'Submit for Review'
@@ -5987,9 +6002,9 @@ export function CreateDeliveryOrderModal({
               style={{
                 padding: '9px 24px', borderRadius: 8,
                 border: 'none',
-                background: canSubmit && !submitting ? theme.colors.primary : theme.colors.border,
+                background: canSubmit && !submitting && !orderSaveLocked ? theme.colors.primary : theme.colors.border,
                 color: '#fff',
-                fontSize: 13, fontWeight: 600, cursor: canSubmit && !submitting ? 'pointer' : 'not-allowed',
+                fontSize: 13, fontWeight: 600, cursor: canSubmit && !submitting && !orderSaveLocked ? 'pointer' : 'not-allowed',
                 fontFamily: 'inherit',
               }}
             />
