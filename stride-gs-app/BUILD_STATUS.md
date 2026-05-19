@@ -36,6 +36,12 @@
 
 ---
 
+## Recent Changes (2026-05-19, dt_order_items double-insert on order submit — PR #462)
+
+**Bug:** standalone delivery **ALL-00097** had all 6 inventory lines inserted twice with identical `created_at` — the items array persisted twice in one submit flow. Root cause in `src/components/shared/CreateDeliveryOrderModal.tsx`: (1) `handleSubmit` had no synchronous re-entrancy guard — `setSubmitting()` is async and `WriteButton`'s own `inFlight` ref resets the instant `performSubmit()` resolves (incl. the keep-modal-open repush-failure return), so a second click re-entered; (2) the single-leg edit/promote path re-read the mutable `editingDraftRowIdRef.current` at delete + insert across many awaits — a null/stale read makes `.delete().eq('dt_order_id', null)` a no-op while the insert still runs (the exact mechanism documented in `dt-push-order`'s `pruneDuplicateOrderItems()`). There was **no DB-level uniqueness** on a logical line.
+
+**Fix:** `handleSubmit` split into `performSubmit` + a `submitInFlightRef`-latched wrapper; Submit button disabled while `submitting`; new `orderSaveLocked` latch permanently disables Submit once the order is durably written but the modal is kept open on a DT-republish failure (set on all three keep-open returns — convert / P+D / single-leg); single-leg edit path snapshots the order id once into `editId` with a throw-if-falsy guard, all delete/insert/update id refs switched to `editId`; the single-leg warehouse items insert now checks `{ error }` and throws (was the only insert in that block swallowing failures). Migration `supabase/migrations/20260519000000_dt_order_items_dedupe_unique_index.sql` soft-removes existing non-adhoc dup rows (FK-safe vs the `parent_pickup_item_id` self-FK) then creates partial `UNIQUE INDEX dt_order_items_order_code_active_uniq ON dt_order_items (dt_order_id, dt_item_code) WHERE dt_item_code IS NOT NULL AND removed_at IS NULL` — structural backstop for every write path. Code review (locked-in Opus reviewer): no Critical, no landmine; both Important items fixed before merge. React side shipped via `npm run deploy`. **Migration NOT yet applied** — this builder env has no Supabase MCP / `SUPABASE_ACCESS_TOKEN`; handed to Justin (see Pending User Actions).
+
 ## Recent Changes (2026-05-19, [MIGRATION-P1.8] 100% shadow coverage + Parity Dashboard — PRs #450 + #451 + Supabase MCP)
 
 **Goal (Justin):** get every migratable function under parity instrumentation so divergence is visible the moment a function takes real traffic, and ship the read-side observability surface to judge flip-readiness.
@@ -1718,6 +1724,7 @@ Late-day session that started as a single production fire (release-items timing 
 
 ## Pending User Actions
 
+- [ ] **Apply migration `20260519000000_dt_order_items_dedupe_unique_index.sql`** (PR #462 — completes the ALL-00097 dup-line fix; until applied, the DB has no structural guard and the partial unique index does not exist). Builder env has no Supabase MCP / `SUPABASE_ACCESS_TOKEN`. Apply via Supabase MCP `apply_migration(project_id='uqplppugeickmamycpuz', name='dt_order_items_dedupe_unique_index', query=<file contents>)`, or paste the file into the Supabase SQL editor. It is idempotent (`IF NOT EXISTS`) and safe to re-run; the dedupe step soft-removes existing duplicate rows (incl. ALL-00097's) so the index can build. Verify: `SELECT indexname FROM pg_indexes WHERE indexname='dt_order_items_order_code_active_uniq';` returns one row, and ALL-00097 has exactly 6 active (`removed_at IS NULL`) lines.
 - [ ] **Get DT JSON-API X-AUTH-TOKEN** (Settings → Advanced Settings in DT, or email support@dispatchtrack.com) so the next session can wire photo sync via `/api/external/v1/dispatches/:identifier`. Add to a new `dt_credentials.rest_api_token` column.
 - [ ] Set `STAX_API_KEY` secret on stax-catalog-sync Edge Function in Supabase dashboard
 - [ ] Run `backfillShipmentFolderUrls()` from Apps Script editor (one-time)
