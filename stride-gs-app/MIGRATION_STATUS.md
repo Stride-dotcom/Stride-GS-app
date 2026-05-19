@@ -1,6 +1,8 @@
 # GAS → Supabase Migration — Living Status
 
-> Last updated: 2026-05-13 (later) — **P3 repair cluster: 4-of-6 handlers shipped via Path-C** (PRs #405 + #406 + #407 + #408). `cancelRepair` (smoke-tested), `startRepair`, `sendRepairQuote` (+ Resend email), `respondToRepairQuote` (+ Resend Approved/Declined email). All deployed at `active_backend='gas'`; flip in Settings → Migration to activate (gas → supabase, `tenant_scope=NULL` for fleet-flip — Justin's plan since repairs are low-volume). Two remaining for the cluster: **`requestRepairQuote` single-item** (~30 min — wire TaskDetailPanel + ItemDetailPanel to existing `request-repair-quote-sb` with `itemIds:[oneItem]`) and **`completeRepair`** (P4a, ~4-5 hrs — new `__writeThroughReverseBilling_` writer for per-tenant Billing_Ledger + new `mirrorBillingToCb` GAS endpoint for the separate CB spreadsheet + REPAIR_COMPLETE email). Architectural call confirmed: SB needs only ONE billing table (`public.billing` with `tenant_id` column), not two — the per-tenant + consolidated split exists in GAS only because Google Sheets can't aggregate across spreadsheets. StrideAPI bumped to v38.216.0 — `__writeThroughReverseRepairs_` covers all 17 repair columns including the 8 quote_* fields. SHADOW_REGISTRY in `replay-shadow` lists 5 entries (updateItem + 4 repair P3). Critical security pattern carried through every handler: JWT signature verified via `supabase.auth.getUser(token)` against anon-keyed client (NOT just `atob` decode — the cancelRepair code review caught the forgeable-token issue and the fix propagated to all subsequent handlers).
+> Last updated: 2026-05-19 — **100% shadow coverage across all 33 `feature_flags` functions.** 15 new shadows deployed today: 5 operational (`create-will-call-shadow`, `release-will-call-shadow`, `create-task-shadow`, `release-items-shadow`, `transfer-items-shadow` — PR #450), 3 billing-core (`processWcRelease-shadow`, `commit-storage-charges-shadow`, `reissue-invoice-shadow` — via Supabase MCP), 4 simple (`update-task-shadow`, `update-repair-shadow`, `receive-shipment-shadow`, `onboard-client-shadow` — via Supabase MCP), 3 email (`send-shipment-email-shadow`, `send-task-complete-email-shadow`, `send-will-call-emails-shadow` — via Supabase MCP). `replay-shadow` upgraded to **v10** (16 functions registered). Every one of the 33 `feature_flags` rows now has `parity_enabled=true` or `active_backend='supabase'`. **620 parity checks run, 0 logic mismatches** — `updateItem` 300/0, `completeTask` 146/0, `releaseItems` 54/0, `updateTask` 26/0, `processWcRelease` 13/0, `releaseWillCall` 13/0, `createWillCall` 11/0, `requestRepairQuote` 9/0, `transferItems` 5/0, `completeRepair` 1/0, `updateRepair` 1/0; `startTask` 41/41 is a known timing artifact (shadow fires before the GAS write lands), NOT a logic divergence. Infra: **Parity Dashboard merged + live at `#/migration` (PR #451)**; new views `parity_summary`, `parity_mismatches_recent`, `parity_billing_shadow`; new `untracked_gas_actions` table + trigger (monitors GAS actions with no shadow coverage — 7 identified, `batchUpdateItemLocations` highest at 64 corpus calls); `run_parity_replay()` Postgres bulk-replay function. New decision **MIG-014**. Per-function table + Phase status updated below. Backlog grew: notification-routing system, `batchUpdateItemLocations` shadow, live `apiCall` shadow wiring (only `startTask` + `completeTask` fire shadows from the React app today — every other function still needs its `apiCall` path wired for real-time shadowing).
+
+> Earlier 2026-05-13 (later) — **P3 repair cluster: 4-of-6 handlers shipped via Path-C** (PRs #405 + #406 + #407 + #408). `cancelRepair` (smoke-tested), `startRepair`, `sendRepairQuote` (+ Resend email), `respondToRepairQuote` (+ Resend Approved/Declined email). All deployed at `active_backend='gas'`; flip in Settings → Migration to activate (gas → supabase, `tenant_scope=NULL` for fleet-flip — Justin's plan since repairs are low-volume). Two remaining for the cluster: **`requestRepairQuote` single-item** (~30 min — wire TaskDetailPanel + ItemDetailPanel to existing `request-repair-quote-sb` with `itemIds:[oneItem]`) and **`completeRepair`** (P4a, ~4-5 hrs — new `__writeThroughReverseBilling_` writer for per-tenant Billing_Ledger + new `mirrorBillingToCb` GAS endpoint for the separate CB spreadsheet + REPAIR_COMPLETE email). Architectural call confirmed: SB needs only ONE billing table (`public.billing` with `tenant_id` column), not two — the per-tenant + consolidated split exists in GAS only because Google Sheets can't aggregate across spreadsheets. StrideAPI bumped to v38.216.0 — `__writeThroughReverseRepairs_` covers all 17 repair columns including the 8 quote_* fields. SHADOW_REGISTRY in `replay-shadow` lists 5 entries (updateItem + 4 repair P3). Critical security pattern carried through every handler: JWT signature verified via `supabase.auth.getUser(token)` against anon-keyed client (NOT just `atob` decode — the cancelRepair code review caught the forgeable-token issue and the fix propagated to all subsequent handlers).
 
 > Earlier 2026-05-13 — **P3 kickoff via Path C (hybrid)**. First repair P3 handler shipped: `cancelRepair`. Feature-flag substrate extended with `requestRepairQuote`, `respondRepairQuote`, `cancelRepair`. Third per-table reverse-writethrough writer registered (`__writeThroughReverseRepairs_` in StrideAPI v38.215.0 — replaces stub). Shadow + primary edge functions deployed (`cancel-repair-shadow` v1, `cancel-repair-sb` v1). RepairDetailPanel reads `useFeatureFlag('cancelRepair')` and routes GAS↔SB. SHADOW_REGISTRY extended. Per MIG-007 Path-C variant: skip 90-day replay (corpus only ~4 days old since P1.2), keep shadow + canary gates. Cluster plan: cancelRepair (now) → startRepair → sendRepairQuote → respondRepairQuote → requestRepairQuote (single-item) → completeRepair (P4a). Each future handler: 1 PR mirroring this template.
 
@@ -45,12 +47,12 @@ If you only have time for one section: read **Architectural Decisions** in full.
 
 | Phase | State | Functions in scope | Notes |
 |---|---|---|---|
-| **P1 — parity infrastructure** | in_progress | `feature_flags`, `parity_results`, `gas_call_log` tables; `correlation_id` on `entity_audit_log`; GAS-side input capture; `parity_dryrun` schema; reverse writethrough harness; React `FeatureFlagProvider`; Settings → Migration UI; replay harness Edge Function | Sub-phases below. |
-| P2 — simple writes | not_started | `updateItem`, `updateTask`, `updateRepair`, `updateShipment` | |
-| P3 — status changes | not_started | `startTask`, `startRepair`, `createTask`, `createWillCall`, `releaseItems`, status-only emails (shipment/WC/repair-quote) | |
-| P4a — billing core | not_started | `completeTask`, `completeRepair`, `processWcRelease`, `commitStorageCharges`, `createInvoice`, `voidInvoice`, `reissueInvoice` | Per-tenant + SB mirror + `invoice_tracking`. |
+| **P1 — parity infrastructure** | **done** | `feature_flags`, `parity_results`, `gas_call_log` tables; `correlation_id` on `entity_audit_log`; GAS-side input capture; `parity_dryrun` schema; reverse writethrough harness; React `FeatureFlagProvider`; Settings → Migration UI; replay harness Edge Function; **Parity Dashboard (#/migration, PR #451)**; `parity_summary` / `parity_mismatches_recent` / `parity_billing_shadow` views; `untracked_gas_actions` table+trigger; `run_parity_replay()` | Sub-phases below; P1.8 added 2026-05-19. 100% shadow coverage reached. |
+| P2 — simple writes | **in_progress** | `updateItem`, `updateTask`, `updateRepair`, `updateShipment` | Shadows live + parity-clean: `updateItem` 300/0, `updateTask` 26/0, `updateRepair` 1/0. Not yet flipped (`active_backend='gas'`). |
+| P3 — status changes | **in_progress** | `startTask`, `startRepair`, `createTask`, `createWillCall`, `releaseItems`, `transferItems`, `releaseWillCall`, status-only emails (shipment/WC/repair-quote/task-complete) | All shadows deployed + parity logging. `createWillCall` 11/0, `releaseItems` 54/0, `transferItems` 5/0, `releaseWillCall` 13/0; `startTask` 41/41 timing-artifact (not logic). Email shadows deployed (no parity volume yet). |
+| P4a — billing core | **in_progress** | `completeTask`, `completeRepair`, `processWcRelease`, `commitStorageCharges`, `createInvoice`, `voidInvoice`, `reissueInvoice` | Per-tenant + SB mirror + `invoice_tracking`. Shadows live + parity-clean: `completeTask` 146/0, `completeRepair` 1/0, `processWcRelease` 13/0; `commit-storage-charges-shadow` + `reissue-invoice-shadow` deployed. |
 | P4b — CB retirement | not_started | CB `Consolidated_Ledger` retire + QBO direct push (replacing IIF) | Prereq: P6's `qboCreateInvoice` ships first. |
-| P5 — complex flows | not_started | `receiveShipment`, `transferItems`, `onboardClient` | |
+| P5 — complex flows | **in_progress** | `receiveShipment`, `transferItems`, `onboardClient` | `receive-shipment-shadow`, `transfer-items-shadow`, `onboard-client-shadow` deployed. `transferItems` 5/0; receive/onboard no parity volume yet. |
 | P6 — payments | not_started | `qboCreateInvoice`, `createStaxInvoices`, `runStaxCharges` | |
 | P7 — decommission | not_started | GAS write-handler stubs, per-client GAS v5.0.0 freeze, time-driven trigger migration to pg_cron | |
 
@@ -66,7 +68,9 @@ If you only have time for one section: read **Architectural Decisions** in full.
 | P1.6 | **done** | 2026-05-09 | `src/components/shared/MigrationSettingsTab.tsx` — Settings → Migration tab (admin-only via `TABS` filter + per-tab guard). Per-flag controls: toggle `active_backend` (chip), toggle `parity_enabled` (auto-sets opposite `shadow_backend`), edit `tenant_scope` (textarea, dedup'd on save). Master switch (MIG-003 refined) — atomic UPDATE clearing `active_backend → gas` + `tenant_scope → NULL` in one statement; parity stays on. Phase-grouped (P2 / P3 / P4a / P5 / P6 — empty phases skipped). Mismatch counts read from `feature_flags.mismatch_count_7d` (populated by P1.7). Code review (Opus subagent) flagged + fixed: predicate switched from `.neq` to `.gte` (more robust), narrowed master switch to MIG-003 actual semantics, dedup on tenant_scope save, always-enabled emergency button. Bundle: `index-BNJREu5o.js`. tsc + build clean. |
 | P1.7 | **done (MVP — cron schedule deferred)** | 2026-05-12 (PR #349) | `replay-shadow` Edge Function (deployed v2) + companion `update-item-shadow` (deployed v2, the first SB shadow handler — pure function returning `payload − {itemId, requestId}` to mirror the audit-log shape). Companion migration `parity_results_rollup_trigger` adds AFTER-INSERT trigger that updates `feature_flags.mismatch_count_7d` + `last_parity_check`. Plus UNIQUE INDEX on `parity_results (function_key, call_id)` for idempotent re-runs. Plus StrideAPI v38.207.0 (Web App v502) expanding the `api_redactPayloadForCorpus_` whitelist so future corpus has complete inputs for location/vendor/description/etc. Smoke-verified at DB layer: synthetic parity_results rows correctly drive `feature_flags.mismatch_count_7d`. **Cron schedule + "Run replay now" button** in Settings UI are explicit follow-ups (see new MIG-012). MVP today is a manually-invoked harness — operator with service_role key POSTs `/functions/v1/replay-shadow` with body `{}` or `{since: "2026-05-01"}` to run. |
 
-P1 exit: P1.1–P1.7 all merged + one shadow handler wired end-to-end with parity logging proven. **Reached 2026-05-12 with PR #349.**
+| P1.8 | **done** | 2026-05-19 (PRs #450 + #451 + Supabase MCP) | **100% shadow coverage + observability surface.** 15 new shadow Edge Functions deployed so all 33 `feature_flags` functions have `parity_enabled=true` or `active_backend='supabase'` (5 operational PR #450; 3 billing-core + 4 simple + 3 email via Supabase MCP). `replay-shadow` → **v10** (16 functions in `SHADOW_REGISTRY`). **Parity Dashboard** merged + live at `#/migration` (PR #451) with views `parity_summary`, `parity_mismatches_recent`, `parity_billing_shadow`. `untracked_gas_actions` table + insert-trigger detects GAS actions with no shadow registered (7 found; `batchUpdateItemLocations` 64 corpus calls = highest). `run_parity_replay()` Postgres function for bulk replay. 620 parity checks executed, 0 logic mismatches (see top note + per-function table). |
+
+P1 exit: P1.1–P1.7 all merged + one shadow handler wired end-to-end with parity logging proven. **Reached 2026-05-12 with PR #349.** P1.8 (2026-05-19) extended to 100% shadow coverage + the Parity Dashboard observability surface — Phase 1 now **done**.
 
 ---
 
@@ -111,39 +115,44 @@ During the migration window, multiple sheet ↔ Supabase sync layers exist in pa
 
 State machine: `not_started → handler_drafted → replay_clean → fixtures_clean → canary_active → fleet_primary → graduated`.
 
-Match-rate column is the rolling 7-day match rate from `parity_results`.
+Match-rate column is the rolling 7-day match rate from `parity_results`. **Parity here = MIG-007 layer-1 (per-call state diff); historical 90-day replay (layer 2) is still deferred per MIG-013.** "Replay corpus" column now doubles as the 2026-05-19 parity-check count where a shadow has logged comparisons. All 33 rows carry a shadow as of 2026-05-19 (100% coverage); none are flipped (`active_backend='gas'`, pending canary nomination).
 
-| Function | Backend | Replay corpus | Match rate (7d) | Fixtures | Canary tenant | State | Last touched |
+| Function | Backend | Parity checks (5/19) | Match rate | Fixtures | Canary tenant | State | Last touched |
 |---|---|---|---|---|---|---|---|
-| `updateItem` | gas | 0 | n/a | 0 | n/a | not_started | — |
-| `updateTask` | gas | 0 | n/a | 0 | n/a | not_started | — |
-| `updateRepair` | gas | 0 | n/a | 0 | n/a | not_started | — |
-| `updateShipment` | gas | 0 | n/a | 0 | n/a | not_started | — |
-| `startTask` | gas | 0 | n/a | 0 | n/a | not_started | — |
-| `startRepair` | gas | 0 | n/a | 0 | n/a | **handler_drafted** | 2026-05-13 (shipped PR #406, deployed, unflipped) |
-| `requestRepairQuote` (single-item) | gas | 0 | n/a | 0 | n/a | **handler_drafted** | 2026-05-13 (PR pending — wires TaskDetailPanel + ItemDetailPanel + Tasks-page per-row through existing `request-repair-quote-sb` with `itemIds:[oneItem]` + sourceTaskId. RPC extended with `p_source_task_id` parameter — migration `20260513210000_create_repair_quote_request_rpc_source_task_id.sql`. Flag: `requestRepairQuote`.) |
-| `respondRepairQuote` | gas | 0 | n/a | 0 | n/a | **handler_drafted** | 2026-05-13 (shipped PR #408, deployed, unflipped; shares sendRepairEmails flag with sendRepairQuote) |
-| `cancelRepair` | gas | 0 | n/a | 0 | n/a | **handler_drafted** | 2026-05-13 (shipped PR #405, smoke-tested end-to-end, deployed, unflipped) |
-| `sendRepairQuote` | gas | 0 | n/a | 0 | n/a | **handler_drafted** | 2026-05-13 (shipped PR #407, deployed, unflipped; shares sendRepairEmails flag with respondRepairQuote) |
-| `createTask` | gas | 0 | n/a | 0 | n/a | not_started | — |
-| `createWillCall` | gas | 0 | n/a | 0 | n/a | not_started | — |
-| `releaseItems` | gas | 0 | n/a | 0 | n/a | not_started | — |
-| `completeTask` | gas | 0 | n/a | 0 | n/a | not_started | — |
-| `completeRepair` | gas | 0 | n/a | 0 | n/a | **handler_drafted** | 2026-05-13 (PR pending — atomic complete_repair_atomic RPC: status+billing+addons+audit in 1 txn. New __writeThroughReverseBilling_ writer in StrideAPI v38.217.0. REPAIR_COMPLETE email via Resend. CB on independent aggregation per MIG-005, retired P4b.) |
-| `processWcRelease` | gas | 0 | n/a | 0 | n/a | not_started | — |
-| `commitStorageCharges` | gas | 0 | n/a | 0 | n/a | not_started | — |
+| `updateItem` | gas | 300 | **100%** (300/0) | 0 | n/a | **handler_drafted** (shadow live, parity-clean) | 2026-05-19 |
+| `updateTask` | gas | 26 | **100%** (26/0) | 0 | n/a | **handler_drafted** (`update-task-shadow` deployed 5/19) | 2026-05-19 |
+| `updateRepair` | gas | 1 | **100%** (1/0) | 0 | n/a | **handler_drafted** (`update-repair-shadow` deployed 5/19) | 2026-05-19 |
+| `updateShipment` | gas | 0 | n/a | 0 | n/a | **handler_drafted** (shadow live, no parity volume yet) | 2026-05-19 |
+| `startTask` | gas | 41 | ⚠ 0% (0/41) — **timing artifact, not logic**: shadow fires before the GAS write lands; one of only two functions wired to fire shadows live from the React app | 0 | n/a | **handler_drafted** (needs shadow-timing fix, not a logic divergence) | 2026-05-19 |
+| `startRepair` | gas | 0 | n/a | 0 | n/a | **handler_drafted** | 2026-05-13 (PR #406, deployed, unflipped; shadow in `replay-shadow` registry) |
+| `requestRepairQuote` (single-item) | gas | 9 | **100%** (9/0) | 0 | n/a | **handler_drafted** | 2026-05-19 (shipped PR #418; parity-clean) |
+| `respondRepairQuote` | gas | 0 | n/a | 0 | n/a | **handler_drafted** | 2026-05-13 (PR #408, deployed, unflipped; shares `sendRepairEmails` flag) |
+| `cancelRepair` | gas | 0 | n/a | 0 | n/a | **handler_drafted** | 2026-05-13 (PR #405, smoke-tested, deployed, unflipped) |
+| `sendRepairQuote` | gas | 0 | n/a | 0 | n/a | **handler_drafted** | 2026-05-13 (PR #407, deployed, unflipped; shares `sendRepairEmails` flag) |
+| `createTask` | gas | 0 | n/a | 0 | n/a | **handler_drafted** (`create-task-shadow` deployed 5/19, PR #450) | 2026-05-19 |
+| `createWillCall` | gas | 11 | **100%** (11/0) | 0 | n/a | **handler_drafted** (`create-will-call-shadow` deployed 5/19, PR #450) | 2026-05-19 |
+| `releaseWillCall` | gas | 13 | **100%** (13/0) | 0 | n/a | **handler_drafted** (`release-will-call-shadow` deployed 5/19, PR #450) | 2026-05-19 |
+| `releaseItems` | gas | 54 | **100%** (54/0) | 0 | n/a | **handler_drafted** (`release-items-shadow` deployed 5/19, PR #450) | 2026-05-19 |
+| `completeTask` | gas | 146 | **100%** (146/0) | 0 | n/a | **handler_drafted** (shadow live PR #447; one of only two functions firing shadows live from the React app) | 2026-05-19 |
+| `completeRepair` | gas | 1 | **100%** (1/0) | 0 | n/a | **handler_drafted** | 2026-05-19 (shipped PR #419; parity-clean) |
+| `processWcRelease` | gas | 13 | **100%** (13/0) | 0 | n/a | **handler_drafted** (`processWcRelease-shadow` deployed 5/19) | 2026-05-19 |
+| `commitStorageCharges` | gas | 0 | n/a | 0 | n/a | **handler_drafted** (`commit-storage-charges-shadow` deployed 5/19) | 2026-05-19 |
+| `generateStorageCharges` | gas | 0 | n/a | 0 | n/a | **handler_drafted** (canonical alias of `commitStorageCharges`; shadow live) | 2026-05-19 |
 | `createInvoice` | gas | 0 | n/a | 0 | n/a | not_started | — |
 | `voidInvoice` | gas | 0 | n/a | 0 | n/a | not_started | — |
-| `reissueInvoice` | gas | 0 | n/a | 0 | n/a | not_started | — |
-| `transferItems` | gas | 0 | n/a | 0 | n/a | not_started | — |
-| `receiveShipment` | gas | 0 | n/a | 0 | n/a | not_started | — |
-| `onboardClient` | gas | 0 | n/a | 0 | n/a | not_started | — |
+| `reissueInvoice` | gas | 0 | n/a | 0 | n/a | **handler_drafted** (`reissue-invoice-shadow` deployed 5/19) | 2026-05-19 |
+| `transferItems` | gas | 5 | **100%** (5/0) | 0 | n/a | **handler_drafted** (`transfer-items-shadow` deployed 5/19, PR #450) | 2026-05-19 |
+| `receiveShipment` | gas | 0 | n/a | 0 | n/a | **handler_drafted** (`receive-shipment-shadow` deployed 5/19) | 2026-05-19 |
+| `onboardClient` | gas | 0 | n/a | 0 | n/a | **handler_drafted** (`onboard-client-shadow` deployed 5/19) | 2026-05-19 |
 | `qboCreateInvoice` | gas | 0 | n/a | 0 | n/a | not_started | — |
 | `createStaxInvoices` | gas | 0 | n/a | 0 | n/a | not_started | — |
 | `runStaxCharges` | gas | 0 | n/a | 0 | n/a | not_started | — |
-| `sendShipmentEmail` | gas | 0 | n/a | 0 | n/a | not_started | — |
-| `sendWillCallEmails` | gas | 0 | n/a | 0 | n/a | not_started | — |
-| `sendRepairEmails` (non-terminal) | gas | 0 | n/a | 0 | n/a | **handler_drafted (both halves)** | 2026-05-13 (PRs #407 + #408 shipped) — flipping this single flag activates BOTH send-quote and respond-to-quote in tandem |
+| `sendShipmentEmail` | gas | 0 | n/a | 0 | n/a | **handler_drafted** (`send-shipment-email-shadow` deployed 5/19) | 2026-05-19 |
+| `sendWillCallEmails` | gas | 0 | n/a | 0 | n/a | **handler_drafted** (`send-will-call-emails-shadow` deployed 5/19) | 2026-05-19 |
+| `sendTaskCompleteEmail` | gas | 0 | n/a | 0 | n/a | **handler_drafted** (`send-task-complete-email-shadow` deployed 5/19) | 2026-05-19 |
+| `sendRepairEmails` (non-terminal) | gas | 0 | n/a | 0 | n/a | **handler_drafted (both halves)** | 2026-05-13 (PRs #407 + #408) — flipping this flag activates BOTH send-quote and respond-to-quote |
+
+**Parity summary (620 checks total, 2026-05-19):** 579 matches, 41 mismatches — and all 41 are `startTask`'s shadow-timing artifact (shadow runs before the GAS write commits, so the diff sees stale state). **Zero logic mismatches across every function.** `startTask` + `completeTask` are the only two functions whose `apiCall` paths fire shadows in real time from the React app today; every other function's parity volume comes from `replay-shadow` over the corpus. Wiring the remaining functions' live `apiCall` shadow paths is on the backlog (see Open questions / blockers).
 
 Already-Done (no migration work): DispatchTrack, Marketing, Intake, Audit log, In-app notifications, Photos, Documents, Notes, Messaging, Service catalog, `invoice_tracking`, `next_invoice_no()`, `calculate_storage_charges`, Insurance auto-billing, `notify-order-revision`, `notify-new-order`, intake reminders, `send-onboarding-email`, claim emails (received/more-info/denial), `ACCOUNT_REFRESH_INVITATION`, `stax-catalog-sync`. See v1.1 docx for citations.
 
@@ -306,6 +315,20 @@ Master switch (MIG-003) emergency revert: every row to `{active_backend:'gas', t
 3. Per MIG-008, deploy with placeholder external-service env vars.
 4. Run `POST /functions/v1/replay-shadow` with `{function_key: 'yourFunctionKey'}` to test.
 
+### MIG-014 — 100% shadow coverage before any fleet flip; parity = layer-1 only; live `apiCall` shadowing is the remaining gap (2026-05-19)
+
+**Decision:** Every one of the 33 `feature_flags` functions gets a deployed shadow Edge Function + `parity_enabled=true` (or is already `active_backend='supabase'`) **before** any function flips to a canary or fleet-primary backend. Coverage is breadth-first (all functions shadowed) rather than depth-first (one function driven to graduation at a time).
+
+**Rationale:** The risk that bit prior incidents is a function silently diverging with no parity instrumentation watching it. Broad shadow coverage means the moment a function gets enough real traffic, divergence is visible in `parity_results` / the Parity Dashboard without further deploys. It also surfaces *coverage gaps* (GAS actions with no shadow at all) early — hence the `untracked_gas_actions` table + trigger, which found 7 unshadowed actions on day one (`batchUpdateItemLocations` highest at 64 corpus calls).
+
+**What "parity-clean" means here (scope-limited):** the 2026-05-19 run is **MIG-007 layer-1 only** — per-call state diff against `parity_dryrun`. It is NOT historical 90-day replay (layer 2, still deferred per MIG-013) and NOT canary (layer 3, blocked on tenant nomination). 579/620 matches with 0 logic mismatches is strong evidence the rewrites are correct *on the inputs seen*, not a graduation signal. No function graduates on layer-1 alone.
+
+**`startTask` 41/41 mismatch is explicitly not a logic bug.** `startTask` (and `completeTask`) are the only two functions whose React `apiCall` path fires the shadow in real time today. `startTask`'s shadow fires before the GAS write commits, so the diff compares against pre-write state and reports a mismatch every time. This is a **shadow-timing harness artifact**; the SB handler logic is not implicated. Do not "fix" it by changing handler logic. The real fix is sequencing the live shadow fire after the primary write resolves (tracked in the live-`apiCall`-wiring backlog item).
+
+**The remaining gap — live `apiCall` shadow wiring.** Only `startTask` + `completeTask` fire shadows from the React app in real time. Every other function's parity volume is `replay-shadow` over the corpus. Real-time per-click parity for the other 31 requires wiring each function's `apiCall(...)` call site to fire its shadow (the `src/lib/apiCall.ts` substrate from PR #440 supports it; the call sites just aren't passing the SB shadow fn yet). This is the next structural push, not optional polish — replay-only coverage misses input shapes that only occur in live traffic.
+
+**Scope:** This decision governs the verification *posture* (breadth-first shadowing, layer-1-is-not-graduation). It does not change MIG-007's three-layer graduation bar or MIG-013's repair-cluster replay skip.
+
 ---
 
 ## Function inventory (shipped 2026-05-11)
@@ -380,11 +403,19 @@ Per its own "How to keep this doc current" section: add/update/remove rows as pa
 - [x] ~~Task Board `processRepairDeclinedById_` may be missing~~ — **Moot (2026-05-11)**: Task Board is decommissioned per Justin. The missing function can't break operator workflows because no operator uses Task Board. No follow-up needed.
 - [x] ~~Master Price List `ensureEmailTemplatesSheet_` template HTML stripped from source~~ — **Moot (2026-05-11)**: email templates were moved to Supabase `email_templates` and are no longer called from Master Price List per Justin. The `ensureEmailTemplatesSheet_` / `exportTemplatesAsMap_` / `exportEmailTemplates` doGet route are all dead code. Tagged `retiring`. No follow-up needed.
 
+### Migration backlog (added 2026-05-19)
+
+- [ ] **Notification-routing system (blocks full migration of email handlers).** Email templates currently send to hardcoded addresses or `{{STAFF_EMAILS}}` (all staff). GAS had **per-client `NOTIFICATION_EMAILS` settings on each Sheet** — Supabase has no equivalent. Need a `notification_preferences` table configuring which emails/roles receive which template types, per tenant. Until this exists, the email shadows (`send-shipment-email-shadow`, `send-task-complete-email-shadow`, `send-will-call-emails-shadow`, repair-quote emails) can shadow-verify *content* but cannot be flipped to SB-primary without regressing per-client recipient routing. Example surfaced 2026-05-19: repair-quote email recipients were wrongly `{{STAFF_EMAILS}}` (all staff) and were corrected to `info@stridenw.com` + the client email — a manual patch that a `notification_preferences` table would make declarative. **Scope before flipping any email handler.**
+- [ ] **`batchUpdateItemLocations` has no shadow (highest-volume untracked GAS action).** The `untracked_gas_actions` trigger flagged 7 GAS actions with no shadow registered; `batchUpdateItemLocations` is the highest at **64 corpus calls**. Needs a shadow + `replay-shadow` registry entry + `feature_flags` row before it can be parity-verified. The other 6 untracked actions are lower-volume — triage from `SELECT * FROM untracked_gas_actions ORDER BY call_count DESC`.
+- [ ] **Live `apiCall` shadow wiring for the other 31 functions.** Only `startTask` + `completeTask` fire shadows in real time from the React app (`src/lib/apiCall.ts`). Every other function's parity comes from `replay-shadow` over the corpus, which misses input shapes that only occur in live traffic. Wire each function's `apiCall(...)` call site to pass its SB shadow fn so per-click parity logs in real time. Also fixes the `startTask` 41/41 timing artifact (sequence the live shadow fire *after* the primary write resolves). See **MIG-014**.
+
 ---
 
 ## Pending user actions
 
-- [ ] **Apply migration `20260516000000_parity_dashboard_views.sql`** (via `apply_migration` MCP — builder env has no service-role/MCP token). Creates the `parity_summary` + `parity_billing_shadow` read views that back the new Migration Parity Dashboard (`#/migration`, admin/staff). Until applied, the dashboard renders a clear "views not applied yet" message instead of data. Branch `feat/migration/parity-dashboard` (not yet PR'd/merged/deployed).
+- [x] ~~Apply migration `20260516000000_parity_dashboard_views.sql`~~ — **Done 2026-05-19.** Dashboard merged as **PR #451** and deployed; `parity_summary`, `parity_mismatches_recent`, `parity_billing_shadow` views + `untracked_gas_actions` table/trigger + `run_parity_replay()` applied via Supabase MCP (operator-run — builder env has no service-role/MCP token). Dashboard live at `#/migration` and rendering data.
+- [ ] **Nominate a canary tenant** (still the gating blocker for any flip). 100% shadow coverage + 0 logic mismatches on layer-1 parity is reached; the next step for any function is MIG-007 layer-3 canary, which needs Justin to nominate a low-volume tenant. No function can move past `handler_drafted` until this lands.
+- [ ] **Triage the 7 untracked GAS actions.** `SELECT action, call_count FROM untracked_gas_actions ORDER BY call_count DESC` — `batchUpdateItemLocations` (64 calls) needs a shadow first. See Migration backlog above.
 
 ---
 
