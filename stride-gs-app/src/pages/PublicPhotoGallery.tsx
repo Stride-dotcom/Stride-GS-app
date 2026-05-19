@@ -5,9 +5,18 @@
  *   #/shared/attachments/:shareId   (canonical — photos + docs)
  *   #/shared/photos/:shareId        (legacy alias — photos-only links)
  * Bypasses the auth gate entirely. The page uses the Supabase anon
- * key, which the photo_shares / item_photos / documents / storage
- * RLS policies allow for active, non-expired shares (see migrations
+ * key, which the photo_shares / documents RLS policies allow for
+ * active, non-expired shares (see migrations
  * 20260426120000_photo_shares.sql + 20260514120000_attachment_shares.sql).
+ *
+ * Photo signed URLs are minted server-side by the get-shared-photos
+ * Edge Function (service role, verify_jwt=false). The anon client
+ * cannot call storage.createSignedUrls on the private `photos` bucket
+ * — that silently returned empty URLs for every client opening a share
+ * link, which is the bug this page now fixes.
+ *
+ * Document bytes are still fetched on demand through get-shared-doc;
+ * doc metadata comes via anon RLS on the documents table.
  *
  * Header info is read from photo_shares.entity_context (a snapshot
  * taken at share-creation time) so the public page never needs to
@@ -26,9 +35,6 @@ import {
 import { PhotoGrid } from '../components/media/PhotoGrid';
 import { PhotoLightbox } from '../components/media/PhotoLightbox';
 import type { Photo } from '../hooks/usePhotos';
-
-const PHOTOS_BUCKET = 'photos';
-const SIGNED_URL_TTL = 60 * 60; // 1 hour — page refresh re-mints
 
 interface SharedDoc {
   id: string;
@@ -139,7 +145,7 @@ export function PublicPhotoGallery({ shareId }: Props) {
       // failure on one shouldn't blank out the other, so errors are
       // collected and surfaced inline rather than thrown.
       await Promise.all([
-        loadPhotos(s, () => cancelled, setPhotos, setError).finally(() => {
+        loadPhotos(s, shareId, () => cancelled, setPhotos, setError).finally(() => {
           if (!cancelled) setPhotosLoaded(true);
         }),
         loadDocs(s, () => cancelled, setDocs, setError).finally(() => {
@@ -399,56 +405,117 @@ export function PublicPhotoGallery({ shareId }: Props) {
 // Both are no-ops when the share carries an empty id list, which is
 // the common case for photos-only or docs-only shares.
 
+// Edge Function payload — camelCase keys per the get-shared-photos
+// contract. snake_case fallbacks accepted in case the EF later aligns
+// with the DB column names.
+interface EdgePhoto {
+  id: string;
+  signedUrl?: string | null;
+  storageUrl?: string | null;
+  storage_url?: string | null;
+  thumbnailUrl?: string | null;
+  thumbnail_url?: string | null;
+  fileName?: string | null;
+  file_name?: string | null;
+  fileSize?: number | null;
+  file_size?: number | null;
+  mimeType?: string | null;
+  mime_type?: string | null;
+  photoType?: string | null;
+  photo_type?: string | null;
+  needsAttention?: boolean | null;
+  needs_attention?: boolean | null;
+  isRepair?: boolean | null;
+  is_repair?: boolean | null;
+  isPrimary?: boolean | null;
+  is_primary?: boolean | null;
+  createdAt?: string | null;
+  created_at?: string | null;
+  uploadedByName?: string | null;
+  uploaded_by_name?: string | null;
+}
+
+interface EdgePhotosResponse {
+  ok?: boolean;
+  share?: { entity_context?: unknown } | null;
+  photos?: EdgePhoto[];
+  error?: string;
+}
+
+function mapEdgePhoto(p: EdgePhoto): Photo {
+  const storageUrl = p.signedUrl ?? p.storageUrl ?? p.storage_url ?? null;
+  const thumbnailUrl = p.thumbnailUrl ?? p.thumbnail_url ?? storageUrl;
+  return {
+    id: p.id,
+    // Fields the public viewer never reads but the Photo type requires.
+    tenant_id: '',
+    entity_type: 'inventory',
+    entity_id: '',
+    item_id: null,
+    storage_key: '',
+    storage_url: storageUrl,
+    thumbnail_key: null,
+    thumbnail_url: thumbnailUrl,
+    file_name: p.fileName ?? p.file_name ?? '',
+    file_size: p.fileSize ?? p.file_size ?? null,
+    mime_type: p.mimeType ?? p.mime_type ?? null,
+    is_primary: p.isPrimary ?? p.is_primary ?? false,
+    needs_attention: p.needsAttention ?? p.needs_attention ?? false,
+    is_repair: p.isRepair ?? p.is_repair ?? false,
+    photo_type: (p.photoType ?? p.photo_type ?? 'general') as Photo['photo_type'],
+    uploaded_by: null,
+    uploaded_by_name: p.uploadedByName ?? p.uploaded_by_name ?? null,
+    created_at: p.createdAt ?? p.created_at ?? '',
+    updated_at: p.createdAt ?? p.created_at ?? '',
+  };
+}
+
 async function loadPhotos(
   s: PhotoShare,
+  shareId: string,
   isCancelled: () => boolean,
   setPhotos: (p: Photo[]) => void,
   setError: (e: string | null) => void,
 ): Promise<void> {
   if (s.photoIds.length === 0) return;
   try {
-    // Explicit column list — anon role has SELECT on a narrow subset
-    // only (migration 20260426130000). select('*') would 401.
-    const { data, error: err } = await supabase
-      .from('item_photos')
-      .select('id, storage_key, thumbnail_key, file_name, photo_type, needs_attention, is_repair, created_at, uploaded_by_name')
-      .in('id', s.photoIds);
+    // Pre-signed URLs come from the get-shared-photos Edge Function
+    // (service role, verify_jwt=false). The anon client cannot mint
+    // signed URLs against the private `photos` bucket itself — that's
+    // the bug this page is fixing.
+    const base = (import.meta.env.VITE_SUPABASE_URL as string | undefined ?? '').replace(/\/$/, '');
+    const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
+    if (!base || !anonKey) {
+      setError('Photo service unavailable');
+      return;
+    }
+    const url = `${base}/functions/v1/get-shared-photos?shareId=${encodeURIComponent(shareId)}`;
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: { apikey: anonKey, Authorization: `Bearer ${anonKey}` },
+    });
     if (isCancelled()) return;
-    if (err) { setError(err.message); return; }
-    const rows = ((data || []) as Photo[]).slice();
-    // Preserve the curator's chosen order — don't shuffle by created_at.
+    if (!res.ok) {
+      let msg = `Could not load photos (${res.status})`;
+      try {
+        const body = await res.json();
+        if (body?.error) msg = body.error;
+      } catch { /* non-JSON error body — keep status message */ }
+      setError(msg);
+      return;
+    }
+    const json = (await res.json()) as EdgePhotosResponse;
+    if (isCancelled()) return;
+    if (json.ok === false) {
+      setError(json.error || 'Could not load photos');
+      return;
+    }
+    const rows = (json.photos ?? []).map(mapEdgePhoto);
+    // Preserve the curator's chosen order — don't trust the EF to
+    // return rows in s.photoIds order.
     const orderIdx: Record<string, number> = {};
     s.photoIds.forEach((id, i) => { orderIdx[id] = i; });
     rows.sort((a, b) => (orderIdx[a.id] ?? 0) - (orderIdx[b.id] ?? 0));
-
-    const originalKeys = rows.map(r => r.storage_key).filter(Boolean);
-    const thumbKeys = rows.map(r => r.thumbnail_key).filter((k): k is string => !!k);
-    const [origSigned, thumbSigned] = await Promise.all([
-      originalKeys.length
-        ? supabase.storage.from(PHOTOS_BUCKET).createSignedUrls(originalKeys, SIGNED_URL_TTL)
-        : Promise.resolve({ data: [] as Array<{ path: string | null; signedUrl: string }>, error: null }),
-      thumbKeys.length
-        ? supabase.storage.from(PHOTOS_BUCKET).createSignedUrls(thumbKeys, SIGNED_URL_TTL)
-        : Promise.resolve({ data: [] as Array<{ path: string | null; signedUrl: string }>, error: null }),
-    ]);
-    const origMap: Record<string, string> = {};
-    for (const item of origSigned.data || []) {
-      if (item.path && item.signedUrl) origMap[item.path] = item.signedUrl;
-    }
-    const thumbMap: Record<string, string> = {};
-    for (const item of thumbSigned.data || []) {
-      if (item.path && item.signedUrl) thumbMap[item.path] = item.signedUrl;
-    }
-    for (const r of rows) {
-      const oSigned = origMap[r.storage_key];
-      if (oSigned) r.storage_url = oSigned;
-      if (r.thumbnail_key) {
-        const tSigned = thumbMap[r.thumbnail_key];
-        if (tSigned) r.thumbnail_url = tSigned;
-      } else if (oSigned) {
-        r.thumbnail_url = oSigned;
-      }
-    }
     if (!isCancelled()) setPhotos(rows);
   } catch (e) {
     if (!isCancelled()) setError(e instanceof Error ? e.message : 'Failed to load photos');
