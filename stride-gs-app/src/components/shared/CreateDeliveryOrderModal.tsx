@@ -1,5 +1,13 @@
 /**
- * CreateDeliveryOrderModal — Phase 2c (expanded) — v5 2026-04-30 PST
+ * CreateDeliveryOrderModal — Phase 2c (expanded) — v6 2026-05-19 PST
+ *   v6: Per-line taxable gating. Sales tax now applies ONLY to selected
+ *       accessorials whose service_catalog row has taxable=true (felt
+ *       pads, fabric protection, …), not the whole pre-tax subtotal.
+ *       Delivery labor (base/zone fee, pickup leg, drive-out), the
+ *       XTRA_PC extra-piece fee (taxable=false), bundle discount, and
+ *       the coverage charge are NOT taxed. Snapshots taxable_subtotal
+ *       onto dt_orders for audit (migration 20260519130000). Supersedes
+ *       v4's "entire DO is one taxable service" model.
  *   v5: Customizable add-on charges. Every selected add-on now exposes
  *       editable Qty + Rate inputs (catalog rate is the default, staff/
  *       admin can override; clients can adjust qty only). Subtotal is
@@ -1724,12 +1732,15 @@ export function CreateDeliveryOrderModal({
     return baseFee + pickupLegFee - bundleDiscount + extraItemsFee + accessorialsTotal + coverageCharge;
   }, [baseFee, pickupLegFee, bundleDiscount, extraItemsFee, accessorialsTotal, coverageCharge]);
 
-  // Sales tax (Task 8a). For tax-exempt customers (the common case for this
+  // Sales tax. For tax-exempt customers (the common case for this
   // 3PL — most clients are wholesale resellers) tax is always 0 and the
   // chip shows green. For non-exempt customers we apply the customer's
-  // saved rate to the entire pre-tax subtotal. v1 does NOT split per-line
-  // by service_catalog.taxable; the whole DO is treated as a taxable
-  // delivery service. Per-line gating lands with 8b (billing-ledger writer).
+  // saved rate ONLY to accessorial services flagged taxable=true in
+  // service_catalog (felt pads, fabric protection, …). Delivery labor —
+  // base/zone fee, pickup leg, drive-out, the XTRA_PC extra-piece fee
+  // (taxable=false), bundle discount — and the coverage charge (not a
+  // service_catalog service) are NOT taxed. Pre-fix this taxed the
+  // entire pre-tax subtotal, over-charging tax on non-taxable delivery.
   // Effective sales-tax rate (% — not fraction), or null when the sale is
   // not taxable. Single source of truth so the math, the persisted snapshot,
   // and the displayed breakdown can never disagree.
@@ -1751,10 +1762,35 @@ export function CreateDeliveryOrderModal({
     return rate;
   }, [clientTaxInfo, billingMethod]);
 
+  // The taxable base: only selected accessorials whose service_catalog
+  // row has taxable=true. quotePending lines are skipped (their subtotal
+  // is forced to 0 until staff price them — taxing a $0 line is a no-op
+  // but excluding them keeps the displayed "Tax on …" label honest).
+  // Catalog lookup is by code; if the code isn't in catalogServices
+  // (stale/unseeded) it defaults to NOT taxable — fail closed, never
+  // over-charge tax.
+  const taxableLines = useMemo(() => {
+    const out: { code: string; name: string; amount: number }[] = [];
+    for (const a of selectedAccessorials.values()) {
+      if (a.quotePending || !(a.subtotal > 0)) continue;
+      const svc = catalogServices.find(s => s.code === a.code);
+      if (svc?.taxable !== true) continue;
+      out.push({ code: a.code, name: svc.name || a.code, amount: a.subtotal });
+    }
+    return out;
+  }, [selectedAccessorials, catalogServices]);
+
+  const taxableSubtotal = useMemo(
+    () => taxableLines.reduce((s, l) => s + l.amount, 0),
+    [taxableLines],
+  );
+
   const taxAmount = useMemo(() => {
+    // subtotalBeforeTax==null means the order isn't priced yet (call-for-
+    // quote / no zone) — don't snapshot tax on an unpriced order.
     if (subtotalBeforeTax == null || effectiveTaxRatePct == null) return 0;
-    return subtotalBeforeTax * (effectiveTaxRatePct / 100);
-  }, [subtotalBeforeTax, effectiveTaxRatePct]);
+    return taxableSubtotal * (effectiveTaxRatePct / 100);
+  }, [subtotalBeforeTax, taxableSubtotal, effectiveTaxRatePct]);
 
   const orderTotal = useMemo(() => {
     if (subtotalBeforeTax == null) return null;
@@ -2592,6 +2628,7 @@ export function CreateDeliveryOrderModal({
           tax_amount: null,
           tax_rate_pct: null,
           customer_tax_exempt: null,
+          taxable_subtotal: null,
           order_total: null,
           pricing_override: true,
           pricing_notes: 'Pickup leg of linked pickup+delivery — pricing rolled into delivery order.',
@@ -2903,11 +2940,15 @@ export function CreateDeliveryOrderModal({
           tax_amount: taxAmount,
           tax_rate_pct: effectiveTaxRatePct ?? DEFAULT_TAX_RATE,
           customer_tax_exempt: false,
+          // Audit: the base tax was actually applied to (taxable
+          // accessorials only), not the full order subtotal.
+          taxable_subtotal: taxableSubtotal,
         }
       : {
           tax_amount: clientTaxInfo && !clientTaxInfo.taxExempt ? taxAmount : null,
           tax_rate_pct: clientTaxInfo ? clientTaxInfo.taxRatePct : null,
           customer_tax_exempt: clientTaxInfo ? clientTaxInfo.taxExempt : null,
+          taxable_subtotal: clientTaxInfo && !clientTaxInfo.taxExempt ? taxableSubtotal : null,
         };
 
     // Edit-existing-row path. When the modal was opened on an existing
@@ -3077,6 +3118,7 @@ export function CreateDeliveryOrderModal({
           tax_amount: null,
           tax_rate_pct: null,
           customer_tax_exempt: null,
+          taxable_subtotal: null,
           order_total: null,
           pricing_override: true,
           pricing_notes: 'Pickup leg of linked pickup+delivery (converted from standalone delivery) — pricing rolled into delivery order.',
@@ -3266,6 +3308,7 @@ export function CreateDeliveryOrderModal({
           tax_amount: null,
           tax_rate_pct: null,
           customer_tax_exempt: null,
+          taxable_subtotal: null,
           order_total: null,
           pricing_override: true,
           pricing_notes: 'Pickup leg of linked pickup+delivery — pricing rolled into delivery order.',
@@ -5772,7 +5815,14 @@ export function CreateDeliveryOrderModal({
                   </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
                     <span>
-                      Sales Tax ({effectiveTaxRatePct.toFixed(3)}%)
+                      {taxableLines.length > 0 ? (
+                        <>
+                          Sales Tax on {taxableLines.map(l => l.name).join(' + ')}
+                          {' '}({effectiveTaxRatePct.toFixed(3)}% × ${taxableSubtotal.toFixed(2)})
+                        </>
+                      ) : (
+                        <>Sales Tax ({effectiveTaxRatePct.toFixed(3)}%) — no taxable services</>
+                      )}
                       {billingMethod === 'customer_collect' && clientTaxInfo?.taxExempt
                         ? ' — collected on COD' : ''}
                     </span>
