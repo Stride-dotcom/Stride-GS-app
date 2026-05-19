@@ -3893,3 +3893,158 @@ export async function generateStorageChargesViaSupabase(args: {
   }
 }
 
+// ── Tax jurisdictions ──────────────────────────────────────────────────────
+// Replaces the hardcoded Kent 10.4% literals that used to live in
+// CreateDeliveryOrderModal / PublicServiceRequest. One row is flagged
+// is_default (enforced single by a partial unique index); per-client
+// overrides still live on clients.tax_rate_pct and take precedence.
+
+export interface TaxJurisdiction {
+  id: string;
+  city: string;
+  state: string;
+  ratePct: number;
+  isDefault: boolean;
+  effectiveDate: string | null;
+  source: string | null;
+  notes: string | null;
+}
+
+interface TaxJurisdictionRow {
+  id: string;
+  city: string;
+  state: string;
+  rate_pct: number | string;
+  is_default: boolean;
+  effective_date: string | null;
+  source: string | null;
+  notes: string | null;
+}
+
+function mapTaxJurisdiction(r: TaxJurisdictionRow): TaxJurisdiction {
+  return {
+    id: r.id,
+    city: r.city,
+    state: r.state,
+    ratePct: Number(r.rate_pct),
+    isDefault: r.is_default === true,
+    effectiveDate: r.effective_date,
+    source: r.source,
+    notes: r.notes,
+  };
+}
+
+const TAX_JURISDICTION_COLS =
+  'id, city, state, rate_pct, is_default, effective_date, source, notes';
+
+export async function fetchTaxJurisdictions(): Promise<TaxJurisdiction[]> {
+  const { data, error } = await supabase
+    .from('tax_jurisdictions')
+    .select(TAX_JURISDICTION_COLS)
+    .order('is_default', { ascending: false })
+    .order('state', { ascending: true })
+    .order('city', { ascending: true });
+  if (error || !data) return [];
+  return (data as TaxJurisdictionRow[]).map(mapTaxJurisdiction);
+}
+
+export async function fetchDefaultTaxJurisdiction(): Promise<TaxJurisdiction | null> {
+  const { data, error } = await supabase
+    .from('tax_jurisdictions')
+    .select(TAX_JURISDICTION_COLS)
+    .eq('is_default', true)
+    .maybeSingle();
+  if (error || !data) return null;
+  return mapTaxJurisdiction(data as TaxJurisdictionRow);
+}
+
+export interface TaxJurisdictionInput {
+  city: string;
+  state: string;
+  ratePct: number;
+  effectiveDate?: string | null;
+  source?: string | null;
+  notes?: string | null;
+}
+
+export async function createTaxJurisdiction(
+  input: TaxJurisdictionInput,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const { error } = await supabase.from('tax_jurisdictions').insert({
+    city: input.city,
+    state: input.state,
+    rate_pct: input.ratePct,
+    effective_date: input.effectiveDate || null,
+    source: input.source || null,
+    notes: input.notes || null,
+  });
+  return error ? { ok: false, error: error.message } : { ok: true };
+}
+
+export async function updateTaxJurisdiction(
+  id: string,
+  patch: Partial<TaxJurisdictionInput>,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const row: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  if (patch.city !== undefined) row.city = patch.city;
+  if (patch.state !== undefined) row.state = patch.state;
+  if (patch.ratePct !== undefined) row.rate_pct = patch.ratePct;
+  if (patch.effectiveDate !== undefined) row.effective_date = patch.effectiveDate || null;
+  if (patch.source !== undefined) row.source = patch.source || null;
+  if (patch.notes !== undefined) row.notes = patch.notes || null;
+  const { data, error } = await supabase
+    .from('tax_jurisdictions')
+    .update(row)
+    .eq('id', id)
+    .select('id');
+  if (error) return { ok: false, error: error.message };
+  if (!data || data.length === 0) {
+    return { ok: false, error: 'Update affected no row — refresh and retry.' };
+  }
+  return { ok: true };
+}
+
+export async function deleteTaxJurisdiction(
+  id: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  // The default row is protected — clearing it would leave the app with
+  // no jurisdiction to fall back to. Caller also disables the button, but
+  // re-check here so a stale UI can't slip a delete through.
+  const { data: target, error: readErr } = await supabase
+    .from('tax_jurisdictions')
+    .select('is_default')
+    .eq('id', id)
+    .maybeSingle();
+  if (readErr) return { ok: false, error: readErr.message };
+  if (target?.is_default) {
+    return { ok: false, error: 'Cannot delete the default jurisdiction. Set another as default first.' };
+  }
+  const { error } = await supabase.from('tax_jurisdictions').delete().eq('id', id);
+  return error ? { ok: false, error: error.message } : { ok: true };
+}
+
+export async function setDefaultTaxJurisdiction(
+  id: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  // The partial unique index allows only one is_default=true row, so the
+  // previous default must be cleared BEFORE the new one is set or the
+  // second update collides with the index. Two statements (no transaction
+  // in supabase-js); the gap is sub-second and this is a rare admin click.
+  const { error: clearErr } = await supabase
+    .from('tax_jurisdictions')
+    .update({ is_default: false, updated_at: new Date().toISOString() })
+    .eq('is_default', true)
+    .neq('id', id);
+  if (clearErr) return { ok: false, error: clearErr.message };
+  const { data, error } = await supabase
+    .from('tax_jurisdictions')
+    .update({ is_default: true, updated_at: new Date().toISOString() })
+    .eq('id', id)
+    .select('id');
+  if (error) return { ok: false, error: error.message };
+  if (!data || data.length === 0) {
+    return { ok: false, error: 'Update affected no row — refresh and retry.' };
+  }
+  return { ok: true };
+}
+
