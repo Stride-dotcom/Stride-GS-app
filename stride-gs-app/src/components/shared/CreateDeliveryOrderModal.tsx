@@ -110,6 +110,8 @@ import { useDefaultTaxRate } from '../../hooks/useDefaultTaxRate';
 import { ProcessingOverlay } from './ProcessingOverlay';
 import { AttachmentUploadField } from './AttachmentUploadField';
 import { uploadOrderAttachments } from '../../lib/orderAttachmentUpload';
+import { ConfirmDialog } from './ConfirmDialog';
+import { summarizeDtChanges, DT_GROUP_LABEL, type DtFieldGroup, type DtChangeSummary } from '../../lib/dtSelectivePush';
 
 // ── Address Book helpers ─────────────────────────────────────────────────
 interface AddressBookContact {
@@ -312,26 +314,43 @@ function genUid(): string {
  * check on `pushed_to_dt_at` is mostly an "is this order actually live
  * in DT yet" gate, not a duplicate-push protection.
  */
-async function repushOrdersAfterEdit(
+// Which of these legs are actually live in DT (pushed_to_dt_at set).
+// Drafts / pending-review orders return [] — there's no DT-side
+// counterpart to update, so no confirm prompt and no push.
+async function selectPreviouslyPushed(
   supabaseClient: typeof supabase,
   orderIds: string[],
-): Promise<{ failures: Array<{ orderId: string; identifier: string; error: string }> }> {
-  if (orderIds.length === 0) return { failures: [] };
-
+): Promise<Array<{ id: string; dt_identifier: string | null }>> {
+  if (orderIds.length === 0) return [];
   const { data: rows } = await supabaseClient
     .from('dt_orders')
     .select('id, dt_identifier, pushed_to_dt_at')
     .in('id', orderIds);
+  return (rows ?? [])
+    .filter((r: { pushed_to_dt_at: string | null }) => r.pushed_to_dt_at)
+    .map((r: { id: string; dt_identifier: string | null }) => ({ id: r.id, dt_identifier: r.dt_identifier }));
+}
 
-  const previouslyPushed = (rows ?? []).filter(
-    (r: { pushed_to_dt_at: string | null }) => r.pushed_to_dt_at,
-  ) as Array<{ id: string; dt_identifier: string | null; pushed_to_dt_at: string }>;
+async function repushOrdersAfterEdit(
+  supabaseClient: typeof supabase,
+  orderIds: string[],
+  changedFields?: DtFieldGroup[],
+): Promise<{ failures: Array<{ orderId: string; identifier: string; error: string }> }> {
+  if (orderIds.length === 0) return { failures: [] };
+
+  const previouslyPushed = await selectPreviouslyPushed(supabaseClient, orderIds);
 
   if (previouslyPushed.length === 0) return { failures: [] };
 
+  // Never send an empty changedFields array — the edge function reads
+  // [] as a FULL push. Callers that have nothing DT-relevant to send
+  // must skip this function entirely (the gate in the submit handler
+  // does exactly that).
+  const scoped = changedFields && changedFields.length > 0 ? { changedFields } : {};
+
   const results = await Promise.allSettled(
     previouslyPushed.map(r =>
-      supabaseClient.functions.invoke('dt-push-order', { body: { orderId: r.id } }),
+      supabaseClient.functions.invoke('dt-push-order', { body: { orderId: r.id, ...scoped } }),
     ),
   );
 
@@ -2892,6 +2911,15 @@ export function CreateDeliveryOrderModal({
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [createResult, setCreateResult] = useState<{ dtIdentifier: string; linkedIdentifier?: string; orderId: string } | null>(null);
   const [orderPaid, setOrderPaid] = useState(false);
+  // Re-push confirmation. When an edit-save lands on an order that's
+  // already live in DT, we diff the changes, ask the operator to
+  // confirm, and re-push ONLY the changed groups. The Supabase save has
+  // already happened by the time the prompt shows — confirming only
+  // gates the scoped dt-push-order invoke. The resolver ref bridges the
+  // promise the submit flow awaits to the dialog's button handlers.
+  const [dtRepushPrompt, setDtRepushPrompt] = useState<DtChangeSummary | null>(null);
+  const [dtRepushPushing, setDtRepushPushing] = useState(false);
+  const dtRepushResolveRef = useRef<((go: boolean) => void) | null>(null);
 
   // Photo + doc attachments captured before submit. Held as File
   // objects until the dt_order row exists, then flushed in one pass
@@ -2923,6 +2951,84 @@ export function CreateDeliveryOrderModal({
       }
     } finally {
       setAttachUploading(null);
+    }
+  };
+
+  // Gate an edit-save re-push behind a diff + confirmation. Returns the
+  // same { failures } shape repushOrdersAfterEdit does so the existing
+  // per-path failure handling is unchanged.
+  //
+  //   • No leg live in DT (draft/pending) → no-op, no prompt (matches
+  //     pre-change behaviour: drafts shouldn't auto-push).
+  //   • Nothing DT-relevant changed → skip the push entirely. An empty
+  //     changedFields would be read by the edge function as a FULL push,
+  //     so skipping (not pushing empty) is load-bearing.
+  //   • Otherwise → confirm dialog listing the exact changes. Confirm =
+  //     scoped re-push (changed groups only). Cancel = leave DT alone
+  //     (Supabase is already saved).
+  //
+  // The diff compares the edit-load snapshot against the just-saved
+  // primary leg (re-read from the DB so this is uniform across the
+  // single-leg / P+D / convert paths without each needing to hand a
+  // payload object in). Item-change detection rebuilds the signature
+  // with the EXACT formula the snapshot used (same DB source, same
+  // fields) so it never false-positives the items group — a spurious
+  // items re-push is precisely the route-reassign footgun this closes.
+  const runGatedRepush = async (
+    legs: string[],
+    primaryLegId: string,
+  ): Promise<{ failures: Array<{ orderId: string; identifier: string; error: string }> }> => {
+    const pushed = await selectPreviouslyPushed(supabase, legs);
+    if (pushed.length === 0) return { failures: [] };
+
+    const snap = originalOrderSnapshotRef.current;
+    // No snapshot should be impossible on an edit-save (the edit-load
+    // effect always sets it), but if it ever is, fall back to the
+    // pre-change full re-push rather than silently dropping the push.
+    if (!snap) return repushOrdersAfterEdit(supabase, legs);
+
+    const cols = Object.keys(snap).filter(k => !k.startsWith('_'));
+    const { data: savedRow } = await supabase
+      .from('dt_orders')
+      .select(cols.join(','))
+      .eq('id', primaryLegId)
+      .maybeSingle();
+    const { data: savedItems } = await supabase
+      .from('dt_order_items')
+      .select('dt_item_code, inventory_id, quantity, description')
+      .eq('dt_order_id', primaryLegId)
+      .is('removed_at', null);
+
+    const items = (savedItems ?? []) as Array<Record<string, unknown>>;
+    const newSig = items
+      .map(it => `${String(it.dt_item_code ?? it.inventory_id ?? '')}|${String(it.quantity ?? '')}|${String(it.description ?? '')}`)
+      .sort()
+      .join('§');
+    const newCount = items.length;
+    const oldCount = Number(snap._items_count ?? 0);
+    const itemsChanged = newCount !== oldCount || newSig !== String(snap._items_signature ?? '');
+
+    const summary = summarizeDtChanges(
+      snap,
+      (savedRow ?? {}) as Record<string, unknown>,
+      itemsChanged,
+      { from: `${oldCount} item(s)`, to: `${newCount} item(s)` },
+    );
+
+    if (summary.groups.length === 0) return { failures: [] };
+
+    const go = await new Promise<boolean>(resolve => {
+      dtRepushResolveRef.current = resolve;
+      setDtRepushPrompt(summary);
+    });
+    if (!go) return { failures: [] };
+
+    try {
+      return await repushOrdersAfterEdit(supabase, legs, summary.groups);
+    } finally {
+      setDtRepushPrompt(null);
+      setDtRepushPushing(false);
+      dtRepushResolveRef.current = null;
     }
   };
 
@@ -3227,8 +3333,8 @@ export function CreateDeliveryOrderModal({
         //    function picks the new pickup up via linked_order_id
         //    when called with the delivery leg's id. Drafts naturally
         //    no-op since pushed_to_dt_at IS NULL on both legs.
-        const { failures: convPushFailures } = await repushOrdersAfterEdit(
-          supabase, [savedDeliveryTyped.id, newPickupId],
+        const { failures: convPushFailures } = await runGatedRepush(
+          [savedDeliveryTyped.id, newPickupId], savedDeliveryTyped.id,
         );
 
         onSubmit?.({
@@ -3451,7 +3557,7 @@ export function CreateDeliveryOrderModal({
         const legsToPush: string[] = [];
         if (editingPickupRowIdRef.current) legsToPush.push(editingPickupRowIdRef.current);
         if (editingDraftRowIdRef.current) legsToPush.push(editingDraftRowIdRef.current);
-        const { failures: pdPushFailures } = await repushOrdersAfterEdit(supabase, legsToPush);
+        const { failures: pdPushFailures } = await runGatedRepush(legsToPush, savedDelivery.id);
 
         onSubmit?.({
           dtOrderId: savedDelivery.id,
@@ -3717,8 +3823,8 @@ export function CreateDeliveryOrderModal({
         // v2026-05-13 — auto re-push to DT after a successful single-leg
         // edit-save on an ALREADY-PUSHED order. Same rationale + same
         // keep-modal-open-on-failure pattern as the P+D block above.
-        const { failures: singleLegPushFailures } = await repushOrdersAfterEdit(
-          supabase, [savedRow.id],
+        const { failures: singleLegPushFailures } = await runGatedRepush(
+          [savedRow.id], savedRow.id,
         );
 
         onSubmit?.({
@@ -4410,6 +4516,47 @@ export function CreateDeliveryOrderModal({
 
   return (
     <>
+      <ConfirmDialog
+        open={!!dtRepushPrompt}
+        title="Re-push to DispatchTrack?"
+        variant="danger"
+        confirmLabel="Save & Re-push"
+        cancelLabel="Save only"
+        processing={dtRepushPushing}
+        onConfirm={() => {
+          setDtRepushPushing(true);
+          dtRepushResolveRef.current?.(true);
+        }}
+        onCancel={() => {
+          dtRepushResolveRef.current?.(false);
+          dtRepushResolveRef.current = null;
+          setDtRepushPrompt(null);
+        }}
+        message={
+          <div>
+            <p style={{ margin: '0 0 10px' }}>
+              This order is already in DispatchTrack. Saving will re-push and may
+              affect route assignments. Only the changed fields below will be sent
+              — everything else DT has stays as-is.
+            </p>
+            <div style={{ fontWeight: 700, fontSize: 12, marginBottom: 4 }}>Changes:</div>
+            <ul style={{ margin: 0, paddingLeft: 18 }}>
+              {(dtRepushPrompt?.changes ?? []).map((c, i) => (
+                <li key={i} style={{ marginBottom: 2 }}>
+                  <strong>{c.label}:</strong> {c.from} → {c.to}
+                </li>
+              ))}
+            </ul>
+            <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 10 }}>
+              Field groups re-pushed:{' '}
+              {(dtRepushPrompt?.groups ?? []).map(g => DT_GROUP_LABEL[g]).join(', ')}
+            </div>
+            <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 6 }}>
+              “Save only” keeps your edits in Stride without touching DispatchTrack.
+            </div>
+          </div>
+        }
+      />
       {/* z-index bumped from 200/201 to 1000/1001 so the modal footer
           (Cancel + Submit for Review) is never covered by the
           FloatingActionBar at the bottom of the page. The FAB's parent
