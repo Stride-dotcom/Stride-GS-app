@@ -2814,6 +2814,13 @@ export function CreateDeliveryOrderModal({
 
   // ── Submit ─────────────────────────────────────────────────────────────
   const [submitting, setSubmitting] = useState(false);
+  // Synchronous re-entrancy latch. setSubmitting() is async and the
+  // submit button only reflects `submitting` after a re-render, so a
+  // fast second click (or a click on the keep-modal-open repush-failure
+  // screen) can enter the submit flow again before React repaints —
+  // running the edit path's delete-then-insert twice and doubling
+  // dt_order_items. A ref flips synchronously and blocks that window.
+  const submitInFlightRef = useRef(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [createResult, setCreateResult] = useState<{ dtIdentifier: string; linkedIdentifier?: string; orderId: string } | null>(null);
   const [orderPaid, setOrderPaid] = useState(false);
@@ -2851,7 +2858,7 @@ export function CreateDeliveryOrderModal({
     }
   };
 
-  const handleSubmit = async () => {
+  const performSubmit = async () => {
     if (!canSubmit) return;
     setSubmitting(true);
     setSubmitError(null);
@@ -3399,7 +3406,15 @@ export function CreateDeliveryOrderModal({
 
     if (editingDraftRowIdRef.current && mode !== 'pickup_and_delivery') {
       const wasDraft = originalReviewStatusRef.current === 'draft' || !originalReviewStatusRef.current;
+      // Snapshot the target id ONCE. The branch guard proved it truthy,
+      // but it's a mutable ref read again at delete + insert time across
+      // many awaits. If it ever flipped to null mid-flow the delete
+      // (.eq('dt_order_id', null)) would silently match nothing while
+      // the insert still ran — producing exactly the doubled rows this
+      // fix targets. Pin it and use the local everywhere below.
+      const editId = editingDraftRowIdRef.current;
       try {
+        if (!editId) throw new Error('Lost the order id mid-edit — aborting before delete/insert could double items.');
         const { data: authData2 } = await supabase.auth.getUser();
         const authUid2 = authData2?.user?.id || null;
         const accList2 = Array.from(selectedAccessorials.values()).map(a => ({
@@ -3520,7 +3535,7 @@ export function CreateDeliveryOrderModal({
         const { data: saved, error: saveErr } = await supabase
           .from('dt_orders')
           .update(editPayload)
-          .eq('id', editingDraftRowIdRef.current)
+          .eq('id', editId)
           .select('id, dt_identifier, review_status')
           .single();
         if (saveErr || !saved) throw new Error(`${wasDraft ? 'Draft promote' : 'Order save'} failed: ${saveErr?.message || 'no row returned'}`);
@@ -3530,14 +3545,14 @@ export function CreateDeliveryOrderModal({
         // Throw on delete failure — see P+D branch above for context.
         {
           const { error: delErr } = await supabase.from('dt_order_items')
-            .delete().eq('dt_order_id', editingDraftRowIdRef.current);
+            .delete().eq('dt_order_id', editId);
           if (delErr) throw new Error(`Single-leg edit items delete failed: ${delErr.message}`);
         }
         if (mode === 'delivery' && itemsSource === 'warehouse') {
           const invRows = selectedInvItems.map(i => {
             const room = effectiveRoom(i.itemId, i.room);
             return {
-              dt_order_id: editingDraftRowIdRef.current,
+              dt_order_id: editId,
               inventory_id: i.inventoryRowId ?? null,
               dt_item_code: i.itemId,
               description: i.description || '',
@@ -3563,7 +3578,7 @@ export function CreateDeliveryOrderModal({
               const weight = Number.isFinite(Number(i.weight)) && Number(i.weight) > 0 ? Number(i.weight) : null;
               const cuFtPerUnit = Number.isFinite(Number(i.cubicFeet)) && Number(i.cubicFeet) > 0 ? Number(i.cubicFeet) : null;
               return {
-                dt_order_id: editingDraftRowIdRef.current,
+                dt_order_id: editId,
                 dt_item_code: null,
                 description: i.description.trim(),
                 quantity: qty,
@@ -3584,7 +3599,7 @@ export function CreateDeliveryOrderModal({
             .map(i => {
               const qty = Math.max(1, Number(i.quantity) || 1);
               return {
-                dt_order_id: editingDraftRowIdRef.current,
+                dt_order_id: editId,
                 dt_item_code: null,
                 description: i.description.trim(),
                 quantity: qty,
@@ -4109,6 +4124,21 @@ export function CreateDeliveryOrderModal({
       setSubmitError(err instanceof Error ? err.message : 'Submit failed');
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  // Re-entrancy-guarded entry point. WriteButton has its own in-flight
+  // ref, but it resets the moment performSubmit() resolves — including
+  // the keep-modal-open repush-failure return — so a second click was
+  // still reachable. This latch closes that window synchronously; the
+  // dt_order_items partial-unique index is the DB-level backstop.
+  const handleSubmit = async () => {
+    if (submitInFlightRef.current) return;
+    submitInFlightRef.current = true;
+    try {
+      await performSubmit();
+    } finally {
+      submitInFlightRef.current = false;
     }
   };
 
@@ -5945,7 +5975,7 @@ export function CreateDeliveryOrderModal({
             </button>
             <WriteButton
               onClick={handleSubmit}
-              disabled={!canSubmit}
+              disabled={!canSubmit || submitting}
               label={
                 !editingDraftRowIdRef.current
                   ? 'Submit for Review'
@@ -5957,9 +5987,9 @@ export function CreateDeliveryOrderModal({
               style={{
                 padding: '9px 24px', borderRadius: 8,
                 border: 'none',
-                background: canSubmit ? theme.colors.primary : theme.colors.border,
+                background: canSubmit && !submitting ? theme.colors.primary : theme.colors.border,
                 color: '#fff',
-                fontSize: 13, fontWeight: 600, cursor: canSubmit ? 'pointer' : 'not-allowed',
+                fontSize: 13, fontWeight: 600, cursor: canSubmit && !submitting ? 'pointer' : 'not-allowed',
                 fontFamily: 'inherit',
               }}
             />
