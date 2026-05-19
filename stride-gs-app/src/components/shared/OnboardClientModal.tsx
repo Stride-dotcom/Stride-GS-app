@@ -13,6 +13,7 @@ import { useClientInsurance } from '../../hooks/useClientInsurance';
 import { Shield } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { fmtDate } from '../../lib/constants';
+import { useDefaultTaxRate } from '../../hooks/useDefaultTaxRate';
 
 export interface OnboardClientFormData {
   // Identity
@@ -1445,6 +1446,11 @@ function TaxExemptBlock({
   const [certUrl, setCertUrl] = useState<string>('');
   const [certExpires, setCertExpires] = useState<string>('');
   const [certUploadedAt, setCertUploadedAt] = useState<string>('');
+  // Per-client tax-rate override. null/blank ⇒ the client falls back to
+  // the default jurisdiction rate (Settings → Pricing → Tax Rates).
+  const [taxRatePct, setTaxRatePct] = useState<string>('');
+
+  const defaultTax = useDefaultTaxRate();
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -1455,7 +1461,7 @@ function TaxExemptBlock({
       setLoading(true); setError(null);
       const { data: row, error: err } = await supabase
         .from('clients')
-        .select('tax_exempt, tax_exempt_reason, resale_cert_url, resale_cert_expires, resale_cert_uploaded_at')
+        .select('tax_exempt, tax_exempt_reason, resale_cert_url, resale_cert_expires, resale_cert_uploaded_at, tax_rate_pct')
         .eq('spreadsheet_id', spreadsheetId)
         .maybeSingle();
       if (!alive) return;
@@ -1470,6 +1476,7 @@ function TaxExemptBlock({
         setCertUrl(row.resale_cert_url || '');
         setCertExpires(row.resale_cert_expires || '');
         setCertUploadedAt(row.resale_cert_uploaded_at || '');
+        setTaxRatePct(row.tax_rate_pct != null ? String(row.tax_rate_pct) : '');
       }
       setLoading(false);
     })();
@@ -1522,6 +1529,25 @@ function TaxExemptBlock({
     setCertExpires(next);
     const ok = await saveField('expiry', { resale_cert_expires: next || null });
     if (!ok) {/* leave value; user can retry */}
+  };
+
+  // Save (or clear) the per-client override. Blank ⇒ NULL ⇒ the client
+  // uses the default jurisdiction rate. Validated 0–100; invalid input
+  // is rejected without writing so a typo can't poison the snapshot.
+  const handleTaxRateBlur = async () => {
+    const trimmed = taxRatePct.trim();
+    if (trimmed === '') {
+      const ok = await saveField('tax_rate', { tax_rate_pct: null });
+      if (!ok) {/* leave value; user can retry */}
+      return;
+    }
+    const val = Number(trimmed);
+    if (!Number.isFinite(val) || val < 0 || val > 100) {
+      setError('Tax rate must be a number between 0 and 100, or blank to use the default.');
+      return;
+    }
+    const ok = await saveField('tax_rate', { tax_rate_pct: val });
+    if (ok) setTaxRatePct(String(val));
   };
 
   const handleCertUpload = async (file: File) => {
@@ -1607,6 +1633,47 @@ function TaxExemptBlock({
         </label>
         <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 4, marginLeft: 22 }}>
           When checked, all sales tax is waived for this customer. Most clients are wholesale resellers (default).
+        </div>
+      </div>
+
+      {/* Sales tax rate — per-client override vs. system default. The
+          rate still applies to COD / non-exempt charges even when the
+          client is tax-exempt for their own purchases, so this is shown
+          regardless of the exempt toggle. */}
+      <div style={{ marginBottom: 14 }}>
+        <label style={lbl}>
+          <span>Sales tax rate</span>
+          <InfoTooltip text="Leave blank to use the system default jurisdiction (Settings → Pricing → Tax Rates). Enter a percentage to override it for this client only — used for COD and non-exempt charges." />
+        </label>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <input
+            type="text"
+            inputMode="decimal"
+            value={taxRatePct}
+            placeholder={`${defaultTax.rate}`}
+            onChange={e => setTaxRatePct(e.target.value)}
+            onBlur={handleTaxRateBlur}
+            disabled={saving === 'tax_rate'}
+            style={{ ...inp, maxWidth: 110 }}
+          />
+          <span style={{ fontSize: 12, color: theme.colors.textMuted }}>%</span>
+          {taxRatePct.trim() !== '' && (
+            <button
+              type="button"
+              onClick={() => { setTaxRatePct(''); void saveField('tax_rate', { tax_rate_pct: null }); }}
+              disabled={saving === 'tax_rate'}
+              style={{ fontSize: 11, padding: '4px 10px', border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', color: theme.colors.textSecondary, cursor: 'pointer', fontFamily: 'inherit' }}
+            >
+              Use default
+            </button>
+          )}
+          {saving === 'tax_rate' && <Loader2 size={12} style={{ animation: 'spin 1s linear infinite', color: theme.colors.textMuted }} />}
+          {savedFlash === 'tax_rate' && <CheckCircle size={12} style={{ color: '#15803D' }} />}
+        </div>
+        <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 5 }}>
+          {taxRatePct.trim() === ''
+            ? <>Using default — <strong>{defaultTax.city}, {defaultTax.state} {defaultTax.rate}%</strong>{defaultTax.isFallback && ' (fallback — no default jurisdiction configured)'}</>
+            : <>Custom rate — <strong>{taxRatePct.trim()}%</strong> (overrides the {defaultTax.city} default of {defaultTax.rate}%)</>}
         </div>
       </div>
 
