@@ -1,5 +1,24 @@
 /**
- * dt-push-order — Supabase Edge Function (Phase 2c) — v23 2026-05-14 PST
+ * dt-push-order — Supabase Edge Function (Phase 2c) — v34 2026-05-19 PST
+ * v34: Selective field push. Request body now accepts an optional
+ *      `changedFields: string[]` naming which logical field GROUPS the
+ *      caller actually edited. When present + non-empty, buildOrderXml
+ *      emits ONLY those groups plus the always-required fields (order
+ *      number, account, customer name + address) — so a re-push from an
+ *      edit-save no longer blanks DT-side fields the operator never
+ *      touched (the route/schedule-wipe footgun the React confirm
+ *      dialog pairs with). Omitted when absent/empty → full payload,
+ *      identical to every prior version (initial push, Review-Queue
+ *      Approve&Push, and any legacy caller are unaffected).
+ *
+ *      Groups (see GROUP set below): items | date | contact | notes |
+ *      custom. The same changedFields set is threaded to BOTH legs of a
+ *      pickup_and_delivery pair (the diff is computed order-level on the
+ *      React side). Attachments share-row build is skipped entirely when
+ *      `custom` is out of scope — no pointless photo_shares writes and
+ *      no <additional_fields> emitted on a partial push.
+ *
+ * v23 2026-05-14 PST:
  * v23: Unified attachment share — DT's "Attachments" custom field now
  *      carries ONE short URL per order covering BOTH photos AND docs
  *      (was: photo-share URL + comma-separated signed doc URLs, capped
@@ -220,6 +239,39 @@ interface DtOrderItemRow {
   cubic_feet: number | null;
   room: string | null;
   extras: Record<string, unknown> | null;
+}
+
+// Logical field groups the caller can scope a re-push to. Required
+// fields (order number, account, customer name + address) are ALWAYS
+// emitted regardless — DT's add_order upsert rejects an order without
+// them. Anything not in the active set is omitted from the XML so DT
+// keeps its current value (route assignments, dispatcher-edited
+// schedule/notes, etc. survive the re-push).
+type DtFieldGroup = 'items' | 'date' | 'contact' | 'notes' | 'custom';
+const DT_FIELD_GROUPS: ReadonlySet<DtFieldGroup> = new Set<DtFieldGroup>([
+  'items', 'date', 'contact', 'notes', 'custom',
+]);
+
+// Normalize the request's `changedFields` into a Set, or null for a
+// full push. null is the legacy/initial-push contract: every block
+// emitted (behaviour identical to pre-v34). An empty or all-invalid
+// array also falls back to null — a caller that means "push nothing"
+// simply shouldn't invoke this function.
+function parseChangedFields(raw: unknown): Set<DtFieldGroup> | null {
+  if (!Array.isArray(raw)) return null;
+  const set = new Set<DtFieldGroup>();
+  for (const v of raw) {
+    if (typeof v === 'string' && DT_FIELD_GROUPS.has(v as DtFieldGroup)) {
+      set.add(v as DtFieldGroup);
+    }
+  }
+  return set.size > 0 ? set : null;
+}
+
+// include(group) — true when the group should be emitted: either a
+// full push (groups === null) or the group is in the scoped set.
+function makeIncluder(groups: Set<DtFieldGroup> | null) {
+  return (g: DtFieldGroup) => groups === null || groups.has(g);
 }
 
 function xmlEscape(val: unknown): string {
@@ -504,7 +556,9 @@ function buildOrderXml(
   crossRefIdent?: string,
   linkedDeliveryInfo?: { identifier: string; contactName?: string; address?: string; city?: string; state?: string; zip?: string },
   attachmentsField?: string,
+  groups: Set<DtFieldGroup> | null = null,
 ): string {
+  const include = makeIncluder(groups);
   const nameParts = (order.contact_name || '').trim().split(/\s+/);
   const firstName = nameParts[0] || '';
   const lastName = nameParts.slice(1).join(' ') || '';
@@ -562,7 +616,13 @@ function buildOrderXml(
     return `    <item>\n      <item_id>${xmlEscape(sku)}</item_id>\n      <description>${xmlEscape(desc)}</description>\n      <quantity>${qty}</quantity>${cubeVal}${locationVal}\n    </item>`;
   }).join('\n');
 
-  const desc = buildOrderDescription(order, accountName, crossRefIdent, linkedDeliveryInfo);
+  // <description> carries the dispatcher-facing billing/coverage summary
+  // + the operator's free-text details. It belongs to the `notes` group:
+  // skip building it on a scoped push that didn't touch notes so DT
+  // keeps whatever the dispatcher may have annotated on their side.
+  const desc = include('notes')
+    ? buildOrderDescription(order, accountName, crossRefIdent, linkedDeliveryInfo)
+    : '';
 
   // Build notes XML. Phase 1 introduces three free-text columns:
   //   • details        → "Order Details" — operator/customer-facing
@@ -578,8 +638,8 @@ function buildOrderXml(
   //                      DT-side staff can see the context but it does
   //                      NOT render on the driver-app side. Empty if
   //                      the operator left it blank.
-  const driverFacingNotes = order.driver_notes || order.order_notes || order.details || '';
-  const internalFacingNotes = order.internal_notes || '';
+  const driverFacingNotes = include('notes') ? (order.driver_notes || order.order_notes || order.details || '') : '';
+  const internalFacingNotes = include('notes') ? (order.internal_notes || '') : '';
   const noteEntries: string[] = [];
   if (driverFacingNotes) {
     noteEntries.push(`      <note created_at="${new Date().toISOString()}" author="StrideApp" note_type="Public">\n        <![CDATA[${cdataEscape(driverFacingNotes)}]]>\n      </note>`);
@@ -591,11 +651,48 @@ function buildOrderXml(
     ? `\n    <notes count="${noteEntries.length}">\n${noteEntries.join('\n')}\n    </notes>`
     : '';
 
-  // DT custom field #3 = "Attachments" tag. Only emit the block when we
-  // actually have a value — DT rejects empty <additional_field_3/> on
-  // some accounts.
-  const attachmentsXml = attachmentsField
+  // DT custom field #3 = "Attachments" tag (part of the `custom` group).
+  // Only emit when we have a value AND the group is in scope — DT rejects
+  // empty <additional_field_3/> on some accounts, and a scoped push that
+  // didn't touch custom fields must leave DT's value alone.
+  const attachmentsXml = attachmentsField && include('custom')
     ? `\n    <additional_fields>\n      <additional_field_3>${xmlEscape(attachmentsField)}</additional_field_3>\n    </additional_fields>`
+    : '';
+
+  // ── Conditional block assembly ────────────────────────────────────────
+  // Always emitted (DT add_order upsert rejects an order without them):
+  //   <number> <account> <service_type> <customer name + full address>
+  //   <amount>
+  // The street address (address1/city/state/zip) is part of the required
+  // identity DT geocodes/routes on; re-sending the unchanged value is a
+  // no-op for routing, whereas OMITTING it risks DT blanking the stop.
+  // phone/email are the editable `contact` extras → scoped to that group.
+  //
+  // <delivery_date> + time window → `date` group. Omitting them on a
+  // scoped push is the whole point: DT keeps the dispatcher's schedule.
+  // <items> → `items` group. <description>/<notes> → `notes` group.
+  // <service_time>/<additional_fields> → `custom` group.
+  const contactExtrasXml = include('contact')
+    ? `\n      <phone1>${xmlEscape(order.contact_phone || '')}</phone1>\n      <phone2>${xmlEscape(order.contact_phone2 || '')}</phone2>\n      <email>${xmlEscape(order.contact_email || '')}</email>`
+    : '';
+
+  const dateXml = include('date')
+    ? `\n    <delivery_date>${xmlEscape(order.local_service_date || '')}</delivery_date>\n    <request_time_window_start>${xmlEscape(winStart)}</request_time_window_start>\n    <request_time_window_end>${xmlEscape(winEnd)}</request_time_window_end>`
+    : '';
+
+  const descriptionXml = include('notes')
+    ? `\n    <description><![CDATA[${desc}]]></description>`
+    : '';
+
+  const serviceTimeXml = include('custom') && order.service_time_minutes != null && order.service_time_minutes > 0
+    ? `\n    <service_time>${order.service_time_minutes}</service_time>`
+    : '';
+
+  // service_only orders legitimately have zero items, so on a FULL push
+  // we still emit an empty <items> block (unchanged legacy behaviour).
+  // On a scoped push the block is emitted only when `items` is in scope.
+  const itemsBlockXml = include('items')
+    ? `\n    <items>\n${itemsXml}\n    </items>`
     : '';
 
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -610,19 +707,9 @@ function buildOrderXml(
       <address1>${xmlEscape(order.contact_address || '')}</address1>
       <city>${xmlEscape(order.contact_city || '')}</city>
       <state>${xmlEscape(order.contact_state || '')}</state>
-      <zip>${xmlEscape(order.contact_zip || '')}</zip>
-      <phone1>${xmlEscape(order.contact_phone || '')}</phone1>
-      <phone2>${xmlEscape(order.contact_phone2 || '')}</phone2>
-      <email>${xmlEscape(order.contact_email || '')}</email>
-    </customer>
-    <delivery_date>${xmlEscape(order.local_service_date || '')}</delivery_date>
-    <request_time_window_start>${xmlEscape(winStart)}</request_time_window_start>
-    <request_time_window_end>${xmlEscape(winEnd)}</request_time_window_end>
-    <description><![CDATA[${desc}]]></description>
-    <amount>${order.order_total != null ? Number(order.order_total).toFixed(2) : '0.00'}</amount>${order.service_time_minutes != null && order.service_time_minutes > 0 ? `\n    <service_time>${order.service_time_minutes}</service_time>` : ''}
-    <items>
-${itemsXml}
-    </items>${notesXml}${attachmentsXml}
+      <zip>${xmlEscape(order.contact_zip || '')}</zip>${contactExtrasXml}
+    </customer>${dateXml}${descriptionXml}
+    <amount>${order.order_total != null ? Number(order.order_total).toFixed(2) : '0.00'}</amount>${serviceTimeXml}${itemsBlockXml}${notesXml}${attachmentsXml}
   </service_order>
 </service_orders>`;
 }
@@ -737,12 +824,17 @@ async function pushSingleOrder(
   supabase: any,
   crossRefIdent?: string,
   linkedDeliveryInfo?: { identifier: string; contactName?: string; address?: string; city?: string; state?: string; zip?: string },
+  groups: Set<DtFieldGroup> | null = null,
 ): Promise<{ ok: boolean; body: string; errMsg?: string }> {
   // Build the DT Attachments custom-field BEFORE the XML — best-effort
-  // and never blocks the push (returns '' on any failure).
-  const attachmentsField = await buildAttachmentsField(supabase, order);
-  const xml = buildOrderXml(order, items, accountName, crossRefIdent, linkedDeliveryInfo, attachmentsField);
-  console.log(`[dt-push-order] POST order=${order.dt_identifier} type=${order.order_type || 'delivery'} items=${items.length} account=${accountName}${crossRefIdent ? ` crossRef=${crossRefIdent}` : ''}`);
+  // and never blocks the push (returns '' on any failure). Skip the
+  // photo_shares read/write entirely on a scoped push that didn't touch
+  // custom fields: no <additional_fields> will be emitted anyway, so the
+  // share-row side effect would be pointless churn.
+  const buildAttachments = groups === null || groups.has('custom');
+  const attachmentsField = buildAttachments ? await buildAttachmentsField(supabase, order) : '';
+  const xml = buildOrderXml(order, items, accountName, crossRefIdent, linkedDeliveryInfo, attachmentsField, groups);
+  console.log(`[dt-push-order] POST order=${order.dt_identifier} type=${order.order_type || 'delivery'} items=${items.length} account=${accountName}${crossRefIdent ? ` crossRef=${crossRefIdent}` : ''} scope=${groups === null ? 'FULL' : [...groups].join(',')}`);
   console.log(`[dt-push-order] XML payload:\n${xml.slice(0, 800)}`);
   try {
     // DT API expects XML as a form-encoded "data" parameter (per API docs v8.1)
@@ -782,10 +874,15 @@ Deno.serve(async (req: Request) => {
     new Response(JSON.stringify(body), { status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
 
   let orderId: string;
+  // null = full push (legacy/initial-push contract). A scoped set comes
+  // from React edit-save callers that diffed the form against the loaded
+  // order. Threaded to BOTH legs of a P+D pair (the diff is order-level).
+  let changedFields: Set<DtFieldGroup> | null = null;
   try {
     const body = await req.json();
     orderId = body.orderId;
     if (!orderId) throw new Error('orderId required');
+    changedFields = parseChangedFields(body.changedFields);
   } catch (err) {
     return json({ ok: false, error: (err as Error).message }, 400);
   }
@@ -969,6 +1066,7 @@ Deno.serve(async (req: Request) => {
           state: deliveryRow.contact_state || undefined,
           zip: deliveryRow.contact_zip || undefined,
         } : undefined,
+        changedFields, // same scope on both legs — diff is order-level
       );
 
       if (!linkedPush.ok) {
@@ -1015,6 +1113,7 @@ Deno.serve(async (req: Request) => {
     orderTyped, itemsTyped, accountName, postUrl, supabase,
     linkedPushedIdentifier, // include cross-ref if we pushed a linked leg
     primaryLinkedDeliveryInfo,
+    changedFields,
   );
 
   if (!primaryPush.ok) {
