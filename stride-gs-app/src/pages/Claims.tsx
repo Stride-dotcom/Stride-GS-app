@@ -20,6 +20,7 @@ import { CreateClaimModal } from '../components/shared/CreateClaimModal';
 import { WriteButton } from '../components/shared/WriteButton';
 import { MultiSelectFilter } from '../components/shared/MultiSelectFilter';
 import { isApiConfigured } from '../lib/api';
+import { migrateLegacyKey, userScopedKey } from '../lib/userScopedStorage';
 import { useAuth } from '../contexts/AuthContext';
 import { useClaims } from '../hooks/useClaims';
 import { useClients } from '../hooks/useClients';
@@ -266,10 +267,37 @@ export function Claims() {
   const [dragOverColId, setDragOverColId] = useState<string | null>(null);
   const colBtnRef = useRef<HTMLButtonElement>(null);
   const colMenuRef = useRef<HTMLDivElement>(null);
+  // Status filter key namespaced by user.email so an admin's selection
+  // doesn't leak into an impersonated client's view (and vice versa).
+  // user.email is the impersonated email during impersonation — see
+  // AuthContext.
+  const STATUS_FILTER_LEGACY_KEY = 'stride_filter_claims_status';
+  const statusFilterKey = userScopedKey(STATUS_FILTER_LEGACY_KEY, authUser?.email);
   const [statusFilter, setStatusFilterRaw] = useState<string[]>(() => {
-    try { const v = localStorage.getItem('stride_filter_claims_status'); return v ? JSON.parse(v) : []; } catch { return []; }
+    try {
+      // First-paint migration. At cold-start authUser is often still null
+      // here — the rehydrate effect below re-runs migration once auth
+      // resolves so the user's saved selection ports over either way.
+      migrateLegacyKey(STATUS_FILTER_LEGACY_KEY, authUser?.email);
+      const v = localStorage.getItem(statusFilterKey);
+      return v ? JSON.parse(v) : [];
+    } catch { return []; }
   });
-  const setStatusFilter = useCallback((v: string[]) => { setStatusFilterRaw(v); try { localStorage.setItem('stride_filter_claims_status', JSON.stringify(v)); } catch {} }, []);
+  const setStatusFilter = useCallback((v: string[]) => {
+    setStatusFilterRaw(v);
+    try { localStorage.setItem(statusFilterKey, JSON.stringify(v)); } catch {}
+  }, [statusFilterKey]);
+  // When auth resolves (cold-start) or the impersonation target changes
+  // mid-session, port any legacy unkeyed selection into the namespaced
+  // slot, then reload the filter from THAT user's key.
+  useEffect(() => {
+    if (!authUser?.email) return;
+    migrateLegacyKey(STATUS_FILTER_LEGACY_KEY, authUser.email);
+    try {
+      const v = localStorage.getItem(statusFilterKey);
+      setStatusFilterRaw(v ? JSON.parse(v) : []);
+    } catch { setStatusFilterRaw([]); }
+  }, [statusFilterKey, authUser?.email]);
   const [typeFilter, setTypeFilter] = useState<string[]>([]);
   // showStatusDrop/showTypeDrop/showClientDrop removed — using MultiSelectFilter components
 
