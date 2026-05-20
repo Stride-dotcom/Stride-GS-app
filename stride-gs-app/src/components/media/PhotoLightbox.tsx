@@ -100,6 +100,8 @@ export function PhotoLightbox({
   };
 
   const handleTouchStart = (e: React.TouchEvent) => {
+    // Ignore multi-touch (pinch-to-zoom) — only swipe on single finger
+    if (e.touches.length > 1) { touchStartX.current = null; return; }
     touchStartX.current = e.touches[0]?.clientX ?? null;
   };
   const handleTouchEnd = (e: React.TouchEvent) => {
