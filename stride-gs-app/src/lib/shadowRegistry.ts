@@ -90,6 +90,20 @@ export const SHADOW_REGISTRY: Record<string, ShadowSpec> = {
   updateInventoryItem: {
     flagKey: 'updateItem',
     ef:      'update-item-shadow',
+    // update-item-shadow strips ONLY {itemId, requestId} per its source
+    // (supabase/functions/update-item-shadow/index.ts:99-103). The default
+    // strip set is broader (includes taskId, repairId, etc.) — for this
+    // shadow specifically, narrow the strip to exactly match so a payload
+    // carrying a stray taskId-shaped field doesn't false-positive.
+    toAuditShape: (p) => {
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(p)) {
+        if (k === 'itemId' || k === 'requestId') continue;
+        if (v === undefined) continue;
+        out[k] = v;
+      }
+      return out;
+    },
     toCallId: (p) => firstId(p, 'itemId', 'requestId'),
     toSummary: (p) => `updateItem: ${firstId(p, 'itemId') ?? '?'}`,
   },
@@ -173,15 +187,19 @@ export const SHADOW_REGISTRY: Record<string, ShadowSpec> = {
   requestRepairQuote: {
     flagKey: 'requestRepairQuote',
     ef:      'request-repair-quote-shadow',
-    // Shadow synthesizes `{ summary }` where summary is a stringified
-    // items list. The exact serialization depends on payload shape;
-    // mirror the shadow's deterministic concat so hashes line up.
+    // Mirror request-repair-quote-shadow exactly (see its source at
+    // supabase/functions/request-repair-quote-shadow/index.ts:41-60).
+    // Format: GAS at StrideAPI.gs:7761 logs
+    //   `Repair quote requested for items: ${JSON.stringify(itemIds).substring(0,200)}`
+    // payload order preserved (NOT sorted) so this matches a JSON-array
+    // round-trip from the React payload.
     toAuditShape: (p) => {
-      const itemIds = Array.isArray(p.itemIds) ? p.itemIds
-                    : Array.isArray(p.items)   ? p.items
-                    : p.itemId !== undefined   ? [p.itemId]
-                    : [];
-      const summary = itemIds.map(String).sort().join(',');
+      const arr: string[] = Array.isArray(p.itemIds) ? p.itemIds.map(String)
+                          : Array.isArray(p.items)   ? p.items.map(String)
+                          : p.itemId !== undefined && p.itemId !== null
+                            ? [String(p.itemId)]
+                            : [];
+      const summary = `Repair quote requested for items: ${JSON.stringify(arr).substring(0, 200)}`;
       return { summary };
     },
     toCallId: (p) => firstId(p, 'requestId'),
@@ -201,18 +219,26 @@ export const SHADOW_REGISTRY: Record<string, ShadowSpec> = {
       result: String(p.resultValue ?? ''),
     }),
     toCallId: (p) => firstId(p, 'taskId', 'requestId'),
+    // toSummary reads `result` (the field React sends — `resultValue` is
+    // only echoed in the audit shape, blank for React-originated calls)
+    // so the dashboard's one-liner reflects what the user actually picked.
     toSummary: (p) => `completeTask: ${firstId(p, 'taskId') ?? '?'} ${String(p.result ?? '')}`,
   },
   completeRepair: {
     flagKey: 'completeRepair',
     ef:      'complete-repair-shadow',
-    // RepairDetailPanel DOES send resultValue (per shadow source).
+    // complete-repair-shadow REQUIRES `resultValue` (rejects otherwise)
+    // and returns it verbatim. RepairDetailPanel sends `resultValue`,
+    // not `result`. A `result`-only payload would have the shadow throw
+    // INVALID_PARAMS (recorded as the 'ERROR' hash by runShadow); no
+    // fallback to `result` here so the registry and shadow agree on what
+    // the parity check expects.
     toAuditShape: (p) => ({
       status: { new: 'Complete' },
-      result: String(p.resultValue ?? p.result ?? ''),
+      result: String(p.resultValue ?? ''),
     }),
     toCallId: (p) => firstId(p, 'repairId', 'requestId'),
-    toSummary: (p) => `completeRepair: ${firstId(p, 'repairId') ?? '?'}`,
+    toSummary: (p) => `completeRepair: ${firstId(p, 'repairId') ?? '?'} ${String(p.resultValue ?? '')}`,
   },
 
   // ─── P3/P4a — operational + billing (MCP-deployed shadows) ────────
@@ -273,6 +299,9 @@ export const SHADOW_REGISTRY: Record<string, ShadowSpec> = {
   },
 
   // ─── P5 — complex flows (MCP-deployed shadows) ────────────────────
+  // Naming aliases: GAS action `completeShipment` is what fires the
+  // receiving flow; the feature_flags row is named `receiveShipment`
+  // (the user-facing operation). The shadow EF mirrors the flag name.
   completeShipment: {
     flagKey: 'receiveShipment',
     ef:      'receive-shipment-shadow',

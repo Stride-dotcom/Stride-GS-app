@@ -39,7 +39,7 @@
 
 import { supabase } from './supabase';
 import { runShadow } from './shadowRunner';
-import { getShadowSpec, resolveAuditShape } from './shadowRegistry';
+import { getShadowSpec, resolveAuditShape, type ShadowSpec } from './shadowRegistry';
 
 /**
  * Fire a shadow parity check for a just-completed GAS write.
@@ -56,12 +56,27 @@ export function fireShadow(
   payload: Record<string, unknown>,
   tenantId?: string | null,
 ): void {
-  const spec = getShadowSpec(gasAction);
-  if (!spec) return;
-
-  const auditShape = resolveAuditShape(spec, payload);
-  const callId     = spec.toCallId  ? spec.toCallId(payload)  : undefined;
-  const summary    = spec.toSummary ? spec.toSummary(payload) : `${gasAction}: shadow run`;
+  // Synchronous-path defense: a buggy registry entry (e.g. a thrown
+  // toAuditShape on an unexpected payload shape) must not propagate
+  // into the apiPost success path. runShadow itself is async + already
+  // catches throws inside sbInvoke; this guards the spec lookup +
+  // shape derivation that runs synchronously before runShadow is even
+  // scheduled.
+  let spec: ShadowSpec;
+  let auditShape: Record<string, unknown>;
+  let callId: string | undefined;
+  let summary: string;
+  try {
+    const found = getShadowSpec(gasAction);
+    if (!found) return;
+    spec       = found;
+    auditShape = resolveAuditShape(spec, payload);
+    callId     = spec.toCallId  ? spec.toCallId(payload)  : undefined;
+    summary    = spec.toSummary ? spec.toSummary(payload) : `${gasAction}: shadow run`;
+  } catch (err) {
+    console.warn('[fireShadow] registry derivation threw — skipping shadow', { gasAction, err });
+    return;
+  }
 
   void runShadow({
     key:           spec.flagKey,
