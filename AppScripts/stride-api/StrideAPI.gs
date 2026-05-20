@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.223.0 — 2026-05-18 PST — [CRITICAL auth fix] Onboarding created Supabase auth users with EMPTY raw_user_meta_data — broken since 2026-04-11 (73 client users affected). Root cause: createSupabaseAuthUser_ never sent user_metadata on the admin create, so every RLS policy (which keys off auth.jwt()->'user_metadata'->>'role' / ->>'clientSheetId') filtered these users out and they were invisible everywhere in the app. The apply-intake-on-submit Edge Function does NOT create auth users (only deactivates the intake link + propagates refresh-mode client data) so the bug is entirely GAS-side. Fix: createSupabaseAuthUser_ gains an optional `metadata` param and POSTs it as user_metadata; new helper api_buildAuthUserMetadata_(role, clientName, clientSpreadsheetId) centralizes the AuthContext contract — { role, clientName, clientSheetId, accessibleClientSheetIds } (NOT `tenantId` as first hypothesized — RLS + AuthContext.tsx both key off `clientSheetId` / `accessibleClientSheetIds`; a `tenantId` field would not have unblocked RLS). All FIVE auth-user-creation sites now stamp it: api_upsertClientUser_ (onboarding — the primary bug), handleCreateUser_ (admin add user), handleEnsureAuthUser_ (gap-fill), handleAdminSetUserPassword_ create branch, plus the helper itself. Remediation for the existing 73: createSupabaseAuthUser_'s 422 "already exists" branch now self-heals via api_backfillAuthUserMetadata_ — finds the user by email and merges metadata ONLY when their existing user_metadata has no `role` (idempotent; never trampling a live login-synced metadata). Re-running onboarding or clicking ensureAuthUser for any pre-fix user repairs them; a bulk remediation can also iterate handleEnsureAuthUser_ over the cohort. Scoping: the stamped shape mirrors AuthContext's full four-key inSync contract (role/clientSheetId/accessibleClientSheetIds/childClientSheetIds); childClientSheetIds is always [] because no RLS policy keys off it and parent→child scope expansion is resolved authoritatively by AuthContext on login (unchanged by this fix). The 73 are single-tenant onboarded clients so [] is correct for them. No schema/migration/React change.
+   StrideAPI.gs — v38.224.0 — 2026-05-20 PST — [Supabase-authoritative client settings write-back] Fifth per-table writer registered against the P1.4 framework (after inventory v38.208, will_calls v38.213, repairs v38.215, billing v38.217): `__writeThroughReverseClients_` for the `clients` table replaces the stub. Inverts the GAS→Supabase invariant for client settings — when React / intake / any future Supabase-authoritative caller writes `public.clients` directly, this writer mirrors the row OUT to (a) the per-tenant Settings tab as key/value upserts keyed by `CLIENT_FIELDS_[*].clientSettingsKey` and (b) the CB Clients tab via per-column setValue keyed by `CLIENT_FIELDS_[*].cbHeader`. Both sheets must be touched: per-tenant Settings is what dock-intake reads `AUTO_INSPECTION` from (the Brian Paquette failure mode); CB Clients is what `handleResyncClients_` reads back when pushing to Supabase — without the CB write, a CB-driven resync would silently overwrite the SB-side change. Also writes SB-only fields (`notification_contacts`, `billing_contact_name`, `billing_email`, `billing_address`, `tax_exempt`, `tax_exempt_reason`, `resale_cert_expires`, `resale_cert_url`) into the per-tenant Settings tab as ops-visible key/value rows — they don't have a `cbHeader` so they don't touch CB Clients, matching migrations 20260426160000 / 20260504000000 which placed them in Supabase only. Idempotent by tenantId; re-firing with the same row produces the same sheet state. Op support is `update` only — inserts flow through `handleOnboardClient_` which has its own bespoke sheet-creation path. Failure semantics mirror the framework: a single-side failure (Settings tab present but CB write fails, or vice versa) returns success with details in `cbSkipped` / `perTenantSkipped` so the next sync pass catches up; a both-sides failure throws so `handleWriteThroughReverse_` lands the row in `gs_sync_events` for FailedOperationsDrawer pickup. Cache invalidation: matches `handleUpdateClient_` by removing `api_active_clients`/`clients`/`clients_all`/`api_client_name_map` from CacheService after the CB write so the next `handleGetClients_` reflects the fresh values. Companion Edge Function `push-client-settings-to-sheet` + Postgres trigger `propagate_clients_to_sheet` ship in the same PR — together they form the App → Supabase → GAS Sheet flow.
+   v38.223.0 — 2026-05-18 PST — [CRITICAL auth fix] Onboarding created Supabase auth users with EMPTY raw_user_meta_data — broken since 2026-04-11 (73 client users affected). Root cause: createSupabaseAuthUser_ never sent user_metadata on the admin create, so every RLS policy (which keys off auth.jwt()->'user_metadata'->>'role' / ->>'clientSheetId') filtered these users out and they were invisible everywhere in the app. The apply-intake-on-submit Edge Function does NOT create auth users (only deactivates the intake link + propagates refresh-mode client data) so the bug is entirely GAS-side. Fix: createSupabaseAuthUser_ gains an optional `metadata` param and POSTs it as user_metadata; new helper api_buildAuthUserMetadata_(role, clientName, clientSpreadsheetId) centralizes the AuthContext contract — { role, clientName, clientSheetId, accessibleClientSheetIds } (NOT `tenantId` as first hypothesized — RLS + AuthContext.tsx both key off `clientSheetId` / `accessibleClientSheetIds`; a `tenantId` field would not have unblocked RLS). All FIVE auth-user-creation sites now stamp it: api_upsertClientUser_ (onboarding — the primary bug), handleCreateUser_ (admin add user), handleEnsureAuthUser_ (gap-fill), handleAdminSetUserPassword_ create branch, plus the helper itself. Remediation for the existing 73: createSupabaseAuthUser_'s 422 "already exists" branch now self-heals via api_backfillAuthUserMetadata_ — finds the user by email and merges metadata ONLY when their existing user_metadata has no `role` (idempotent; never trampling a live login-synced metadata). Re-running onboarding or clicking ensureAuthUser for any pre-fix user repairs them; a bulk remediation can also iterate handleEnsureAuthUser_ over the cohort. Scoping: the stamped shape mirrors AuthContext's full four-key inSync contract (role/clientSheetId/accessibleClientSheetIds/childClientSheetIds); childClientSheetIds is always [] because no RLS policy keys off it and parent→child scope expansion is resolved authoritatively by AuthContext on login (unchanged by this fix). The 73 are single-tenant onboarded clients so [] is correct for them. No schema/migration/React change.
    v38.222.0 — 2026-05-14 PST — [BILLING bridge] CB Consolidated_Ledger auto-reconcile from public.billing on every QBO push. Closes the silent-drop class that bit INV-001152 (and the six other stuck invoices from the 2026-05-05 / 2026-05-06 cycle): handleCreateInvoice_'s CB dedup-skip at ~line 25303, plus the symmetry gaps in handleVoidInvoice_ / handleReopenTask_ (open backlog #5 / #7), let CB Consolidated_Ledger drift behind per-tenant Billing_Ledger + public.billing. handleQboCreateInvoice_ reads CB for the grouping pass, so any row that diverged got silently dropped from the push payload (React sent N invoices, GAS grouped <N). New helper `reconcileCbFromBilling_(invoiceNos)` reads public.billing as the source of truth, indexes CB by Ledger Row ID, and either UPDATEs the matching CB row in place (Status / Invoice # / Sidemark / Client / svc fields) or APPENDs a fresh CB row for IDs missing from CB. Idempotent — re-running is a no-op when state matches. handleQboCreateInvoice_ derives the set of invoice numbers covered by the incoming ledger_row_ids (one supabaseSelect_ on public.billing.invoice_no), calls the reconciler before reading CB, then proceeds with the existing grouping pass against the post-reconcile state. Wrapped in try/catch so a Supabase outage degrades to the prior behavior (silent skip of drifted rows) instead of blocking the push. NOT a structural fix — the underlying CB-symmetry bugs are intentionally left in place per MIG-005 (CB is retired in P4b). This is a transitional bridge that keeps billing accurate during the migration window.
    v38.221.0 — 2026-05-14 PST — [MIGRATION-P3 SB→Sheet mirror for repairs] Extends __writeThroughReverseRepairs_ to support op='insert' (treats both 'insert' and 'update' as upserts: find row by Repair ID, append if missing, update if present — same idempotency invariants either way). Extends REVERSE_REPAIR_FIELDS_ with created_date / created_by / item_notes / task_notes / source_task_id so a fresh sheet row built by the insert path has the full create state. New admin function runBackfillSbOnlyRepairsToSheet(tenantIdArg?) (and the runBackfillSevaRepairsToSheet convenience wrapper) walks active CB clients, fetches every public.repairs row for the tenant, and inserts the missing ones into the per-tenant Repairs sheet via the writer — idempotent, so re-running is harmless. Companion edge function change in request-repair-quote-sb fires the writer with op='insert' after the RPC, so new multi-item repairs land on the sheet immediately instead of being SB-only and invisible to legacy readers. Closes the symmetric gap to v38.220.0: that PR stopped the GAS sync from DELETING SB-only rows; this PR stops the multi-item create flow from leaving them SB-only in the first place.
    v38.220.0 — 2026-05-14 PST — [MIGRATION-P3 SB-primary preserves SB-only repairs] api_fullClientSync_ no longer calls supabaseDeleteStaleRows_ on the repairs entity. With all six repair feature flags now at active_backend='supabase' fleet-wide (cancelRepair / startRepair / sendRepairEmails / completeRepair / requestRepairQuote / respondRepairQuote — flipped 2026-05-14 19:32 UTC), public.repairs is the authoritative store. The SB-only multi-item create path (request-repair-quote-sb, PR #397) intentionally never writes to the per-tenant Repairs sheet — so the stale-delete sweep was nuking legitimate SB rows on every full-sync (caught 2026-05-14 19:43 UTC when Seva Home's RPR-63280-1778715634749 lost its parent row mid-quote-send; reconstructed manually via SQL; this fix prevents a recurrence). Sheet edits still upsert to SB via supabaseBatchUpsert_; only the destructive delete sweep is dropped.
@@ -2802,7 +2803,7 @@ var REVERSE_WRITETHROUGH_TABLES_ = {
   "invoice_tracking":  __writeThroughReverseStub_,
   "entity_notes":      __writeThroughReverseStub_,
   "item_photos":       __writeThroughReverseStub_,
-  "clients":           __writeThroughReverseStub_,
+  "clients":           __writeThroughReverseClients_,
   "stax_invoices":     __writeThroughReverseStub_,
   "stax_charges":      __writeThroughReverseStub_
 };
@@ -3268,6 +3269,257 @@ function __writeThroughReverseBilling_(ss, payload) {
     op: op,
     rowId: rowId,
     fieldsWritten: targetCols.length
+  };
+}
+
+/**
+ * v38.224.0 — Clients reverse-writethrough writer. Fifth per-table writer
+ * against the P1.4 framework (inventory v38.208, will_calls v38.213,
+ * repairs v38.215, billing v38.217).
+ *
+ * Reverses the GAS→Supabase invariant for client settings: the React
+ * app + intake form write `public.clients` directly via Supabase, then
+ * this writer mirrors the row OUT to:
+ *   1. The per-tenant Settings tab (key/value, keyed by clientSettingsKey
+ *      from CLIENT_FIELDS_) — so per-client GAS handlers (dock intake's
+ *      AUTO_INSPECTION read, billing's FREE_STORAGE_DAYS read, etc.) see
+ *      the SB-authoritative values.
+ *   2. The CB Clients tab (column-based, keyed by cbHeader from
+ *      CLIENT_FIELDS_) — so handleResyncClients_ + handleGetClients_
+ *      read the SAME values back, closing the loop. Without this, a
+ *      handleUpdateClient_ via the Settings modal would silently
+ *      overwrite a fresh SB-side change.
+ *
+ * Idempotent by tenantId. Re-firing with the same row payload is safe:
+ * key/value upsert on the Settings tab + per-column setValue on the CB
+ * row produce identical sheet state.
+ *
+ * Op support: 'update' (the only op clients writes use). Insert is
+ * handled by the onboarding flow (handleOnboardClient_) which has its
+ * own bespoke sheet-creation path; reverse writethrough never inserts
+ * a clients row.
+ *
+ * The writer ALSO writes a few Supabase-only fields (notification_contacts,
+ * billing_*, tax_*, resale_*) into the per-tenant Settings tab as new
+ * keys for ops-team visibility. They don't have a cbHeader so they
+ * don't touch CB Clients — that's correct because handleGetClients_
+ * doesn't read them either (they live ONLY in Supabase, per migrations
+ * 20260426160000 + 20260504000000).
+ */
+var REVERSE_CLIENTS_SB_ONLY_SETTINGS_ = {
+  // SB column → per-tenant Settings tab key. These fields don't exist
+  // on CB Clients (no CLIENT_FIELDS_.cbHeader). Pushed to Settings as
+  // new key/value rows for ops-team visibility + downstream readers.
+  "notification_contacts":   "NOTIFICATION_CONTACTS",
+  "billing_contact_name":    "BILLING_CONTACT_NAME",
+  "billing_email":           "BILLING_EMAIL",
+  "billing_address":         "BILLING_ADDRESS",
+  "tax_exempt":              "TAX_EXEMPT",
+  "tax_exempt_reason":       "TAX_EXEMPT_REASON",
+  "resale_cert_expires":     "RESALE_CERT_EXPIRES",
+  "resale_cert_url":         "RESALE_CERT_URL"
+};
+
+function __writeThroughReverseClients_(ss, payload) {
+  var rowId = payload && payload.rowId ? String(payload.rowId).trim() : "";
+  var row   = (payload && payload.row) || {};
+  var op    = payload && payload.op ? String(payload.op) : "";
+
+  if (op !== "update") {
+    throw new Error(
+      "__writeThroughReverseClients_: op '" + op + "' not supported " +
+      "(only 'update' is implemented; new clients flow through handleOnboardClient_)."
+    );
+  }
+  if (!rowId) throw new Error("__writeThroughReverseClients_: rowId (spreadsheet_id) required");
+
+  // Confirm the writer was opened on the correct per-tenant spreadsheet.
+  // handleWriteThroughReverse_ already validated tenantId == spreadsheet_id
+  // against public.clients, but a sanity check guards against a future
+  // refactor that forgets the symmetry.
+  if (String(ss.getId()) !== rowId) {
+    throw new Error(
+      "__writeThroughReverseClients_: ss.getId() '" + ss.getId() + "' != rowId '" + rowId + "' " +
+      "(handleWriteThroughReverse_ should have opened the per-tenant spreadsheet matching rowId)"
+    );
+  }
+
+  // ── 1. Per-tenant Settings tab — key/value upsert ─────────────────
+  var perTenantUpdated = [];
+  var perTenantSkipped = [];
+  try {
+    var settingsSh = ss.getSheetByName("Settings");
+    if (!settingsSh) {
+      perTenantSkipped.push("Settings tab missing — skipped per-tenant write");
+    } else {
+      var settingsData = settingsSh.getDataRange().getValues();
+      var keyToRow = {};
+      for (var i = 0; i < settingsData.length; i++) {
+        var k = String(settingsData[i][0] || "").trim();
+        if (k) keyToRow[k] = i + 1; // 1-based
+      }
+
+      function writeSetting_(key, value) {
+        var existingRow = keyToRow[key];
+        if (existingRow) {
+          settingsSh.getRange(existingRow, 2).clearDataValidations().setValue(value);
+        } else {
+          // Landmine #1: never use getLastRow() for an insert position —
+          // trailing blank rows silently overwrite. Use api_getLastDataRow_.
+          var nr = api_getLastDataRow_(settingsSh) + 1;
+          settingsSh.getRange(nr, 1).setValue(key);
+          settingsSh.getRange(nr, 2).setValue(value);
+          keyToRow[key] = nr;
+        }
+        perTenantUpdated.push(key);
+      }
+
+      // CLIENT_FIELDS_ schema fields — boolean → "TRUE"/"FALSE",
+      // number → Number, string → String. Mirrors api_writeClientSettings_.
+      for (var k1 = 0; k1 < CLIENT_FIELD_KEYS_.length; k1++) {
+        var fKey = CLIENT_FIELD_KEYS_[k1];
+        var fDef = CLIENT_FIELDS_[fKey];
+        if (!fDef.clientSettingsKey || !fDef.supabaseColumn) continue;
+        if (!row.hasOwnProperty(fDef.supabaseColumn)) continue;
+        var raw = row[fDef.supabaseColumn];
+        if (raw === undefined) continue;
+        if (fDef.type === "boolean") {
+          writeSetting_(fDef.clientSettingsKey, raw === true || String(raw).toUpperCase() === "TRUE" ? "TRUE" : "FALSE");
+        } else if (fDef.type === "number") {
+          var n = Number(raw);
+          writeSetting_(fDef.clientSettingsKey, isFinite(n) ? n : 0);
+        } else {
+          writeSetting_(fDef.clientSettingsKey, raw == null ? "" : String(raw));
+        }
+      }
+
+      // Legacy CLIENT_EMAIL key (lives outside CLIENT_FIELDS_ — see
+      // api_writeClientSettings_ around line 28164). Mirror that.
+      if (row.hasOwnProperty("email")) {
+        writeSetting_("CLIENT_EMAIL", row.email == null ? "" : String(row.email));
+      }
+      if (row.hasOwnProperty("contact_name")) {
+        writeSetting_("CONTACT_NAME", row.contact_name == null ? "" : String(row.contact_name));
+      }
+      if (row.hasOwnProperty("phone")) {
+        writeSetting_("PHONE", row.phone == null ? "" : String(row.phone));
+      }
+
+      // Supabase-only fields — write to Settings as ops-visible key/value
+      // rows. notification_contacts is jsonb; stringify so the cell holds
+      // a readable JSON literal rather than [object Object].
+      for (var sbCol in REVERSE_CLIENTS_SB_ONLY_SETTINGS_) {
+        if (!row.hasOwnProperty(sbCol)) continue;
+        var sbKey = REVERSE_CLIENTS_SB_ONLY_SETTINGS_[sbCol];
+        var v = row[sbCol];
+        var cell;
+        if (v == null) cell = "";
+        else if (typeof v === "boolean") cell = v ? "TRUE" : "FALSE";
+        else if (typeof v === "object") cell = JSON.stringify(v);
+        else cell = String(v);
+        writeSetting_(sbKey, cell);
+      }
+    }
+  } catch (perTenantErr) {
+    // Don't lose the CB write because the Settings tab choked. Re-throw
+    // at the end if BOTH failed; if just one failed, surface in result.
+    perTenantSkipped.push("per-tenant Settings write threw: " + perTenantErr.message);
+  }
+
+  // ── 2. CB Clients tab — column update on the matching row ─────────
+  var cbUpdated = [];
+  var cbSkipped = [];
+  var cbThrew = null;
+  try {
+    var cbSsId = prop_("CB_SPREADSHEET_ID");
+    if (!cbSsId) throw new Error("CB_SPREADSHEET_ID Script Property not set");
+    var cbSs = SpreadsheetApp.openById(cbSsId);
+    var clientsSh = cbSs.getSheetByName("Clients");
+    if (!clientsSh) throw new Error("CB Clients tab not found");
+    var clientsData = clientsSh.getDataRange().getValues();
+    var headerRow = clientsData[0] || [];
+    var hMap = {};
+    for (var h = 0; h < headerRow.length; h++) {
+      var hk = String(headerRow[h] || "").trim().toUpperCase();
+      if (hk) hMap[hk] = h;
+    }
+    var ssIdIdx = hMap["CLIENT SPREADSHEET ID"];
+    if (ssIdIdx === undefined) throw new Error("'Client Spreadsheet ID' column not found in CB Clients tab");
+
+    var cbRow = -1;
+    for (var r = 1; r < clientsData.length; r++) {
+      if (String(clientsData[r][ssIdIdx] || "").trim() === rowId) {
+        cbRow = r + 1; // 1-based sheet row
+        break;
+      }
+    }
+    if (cbRow === -1) {
+      cbSkipped.push("CB row not found for spreadsheet_id " + rowId + " — skipped CB write (full sync will pick it up)");
+    } else {
+      for (var k2 = 0; k2 < CLIENT_FIELD_KEYS_.length; k2++) {
+        var fk = CLIENT_FIELD_KEYS_[k2];
+        var fd = CLIENT_FIELDS_[fk];
+        if (!fd.cbHeader || !fd.supabaseColumn) continue;
+        if (!row.hasOwnProperty(fd.supabaseColumn)) continue;
+        var sbVal = row[fd.supabaseColumn];
+        if (sbVal === undefined) continue;
+        var colIdx = hMap[fd.cbHeader.toUpperCase()];
+        if (colIdx === undefined) {
+          cbSkipped.push(fd.cbHeader + " (column not on CB Clients)");
+          continue;
+        }
+        var coerced;
+        if (fd.type === "boolean") {
+          coerced = sbVal === true || String(sbVal).toUpperCase() === "TRUE";
+        } else if (fd.type === "number") {
+          coerced = Number(sbVal);
+          if (!isFinite(coerced)) coerced = 0;
+        } else {
+          coerced = sbVal == null ? "" : String(sbVal);
+        }
+        try {
+          clientsSh.getRange(cbRow, colIdx + 1).clearDataValidations().setValue(coerced);
+          cbUpdated.push(fd.cbHeader);
+        } catch (cellErr) {
+          cbSkipped.push(fd.cbHeader + " (write failed: " + cellErr.message + ")");
+        }
+      }
+
+      // Invalidate the active-clients cache so the next handleGetClients_
+      // returns the fresh row. Mirrors handleUpdateClient_'s cache flush.
+      try {
+        var _c = CacheService.getScriptCache();
+        _c.remove("api_active_clients");
+        _c.remove("clients");
+        _c.remove("clients_all");
+        _c.remove("api_client_name_map");
+      } catch (_) {}
+    }
+  } catch (cbErr) {
+    cbThrew = cbErr;
+    cbSkipped.push("CB write threw: " + cbErr.message);
+  }
+
+  SpreadsheetApp.flush();
+
+  // If BOTH sides failed, re-throw so handleWriteThroughReverse_ logs to
+  // gs_sync_events and the FailedOperationsDrawer surfaces it. A
+  // single-side failure is non-fatal because the other side is fresh
+  // and the next sync pass will catch up.
+  if (perTenantUpdated.length === 0 && cbUpdated.length === 0) {
+    var detail = perTenantSkipped.concat(cbSkipped).join("; ");
+    throw new Error(
+      "__writeThroughReverseClients_: no fields written (" + detail + "). " +
+      "Payload keys: " + Object.keys(row).join(",")
+    );
+  }
+
+  return {
+    perTenantUpdated: perTenantUpdated.length,
+    perTenantSkipped: perTenantSkipped,
+    cbUpdated:        cbUpdated.length,
+    cbSkipped:        cbSkipped,
+    cbErrorMessage:   cbThrew ? String(cbThrew.message || cbThrew) : null
   };
 }
 
