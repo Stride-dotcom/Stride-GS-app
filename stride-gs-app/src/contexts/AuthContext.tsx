@@ -30,8 +30,19 @@ import {
 import type { Session, AuthError } from '@supabase/supabase-js';
 import { supabase } from '../lib/supabase';
 import { fetchUserByEmail, setCallerEmail } from '../lib/api';
-import { setSupabaseImpersonating } from '../lib/supabaseQueries';
 import { cacheClearAll } from '../lib/apiCache';
+import {
+  clearAdminStash,
+  clearImpersonationFlag,
+  endImpersonationEdge,
+  getImpersonationFlag,
+  getStashedAdminCache,
+  getStashedAdminSession,
+  setImpersonationFlag,
+  stashAdminCache,
+  stashAdminSession,
+  startImpersonationEdge,
+} from '../lib/impersonationSession';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -76,7 +87,7 @@ interface AuthContextValue {
   changePassword: (newPassword: string) => Promise<{ error: string | null }>;
   signOut: () => Promise<void>;
   impersonateUser: (email: string) => Promise<{ error: string | null }>;
-  exitImpersonation: () => void;
+  exitImpersonation: () => Promise<void>;
 }
 
 // ─── Context ─────────────────────────────────────────────────────────────────
@@ -187,8 +198,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [authState, setAuthState] = useState<AuthState>({ status: 'loading' });
   const [loginPhase, setLoginPhase] = useState<LoginPhase>('idle');
   const [loginPhaseError, setLoginPhaseError] = useState<string | null>(null);
-  const [impersonatedUser, setImpersonatedUser] = useState<AuthUser | null>(null);
+  // `realUser` is the ADMIN identity during impersonation, otherwise it
+  // mirrors `authState.user`. Decoupled from authState because piece #3
+  // of the impersonation series swaps the live Supabase session to the
+  // target user — without separate state, authState.user becomes the
+  // target and we'd lose the admin reference Settings.tsx + IntakesPanel
+  // need for admin-only gates.
+  const [realUser, setRealUser] = useState<AuthUser | null>(() => {
+    // Bootstrap: if the tab is reloading mid-impersonation, the admin's
+    // AuthUser snapshot lives in sessionStorage. Pre-hydrate so the UI
+    // never sees a "no admin" frame while the Supabase session
+    // auto-restores as the target user.
+    if (getImpersonationFlag()) {
+      const stash = getStashedAdminCache();
+      if (stash) {
+        try { return JSON.parse(stash) as AuthUser; } catch { /* corrupt */ }
+      }
+    }
+    return null;
+  });
   const recoveryRef = useRef(false);
+  // Ref the onAuthStateChange listener consults so it can skip
+  // handleSession during a deliberate impersonation swap (verifyOtp or
+  // setSession). Without this, the handler would re-run with the wrong
+  // identity context and either overwrite the admin's localStorage
+  // cache with the target's, or clobber the carefully-managed
+  // realUser/authState state we're about to set ourselves.
+  const impersonationSwapRef = useRef(false);
   // Distinct from recoveryRef: only set when resetPassword() is explicitly called.
   // handleSession() also calls supabase.auth.updateUser() for role-sync metadata,
   // which fires USER_UPDATED — passwordChangeRef lets us tell the two apart.
@@ -201,6 +237,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // Handle Supabase session → resolve user from CB Users tab
   const handleSession = useCallback(
     async (session: Session | null, loginSource: 'password' | 'recovery' = 'password') => {
+      // During an impersonation swap (verifyOtp or setSession), we manage
+      // state transitions ourselves — skip the default handler so the
+      // admin's AUTH_CACHE_KEY isn't overwritten with the target's
+      // profile and authState isn't snapped back to whoever Supabase
+      // thinks is logged in mid-swap.
+      if (impersonationSwapRef.current) return;
       if (!session?.user?.email) {
         clearCache();
         setCallerEmail('');
@@ -307,8 +349,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         cacheClearAll();
       }
 
-      // Cache resolved user for fast subsequent loads (display-only bootstrap)
-      localStorage.setItem(AUTH_CACHE_KEY, JSON.stringify(user));
+      // Cache resolved user for fast subsequent loads (display-only bootstrap).
+      // Suppressed while impersonating (refresh-during-impersonation path):
+      // AUTH_CACHE_KEY must stay seeded with the ADMIN's profile so a
+      // subsequent exit doesn't have to re-verify them against GAS, and so
+      // realUser stays accurate. The admin's snapshot lives in
+      // sessionStorage `stride_imp_admin_cache`; we restore it via the
+      // bootstrap effect / impersonate flow.
+      if (!getImpersonationFlag()) {
+        localStorage.setItem(AUTH_CACHE_KEY, JSON.stringify(user));
+      }
 
       // Sync role + clientSheetId + accessibleClientSheetIds into Supabase
       // user_metadata so RLS policies can grant the right access. Awaited
@@ -404,7 +454,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // When opening a new tab, skip the "Signing you in..." screen by showing
     // the cached user immediately. The API re-validation still runs in the
     // background so role changes propagate within seconds.
-    const cachedJson = localStorage.getItem(AUTH_CACHE_KEY);
+    //
+    // Suppressed during a mid-impersonation refresh: AUTH_CACHE_KEY holds
+    // the ADMIN's profile (we preserved it), but Supabase's auto-restored
+    // session is the TARGET's. Hydrating from cache here would briefly
+    // render the admin's nav/role before handleSession swaps to target.
+    // Skip and let the normal getSession() → handleSession path resolve
+    // the target user properly. The realUser useState initializer above
+    // already pre-hydrated the admin info from the sessionStorage stash
+    // so the Exit banner / admin gates remain visible during the brief
+    // loading state.
+    const cachedJson = getImpersonationFlag() ? null : localStorage.getItem(AUTH_CACHE_KEY);
     if (cachedJson) {
       try {
         const cached = JSON.parse(cachedJson) as AuthUser;
@@ -450,6 +510,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       (event, session) => {
         if (!mounted) return;
+
+        // While impersonation is mid-swap (verifyOtp / setSession), the
+        // impersonateUser / exitImpersonation callbacks manage state
+        // transitions directly. Drop every event so we don't double-run
+        // handleSession or wipe AUTH_CACHE_KEY underneath ourselves.
+        if (impersonationSwapRef.current) return;
 
         if (event === 'SIGNED_OUT') {
           // Session 71 hardened: Supabase fires spurious SIGNED_OUT on cross-tab
@@ -617,52 +683,191 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setAuthState({ status: 'unauthenticated' });
   }, [clearCache]);
 
-  // ─── Impersonation ─────────────────────────────────────────────────────────
+  // ─── Impersonation (real Supabase-session swap) ────────────────────────
+  //
+  // Piece #3 of the impersonation-fidelity series. Previously this swapped
+  // only React state and the Supabase JWT stayed on the admin's identity —
+  // forcing the codebase to carry a `setSupabaseImpersonating` cache-bypass
+  // workaround in supabaseQueries because RLS reads would have returned
+  // admin-scoped rows. Now the live Supabase session is the target user's
+  // for the duration of impersonation, so RLS / auth.email() / edge
+  // functions all evaluate as the client.
+  //
+  // Flow:
+  //   1. Verify admin role locally (re-verified server-side too).
+  //   2. Stash admin's session tokens + admin's localStorage AUTH_CACHE
+  //      entry into sessionStorage. sessionStorage so closing the tab
+  //      ends impersonation cleanly and admin tokens never linger on disk.
+  //   3. Call the impersonate-mint-session edge function — admin role is
+  //      enforced there too, and it writes the impersonation_log audit
+  //      row before minting the magic-link token.
+  //   4. supabase.auth.verifyOtp() swaps the live session to the target.
+  //      We set impersonationSwapRef so handleSession (which would fire
+  //      via onAuthStateChange SIGNED_IN) doesn't overwrite the admin's
+  //      AUTH_CACHE_KEY with the target's profile.
+  //   5. Resolve the target's AuthUser via fetchUserByEmail and push it
+  //      into authState. realUser stays as the admin (NOT mirrored from
+  //      authState while impersonating).
 
   const impersonateUser = useCallback(
     async (email: string): Promise<{ error: string | null }> => {
-      const realUser = authState.status === 'authenticated' ? authState.user : null;
-      if (!realUser || realUser.role !== 'admin') {
+      const currentRealUser = realUser ?? (authState.status === 'authenticated' ? authState.user : null);
+      if (!currentRealUser || currentRealUser.role !== 'admin') {
         return { error: 'Only admins can impersonate users.' };
       }
-      if (email === realUser.email) {
+      const targetEmail = email.trim().toLowerCase();
+      if (targetEmail === currentRealUser.email.toLowerCase()) {
         return { error: 'You cannot impersonate yourself.' };
       }
 
-      const { user: targetUser, error } = await resolveUserFromApi(email, 'password');
-      if (error || !targetUser) {
-        return { error: error || 'User not found.' };
+      // Snapshot current admin session BEFORE the swap. If anything fails
+      // mid-flow we restore from this stash.
+      const { data: { session: adminSession } } = await supabase.auth.getSession();
+      if (!adminSession?.access_token || !adminSession?.refresh_token) {
+        return { error: 'Admin session unavailable — please sign in again.' };
       }
 
-      // Clear API response cache so the impersonation starts with a clean
-      // slate — the admin's cached data must not leak into the impersonated
-      // client's view. Session 60 isolation fix.
+      // Call the edge function (admin role re-verified, audit row written,
+      // OTP minted). On failure: nothing was changed locally, safe to bail.
+      const mintResult = await startImpersonationEdge(targetEmail);
+      if (!mintResult.ok) {
+        return { error: mintResult.error || 'Impersonation request failed.' };
+      }
+
+      // Persist the admin's identity ahead of the swap so a refresh
+      // during impersonation can restore realUser.
+      stashAdminSession({
+        access_token: adminSession.access_token,
+        refresh_token: adminSession.refresh_token,
+      });
+      stashAdminCache(localStorage.getItem(AUTH_CACHE_KEY));
+      setRealUser(currentRealUser);
+
+      // Block handleSession from running on the SIGNED_IN that verifyOtp
+      // will fire — we manage the state transition manually below.
+      impersonationSwapRef.current = true;
+      const { error: otpErr } = await supabase.auth.verifyOtp({
+        email: targetEmail,
+        token: mintResult.token,
+        type: 'magiclink',
+      });
+      if (otpErr) {
+        impersonationSwapRef.current = false;
+        clearAdminStash();
+        setRealUser(null);
+        return { error: `Token verification failed: ${otpErr.message}` };
+      }
+
+      // Now the live Supabase session is the target's. Resolve their
+      // AuthUser (CB Users tab) and push into authState.
+      const { user: targetUser, error: resolveErr } = await resolveUserFromApi(targetEmail, 'password');
+      if (resolveErr || !targetUser) {
+        // Swap back immediately — partial impersonation is worse than
+        // a hard failure here.
+        await supabase.auth.setSession(adminSession);
+        impersonationSwapRef.current = false;
+        clearAdminStash();
+        setRealUser(null);
+        return { error: resolveErr || 'Target user lookup failed.' };
+      }
+
+      // Clear the API response cache so admin's cached data doesn't leak
+      // into the impersonated view, and seed the active-impersonation
+      // flag in sessionStorage so a page refresh stays in this mode.
       cacheClearAll();
-      setImpersonatedUser(targetUser);
+      setImpersonationFlag({
+        adminEmail:       currentRealUser.email,
+        targetEmail:      targetUser.email,
+        impersonationId:  mintResult.impersonationId,
+        startedAt:        new Date().toISOString(),
+      });
       setCallerEmail(targetUser.email);
-      setSupabaseImpersonating(true);
+      setAuthState({ status: 'authenticated', user: targetUser });
+      // Restore admin's localStorage cache — handleSession was suppressed
+      // but Supabase's internal SIGNED_IN path may have nudged it.
+      const stashedCache = getStashedAdminCache();
+      if (stashedCache) localStorage.setItem(AUTH_CACHE_KEY, stashedCache);
+      impersonationSwapRef.current = false;
       return { error: null };
     },
-    [authState]
+    [authState, realUser]
   );
 
-  const exitImpersonation = useCallback(() => {
-    const realUser = authState.status === 'authenticated' ? authState.user : null;
-    // Clear API response cache so the impersonated user's data can't leak
-    // back to the real admin's view. Session 60 isolation fix.
-    cacheClearAll();
-    setImpersonatedUser(null);
-    setSupabaseImpersonating(false);
+  const exitImpersonation = useCallback(async () => {
+    const flag = getImpersonationFlag();
+    const adminTokens = getStashedAdminSession();
+    const stashedAdminCache = getStashedAdminCache();
+
+    if (!adminTokens) {
+      // Stash is gone — corrupt state. Force a full sign-out and let the
+      // user re-authenticate. Better to be safe than leave a dangling
+      // session.
+      console.warn('[AuthContext] exitImpersonation: no admin stash, signing out');
+      clearImpersonationFlag();
+      clearAdminStash();
+      setRealUser(null);
+      await supabase.auth.signOut();
+      return;
+    }
+
+    impersonationSwapRef.current = true;
+    const { error: swapErr } = await supabase.auth.setSession(adminTokens);
+    if (swapErr) {
+      // Admin refresh token probably expired. Fall back to clean sign-out.
+      console.warn('[AuthContext] exitImpersonation: admin session restore failed, signing out:', swapErr.message);
+      impersonationSwapRef.current = false;
+      clearImpersonationFlag();
+      clearAdminStash();
+      setRealUser(null);
+      await supabase.auth.signOut();
+      return;
+    }
+
+    // Restore admin's localStorage cache so the next handleSession path
+    // finds the admin's cached profile (no GAS roundtrip on exit).
+    if (stashedAdminCache) localStorage.setItem(AUTH_CACHE_KEY, stashedAdminCache);
+
+    // Push admin back into authState. The mirror effect below will then
+    // sync realUser from authState since the impersonation flag is gone.
     if (realUser) {
+      setAuthState({ status: 'authenticated', user: realUser });
       setCallerEmail(realUser.email);
     }
-  }, [authState]);
+    setRealUser(null);
+    clearImpersonationFlag();
+    clearAdminStash();
+    cacheClearAll();
+    impersonationSwapRef.current = false;
+
+    // Stamp ended_at on the audit row. Fire-and-forget — the swap-back
+    // already succeeded; an audit-close failure is a logged warning, not
+    // a user-visible error. Admin's JWT is back at this point so the
+    // edge function's admin check will pass.
+    if (flag) {
+      void endImpersonationEdge(flag.targetEmail);
+    }
+  }, [realUser]);
 
   // ─── Derived values ─────────────────────────────────────────────────────────
 
-  const realUser = authState.status === 'authenticated' ? authState.user : null;
-  const user = impersonatedUser ?? realUser;
-  const isImpersonating = impersonatedUser !== null;
+  // user = the currently-effective Supabase identity (target during
+  // impersonation, admin otherwise). authState.user IS this directly
+  // now that we hold a real session as whichever identity is active.
+  const user = authState.status === 'authenticated' ? authState.user : null;
+  const isImpersonating = realUser !== null
+    && user !== null
+    && realUser.email.toLowerCase() !== user.email.toLowerCase();
+
+  // Mirror authState.user → realUser when NOT impersonating, so normal
+  // login flow populates realUser via the same code path it always has.
+  // During impersonation, authState.user is the target — we explicitly
+  // do NOT mirror so realUser stays as the admin we snapshotted at
+  // impersonate-start (or restored from stash on refresh).
+  useEffect(() => {
+    if (getImpersonationFlag()) return;
+    if (authState.status === 'authenticated') setRealUser(authState.user);
+    else setRealUser(null);
+  }, [authState]);
   const loading = authState.status === 'loading';
   const accessDenied = authState.status === 'denied';
   const deniedReason = authState.status === 'denied' ? authState.reason : null;
