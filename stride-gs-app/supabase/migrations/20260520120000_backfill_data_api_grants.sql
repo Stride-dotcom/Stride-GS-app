@@ -28,6 +28,18 @@
 -- `GRANT SELECT, INSERT, UPDATE, DELETE TO authenticated`. RLS policies
 -- still gate which rows the role actually sees; the grant only
 -- gates whether the role can attempt the verb at all.
+--
+-- Deliberately conservative on tables that already hold ANY authenticated
+-- grant: if a table currently has only `GRANT SELECT TO authenticated`,
+-- this backfill leaves it alone — Supabase's 2026-10-30 enforcement
+-- requires reachability, not the full four verbs, and silently adding
+-- INSERT/UPDATE/DELETE could widen access on a table that was
+-- intentionally read-only. Per-verb gaps on partially-granted tables
+-- must be fixed by the owning feature migration with explicit intent.
+--
+-- Anon grants are deliberately NOT touched. Anon access is an opt-in
+-- carve-out per table (e.g. PublicServiceRequest.tsx); granting anon
+-- across the board would be a cross-tenant exposure risk.
 
 DO $$
 DECLARE
