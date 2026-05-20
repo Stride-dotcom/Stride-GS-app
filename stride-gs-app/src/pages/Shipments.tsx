@@ -20,6 +20,7 @@ import { fmtDate } from '../lib/constants';
 import { tanstackGlobalFilter } from '../lib/searchFilters';
 import { WriteButton } from '../components/shared/WriteButton';
 import { isApiConfigured } from '../lib/api';
+import { migrateLegacyKey, userScopedKey } from '../lib/userScopedStorage';
 import type { ApiShipment } from '../lib/api';
 import { useShipments } from '../hooks/useShipments';
 import { useBatchData } from '../contexts/BatchDataContext';
@@ -392,20 +393,14 @@ export function Shipments() {
   // so an admin's selection doesn't leak into an impersonated client's
   // view — user.email is the impersonated email during impersonation, see
   // AuthContext).
-  const statusFilterKey = user?.email
-    ? `stride_filter_shipments_status_${user.email}`
-    : 'stride_filter_shipments_status';
+  const STATUS_FILTER_LEGACY_KEY = 'stride_filter_shipments_status';
+  const statusFilterKey = userScopedKey(STATUS_FILTER_LEGACY_KEY, user?.email);
   const [statusFilter, setStatusFilterRaw] = useState<string[]>(() => {
     try {
-      // One-shot migration from the legacy unkeyed key — admins keep
-      // their current selection when this rollout lands.
-      if (user?.email) {
-        const legacy = localStorage.getItem('stride_filter_shipments_status');
-        if (legacy !== null && localStorage.getItem(statusFilterKey) === null) {
-          localStorage.setItem(statusFilterKey, legacy);
-          localStorage.removeItem('stride_filter_shipments_status');
-        }
-      }
+      // First-paint migration. At cold-start user is often still null here
+      // — the rehydrate effect below re-runs migration once auth resolves
+      // so the user's saved selection ports over either way.
+      migrateLegacyKey(STATUS_FILTER_LEGACY_KEY, user?.email);
       const v = localStorage.getItem(statusFilterKey);
       return v ? JSON.parse(v) : [];
     } catch { return []; }
@@ -414,15 +409,17 @@ export function Shipments() {
     setStatusFilterRaw(v);
     try { localStorage.setItem(statusFilterKey, JSON.stringify(v)); } catch {}
   }, [statusFilterKey]);
-  // When the impersonation target changes mid-session, reload the filter
-  // from that user's key so the page reflects their saved view, not the
-  // previous user's selection.
+  // When auth resolves (cold-start) or the impersonation target changes
+  // mid-session, port any legacy unkeyed selection into the namespaced
+  // slot, then reload the filter from THAT user's key.
   useEffect(() => {
+    if (!user?.email) return;
+    migrateLegacyKey(STATUS_FILTER_LEGACY_KEY, user.email);
     try {
       const v = localStorage.getItem(statusFilterKey);
       setStatusFilterRaw(v ? JSON.parse(v) : []);
     } catch { setStatusFilterRaw([]); }
-  }, [statusFilterKey]);
+  }, [statusFilterKey, user?.email]);
   const [carrierFilter, setCarrierFilter] = useState<string[]>([]);
   const [showStatusDrop, setShowStatusDrop] = useState(false);
   const [showCarrierDrop, setShowCarrierDrop] = useState(false);

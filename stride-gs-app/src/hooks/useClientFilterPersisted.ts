@@ -14,14 +14,17 @@
  *   1. URL `?client=<sheetId,sheetId>` (already written by
  *      `useClientFilterUrlSync`). Used for shareable / bookmarkable deep
  *      links (e.g. email CTAs that open a list scoped to one client).
- *   2. localStorage (`stride_client_filter_<pageKey>`). Used as the
- *      "remember my last view" backstop so back-nav works regardless of
- *      whether the URL still carries `?client=`.
+ *   2. localStorage. Used as the "remember my last view" backstop so
+ *      back-nav works regardless of whether the URL still carries
+ *      `?client=`. Keyed by `user.email` so each identity (real or
+ *      impersonated) gets its own remembered scope — without that,
+ *      the admin's filter would bleed into the impersonated client's
+ *      view on the same browser.
  *
  * Initial state precedence on mount:
  *   a. URL `?client=` (resolved to names via apiClients) — this wins when
  *      present so an email deep-link always opens the intended scope.
- *   b. localStorage entry for this pageKey — covers the back-nav case.
+ *   b. localStorage entry for this (user, pageKey) — covers the back-nav case.
  *   c. Empty array — falls through to the page's own role-based default
  *      effect (auto-select all clients for staff/admin, accessible-only
  *      for client-portal users).
@@ -31,49 +34,15 @@
  * localStorage layer. URL writes still flow through the existing one-way
  * sync hook.
  */
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import type { ApiClient } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
+import { migrateLegacyKey, userScopedKey } from '../lib/userScopedStorage';
 
 const STORAGE_KEY_PREFIX = 'stride_client_filter_';
 
-/**
- * Build the user-namespaced storage key. When impersonating, `user.email`
- * is the impersonated client's email (see AuthContext), so the admin's
- * working-scope filter never bleeds into the impersonated view (and vice
- * versa). Falls back to the legacy unkeyed name when the user isn't loaded
- * yet, so the first paint before auth hydrates still works.
- */
-function storageKey(pageKey: string, userEmail: string | undefined): string {
-  if (!userEmail) return STORAGE_KEY_PREFIX + pageKey;
-  return `${STORAGE_KEY_PREFIX}${userEmail}_${pageKey}`;
-}
-
-/**
- * One-shot migration: if the legacy unkeyed `stride_client_filter_<page>`
- * still has a value but the new user-namespaced key doesn't, copy it over
- * and delete the legacy entry. Runs once per (user, pageKey) pair the
- * first time this hook mounts after the rollout — admins keep their
- * current filter selection without having to re-pick it.
- */
-function migrateLegacyKey(pageKey: string, userEmail: string | undefined): void {
-  if (!userEmail) return;
-  try {
-    const legacyKey = STORAGE_KEY_PREFIX + pageKey;
-    const newKey = storageKey(pageKey, userEmail);
-    if (legacyKey === newKey) return;
-    const legacyValue = localStorage.getItem(legacyKey);
-    if (legacyValue === null) return;
-    if (localStorage.getItem(newKey) !== null) {
-      // User already has a namespaced value — legacy is just stale.
-      localStorage.removeItem(legacyKey);
-      return;
-    }
-    localStorage.setItem(newKey, legacyValue);
-    localStorage.removeItem(legacyKey);
-  } catch {
-    /* best-effort */
-  }
+function legacyKey(pageKey: string): string {
+  return STORAGE_KEY_PREFIX + pageKey;
 }
 
 function readUrlClientIds(): string[] {
@@ -91,7 +60,7 @@ function readUrlClientIds(): string[] {
 
 function readLocalStorage(pageKey: string, userEmail: string | undefined): string[] {
   try {
-    const v = localStorage.getItem(storageKey(pageKey, userEmail));
+    const v = localStorage.getItem(userScopedKey(legacyKey(pageKey), userEmail));
     if (!v) return [];
     const parsed = JSON.parse(v);
     return Array.isArray(parsed) ? parsed.filter((s): s is string => typeof s === 'string') : [];
@@ -102,7 +71,7 @@ function readLocalStorage(pageKey: string, userEmail: string | undefined): strin
 
 function writeLocalStorage(pageKey: string, userEmail: string | undefined, names: string[]) {
   try {
-    const key = storageKey(pageKey, userEmail);
+    const key = userScopedKey(legacyKey(pageKey), userEmail);
     if (names.length === 0) localStorage.removeItem(key);
     else localStorage.setItem(key, JSON.stringify(names));
   } catch {
@@ -123,7 +92,7 @@ export function useClientFilterPersisted(
   // available synchronously (cached `useClients`); otherwise we hydrate from
   // localStorage and the URL-read effect below catches up once apiClients lands.
   const [filter, setFilter] = useState<string[]>(() => {
-    migrateLegacyKey(pageKey, userEmail);
+    migrateLegacyKey(legacyKey(pageKey), userEmail);
     const urlIds = readUrlClientIds();
     if (urlIds.length > 0 && apiClients.length > 0) {
       const names = urlIds
@@ -134,14 +103,24 @@ export function useClientFilterPersisted(
     return readLocalStorage(pageKey, userEmail);
   });
 
+  // Tracks which userEmail the write-effect last fired under. When userEmail
+  // flips (impersonate / exit / late auth resolution), the rehydrate effect
+  // below would re-run AND the write effect would fire once with the stale
+  // `filter` closure under the new key, briefly clobbering the new identity's
+  // saved value before the next render corrects it. This ref lets the write
+  // effect detect "userEmail changed" and skip that one stale write.
+  const lastWriteUserRef = useRef<string | undefined>(userEmail);
+
   // If the user (or impersonation target) changes after mount, re-hydrate
   // from THAT user's stored filter — otherwise an admin who clicked
   // "Impersonate" would briefly keep their admin filter selected before the
   // page re-renders. Skip when URL has an explicit `?client=` because that
-  // wins anyway.
+  // wins anyway. Also re-runs the legacy-key migration here so cold-start
+  // (where useAuth() returned null at first paint, gating out the
+  // initializer's migration) still gets the user's old selection ported.
   useEffect(() => {
     if (!userEmail) return;
-    migrateLegacyKey(pageKey, userEmail);
+    migrateLegacyKey(legacyKey(pageKey), userEmail);
     const urlIds = readUrlClientIds();
     if (urlIds.length > 0 && apiClients.length > 0) return;
     setFilter(readLocalStorage(pageKey, userEmail));
@@ -167,9 +146,17 @@ export function useClientFilterPersisted(
 
   // Write to localStorage on every change so the next mount restores the
   // user's last view. Empty array clears the entry (and the next visit gets
-  // the page's default-selection effect). Keyed by user.email so each user
-  // (and each impersonation target) gets their own remembered scope.
+  // the page's default-selection effect).
   useEffect(() => {
+    // Skip the one tick after userEmail changes — `filter` still holds the
+    // previous identity's value (closure from prior render); the rehydrate
+    // effect above has already scheduled the correct value via setFilter, so
+    // the next render's write will be authoritative. Without this guard we'd
+    // briefly write the old user's filter under the new user's key.
+    if (lastWriteUserRef.current !== userEmail) {
+      lastWriteUserRef.current = userEmail;
+      return;
+    }
     writeLocalStorage(pageKey, userEmail, filter);
   }, [filter, pageKey, userEmail]);
 
