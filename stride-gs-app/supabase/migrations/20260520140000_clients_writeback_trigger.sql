@@ -82,10 +82,10 @@ BEGIN
     RETURN NEW;
   END IF;
 
-  -- Skip rows without a spreadsheet_id. New-client INSERTs that
-  -- haven't reached the postOnboardClient step yet have no per-tenant
-  -- spreadsheet to push to. The intake → onboard activation path will
-  -- write the spreadsheet_id later, which fires the trigger then.
+  -- Skip rows without a spreadsheet_id. Defensive: the trigger is
+  -- UPDATE-only and existing client rows always carry spreadsheet_id,
+  -- but a future migration that NULLs the field (deactivation, archive)
+  -- would otherwise fire the writer on an unopenable spreadsheet.
   IF NEW.spreadsheet_id IS NULL OR NEW.spreadsheet_id = '' THEN
     RETURN NEW;
   END IF;
@@ -118,6 +118,16 @@ COMMENT ON FUNCTION public.propagate_clients_to_sheet() IS
   '2026-05-20: fires push-client-settings-to-sheet Edge Function on relevant clients UPDATE/INSERT. See migration 20260520140000_clients_writeback_trigger.sql.';
 
 -- ── Trigger wiring ──────────────────────────────────────────────────
+-- UPDATE-only. INSERTs are deliberately NOT covered:
+-- `handleOnboardClient_` (GAS-authoritative) creates the per-tenant
+-- spreadsheet, writes its Settings tab, AND inserts the public.clients
+-- row in one flow. Firing the writer on that INSERT would race the
+-- onboard's own write-to-Sheet path (idempotent, but noisy in
+-- gs_sync_events when the writer races a still-being-provisioned
+-- tab). Future SB-authoritative onboarding (P5) would explicitly
+-- invoke push-client-settings-to-sheet after its provision step
+-- rather than relying on the trigger.
+--
 -- Fires only when one of the mirrored columns actually changed. The
 -- `IS DISTINCT FROM` chain prevents recursion via GAS resyncs that
 -- land identical values (the most common "rewrite of the same state"
@@ -130,11 +140,9 @@ COMMENT ON FUNCTION public.propagate_clients_to_sheet() IS
 
 DROP TRIGGER IF EXISTS trg_propagate_clients_to_sheet ON public.clients;
 CREATE TRIGGER trg_propagate_clients_to_sheet
-  AFTER INSERT OR UPDATE ON public.clients
+  AFTER UPDATE ON public.clients
   FOR EACH ROW
   WHEN (
-       (TG_OP = 'INSERT' AND NEW.spreadsheet_id IS NOT NULL AND NEW.spreadsheet_id <> '')
-    OR (TG_OP = 'UPDATE' AND (
             OLD.name                     IS DISTINCT FROM NEW.name
          OR OLD.email                    IS DISTINCT FROM NEW.email
          OR OLD.contact_name             IS DISTINCT FROM NEW.contact_name
@@ -164,7 +172,6 @@ CREATE TRIGGER trg_propagate_clients_to_sheet
          OR OLD.tax_exempt_reason        IS DISTINCT FROM NEW.tax_exempt_reason
          OR OLD.resale_cert_expires      IS DISTINCT FROM NEW.resale_cert_expires
          OR OLD.resale_cert_url          IS DISTINCT FROM NEW.resale_cert_url
-       ))
   )
   EXECUTE FUNCTION public.propagate_clients_to_sheet();
 

@@ -3364,7 +3364,9 @@ function __writeThroughReverseClients_(ss, payload) {
         if (existingRow) {
           settingsSh.getRange(existingRow, 2).clearDataValidations().setValue(value);
         } else {
-          var nr = settingsSh.getLastRow() + 1;
+          // Landmine #1: never use getLastRow() for an insert position —
+          // trailing blank rows silently overwrite. Use api_getLastDataRow_.
+          var nr = api_getLastDataRow_(settingsSh) + 1;
           settingsSh.getRange(nr, 1).setValue(key);
           settingsSh.getRange(nr, 2).setValue(value);
           keyToRow[key] = nr;

@@ -37,14 +37,16 @@
  *
  * Response: { ok, spreadsheet_id, fields_mirrored, error? }
  *
- * Authentication: verify_jwt=false. Internal callers only: the
- * Postgres trigger (service-role JWT) + `apply-intake-on-submit`
- * (service-role JWT) + future React save paths. The function uses
- * GAS_API_TOKEN for the actual sheet mutation — anon callers can't
- * escalate. The Settings-tab write is gated GAS-side by
- * `api_isKnownTenantId_` against `public.clients`, so a request for an
- * unrecognized spreadsheet_id is rejected by GAS regardless of who
- * called this function.
+ * Authentication: deploy with the default `verify_jwt=true`. Every
+ * caller passes a JWT — the Postgres trigger passes the service-role
+ * JWT (via `app.settings.service_role_key` in the trigger function),
+ * `apply-intake-on-submit` passes the service-role JWT, future React
+ * save paths will pass the user JWT. The function uses GAS_API_TOKEN
+ * for the actual sheet mutation — anon callers can't escalate even
+ * if verify_jwt were ever disabled. The Settings-tab write is also
+ * gated GAS-side by `api_isKnownTenantId_` against `public.clients`,
+ * so a request for an unrecognized spreadsheet_id is rejected by GAS
+ * regardless of who called this function.
  *
  * Companion: AppScripts/stride-api/StrideAPI.gs
  *   - handleWriteThroughReverse_
@@ -71,6 +73,14 @@ interface RequestBody {
 // Supabase-only fields surfaced for ops visibility — see
 // __writeThroughReverseClients_ in StrideAPI.gs for the writer-side
 // contract. Extra columns are silently ignored by the GAS writer.
+//
+// editOnly CLIENT_FIELDS_ entries (folder_id, photos_folder_id,
+// invoice_folder_id, web_app_url) are INTENTIONALLY EXCLUDED. They
+// are owned by the onboarding flow (handleOnboardClient_ — provisions
+// the Drive folders + the Web App URL at first creation) and should
+// not churn via reverse-writethrough. If a future SB-side process
+// changes one (it shouldn't), we don't want it overwriting the sheet
+// with a value that might be a partial provision.
 const MIRRORED_COLUMNS: string[] = [
   // CLIENT_FIELDS_ schema (column-mirrored to CB Clients + key/value to Settings)
   'name',
