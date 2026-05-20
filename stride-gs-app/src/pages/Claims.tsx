@@ -266,10 +266,41 @@ export function Claims() {
   const [dragOverColId, setDragOverColId] = useState<string | null>(null);
   const colBtnRef = useRef<HTMLButtonElement>(null);
   const colMenuRef = useRef<HTMLDivElement>(null);
+  // Status filter key namespaced by user.email so an admin's selection
+  // doesn't leak into an impersonated client's view (and vice versa).
+  // user.email is the impersonated email during impersonation — see
+  // AuthContext.
+  const statusFilterKey = authUser?.email
+    ? `stride_filter_claims_status_${authUser.email}`
+    : 'stride_filter_claims_status';
   const [statusFilter, setStatusFilterRaw] = useState<string[]>(() => {
-    try { const v = localStorage.getItem('stride_filter_claims_status'); return v ? JSON.parse(v) : []; } catch { return []; }
+    try {
+      // One-shot migration from the legacy unkeyed key so admins don't
+      // lose their current selection when this rollout lands.
+      if (authUser?.email) {
+        const legacy = localStorage.getItem('stride_filter_claims_status');
+        if (legacy !== null && localStorage.getItem(statusFilterKey) === null) {
+          localStorage.setItem(statusFilterKey, legacy);
+          localStorage.removeItem('stride_filter_claims_status');
+        }
+      }
+      const v = localStorage.getItem(statusFilterKey);
+      return v ? JSON.parse(v) : [];
+    } catch { return []; }
   });
-  const setStatusFilter = useCallback((v: string[]) => { setStatusFilterRaw(v); try { localStorage.setItem('stride_filter_claims_status', JSON.stringify(v)); } catch {} }, []);
+  const setStatusFilter = useCallback((v: string[]) => {
+    setStatusFilterRaw(v);
+    try { localStorage.setItem(statusFilterKey, JSON.stringify(v)); } catch {}
+  }, [statusFilterKey]);
+  // When the impersonation target changes mid-session, reload the filter
+  // from that user's key so the page reflects their saved view, not the
+  // previous user's selection.
+  useEffect(() => {
+    try {
+      const v = localStorage.getItem(statusFilterKey);
+      setStatusFilterRaw(v ? JSON.parse(v) : []);
+    } catch { setStatusFilterRaw([]); }
+  }, [statusFilterKey]);
   const [typeFilter, setTypeFilter] = useState<string[]>([]);
   // showStatusDrop/showTypeDrop/showClientDrop removed — using MultiSelectFilter components
 

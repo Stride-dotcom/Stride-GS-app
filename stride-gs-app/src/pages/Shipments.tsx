@@ -388,11 +388,41 @@ export function Shipments() {
   const colBtnRef = useRef<HTMLButtonElement>(null);
   const colMenuRef = useRef<HTMLDivElement>(null);
 
-  // Filters (status filter persisted to localStorage)
+  // Filters (status filter persisted to localStorage, keyed by user.email
+  // so an admin's selection doesn't leak into an impersonated client's
+  // view — user.email is the impersonated email during impersonation, see
+  // AuthContext).
+  const statusFilterKey = user?.email
+    ? `stride_filter_shipments_status_${user.email}`
+    : 'stride_filter_shipments_status';
   const [statusFilter, setStatusFilterRaw] = useState<string[]>(() => {
-    try { const v = localStorage.getItem('stride_filter_shipments_status'); return v ? JSON.parse(v) : []; } catch { return []; }
+    try {
+      // One-shot migration from the legacy unkeyed key — admins keep
+      // their current selection when this rollout lands.
+      if (user?.email) {
+        const legacy = localStorage.getItem('stride_filter_shipments_status');
+        if (legacy !== null && localStorage.getItem(statusFilterKey) === null) {
+          localStorage.setItem(statusFilterKey, legacy);
+          localStorage.removeItem('stride_filter_shipments_status');
+        }
+      }
+      const v = localStorage.getItem(statusFilterKey);
+      return v ? JSON.parse(v) : [];
+    } catch { return []; }
   });
-  const setStatusFilter = useCallback((v: string[]) => { setStatusFilterRaw(v); try { localStorage.setItem('stride_filter_shipments_status', JSON.stringify(v)); } catch {} }, []);
+  const setStatusFilter = useCallback((v: string[]) => {
+    setStatusFilterRaw(v);
+    try { localStorage.setItem(statusFilterKey, JSON.stringify(v)); } catch {}
+  }, [statusFilterKey]);
+  // When the impersonation target changes mid-session, reload the filter
+  // from that user's key so the page reflects their saved view, not the
+  // previous user's selection.
+  useEffect(() => {
+    try {
+      const v = localStorage.getItem(statusFilterKey);
+      setStatusFilterRaw(v ? JSON.parse(v) : []);
+    } catch { setStatusFilterRaw([]); }
+  }, [statusFilterKey]);
   const [carrierFilter, setCarrierFilter] = useState<string[]>([]);
   const [showStatusDrop, setShowStatusDrop] = useState(false);
   const [showCarrierDrop, setShowCarrierDrop] = useState(false);
