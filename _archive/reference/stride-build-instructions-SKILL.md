@@ -278,6 +278,15 @@ Misconfigured RLS silently returns empty results — always verify with data pre
 - **Requires explicit approval:** DROP column, DROP table, DROP policy
 - New columns must have DEFAULT or be nullable — never break existing rows
 - New RPC functions require grants for `anon` + `authenticated` roles
+- **Every new table MUST include all four of these** (Supabase enforces 2026-10-30 — a table without GRANTs is invisible to the Data API and the React app silently 404s):
+  ```sql
+  GRANT SELECT, INSERT, UPDATE, DELETE ON public.<table> TO authenticated;
+  GRANT ALL ON public.<table> TO service_role;
+  ALTER TABLE public.<table> ENABLE ROW LEVEL SECURITY;
+  CREATE POLICY <table>_rls ON public.<table>
+    FOR <verb> TO authenticated USING (<tenancy check>);  -- at least one policy
+  ```
+  The GRANT decides whether the role can *attempt* the verb; the RLS policy decides *which rows it sees*. Both are required — RLS `TO authenticated` in a policy is NOT a substitute for the table-level GRANT. Anon access is a separate, deliberate carve-out; never give `anon` write grants unless the table is an explicit public-write surface.
 
 ### 5. API Architecture (Apps Script)
 - **Token auth:** Token stored in Script Properties, sent via `?token=xxx` query param
@@ -387,6 +396,7 @@ Before writing any code:
 
 Before shipping to production:
 - [ ] RLS covers SELECT, INSERT, UPDATE, DELETE as appropriate
+- [ ] **Every new table has explicit `GRANT … TO authenticated` + `GRANT ALL … TO service_role` + RLS enabled + ≥1 policy** (Supabase 2026-10-30 enforcement — see Migration Safety §4)
 - [ ] All lists paginated — no unbounded queries
 - [ ] DB indexes verified with EXPLAIN ANALYZE
 - [ ] React Query cache invalidated after mutations
@@ -405,6 +415,8 @@ Before shipping to production:
 | Infer billing logic without reading billing SYSTEM_MASTER | Causes revenue loss |
 | Create hooks/components without checking for existing ones | Duplication and inconsistency |
 | Add columns without null/default safety | Breaks existing rows in production |
+| Create a new table without explicit `GRANT … TO authenticated` / `GRANT ALL … TO service_role` | Supabase 2026-10-30 enforcement — table is invisible to Data API, React app 404s |
+| Rely on `TO authenticated` in an RLS policy as a substitute for the table-level GRANT | Different layers — grant gates "can attempt the verb", policy gates "which rows" |
 | Skip SALA preflight | Drift causes production incidents |
 | Use `user_metadata` for tenant_id | Client-writable — security hole |
 | Make billing changes without parity verification | Risks revenue disruption |
