@@ -1,6 +1,45 @@
 /**
- * dt-sync-statuses — Supabase Edge Function — v17 2026-05-14 PST
+ * dt-sync-statuses — Supabase Edge Function — v18 2026-05-20 PST
  *
+ * v18: Dispatch-id backfill + status-field atomicity. Three changes
+ *      addressing the "pushed but never matched back to DT" gap that
+ *      stranded orders pushed before dt-push-order v35 (which captures
+ *      dispatch_id from add_order's response).
+ *
+ *      (a) Per-order patch now ALSO stamps dt_dispatch_id when DT's
+ *          export.xml carries one (the `id` attribute on the wrapping
+ *          <service_order> element). Only set when currently NULL so
+ *          we never overwrite a webhook-captured value with a re-export
+ *          that has the same id. With this, every successful sync on
+ *          a pre-v35-pushed order self-heals: it gets the dispatch id
+ *          on the first poll and from then on either lookup path
+ *          (identifier or dispatch id) matches.
+ *
+ *      (b) New secondary sweep: rows with `dt_dispatch_id IS NULL AND
+ *          pushed_to_dt_at IS NOT NULL`. Distinct from the v17 sweep
+ *          (which targeted NULL local_service_date); the two are
+ *          merged + deduped by id into the same per-order loop, so a
+ *          row missing both gets backfilled in one pass. Active-scope
+ *          excludes terminal statuses; this sweep doesn't — a CANCELED
+ *          or COMPLETED order pushed pre-v35 still needs its dispatch
+ *          id backfilled for the dispatcher-side reconcile reports.
+ *          Recency-gated to one sweep per 24h per row.
+ *
+ *      (c) Status fields update atomically. Pre-v18, `dt_status_code`
+ *          was written unconditionally while `status_id` was only
+ *          updated when finalStatusId resolved AND differed from
+ *          o.status_id. That allowed a divergence — dt_status_code
+ *          could be set to a code the lookup couldn't resolve (e.g.
+ *          a new DT status not yet seeded in dt_statuses), leaving
+ *          status_id stale. The display layer JOINs status_id → name,
+ *          so the UI showed the old name while dt_status_code carried
+ *          the new code. Fix: skip the dt_status_code write entirely
+ *          when the code can't be resolved to a status_id; log the
+ *          divergence as a result.errors entry so an operator can seed
+ *          the missing dt_statuses row. Both fields now move together
+ *          or stay together.
+ *
+ * v17 2026-05-14 PST:
  * v17: Two changes for the stranded-order auto-release gap.
  *      (a) Secondary sweep: in addition to the primary
  *          dt_identifier-keyed query, also pull every order with a
@@ -206,7 +245,7 @@ Deno.serve(async (req) => {
   // v9: sync every row with a dt_identifier that isn't already in a
   // terminal status. Drops the previous pushed_to_dt_at filter so
   // legacy reconciled rows (source='reconcile') also pull statuses.
-  const SELECT_COLS = 'id, dt_identifier, dt_dispatch_id, status_id, last_synced_at, tenant_id, paid_at, order_type, linked_order_id, local_service_date';
+  const SELECT_COLS = 'id, dt_identifier, dt_dispatch_id, status_id, last_synced_at, tenant_id, paid_at, order_type, linked_order_id, local_service_date, pushed_to_dt_at';
 
   let query = supabase
     .from('dt_orders')
@@ -272,6 +311,50 @@ Deno.serve(async (req) => {
         if (!orderById.has(o.id)) orderById.set(o.id, o);
       }
     }
+
+    // ── Secondary sweep #2: pushed but missing dispatch id ─────────────
+    // Orders pushed before dt-push-order v35 (which captures
+    // dispatch_id from add_order's response) never got their
+    // dt_dispatch_id stamped — only the dt_identifier path could
+    // match them back. The active-scope query above EXCLUDES terminal
+    // statuses (completed/cancelled/etc.), so a CANCELED order pushed
+    // pre-v35 would never be re-pulled and never get its dispatch id
+    // backfilled, which breaks the dispatcher-side reconcile reports
+    // (which key on dt_dispatch_id). This sweep targets that exact
+    // population: dt_dispatch_id NULL + pushed_to_dt_at NOT NULL,
+    // regardless of status. The per-order patch (v18) writes
+    // dt_dispatch_id from the export.xml's <service_order id="…">
+    // attribute when currently NULL, self-healing the row.
+    // Same 24h recency guard as the no-service-date sweep so a row DT
+    // genuinely never returns an export for (rare, mostly cancelled
+    // duplicates) doesn't get pulled every poll forever.
+    //
+    // Per-poll cap: the per-order loop fetches export.xml serially
+    // (~1.5–3s each between fetch + write + 100ms pacing). A tenant
+    // with thousands of pre-v35 pushed orders would otherwise blow
+    // past the Edge Function CPU/wall-clock budget on the first poll.
+    // 200 rows ≈ 5–10 minutes worst-case — well above the 150s soft
+    // limit, but the function checkpoints per-row via last_synced_at
+    // so a timeout mid-batch leaves the remainder eligible on the
+    // next poll. The 24h recency guard staggers the backlog across
+    // days. Oldest-first (last_synced_at ASC NULLS FIRST) so genuinely
+    // stranded rows clear before recently-touched ones.
+    const { data: noDispatchIdOrders, error: noDispatchIdErr } = await supabase
+      .from('dt_orders')
+      .select(SELECT_COLS)
+      .is('dt_dispatch_id', null)
+      .not('pushed_to_dt_at', 'is', null)
+      .not('dt_identifier', 'is', null)
+      .or(`last_synced_at.is.null,last_synced_at.lt.${oneDayAgoIso}`)
+      .order('last_synced_at', { ascending: true, nullsFirst: true })
+      .limit(200);
+    if (noDispatchIdErr) {
+      result.errors.push(`Secondary (no-dispatch-id) fetch failed: ${noDispatchIdErr.message}`);
+    } else {
+      for (const o of noDispatchIdOrders ?? []) {
+        if (!orderById.has(o.id)) orderById.set(o.id, o);
+      }
+    }
   }
   const mergedOrders = Array.from(orderById.values());
   result.checked = mergedOrders.length;
@@ -313,6 +396,13 @@ Deno.serve(async (req) => {
       if (!parsed) { result.errors.push(`${label}: empty/invalid export response`); continue; }
 
       // ── status code → status_id resolution ───────────────────────────
+      // v18 — both an unknown code AND an empty status now generate a
+      // result.errors entry. The empty case is rare but real (DT can
+      // return <status/> on orders mid-creation) and pre-v18 silently
+      // cleared dt_status_code while leaving status_id alone. v18 skips
+      // BOTH columns when the code can't be resolved, so we must surface
+      // the skip to operators or a legitimately-cleared status would
+      // sit forever with stale values and zero signal.
       const dtStatusCode = (parsed.status || '').toUpperCase();
       let finalStatusId: number | null = null;
       let category: string | null = null;
@@ -327,12 +417,22 @@ Deno.serve(async (req) => {
         } else {
           result.errors.push(`${label}: unknown DT status "${dtStatusCode}"`);
         }
+      } else if (o.status_id != null) {
+        // DT returned a blank status on a row that previously had one.
+        // Don't clear either column blindly (matches v18 atomicity rule)
+        // but emit the divergence so operators can investigate.
+        result.errors.push(`${label}: DT returned empty status — keeping prior status_id`);
       }
 
       // ── update dt_orders row ────────────────────────────────────────
+      // v18: dt_status_code and status_id move together. Skipping both
+      // when the code can't be resolved prevents the display-bug
+      // divergence (UI rendered the stale status_id-joined name while
+      // dt_status_code carried an unresolved new code). The status
+      // mismatch is already pushed to result.errors above so an operator
+      // can seed the missing dt_statuses row.
       const patch: Record<string, unknown> = {
         last_synced_at:               new Date().toISOString(),
-        dt_status_code:               dtStatusCode || null,
         dt_export_payload:            parsed,
         scheduled_at:                 toIso(parsed.scheduled_at),
         started_at:                   toIso(parsed.started_at),
@@ -349,9 +449,27 @@ Deno.serve(async (req) => {
         cod_amount:                   parsed.cod_amount,
         signature_captured_at:        toIso(parsed.signature_captured_at),
       };
-      if (finalStatusId != null && finalStatusId !== o.status_id) {
-        patch.status_id = finalStatusId;
-        if (category === 'completed') result.completed += 1;
+      if (finalStatusId != null) {
+        // Always overwrite both fields when DT gave us a resolvable
+        // code — even when status_id already matches, the dt_status_code
+        // refresh is cheap and keeps the two columns provably in sync
+        // (so a row stamped pre-v18 with a divergent dt_status_code self-
+        // heals on the next sync).
+        patch.dt_status_code = dtStatusCode;
+        if (finalStatusId !== o.status_id) {
+          patch.status_id = finalStatusId;
+          if (category === 'completed') result.completed += 1;
+        }
+      }
+
+      // v18: backfill dt_dispatch_id when DT's export gives us one and
+      // the row currently has none. Pre-v35 push left dt_dispatch_id
+      // NULL forever — this lets every successful poll self-heal the
+      // row. Never overwrite an existing value (a re-export with the
+      // same id is a no-op; a different id would be a DT-side bug we
+      // don't want to silently follow).
+      if (parsed.dispatch_id != null && o.dt_dispatch_id == null) {
+        patch.dt_dispatch_id = parsed.dispatch_id;
       }
 
       // Backfill the scheduled service date for orders that arrived
@@ -878,6 +996,12 @@ interface ParsedItem {
 }
 
 interface ParsedExport {
+  /** v18 — DT's dispatch id, scraped from the `id` attribute on the
+   *  wrapping <service_order> element. Used by the per-order patch to
+   *  backfill dt_dispatch_id on orders pushed before dt-push-order v35
+   *  (which captures it from add_order's response). Null when DT's
+   *  export carries no id attribute. */
+  dispatch_id: number | null;
   status: string | null;
   service_unit: string | null;
   stop_number: number | null;
@@ -901,7 +1025,22 @@ function parseExportOrder(xml: string): ParsedExport | null {
   const orderXml = section(xml, 'service_order');
   if (!orderXml) return null;
 
+  // v18 — capture the dispatch id from <service_order id="..."> on the
+  // OUTER element. `section()` strips the wrapping tag, so we re-scan
+  // the original xml for the open-tag attributes. We accept `id` or
+  // `dispatch_id` to be resilient to a DT schema shift (the exporter
+  // historically used `id`; recent webhook payloads use `dispatch_id`).
+  let dispatch_id: number | null = null;
+  const serviceOrderAttrs = attrs(xml, 'service_order');
+  for (const a of serviceOrderAttrs) {
+    const raw = a.id || a.dispatch_id || '';
+    if (!raw) continue;
+    const n = parseInt(raw, 10);
+    if (Number.isFinite(n) && n > 0) { dispatch_id = n; break; }
+  }
+
   return {
+    dispatch_id,
     status:                tag(orderXml, 'status'),
     service_unit:          tag(orderXml, 'service_unit'),
     stop_number:           toInt(tag(orderXml, 'stop_number')),

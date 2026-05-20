@@ -1,5 +1,25 @@
 /**
- * dt-push-order — Supabase Edge Function (Phase 2c) — v34 2026-05-19 PST
+ * dt-push-order — Supabase Edge Function (Phase 2c) — v35 2026-05-20 PST
+ * v35: Capture DT dispatch id from the add_order response and write it
+ *      to dt_orders.dt_dispatch_id when present. DT's add_order response
+ *      can include the newly-imported order's dispatch id alongside the
+ *      <success> marker. parseDispatchId() tries the three shapes we've
+ *      seen documented (a <dispatch_id> tag, a `dispatch_id` attribute
+ *      on the wrapping <service_order>, or an `id` attribute on that
+ *      same element) and returns the first numeric match, or null when
+ *      the response carries no dispatch id (older DT installs still
+ *      respond with the bare <success>Imported given orders!</success>).
+ *      We deliberately do NOT match a generic <order_id> tag — DT uses
+ *      that for the human Order_Number on some endpoints.
+ *
+ *      When present, dt_dispatch_id is stamped on both the primary and
+ *      the linked-leg update so dt-sync-statuses' dispatch-id-keyed
+ *      lookups (and the secondary backfill sweep added in v18 of that
+ *      function) match without a round-trip through DT export.xml.
+ *      A null dispatch id from DT is a no-op — never overwrites a
+ *      previously-captured value.
+ *
+ * v34 2026-05-19 PST:
  * v34: Selective field push. Request body now accepts an optional
  *      `changedFields: string[]` naming which logical field GROUPS the
  *      caller actually edited. When present + non-empty, buildOrderXml
@@ -814,7 +834,43 @@ async function pruneDuplicateOrderItems(supabase: any, dtOrderId: string): Promi
   }
 }
 
-// Push a single order to DT. Returns {ok, body}.
+// Parse the DT dispatch id from an add_order response body. DT
+// historically returned only <success>Imported given orders!</success>
+// (see v8 docstring in dt-sync-statuses), but newer responses can
+// carry the newly-imported order's dispatch id alongside the success
+// marker. The exact shape isn't stable across DT installs, so we try
+// the patterns we've observed in the wild + the obvious fallbacks and
+// return the first numeric match. Returns null when no dispatch id is
+// present — callers must treat null as "leave the column alone", never
+// as "clear it".
+function parseDispatchId(body: string): number | null {
+  if (!body) return null;
+  // Only dispatch-id-shaped patterns. We deliberately do NOT match a
+  // generic <order_id>NNN</order_id> tag because DT installs use that
+  // field for the human Order_Number (e.g. "MRS-00047") on some
+  // endpoints, and a future install that emits a numeric order
+  // number there would be silently captured as a dispatch id.
+  // `dt_dispatch_id` is INT in the schema, so we require \d+ here and
+  // discard anything non-numeric.
+  const patterns: RegExp[] = [
+    /<dispatch_id>\s*(\d+)\s*<\/dispatch_id>/i,
+    /<service_order\b[^>]*\bdispatch_id\s*=\s*"(\d+)"/i,
+    /<service_order\b[^>]*\bid\s*=\s*"(\d+)"/i,
+  ];
+  for (const re of patterns) {
+    const m = re.exec(body);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (Number.isFinite(n) && n > 0) return n;
+    }
+  }
+  return null;
+}
+
+// Push a single order to DT. Returns {ok, body, dispatchId?}.
+// dispatchId is non-null when DT's response carried a parseable dispatch
+// id; it's an opportunistic capture so callers can stamp dt_dispatch_id
+// on the dt_orders row without waiting for a dt-sync-statuses poll.
 async function pushSingleOrder(
   order: DtOrderRow,
   items: DtOrderItemRow[],
@@ -825,7 +881,7 @@ async function pushSingleOrder(
   crossRefIdent?: string,
   linkedDeliveryInfo?: { identifier: string; contactName?: string; address?: string; city?: string; state?: string; zip?: string },
   groups: Set<DtFieldGroup> | null = null,
-): Promise<{ ok: boolean; body: string; errMsg?: string }> {
+): Promise<{ ok: boolean; body: string; errMsg?: string; dispatchId?: number | null }> {
   // Build the DT Attachments custom-field BEFORE the XML — best-effort
   // and never blocks the push (returns '' on any failure). Skip the
   // photo_shares read/write entirely on a scoped push that didn't touch
@@ -852,7 +908,16 @@ async function pushSingleOrder(
       const errMsg = errMatch ? errMatch[1].trim() : `HTTP ${resp.status}: ${body.slice(0, 300)}`;
       return { ok: false, body, errMsg };
     }
-    return { ok: true, body };
+    // Opportunistic dispatch-id capture. Older DT installs respond with
+    // only <success>...</success> so dispatchId stays null on those —
+    // the next dt-sync-statuses run backfills it via the secondary
+    // sweep added in v18 of that function. Logged so we can audit
+    // capture rate after deploy.
+    const dispatchId = parseDispatchId(body);
+    if (dispatchId != null) {
+      console.log(`[dt-push-order] captured dispatch_id=${dispatchId} for order=${order.dt_identifier}`);
+    }
+    return { ok: true, body, dispatchId };
   } catch (err) {
     return { ok: false, body: '', errMsg: `Network error: ${(err as Error).message}` };
   }
@@ -1077,13 +1142,20 @@ Deno.serve(async (req: Request) => {
         }), { status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
 
+      // v35: stamp dt_dispatch_id when DT returned one in the add_order
+      // response. Skipped when null (older DT installs) so we never
+      // overwrite a previously-captured value with NULL.
+      const linkedUpdate: Record<string, unknown> = {
+        pushed_to_dt_at: new Date().toISOString(),
+        source: 'app',
+        last_synced_at: new Date().toISOString(),
+      };
+      if (linkedPush.dispatchId != null) {
+        linkedUpdate.dt_dispatch_id = linkedPush.dispatchId;
+      }
       await supabase
         .from('dt_orders')
-        .update({
-          pushed_to_dt_at: new Date().toISOString(),
-          source: 'app',
-          last_synced_at: new Date().toISOString(),
-        })
+        .update(linkedUpdate)
         .eq('id', linkedTyped.id);
 
       linkedPushedIdentifier = linkedTyped.dt_identifier;
@@ -1127,13 +1199,21 @@ Deno.serve(async (req: Request) => {
   }
 
   // ── 6. Update pushed_to_dt_at for primary ─────────────────────────────
+  // v35: stamp dt_dispatch_id when DT returned one. Skipped when null
+  // (older DT installs) so we never overwrite a previously-captured
+  // value — the dt-sync-statuses secondary sweep will backfill it via
+  // export.xml on the next poll.
+  const primaryUpdate: Record<string, unknown> = {
+    pushed_to_dt_at: new Date().toISOString(),
+    source: 'app',
+    last_synced_at: new Date().toISOString(),
+  };
+  if (primaryPush.dispatchId != null) {
+    primaryUpdate.dt_dispatch_id = primaryPush.dispatchId;
+  }
   const { error: updateErr } = await supabase
     .from('dt_orders')
-    .update({
-      pushed_to_dt_at: new Date().toISOString(),
-      source: 'app',
-      last_synced_at: new Date().toISOString(),
-    })
+    .update(primaryUpdate)
     .eq('id', orderId);
 
   if (updateErr) console.warn(`[dt-push-order] DT push ok but local update failed: ${updateErr.message}`);
