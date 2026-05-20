@@ -9,6 +9,7 @@
  */
 
 import { CLIENT_FIELD_SCHEMA_FINGERPRINT } from '../types/clientFields';
+import { fireShadow } from './fireShadow';
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -1297,6 +1298,12 @@ export async function apiPost<T>(
     if (json.error) {
       return { data: null, error: json.error, ok: false, requestId };
     }
+
+    // [MIGRATION] Fire-and-forget audit-shape parity check. No-op for
+    // actions without a registered shadow Edge Function (most are
+    // unregistered). See src/lib/shadowRegistry.ts for the wired set
+    // and src/lib/fireShadow.ts for the comparison strategy.
+    fireShadow(action, bodyWithId, extraParams?.clientSheetId ?? null);
 
     return { data: json as T, ok: true, error: null, requestId };
   } catch (err) {
