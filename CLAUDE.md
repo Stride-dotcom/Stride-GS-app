@@ -258,7 +258,7 @@ CREATE POLICY <table>_authenticated_select ON public.<table>
 
 Anon access (e.g. `PublicServiceRequest.tsx`) is a separate, deliberate carve-out: add `GRANT SELECT ON public.<table> TO anon;` only when the table is intentionally part of an unauthenticated surface, with a policy that scopes what anon sees. Anon should NEVER get write grants unless the table is an explicit public-write surface (e.g. `public_service_requests`).
 
-Look at `supabase/migrations/20260519140000_tax_jurisdictions_rls.sql` for an example of a complete policy block (it's missing the explicit GRANTs and will be fixed by `20260520_backfill_data_api_grants.sql` — but new tables should ship correct, not need backfilling).
+Look at `supabase/migrations/20260519140000_tax_jurisdictions_rls.sql` for an example of a complete policy block (it's missing the explicit GRANTs and will be fixed by `20260520120000_backfill_data_api_grants.sql` — but new tables should ship correct, not need backfilling).
 
 ## Role-based access
 
