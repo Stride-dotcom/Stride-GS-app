@@ -214,12 +214,54 @@ Deno.serve(async (req: Request) => {
       console.warn('[apply-intake-on-submit] status stamp failed (non-fatal):', stampErr.message);
     }
 
+    // 8. Mirror the refreshed clients row OUT to the per-tenant Settings
+    // tab + CB Clients tab via push-client-settings-to-sheet.
+    //
+    // The Postgres trigger `trg_propagate_clients_to_sheet` (migration
+    // 20260520140000_clients_writeback_trigger.sql) ALREADY fires on the
+    // UPDATE above, so this call is belt-and-suspenders. Two reasons we
+    // keep the explicit invocation in addition to the trigger:
+    //   (1) The trigger is fail-open on missing app.settings GUCs.
+    //       Explicit invocation works regardless of GUC state.
+    //   (2) Latency: refreshes that flip auto_inspection / autopay are
+    //       user-facing — operators expect the change visible in the
+    //       sheet within seconds. The trigger uses pg_net which queues
+    //       async; an explicit await reduces variance.
+    // The GAS writer is idempotent so the duplicate fire is a no-op
+    // on identical values.
+    let sheetMirrorOk = false;
+    let sheetMirrorError: string | null = null;
+    try {
+      const mirrorResp = await fetch(`${supabaseUrl}/functions/v1/push-client-settings-to-sheet`, {
+        method:  'POST',
+        headers: {
+          'Authorization': `Bearer ${serviceKey}`,
+          'Content-Type':  'application/json',
+        },
+        body: JSON.stringify({
+          spreadsheet_id: clientSpreadsheetId,
+          requestedBy:    'apply-intake-on-submit',
+        }),
+      });
+      const mirrorJson = await mirrorResp.json().catch(() => ({}));
+      sheetMirrorOk = mirrorResp.ok && mirrorJson.ok === true;
+      if (!sheetMirrorOk) {
+        sheetMirrorError = String(mirrorJson.error || `HTTP ${mirrorResp.status}`);
+        console.warn('[apply-intake-on-submit] sheet mirror failed (non-fatal):', sheetMirrorError);
+      }
+    } catch (e) {
+      sheetMirrorError = e instanceof Error ? e.message : String(e);
+      console.warn('[apply-intake-on-submit] sheet mirror threw (non-fatal):', sheetMirrorError);
+    }
+
     return json({
       success: true,
       linkDeactivated,
       refreshApplied: true,
       clientSpreadsheetId,
       certWarnings,
+      sheetMirrorOk,
+      ...(sheetMirrorError ? { sheetMirrorError } : {}),
     });
   } catch (e) {
     console.error('[apply-intake-on-submit] unhandled error:', e);
