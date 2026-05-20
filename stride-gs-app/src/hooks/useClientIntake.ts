@@ -163,20 +163,40 @@ export async function fetchRefreshPrefill(spreadsheetId: string): Promise<Refres
       .maybeSingle();
 
     // Notification contacts: prefer the canonical clients column; fall back
-    // to the last intake's snapshot.
-    const contacts: Array<{ name?: string; email: string }> = (() => {
+    // to the last intake's snapshot. Then merge in any comma-separated extras
+    // from client.email (positions 2+) — legacy rows sometimes stuffed
+    // multiple addresses into the single email column.
+    const baseContacts: Array<{ name?: string; email: string }> = (() => {
       const fromClient = (client as { notification_contacts?: unknown }).notification_contacts;
       if (Array.isArray(fromClient)) return fromClient as Array<{ name?: string; email: string }>;
       const fromIntake = lastIntake?.notification_contacts;
       if (Array.isArray(fromIntake)) return fromIntake as Array<{ name?: string; email: string }>;
       return [];
     })();
+    const emailParts: string[] = String(client.email || '')
+      .split(',')
+      .map((s: string) => s.trim())
+      .filter(Boolean);
+    const seen = new Set<string>();
+    const contacts: Array<{ name?: string; email: string }> = [];
+    for (const c of baseContacts) {
+      const key = (c.email || '').toLowerCase().trim();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      contacts.push(c);
+    }
+    for (const extra of emailParts.slice(1)) {
+      const key = extra.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      contacts.push({ email: extra });
+    }
 
     return {
       spreadsheetId: client.spreadsheet_id,
       businessName:        client.name || '',
       contactName:         client.contact_name || '',
-      email:               client.email || '',
+      email:               emailParts[0] || '',
       phone:               client.phone || '',
       businessAddress:     lastIntake?.business_address || '',
       website:             lastIntake?.website || '',

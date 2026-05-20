@@ -267,7 +267,7 @@ export function ClientIntake({ linkId }: Props) {
         ...d,
         businessName:        prefill.businessName || d.businessName,
         contactName:         prefill.contactName  || d.contactName,
-        email:               prefill.email        || d.email,
+        email:               (prefill.email || d.email || '').split(',')[0].trim(),
         phone:               prefill.phone        || d.phone,
         businessAddress:     prefill.businessAddress || d.businessAddress,
         website:             prefill.website         || d.website,
