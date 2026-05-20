@@ -216,6 +216,12 @@ interface LiveItem {
   description: string;
   location: string;
   sidemark: string;
+  /** PO / reference number from the inventory row. Rendered in the
+   *  item-picker's REFERENCE column. Carried as opaque metadata
+   *  through item selection; NOT propagated to a dt_order_items
+   *  column today (the order-level po_number captures the
+   *  customer's order reference separately). */
+  reference?: string;
   status: string;
   qty?: number;
   itemClass?: string;
@@ -785,11 +791,22 @@ export function CreateDeliveryOrderModal({
   }, []);
   const liveItems: LiveItem[] = useMemo(() => {
     if (liveItemsProp.length > 0) return liveItemsProp;
+    // IMPORTANT: keep this projection in sync with every LiveItem
+    // field the picker / item summary / save path reads. A prior
+    // incident landed here: inventoryRowId was missed → resulting
+    // dt_order_items.inventory_id was null on the self-fetch path →
+    // OrderPage Release Items couldn't link back to inventory rows
+    // (fixed alongside the mapToAppItem threading). Today's miss:
+    // `reference` was dropped, so the picker's REFERENCE column
+    // showed '—' for every row when the modal was opened from
+    // Orders (no liveItemsProp). Add new fields here when the
+    // picker UI starts displaying them.
     return invHookResult.items.map(i => ({
       inventoryRowId: i.inventoryRowId,
       itemId: i.itemId, clientName: i.clientName, clientId: i.clientId,
       vendor: i.vendor || '', description: i.description || '',
       location: i.location || '', sidemark: i.sidemark || '',
+      reference: i.reference || '',
       status: i.status, qty: i.qty,
       itemClass: i.itemClass || '', room: i.room || '',
     }));
