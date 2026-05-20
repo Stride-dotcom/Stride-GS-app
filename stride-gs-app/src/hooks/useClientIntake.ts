@@ -173,9 +173,9 @@ export async function fetchRefreshPrefill(spreadsheetId: string): Promise<Refres
       if (Array.isArray(fromIntake)) return fromIntake as Array<{ name?: string; email: string }>;
       return [];
     })();
-    const emailParts = (client.email || '')
+    const emailParts: string[] = String(client.email || '')
       .split(',')
-      .map(s => s.trim())
+      .map((s: string) => s.trim())
       .filter(Boolean);
     const seen = new Set<string>();
     const contacts: Array<{ name?: string; email: string }> = [];
