@@ -55,23 +55,24 @@ export type ClientNameMap = Record<string, string>;
 /**
  * Check if Supabase read cache is available (tables exist and have data).
  * Cached for the session to avoid repeated checks.
+ *
+ * Historical note: this used to carry an `_impersonating` cache-bypass
+ * because pre-piece-#3 impersonation kept the admin's Supabase session
+ * live, so the read cache returned admin-scoped rows that didn't match
+ * the impersonated identity. As of piece #3 the live session IS the
+ * target user's during impersonation, so RLS scopes the cache reads
+ * correctly and the bypass is no longer needed. `setSupabaseImpersonating`
+ * was removed; AuthContext no longer calls anything here on
+ * impersonate/exit.
  */
 let _cacheAvailable: boolean | null = null;
 let _skipNextSupabase = false;
-let _impersonating = false;
-
-/** When impersonating, skip Supabase cache — RLS uses the real admin session,
- *  not the impersonated user. GAS fallback scopes correctly via callerEmail. */
-export function setSupabaseImpersonating(active: boolean): void {
-  _impersonating = active;
-}
 
 // Session 72 dedup: N concurrent consumers race on cold load — without
 // dedup we saw 4x identical HEAD probes in the Network tab.
 let _availabilityInflight: Promise<boolean> | null = null;
 
 export async function isSupabaseCacheAvailable(): Promise<boolean> {
-  if (_impersonating) return false;
   if (_skipNextSupabase) {
     _skipNextSupabase = false;
     return false;

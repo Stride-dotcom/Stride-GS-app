@@ -32,12 +32,13 @@
  * Impersonation read-only mode: while `isImpersonating` is true the
  * hook surfaces the impersonated user's saved view BUT does not
  * persist any subsequent edits (neither to the admin's localStorage
- * nor to Supabase). Two reasons:
- *   - The Supabase self-policy blocks writes from the admin's JWT
- *     under another `user_email`, so the upsert silently fails RLS.
- *   - Even if it didn't, writing the admin's accidental column-drag
- *     to the impersonated user's persistent view would be a bad
- *     surprise to the client on their next login.
+ * nor to Supabase). After piece #3 of the impersonation series the
+ * admin's live Supabase session IS the client's, so the self RLS
+ * policy would happily ACCEPT the write — but that's the wrong
+ * outcome. The point of impersonation is to SEE what the client
+ * sees, not silently mutate their persistent view via accidental
+ * column drags during a support session. Keep this guard as the
+ * "even though we technically can, we deliberately don't" backstop.
  */
 import { useState, useCallback, useEffect, useRef } from 'react';
 import type { SortingState, VisibilityState } from '@tanstack/react-table';

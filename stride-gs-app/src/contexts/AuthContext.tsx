@@ -655,8 +655,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     cacheClearAll();
     clearCache();
     setCallerEmail('');
-    setImpersonatedUser(null);
-    setSupabaseImpersonating(false);
+    // Clear any impersonation state too — signing out from inside an
+    // impersonation session must blow away the admin stash AND the
+    // target session. Service worker tabs / Cmd+Shift+L sign-outs were
+    // the path that previously hit setSupabaseImpersonating(false); now
+    // we clean up the full piece-#3 surface.
+    clearImpersonationFlag();
+    clearAdminStash();
+    setRealUser(null);
     await supabase.auth.signOut();
     setAuthState({ status: 'unauthenticated' });
     // Session 62 follow-up — reset loginPhase so the Login screen doesn't
