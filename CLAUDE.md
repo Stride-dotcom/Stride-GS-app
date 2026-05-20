@@ -143,6 +143,7 @@ Dropbox\Apps\GS Inventory\credentials\.sync-config.json  →  AppScripts\stride-
 - **Use existing components** — check `src/components/shared/` (65 components) before creating new ones.
 - **Use existing hooks** — check `src/hooks/` (71 hooks) before creating new ones.
 - **Follow the design system** — Stride orange (#E85D2D), Inter font, `theme.v2` tokens. See `_archive/Docs/Entity_Page_Design_Spec.md` for entity page design.
+- **Every new-table migration MUST include explicit GRANTs + RLS.** See [Supabase](#supabase) for the required 4-step template. Supabase begins enforcing this 2026-10-30: new tables without `GRANT … TO authenticated` are invisible to the Data API and the React app will silently 404 on them.
 - **Update BUILD_STATUS.md at end of session.**
 
 ### Must-not-do
@@ -225,10 +226,39 @@ stride-gs-app/src/
 
 ## Supabase
 
-- **Migration files:** `stride-gs-app/supabase/migrations/YYYYMMDDHHMMSS_name.sql` (~140 migrations applied — `ls supabase/migrations/*.sql | wc -l` for exact)
+- **Migration files:** `stride-gs-app/supabase/migrations/YYYYMMDDHHMMSS_name.sql` (~170 migrations applied — `ls supabase/migrations/*.sql | wc -l` for exact)
 - **Apply migrations:** MCP tool `apply_migration(project_id='uqplppugeickmamycpuz', name, query)`. Write the SQL file first (git source of truth), then apply via MCP.
 - **Client:** `stride-gs-app/src/lib/supabase.ts` — anon key in `.env` as `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY`
 - **Edge Functions (~19 deployed in `supabase/functions/`):** DispatchTrack (dt-*), Stax (stax-*), notification (notify-*, send-*), and shadow/replay helpers. `ls supabase/functions/` for the current list.
+
+### New-table migrations: REQUIRED 4-step template
+
+Supabase enforces explicit role grants on the Data API path starting **2026-10-30**. A new table that has RLS policies but no `GRANT` is unreachable from the React app — PostgREST returns 404 / "permission denied for table" because the role can't even attempt the statement (the policy never runs). This is the modern PostgREST behavior; RLS `TO authenticated` in a policy is NOT a substitute for the table-level grant. Every migration that creates a public table MUST include all four of these, or it's a regression:
+
+```sql
+-- 1. Grant Data API roles enough to operate against the table.
+--    Match the verbs your RLS policies allow — never wider.
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.<table> TO authenticated;
+
+-- 2. Service role bypasses RLS already, but Edge Functions / backfills
+--    still need the table-level grant. Always include.
+GRANT ALL ON public.<table> TO service_role;
+
+-- 3. RLS must be ENABLED — otherwise the grants above let any
+--    authenticated user read every tenant's rows. This is the
+--    cross-tenant data leak path.
+ALTER TABLE public.<table> ENABLE ROW LEVEL SECURITY;
+
+-- 4. At least one RLS policy. The grant decides "can the role
+--    attempt this verb"; the policy decides "which rows it sees".
+--    Without a policy, RLS-enabled = deny-all for non-service roles.
+CREATE POLICY <table>_authenticated_select ON public.<table>
+  FOR SELECT TO authenticated USING (<tenancy / ownership check>);
+```
+
+Anon access (e.g. `PublicServiceRequest.tsx`) is a separate, deliberate carve-out: add `GRANT SELECT ON public.<table> TO anon;` only when the table is intentionally part of an unauthenticated surface, with a policy that scopes what anon sees. Anon should NEVER get write grants unless the table is an explicit public-write surface (e.g. `public_service_requests`).
+
+Look at `supabase/migrations/20260519140000_tax_jurisdictions_rls.sql` for an example of a complete policy block (it's missing the explicit GRANTs and will be fixed by `20260520_backfill_data_api_grants.sql` — but new tables should ship correct, not need backfilling).
 
 ## Role-based access
 
