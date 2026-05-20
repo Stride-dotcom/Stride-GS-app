@@ -118,7 +118,7 @@ Deno.serve(async (req: Request) => {
       const { data: mirrorRow, error: mirrorErr } = await supabase
         .from('cb_users')
         .select('email, role, active')
-        .ilike('email', targetEmail)
+        .eq('email', targetEmail)
         .maybeSingle();
       if (mirrorErr) {
         console.error('[impersonate-mint-session] mirror lookup failed:', mirrorErr);

@@ -771,6 +771,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // Swap back immediately — partial impersonation is worse than
         // a hard failure here.
         await supabase.auth.setSession(adminSession);
+        // Close the audit row before bailing. The mint+verify succeeded
+        // so the row exists with ended_at=null; if we don't close it,
+        // a future exit on a re-attempted impersonation of the same
+        // target would stamp-close THIS orphan instead of the active
+        // session row (the edge function matches "most-recent open"
+        // by admin+target). Admin's JWT is back live so the edge
+        // function's role check passes.
+        void endImpersonationEdge(targetEmail);
         impersonationSwapRef.current = false;
         clearAdminStash();
         setRealUser(null);
@@ -819,7 +827,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     impersonationSwapRef.current = true;
     const { error: swapErr } = await supabase.auth.setSession(adminTokens);
     if (swapErr) {
-      // Admin refresh token probably expired. Fall back to clean sign-out.
+      // Admin refresh token probably expired. Fall back to clean
+      // sign-out. ORPHAN-ROW CAVEAT: the impersonation_log row stays
+      // open here (ended_at = null). We can't close it from this
+      // branch because:
+      //   - We're still holding the target's JWT (swap failed), and
+      //     the edge function's 'end' action requires admin role.
+      //   - The admin's refresh token is dead, so we can't get a
+      //     fresh admin JWT to call 'end' with.
+      // This branch is rare in practice (requires the admin's refresh
+      // token to expire DURING an active impersonation session, i.e.
+      // typically within an hour). Operator cleanup query:
+      //   UPDATE impersonation_log
+      //   SET ended_at = now(), reason = COALESCE(reason, '') || ' [auto-closed: orphan]'
+      //   WHERE ended_at IS NULL AND started_at < now() - INTERVAL '24 hours';
       console.warn('[AuthContext] exitImpersonation: admin session restore failed, signing out:', swapErr.message);
       impersonationSwapRef.current = false;
       clearImpersonationFlag();
