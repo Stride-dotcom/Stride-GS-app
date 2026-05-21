@@ -760,13 +760,30 @@ function DetailsTab({
                             <div
                               style={{
                                 display: 'inline-flex', alignItems: 'center', gap: 4,
-                                marginTop: 3,
+                                marginTop: 3, padding: '2px 6px', borderRadius: 4,
+                                background: '#DCFCE7', border: '1px solid #86EFAC',
                                 fontSize: 10, fontWeight: 600,
                                 color: '#166534',
                               }}
-                              title={`Picked up ${fmtDateTime(item.pickedUpAt)}`}
+                              title={`Picked up ${fmtDateTime(item.pickedUpAt)}${order.linkedPickupDriverName ? ` by ${order.linkedPickupDriverName}` : ''}`}
                             >
-                              <PackageCheck size={11} aria-hidden /> Picked up
+                              <PackageCheck size={11} aria-hidden />
+                              {/* Inline driver name + timestamp so the operator
+                               *  sees "who" and "when" at a glance, not just a
+                               *  hover tooltip. Driver name comes from the
+                               *  order-level dt_orders.linked_pickup_driver_name
+                               *  (stamped by stamp-pickup-on-linked-delivery
+                               *  from the PU leg's dt_orders.driver_name);
+                               *  picked_up_at comes from the per-item
+                               *  dt_order_items.picked_up_at stamp. Falls back
+                               *  to bare "Picked up" if either is missing so
+                               *  partial state (e.g. dt-sync-statuses hasn't
+                               *  hydrated driver name yet) still renders. */}
+                              <span>
+                                Picked up
+                                {order.linkedPickupDriverName ? ` by ${order.linkedPickupDriverName}` : ''}
+                                {' · '}{fmtDateTime(item.pickedUpAt)}
+                              </span>
                             </div>
                           )}
                         </td>
