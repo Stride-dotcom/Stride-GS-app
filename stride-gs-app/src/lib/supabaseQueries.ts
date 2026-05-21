@@ -782,6 +782,13 @@ interface SupabaseShipmentRow {
   // Stage A mirror drift: shipment-owned URLs
   photos_url: string | null;
   invoice_url: string | null;
+  // 2-stage receiving — columns added by 2026-05-21 migration. Pre-migration
+  // rows return null/undefined and are treated as 'received' in the UI
+  // (default to the legacy single-stage state).
+  inbound_status?: string | null;
+  dock_piece_count?: number | null;
+  dock_completed_at?: string | null;
+  dock_completed_by?: string | null;
 }
 
 export async function fetchShipmentsFromSupabase(
@@ -813,6 +820,10 @@ export async function fetchShipmentsFromSupabase(
       notes: row.notes || '',
       invoiceUrl: row.invoice_url || '',
       folderUrl: row.folder_url || '',
+      inboundStatus: row.inbound_status || '',
+      dockPieceCount: row.dock_piece_count ?? null,
+      dockCompletedAt: row.dock_completed_at ?? null,
+      dockCompletedBy: row.dock_completed_by ?? null,
     }));
 
     return {
@@ -848,6 +859,10 @@ export async function fetchShipmentByNoFromSupabase(
       notes: row.notes || '',
       invoiceUrl: '',
       folderUrl: row.folder_url || '',
+      inboundStatus: row.inbound_status || '',
+      dockPieceCount: row.dock_piece_count ?? null,
+      dockCompletedAt: row.dock_completed_at ?? null,
+      dockCompletedBy: row.dock_completed_by ?? null,
     };
   } catch {
     return null;

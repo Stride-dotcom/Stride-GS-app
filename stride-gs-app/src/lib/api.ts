@@ -547,6 +547,14 @@ export interface ApiShipment {
   notes: string;
   invoiceUrl: string;
   folderUrl: string;
+  // 2-stage receiving (Stage 1 dock intake → Stage 2 item entry). Source of
+  // truth is the Supabase `shipments` table — GAS doesn't write these.
+  // Older rows from before the migration have inboundStatus='' (falls back to
+  // 'received' in the UI since they're past Stage 2).
+  inboundStatus?: string;        // 'expected' | 'in_progress' | 'received' | ''
+  dockPieceCount?: number | null;
+  dockCompletedAt?: string | null;
+  dockCompletedBy?: string | null;
 }
 
 export interface ShipmentItemsResponse {

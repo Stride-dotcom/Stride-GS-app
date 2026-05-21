@@ -37,7 +37,8 @@ interface ShipmentRow {
   shipmentNo: string;
   clientName: string;
   clientSheetId: string;
-  status: string;
+  status: string;                  // display label — derived from inboundStatus
+  inboundStatus: string;           // raw 'expected' | 'in_progress' | 'received' | ''
   carrier: string;
   // `Number` suffix matters: lib/searchFilters.ts numeric-only mode only scans
   // ID-shaped field names. Rename to plain `tracking` and pure-digit search breaks.
@@ -46,22 +47,40 @@ interface ShipmentRow {
   createdBy: string;
   notes: string;
   itemCount: number;
+  /** Pieces counted at the dock during Stage 1. Null on pre-2-stage rows. */
+  dockPieceCount: number | null;
   folderUrl: string;
   photosUrl: string;
 }
 
+// Map raw inbound_status → display label used by the status badge + filter.
+// '' (pre-migration rows) falls back to 'Received' so legacy data shows
+// correctly without a backfill.
+function statusLabel(inbound: string | undefined): string {
+  switch ((inbound || '').toLowerCase()) {
+    case 'in_progress': return 'In Progress';
+    case 'expected':    return 'Expected';
+    case 'received':    return 'Received';
+    case '':            return 'Received';
+    default:            return inbound || 'Received';
+  }
+}
+
 function fromApi(s: ApiShipment): ShipmentRow {
+  const inbound = (s.inboundStatus || '').toLowerCase();
   return {
     shipmentNo: s.shipmentNumber,
     clientName: s.clientName,
     clientSheetId: s.clientSheetId,
-    status: 'Received',
+    status: statusLabel(inbound),
+    inboundStatus: inbound,
     carrier: s.carrier,
     trackingNumber: s.trackingNumber,
     receivedDate: s.receiveDate,
     createdBy: '',
     notes: s.notes ?? '',
     itemCount: s.itemCount,
+    dockPieceCount: s.dockPieceCount ?? null,
     folderUrl: s.folderUrl ?? '',
     photosUrl: s.photosUrl ?? '',
   };
@@ -69,23 +88,29 @@ function fromApi(s: ApiShipment): ShipmentRow {
 
 // ─── Status config ───────────────────────────────────────────────────────────
 
-const ALL_STATUSES = ['Received', 'Pending', 'Expected', 'Exception', 'Cancelled'];
+// Order matters — the filter dropdown renders these in declaration order.
+// "In Progress" sits between Expected (truck on its way) and Received (fully
+// processed), matching the dock workflow: expected → in_progress → received.
+const ALL_STATUSES = ['Received', 'In Progress', 'Expected', 'Pending', 'Exception', 'Cancelled'];
 
 const STATUS_CFG: Record<string, { bg: string; text: string }> = {
-  'Received':   { bg: '#F0FDF4', text: '#15803D' },
-  'Pending':    { bg: '#FEF3C7', text: '#B45309' },
-  'Expected':   { bg: '#EFF6FF', text: '#1D4ED8' },
-  'Exception':  { bg: '#FEF2F2', text: '#DC2626' },
-  'Cancelled':  { bg: '#F3F4F6', text: '#9CA3AF' },
+  'Received':    { bg: '#F0FDF4', text: '#15803D' },
+  // Stride-orange palette so the "Stage 1 done, items pending" rows pop in the
+  // list — operators need to see these at a glance to know there's open work.
+  'In Progress': { bg: '#FFF1EC', text: '#E85D2D' },
+  'Pending':     { bg: '#FEF3C7', text: '#B45309' },
+  'Expected':    { bg: '#EFF6FF', text: '#1D4ED8' },
+  'Exception':   { bg: '#FEF2F2', text: '#DC2626' },
+  'Cancelled':   { bg: '#F3F4F6', text: '#9CA3AF' },
 };
 
 const COL_LABELS: Record<string, string> = {
   shipmentNo: 'Shipment #', clientName: 'Client', status: 'Status', carrier: 'Carrier',
   tracking: 'Tracking #', receivedDate: 'Received', createdBy: 'Received By',
-  itemCount: 'Items', notes: 'Notes',
+  itemCount: 'Items', dockPieceCount: 'Dock Pieces', notes: 'Notes',
 };
 const TOGGLEABLE = Object.keys(COL_LABELS);
-const DEFAULT_COL_ORDER = ['select', 'shipmentNo', 'clientName', 'status', 'carrier', 'tracking', 'receivedDate', 'createdBy', 'itemCount', 'notes', 'actions'];
+const DEFAULT_COL_ORDER = ['select', 'shipmentNo', 'clientName', 'status', 'carrier', 'tracking', 'receivedDate', 'createdBy', 'dockPieceCount', 'itemCount', 'notes', 'actions'];
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -177,6 +202,22 @@ function buildColumns(onView: (row: ShipmentRow) => void) {
       header: 'Received',
       size: 100,
       cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{fmt(i.getValue())}</span>,
+    }),
+    col.accessor('dockPieceCount', {
+      id: 'dockPieceCount',
+      header: 'Dock Pieces',
+      size: 90,
+      cell: i => {
+        const v = i.getValue() as number | null;
+        return (
+          <span style={{
+            fontSize: 12, fontWeight: 600,
+            color: v != null && v > 0 ? theme.colors.text : theme.colors.textMuted,
+          }}>
+            {v != null ? v : '—'}
+          </span>
+        );
+      },
     }),
     col.accessor('itemCount', {
       header: 'Items',
@@ -480,7 +521,19 @@ export function Shipments() {
     setColumnFilters(f);
   }, [statusFilter, carrierFilter]);
 
-  const columns = useMemo(() => buildColumns((row) => navigate(`/shipments/${row.shipmentNo}`)), [navigate]);
+  // "In Progress" rows are Stage-1 dock intakes waiting for items — clicking
+  // one opens the Receiving page in Stage 2 mode rather than the read-only
+  // detail panel, because the operator's intent there is to enter items, not
+  // browse. Everything else routes to the regular detail page.
+  const handleRowOpen = useCallback((row: ShipmentRow) => {
+    if (row.inboundStatus === 'in_progress') {
+      navigate(`/receiving?shipmentNo=${encodeURIComponent(row.shipmentNo)}`);
+    } else {
+      navigate(`/shipments/${row.shipmentNo}`);
+    }
+  }, [navigate]);
+
+  const columns = useMemo(() => buildColumns(handleRowOpen), [handleRowOpen]);
 
   const table = useReactTable({
     data,
@@ -668,12 +721,12 @@ export function Shipments() {
             </thead>
             <tbody>
               {virtualRows.length > 0 && <tr style={{ height: virtualRows[0].start }}><td colSpan={table.getVisibleLeafColumns().length} /></tr>}
-              {virtualRows.map(vRow => { const row = allRows[vRow.index]; const rowBg = ''; return (
+              {virtualRows.map(vRow => { const row = allRows[vRow.index]; const rowBg = ''; const isInProgress = row.original.inboundStatus === 'in_progress'; return (
                 <tr key={row.id}
-                  style={{ borderBottom: `1px solid ${theme.colors.borderSubtle}`, cursor: 'pointer', transition: 'background 0.1s', background: rowBg, borderLeft: '3px solid transparent' }}
+                  style={{ borderBottom: `1px solid ${theme.colors.borderSubtle}`, cursor: 'pointer', transition: 'background 0.1s', background: rowBg, borderLeft: `3px solid ${isInProgress ? theme.colors.orange : 'transparent'}` }}
                   onMouseEnter={e => { e.currentTarget.style.background = theme.colors.bgSubtle; const a = e.currentTarget.querySelector('.row-actions') as HTMLElement; if (a) a.style.opacity = '1'; }}
                   onMouseLeave={e => { e.currentTarget.style.background = rowBg; const a = e.currentTarget.querySelector('.row-actions') as HTMLElement; if (a) a.style.opacity = '0'; }}
-                  onClick={() => navigate(`/shipments/${row.original.shipmentNo}`)}
+                  onClick={() => handleRowOpen(row.original)}
                 >
                   {row.getVisibleCells().map(cell => (
                     <td key={cell.id} style={{ padding: '8px 12px', verticalAlign: 'middle' }} onClick={e => { if (cell.column.id === 'select') e.stopPropagation(); }}>
