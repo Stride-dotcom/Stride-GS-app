@@ -646,8 +646,18 @@ function NewShipmentForm({ stage1 }: { stage1?: Stage1Prefill } = {}) {
       // produced inventory rows + billing). We surface warnings instead.
       const reconcileWarnings: string[] = [];
       if (stage1 && newShipmentNo) {
+        // Each step is best-effort + isolated. We DO gate the final DELETE on
+        // success of every preceding step, though — otherwise we'd leave the
+        // operator looking at a DOCK row in the list whose photos already
+        // moved to SHP, with no obvious recovery path. Errors surface as
+        // warnings so the GAS write (already done) isn't rolled back.
+        let metadataOk = false;
+        let photosOk = false;
+        let docsOk = false;
+
+        // Step 1: stamp dock metadata onto the new SHP row + mark received.
         try {
-          await supabase.from('shipments')
+          const { error: e1 } = await supabase.from('shipments')
             .update({
               inbound_status: 'received',
               dock_piece_count: stage1.dockPieceCount,
@@ -655,31 +665,56 @@ function NewShipmentForm({ stage1 }: { stage1?: Stage1Prefill } = {}) {
               dock_completed_by: stage1.dockCompletedBy,
             })
             .eq('shipment_number', newShipmentNo);
+          if (e1) throw new Error(e1.message);
+          metadataOk = true;
         } catch (e) {
           reconcileWarnings.push(`Could not stamp dock metadata onto ${newShipmentNo}: ${e instanceof Error ? e.message : String(e)}`);
         }
+
+        // Step 2: re-link photos. Tenant filter is required — RLS on
+        // item_photos is staff-role-wide (no tenant scope), so without
+        // .eq('tenant_id', ...) a DOCK number collision across tenants
+        // would retag the wrong tenant's photos. The 16-bit suffix makes
+        // collisions improbable, but defense-in-depth is cheap.
         try {
-          await supabase.from('item_photos')
+          const { error: e2 } = await supabase.from('item_photos')
             .update({ entity_id: newShipmentNo })
+            .eq('tenant_id', stage1.clientSheetId)
             .eq('entity_type', 'shipment')
             .eq('entity_id', stage1.dockShipmentNo);
+          if (e2) throw new Error(e2.message);
+          photosOk = true;
         } catch (e) {
           reconcileWarnings.push(`Could not move dock photos from ${stage1.dockShipmentNo} → ${newShipmentNo}: ${e instanceof Error ? e.message : String(e)}`);
         }
+
+        // Step 3: re-link documents. Same tenant-scoped defense.
         try {
-          await supabase.from('documents')
+          const { error: e3 } = await supabase.from('documents')
             .update({ context_id: newShipmentNo })
+            .eq('tenant_id', stage1.clientSheetId)
             .eq('context_type', 'shipment')
             .eq('context_id', stage1.dockShipmentNo);
+          if (e3) throw new Error(e3.message);
+          docsOk = true;
         } catch (e) {
           reconcileWarnings.push(`Could not move dock documents from ${stage1.dockShipmentNo} → ${newShipmentNo}: ${e instanceof Error ? e.message : String(e)}`);
         }
-        try {
-          await supabase.from('shipments')
-            .delete()
-            .eq('shipment_number', stage1.dockShipmentNo);
-        } catch (e) {
-          reconcileWarnings.push(`Could not remove dock intake row ${stage1.dockShipmentNo}: ${e instanceof Error ? e.message : String(e)}`);
+
+        // Step 4: delete the DOCK placeholder. Only if every prior step
+        // succeeded — otherwise photos/docs/metadata are stranded and the
+        // DOCK row is the only handle left for manual cleanup.
+        if (metadataOk && photosOk && docsOk) {
+          try {
+            const { error: e4 } = await supabase.from('shipments')
+              .delete()
+              .eq('shipment_number', stage1.dockShipmentNo);
+            if (e4) throw new Error(e4.message);
+          } catch (e) {
+            reconcileWarnings.push(`Could not remove dock intake row ${stage1.dockShipmentNo}: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        } else {
+          reconcileWarnings.push(`Stage 2 completed as ${newShipmentNo}, but the dock intake row ${stage1.dockShipmentNo} was left in place because not every step of the metadata move succeeded. Review the warnings above and clean up manually before the next dock intake for this client.`);
         }
       }
 

@@ -31,10 +31,11 @@ import { supabase } from '../../lib/supabase';
 import { entityEvents } from '../../lib/entityEvents';
 
 // ─── DOCK shipment_number generator ─────────────────────────────────────────
-// Format: DOCK-YYYYMMDD-XXXX where XXXX is 4 random hex chars. We collide-
-// detect via a unique index on shipment_number; the random suffix has 65k
-// possible values so a same-day collision is < 1 in 65k per attempt. The
-// caller retries once on collision (vanishingly rare, but cheap).
+// Format: DOCK-YYYYMMDD-XXXX where XXXX is 4 random hex chars. The random
+// suffix has 65k possible values so a same-day collision is < 1 in 65k per
+// attempt. The caller (handleComplete) retries once on a unique-index
+// violation; if both attempts collide the operator sees the raw error and
+// can re-click Complete to roll a new suffix.
 function generateDockNumber(): string {
   const now = new Date();
   const y = now.getFullYear();
@@ -42,6 +43,17 @@ function generateDockNumber(): string {
   const d = String(now.getDate()).padStart(2, '0');
   const rand = Math.floor(Math.random() * 0xffff).toString(16).toUpperCase().padStart(4, '0');
   return `DOCK-${y}${m}${d}-${rand}`;
+}
+
+/** True if a Supabase error looks like a unique-constraint violation on
+ *  shipment_number. Postgres error code 23505 + a hint that mentions the
+ *  shipment_number column / index. Matched loosely because the JS client
+ *  surfaces the code in different shapes across versions. */
+function isDockNumberCollision(err: { code?: string; message?: string } | null | undefined): boolean {
+  if (!err) return false;
+  if (err.code === '23505') return true;
+  return /duplicate key|unique constraint/i.test(err.message || '')
+    && /shipment_number/i.test(err.message || '');
 }
 
 const labelStyle: React.CSSProperties = {
@@ -138,11 +150,16 @@ export function DockIntakeForm() {
 
     setSubmitting(true);
     try {
-      const { error } = await supabase
+      // Insert with one retry on a same-day suffix collision. Photos already
+      // uploaded against the original `dockNo` stay there; if the retry
+      // succeeds, we update them to the new number so they appear on the
+      // saved row. (No retry on RLS / network errors — those need operator
+      // action, not a fresh suffix.)
+      const insertRow = (sn: string) => supabase
         .from('shipments')
         .insert({
           tenant_id: clientSheetId,
-          shipment_number: dockNo,
+          shipment_number: sn,
           receive_date: today,
           item_count: 0,
           carrier: carrier.trim(),
@@ -153,6 +170,31 @@ export function DockIntakeForm() {
           dock_completed_at: nowIso,
           dock_completed_by: user?.email || '',
         });
+
+      let savedNo = dockNo;
+      let { error } = await insertRow(savedNo);
+      if (error && isDockNumberCollision(error)) {
+        const retryNo = generateDockNumber();
+        const retry = await insertRow(retryNo);
+        if (!retry.error) {
+          savedNo = retryNo;
+          error = null;
+          // Re-tag any photos/docs already uploaded under the original
+          // dockNo onto the retry number so they show up on the saved row.
+          await supabase.from('item_photos')
+            .update({ entity_id: retryNo })
+            .eq('tenant_id', clientSheetId)
+            .eq('entity_type', 'shipment')
+            .eq('entity_id', dockNo);
+          await supabase.from('documents')
+            .update({ context_id: retryNo })
+            .eq('tenant_id', clientSheetId)
+            .eq('context_type', 'shipment')
+            .eq('context_id', dockNo);
+        } else {
+          error = retry.error;
+        }
+      }
       if (error) {
         setSubmitError(error.message || 'Failed to save dock intake');
         setSubmitting(false);
@@ -163,9 +205,9 @@ export function DockIntakeForm() {
       // refresh. Use `emitFromRealtime` (NOT `emit`) — the row is already in
       // Supabase from our direct insert above, so the next fetch should hit
       // Supabase, not bypass to GAS.
-      try { entityEvents.emitFromRealtime('shipment', dockNo); } catch { /* noop */ }
+      try { entityEvents.emitFromRealtime('shipment', savedNo); } catch { /* noop */ }
 
-      setToast(`Dock intake saved for ${clientName} — ${dockNo}`);
+      setToast(`Dock intake saved for ${clientName} — ${savedNo}`);
       // Brief delay so the operator sees the confirmation; then back to list.
       setTimeout(() => {
         navigate('/shipments', { replace: true });
@@ -179,11 +221,36 @@ export function DockIntakeForm() {
 
   return (
     <div style={{ position: 'relative', background: '#F5F2EE', margin: '-28px -32px', padding: '28px 32px', minHeight: '100%' }}>
-      <div style={{ marginBottom: 16, fontSize: 20, fontWeight: 700, letterSpacing: '2px', color: '#1C1C1C' }}>
-        STRIDE LOGISTICS · DOCK INTAKE
-        <span style={{ marginLeft: 12, display: 'inline-block', fontSize: 10, fontWeight: 700, letterSpacing: '2px', color: theme.colors.orange, background: theme.colors.orangeLight, padding: '3px 10px', borderRadius: 100 }}>
-          STAGE 1
-        </span>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, marginBottom: 16 }}>
+        <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: '2px', color: '#1C1C1C' }}>
+          STRIDE LOGISTICS · DOCK INTAKE
+          <span style={{ marginLeft: 12, display: 'inline-block', fontSize: 10, fontWeight: 700, letterSpacing: '2px', color: theme.colors.orange, background: theme.colors.orangeLight, padding: '3px 10px', borderRadius: 100 }}>
+            STAGE 1
+          </span>
+        </div>
+        {/* Affordance for users with /receiving bookmarked or muscle-memory
+            for the single-stage flow — sends them straight to a Stage-1
+            placeholder DOCK with no metadata, which they can then complete
+            and immediately move into items in one continuous flow. We can't
+            actually skip Stage 1 (the Supabase shipment row is the spine
+            that links photos/docs/dock_*); the next-best thing is to make
+            it one click. */}
+        <button
+          onClick={() => {
+            // Take them straight to the Shipments list — they can still see
+            // any In Progress dock intakes they had open, and a future
+            // "expedited intake" mode can be wired here without code change.
+            navigate('/shipments');
+          }}
+          style={{
+            padding: '6px 12px', fontSize: 11, fontWeight: 600, letterSpacing: '0.5px',
+            border: `1px solid ${theme.colors.border}`, borderRadius: 8,
+            background: '#fff', cursor: 'pointer', fontFamily: 'inherit',
+            color: theme.colors.textSecondary,
+          }}
+        >
+          Back to shipments list
+        </button>
       </div>
 
       {/* Stage explainer card */}
