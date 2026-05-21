@@ -21,7 +21,6 @@ import { LocationPicker } from '../components/shared/LocationPicker';
 import { AutocompleteInput } from '../components/shared/AutocompleteInput';
 import { useLocations } from '../hooks/useLocations';
 
-import { useClients } from '../hooks/useClients';
 import { useAutocomplete } from '../hooks/useAutocomplete';
 import { useReceivingAddons, type ReceivingAddon } from '../hooks/useReceivingAddons';
 import { ReceivingRowMedia } from '../components/media/ReceivingRowMedia';
