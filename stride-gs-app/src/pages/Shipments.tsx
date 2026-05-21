@@ -39,7 +39,9 @@ interface ShipmentRow {
   clientSheetId: string;
   status: string;
   carrier: string;
-  tracking: string;
+  // `Number` suffix matters: lib/searchFilters.ts numeric-only mode only scans
+  // ID-shaped field names. Rename to plain `tracking` and pure-digit search breaks.
+  trackingNumber: string;
   receivedDate: string;
   createdBy: string;
   notes: string;
@@ -55,7 +57,7 @@ function fromApi(s: ApiShipment): ShipmentRow {
     clientSheetId: s.clientSheetId,
     status: 'Received',
     carrier: s.carrier,
-    tracking: s.trackingNumber,
+    trackingNumber: s.trackingNumber,
     receivedDate: s.receiveDate,
     createdBy: '',
     notes: s.notes ?? '',
@@ -109,7 +111,7 @@ function Badge({ t, c }: { t: string; c?: { bg: string; text: string } }) {
 function toCSV(rows: ShipmentRow[], fn: string) {
   const h = 'Shipment #,Client,Status,Carrier,Tracking #,Received,Received By,Items,Notes';
   const b = rows.map(r =>
-    [r.shipmentNo, r.clientName, r.status, r.carrier, r.tracking, r.receivedDate, r.createdBy, r.itemCount, r.notes]
+    [r.shipmentNo, r.clientName, r.status, r.carrier, r.trackingNumber, r.receivedDate, r.createdBy, r.itemCount, r.notes]
       .map(v => `"${String(v).replace(/"/g, '""')}"`)
       .join(',')
   ).join('\n');
@@ -160,7 +162,9 @@ function buildColumns(onView: (row: ShipmentRow) => void) {
       filterFn: mf,
       cell: i => <span style={{ fontSize: 12, color: theme.colors.textSecondary }}>{i.getValue() || '\u2014'}</span>,
     }),
-    col.accessor('tracking', {
+    // Explicit id 'tracking' preserves the legacy column id in saved user view prefs.
+    col.accessor('trackingNumber', {
+      id: 'tracking',
       header: 'Tracking #',
       size: 170,
       cell: i => (
