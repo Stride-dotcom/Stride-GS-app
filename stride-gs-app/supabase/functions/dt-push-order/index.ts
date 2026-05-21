@@ -1,5 +1,18 @@
 /**
- * dt-push-order — Supabase Edge Function (Phase 2c) — v36 2026-05-20 PST
+ * dt-push-order — Supabase Edge Function (Phase 2c) — v37 2026-05-21 PST
+ * v37: <description> emission now gated on `pushed_to_dt_at IS NULL`
+ *      (initial push only). Pre-v37 the description was regenerated
+ *      from Stride state on every re-push that included the `notes`
+ *      group, which clobbered DT dispatcher edits to the order's
+ *      "Order Details" block (COD-paid notes, payment receipts,
+ *      special handling, etc.). v37 makes DT's description block
+ *      dispatcher-owned after create. Stride still seeds it on the
+ *      initial push so the dispatcher has full billing + delivery
+ *      context, but never overwrites it again. Trade-off: billing
+ *      changes in Stride after create do not propagate to the DT
+ *      description — billing reconciliation happens via the invoice
+ *      / Consolidated Billing flow, not via DT's description.
+ *
  * v36: Emit order.po_number into <additional_field_1>. Pre-v36 the
  *      po_number was baked into dt_identifier at create-time only;
  *      later PO edits had nowhere to land on the DT side because no
@@ -734,7 +747,26 @@ function buildOrderXml(
     ? `\n    <delivery_date>${xmlEscape(order.local_service_date || '')}</delivery_date>\n    <request_time_window_start>${xmlEscape(winStart)}</request_time_window_start>\n    <request_time_window_end>${xmlEscape(winEnd)}</request_time_window_end>`
     : '';
 
-  const descriptionXml = include('notes')
+  // <description> = the dispatcher-facing "Order Details" block on the
+  // DT order page. Stride's buildOrderDescription() synthesizes this
+  // from billing summary + order.details on every call, so historically
+  // every re-push that included the `notes` group would REGENERATE the
+  // description from current Stride state and overwrite any edits the
+  // DT dispatcher had made to it (e.g. "PAID CASH ON DELIVERY $200",
+  // "Customer not home, called and rescheduled", etc.). v37 (2026-05-21)
+  // makes the description Stride-authored on the INITIAL push only;
+  // after the order has been pushed once (pushed_to_dt_at IS NOT NULL),
+  // the dispatcher owns the description and Stride no longer touches it.
+  // The pre-v37 footgun is documented in the file header.
+  //
+  // Trade-off: billing-summary changes in Stride after create won't
+  // propagate to DT's description. If the operator needs to push a new
+  // billing summary into DT later, a future "Re-push order details"
+  // button can be added that explicitly opts in (would override the
+  // initial-push gate). Today, billing reconciliation happens via the
+  // invoice / Consolidated Billing flow, not via DT's description.
+  const isInitialPush = !order.pushed_to_dt_at;
+  const descriptionXml = include('notes') && isInitialPush
     ? `\n    <description><![CDATA[${desc}]]></description>`
     : '';
 
