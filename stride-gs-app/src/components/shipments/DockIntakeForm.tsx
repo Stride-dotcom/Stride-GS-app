@@ -16,13 +16,13 @@
  * Inline styles + theme.ts only — matches the rest of the Receiving page.
  */
 import React, { useCallback, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { Truck, Camera, FileText, Check, AlertTriangle, Loader2 } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { AutocompleteSelect } from '../shared/AutocompleteSelect';
 import { PhotoUploadButton } from '../media/PhotoUploadButton';
 import { DocumentScanButton } from '../media/DocumentScanButton';
 import { useClients } from '../../hooks/useClients';
+import { useGoBack } from '../../hooks/useGoBack';
 import { useAuth } from '../../contexts/AuthContext';
 import { usePhotos } from '../../hooks/usePhotos';
 import { useDocuments } from '../../hooks/useDocuments';
@@ -69,7 +69,11 @@ const inputStyle: React.CSSProperties = {
 };
 
 export function DockIntakeForm() {
-  const navigate = useNavigate();
+  // History-aware back / post-save nav. Pops the SPA stack so the operator
+  // returns to the Shipments list with their previously-applied client +
+  // status filters intact; falls back to /shipments when the page was
+  // direct-linked into a fresh tab.
+  const goBack = useGoBack('/shipments');
   const { isMobile } = useIsMobile();
   const { user } = useAuth();
   const { clients: liveClients } = useClients();
@@ -212,16 +216,18 @@ export function DockIntakeForm() {
       try { entityEvents.emitFromRealtime('shipment', savedNo); } catch { /* noop */ }
 
       setToast(`Dock intake saved for ${clientName} — ${savedNo}`);
-      // Brief delay so the operator sees the confirmation; then back to list.
+      // Brief delay so the operator sees the confirmation; then return them
+      // to wherever they came from (typically /shipments with filters still
+      // applied), falling back to /shipments when there's no history.
       setTimeout(() => {
-        navigate('/shipments', { replace: true });
+        goBack();
       }, 900);
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : String(err));
       setSubmitting(false);
     }
   }, [canSubmit, clientSheetId, clientName, dockNo, carrier, tracking, reference,
-      notes, pieceCountNum, user?.email, navigate]);
+      notes, pieceCountNum, user?.email, goBack]);
 
   return (
     <div style={{ position: 'relative', background: '#F5F2EE', margin: '-28px -32px', padding: '28px 32px', minHeight: '100%' }}>
@@ -240,12 +246,7 @@ export function DockIntakeForm() {
             that links photos/docs/dock_*); the next-best thing is to make
             it one click. */}
         <button
-          onClick={() => {
-            // Take them straight to the Shipments list — they can still see
-            // any In Progress dock intakes they had open, and a future
-            // "expedited intake" mode can be wired here without code change.
-            navigate('/shipments');
-          }}
+          onClick={goBack}
           style={{
             padding: '6px 12px', fontSize: 11, fontWeight: 600, letterSpacing: '0.5px',
             border: `1px solid ${theme.colors.border}`, borderRadius: 8,
@@ -497,7 +498,7 @@ export function DockIntakeForm() {
               </div>
             )}
             <button
-              onClick={() => navigate('/shipments')}
+              onClick={goBack}
               disabled={submitting}
               style={{
                 padding: '9px 18px', fontSize: 13, fontWeight: 500,

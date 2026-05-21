@@ -13,6 +13,7 @@ import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { AlertCircle, Loader2, SearchX, ShieldX } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useTaskDetail } from '../hooks/useTaskDetail';
+import { useGoBack } from '../hooks/useGoBack';
 import { TaskDetailPanel } from '../components/shared/TaskDetailPanel';
 import { theme } from '../styles/theme';
 import type { ApiTask } from '../lib/api';
@@ -43,6 +44,9 @@ function PageState({ icon: Icon, color, title, body, actions }: {
 export function TaskPage() {
   const { taskId } = useParams<{ taskId: string }>();
   const navigate = useNavigate();
+  // History-aware back for the error/not-found/access-denied/onClose paths;
+  // `navigate` is still used for forward links (open item).
+  const goBack = useGoBack('/tasks');
   const location = useLocation();
   useAuth();
   // ?client=<spreadsheetId> disambiguates duplicate task_ids that exist when
@@ -114,12 +118,12 @@ export function TaskPage() {
       </div>
     );
   }
-  if (status === 'access-denied') return <PageState icon={ShieldX} color={theme.colors.statusRed} title="Access Denied" body="You don't have permission to view this task." actions={<button onClick={() => navigate(-1)} style={backBtnStyle}>Go Back</button>} />;
-  if (status === 'not-found')    return <PageState icon={SearchX} color={theme.colors.textMuted} title="Task Not Found" body={`No task with ID "${taskId}" was found.`} actions={<button onClick={() => navigate('/tasks')} style={backBtnStyle}>Back to Tasks</button>} />;
+  if (status === 'access-denied') return <PageState icon={ShieldX} color={theme.colors.statusRed} title="Access Denied" body="You don't have permission to view this task." actions={<button onClick={goBack} style={backBtnStyle}>Go Back</button>} />;
+  if (status === 'not-found')    return <PageState icon={SearchX} color={theme.colors.textMuted} title="Task Not Found" body={`No task with ID "${taskId}" was found.`} actions={<button onClick={goBack} style={backBtnStyle}>Back to Tasks</button>} />;
   if (status === 'error') {
     return (
       <PageState icon={AlertCircle} color={theme.colors.statusRed} title="Failed to Load Task" body={error || 'An unexpected error occurred.'}
-        actions={<div style={{ display: 'flex', gap: 12 }}><button onClick={refetch} style={{ ...backBtnStyle, color: theme.colors.primary }}>Retry</button><button onClick={() => navigate('/tasks')} style={backBtnStyle}>Back to Tasks</button></div>}
+        actions={<div style={{ display: 'flex', gap: 12 }}><button onClick={refetch} style={{ ...backBtnStyle, color: theme.colors.primary }}>Retry</button><button onClick={goBack} style={backBtnStyle}>Back to Tasks</button></div>}
       />
     );
   }
@@ -131,7 +135,7 @@ export function TaskPage() {
     <TaskDetailPanel
       renderAsPage
       task={task}
-      onClose={() => navigate(-1)}
+      onClose={goBack}
       onTaskUpdated={handleTaskUpdated}
       onNavigateToItem={(itemId) => navigate(`/inventory/${encodeURIComponent(itemId)}`)}
       itemRepairs={relatedRepairs}

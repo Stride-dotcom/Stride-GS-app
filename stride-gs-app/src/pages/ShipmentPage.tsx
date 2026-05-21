@@ -7,11 +7,12 @@
  * edit logic live in ShipmentDetailPanel.
  */
 import React from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams } from 'react-router-dom';
 import { AlertCircle, Loader2, SearchX, ShieldX } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useShipmentDetail } from '../hooks/useShipmentDetail';
 import { ShipmentDetailPanel } from '../components/shared/ShipmentDetailPanel';
+import { useGoBack } from '../hooks/useGoBack';
 import { theme } from '../styles/theme';
 
 const backBtnStyle: React.CSSProperties = {
@@ -39,7 +40,10 @@ function PageState({ icon: Icon, color, title, body, actions }: {
 
 export function ShipmentPage() {
   const { shipmentNo } = useParams<{ shipmentNo: string }>();
-  const navigate = useNavigate();
+  // History-aware back: pops the SPA stack when there's something to pop
+  // (came from list / search results / another tab in app), falls back to
+  // /shipments when the user direct-linked into this page from email.
+  const goBack = useGoBack('/shipments');
   const { user } = useAuth();
   const { shipment, items, status, error, refetch } = useShipmentDetail(shipmentNo);
 
@@ -52,12 +56,12 @@ export function ShipmentPage() {
       </div>
     );
   }
-  if (status === 'access-denied') return <PageState icon={ShieldX} color={theme.colors.statusRed} title="Access Denied" body="You don't have permission to view this shipment." actions={<button onClick={() => navigate(-1)} style={backBtnStyle}>Go Back</button>} />;
-  if (status === 'not-found')    return <PageState icon={SearchX} color={theme.colors.textMuted} title="Shipment Not Found" body={`No shipment "${shipmentNo}" was found.`} actions={<button onClick={() => navigate('/shipments')} style={backBtnStyle}>Back to Shipments</button>} />;
+  if (status === 'access-denied') return <PageState icon={ShieldX} color={theme.colors.statusRed} title="Access Denied" body="You don't have permission to view this shipment." actions={<button onClick={goBack} style={backBtnStyle}>Go Back</button>} />;
+  if (status === 'not-found')    return <PageState icon={SearchX} color={theme.colors.textMuted} title="Shipment Not Found" body={`No shipment "${shipmentNo}" was found.`} actions={<button onClick={goBack} style={backBtnStyle}>Back to Shipments</button>} />;
   if (status === 'error') {
     return (
       <PageState icon={AlertCircle} color={theme.colors.statusRed} title="Failed to Load Shipment" body={error || 'An unexpected error occurred.'}
-        actions={<div style={{ display: 'flex', gap: 12 }}><button onClick={refetch} style={{ ...backBtnStyle, color: theme.colors.primary }}>Retry</button><button onClick={() => navigate('/shipments')} style={backBtnStyle}>Back to Shipments</button></div>}
+        actions={<div style={{ display: 'flex', gap: 12 }}><button onClick={refetch} style={{ ...backBtnStyle, color: theme.colors.primary }}>Retry</button><button onClick={goBack} style={backBtnStyle}>Back to Shipments</button></div>}
       />
     );
   }
@@ -94,7 +98,7 @@ export function ShipmentPage() {
     <ShipmentDetailPanel
       renderAsPage
       shipment={panelShipment as unknown as Parameters<typeof ShipmentDetailPanel>[0]['shipment']}
-      onClose={() => navigate(-1)}
+      onClose={goBack}
       userRole={user?.role}
       isParent={(user as { isParent?: boolean } | null)?.isParent}
       onItemsChanged={refetch}

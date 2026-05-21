@@ -15,6 +15,7 @@ import { AlertCircle, Loader2, SearchX, ShieldX } from 'lucide-react';
 import { theme } from '../styles/theme';
 import { useAuth } from '../contexts/AuthContext';
 import { useItemDetail } from '../hooks/useItemDetail';
+import { useGoBack } from '../hooks/useGoBack';
 import { useInventory } from '../hooks/useInventory';
 import { useTasks } from '../hooks/useTasks';
 import { useRepairs } from '../hooks/useRepairs';
@@ -61,7 +62,7 @@ function PageState({ icon: Icon, color, title, body, actions }: {
 
 export function ItemPage() {
   const { itemId } = useParams<{ itemId: string }>();
-  const navigate = useNavigate();
+  const goBack = useGoBack('/inventory');
   const { item, status, error, refetch } = useItemDetail(itemId);
 
   if (status === 'loading') {
@@ -74,15 +75,15 @@ export function ItemPage() {
     );
   }
   if (status === 'access-denied') {
-    return <PageState icon={ShieldX} color={theme.colors.statusRed} title="Access Denied" body="You don't have permission to view this item." actions={<button onClick={() => navigate(-1)} style={backBtnStyle}>Go Back</button>} />;
+    return <PageState icon={ShieldX} color={theme.colors.statusRed} title="Access Denied" body="You don't have permission to view this item." actions={<button onClick={goBack} style={backBtnStyle}>Go Back</button>} />;
   }
   if (status === 'not-found') {
-    return <PageState icon={SearchX} color={theme.colors.textMuted} title="Item Not Found" body={`No item with ID "${itemId}" was found.`} actions={<button onClick={() => navigate('/inventory')} style={backBtnStyle}>Back to Inventory</button>} />;
+    return <PageState icon={SearchX} color={theme.colors.textMuted} title="Item Not Found" body={`No item with ID "${itemId}" was found.`} actions={<button onClick={goBack} style={backBtnStyle}>Back to Inventory</button>} />;
   }
   if (status === 'error') {
     return (
       <PageState icon={AlertCircle} color={theme.colors.statusRed} title="Failed to Load Item" body={error || 'An unexpected error occurred.'}
-        actions={<div style={{ display: 'flex', gap: 12 }}><button onClick={refetch} style={{ ...backBtnStyle, color: theme.colors.primary }}>Retry</button><button onClick={() => navigate('/inventory')} style={backBtnStyle}>Back to Inventory</button></div>}
+        actions={<div style={{ display: 'flex', gap: 12 }}><button onClick={refetch} style={{ ...backBtnStyle, color: theme.colors.primary }}>Retry</button><button onClick={goBack} style={backBtnStyle}>Back to Inventory</button></div>}
       />
     );
   }
@@ -95,6 +96,9 @@ export function ItemPage() {
 
 function ItemPageInner({ item, onRefetch }: { item: ApiInventoryItem; onRefetch: () => void }) {
   const navigate = useNavigate();
+  // History-aware close for the detail-panel onClose hook below. `navigate`
+  // is kept for the forward links (open task / repair / WC / shipment).
+  const goBack = useGoBack('/inventory');
   const { user } = useAuth();
   const clientSheetId = item.clientSheetId;
 
@@ -199,7 +203,7 @@ function ItemPageInner({ item, onRefetch }: { item: ApiInventoryItem; onRefetch:
       <ItemDetailPanel
         renderAsPage
         item={item}
-        onClose={() => navigate(-1)}
+        onClose={goBack}
         photosFolderId={photosFolderId}
         shipmentFolderUrl={shipmentFolderUrl}
         linkedTasks={linkedTasks}

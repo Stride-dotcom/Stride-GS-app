@@ -5,9 +5,10 @@
  * Full WillCallDetailPanel parity.
  */
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useWillCallDetail } from '../hooks/useWillCallDetail';
+import { useGoBack } from '../hooks/useGoBack';
 import { WillCallDetailPanel } from '../components/shared/WillCallDetailPanel';
 import { theme } from '../styles/theme';
 import type { ApiWillCall } from '../lib/api';
@@ -16,7 +17,9 @@ import { ArrowLeft, AlertCircle, SearchX, ShieldX, Loader2 } from 'lucide-react'
 
 export function WillCallJobPage() {
   const { wcNumber } = useParams<{ wcNumber: string }>();
-  const navigate = useNavigate();
+  // Job pages are commonly opened from email CTAs (history empty) — useGoBack
+  // falls back to /will-calls when there's no in-app history to pop.
+  const goBack = useGoBack('/will-calls');
   useAuth(); // Ensure auth context is loaded
 
   const { wc: fetchedWc, status, error, refetch } = useWillCallDetail(wcNumber);
@@ -87,7 +90,7 @@ export function WillCallJobPage() {
         <div style={{ fontSize: 14, color: theme.colors.textMuted, textAlign: 'center', maxWidth: 400 }}>
           You don't have permission to view this will call.
         </div>
-        <button onClick={() => navigate('/will-calls')} style={linkBtnStyle}><ArrowLeft size={14} /> Back to Will Calls</button>
+        <button onClick={goBack} style={linkBtnStyle}><ArrowLeft size={14} /> Back to Will Calls</button>
       </div>
     );
   }
@@ -101,7 +104,7 @@ export function WillCallJobPage() {
         <div style={{ fontSize: 14, color: theme.colors.textMuted, textAlign: 'center', maxWidth: 400 }}>
           No will call with number <code style={{ fontSize: 13, background: theme.colors.bgSubtle, padding: '2px 6px', borderRadius: 4 }}>{wcNumber}</code> was found.
         </div>
-        <button onClick={() => navigate('/will-calls')} style={linkBtnStyle}><ArrowLeft size={14} /> Back to Will Calls</button>
+        <button onClick={goBack} style={linkBtnStyle}><ArrowLeft size={14} /> Back to Will Calls</button>
       </div>
     );
   }
@@ -115,7 +118,7 @@ export function WillCallJobPage() {
         <div style={{ fontSize: 14, color: theme.colors.textMuted }}>{error || 'An unexpected error occurred.'}</div>
         <div style={{ display: 'flex', gap: 12 }}>
           <button onClick={refetch} style={{ ...linkBtnStyle, color: theme.colors.primary }}>Retry</button>
-          <button onClick={() => navigate('/will-calls')} style={linkBtnStyle}><ArrowLeft size={14} /> Back to Will Calls</button>
+          <button onClick={goBack} style={linkBtnStyle}><ArrowLeft size={14} /> Back to Will Calls</button>
         </div>
       </div>
     );
@@ -144,7 +147,7 @@ export function WillCallJobPage() {
       <div style={{ flex: 1 }}>
         <WillCallDetailPanel
           wc={displayWc}
-          onClose={() => navigate('/will-calls')}
+          onClose={goBack}
           onWcUpdated={handleWcUpdated}
           applyWcPatch={applyWcPatch}
           mergeWcPatch={mergeWcPatch}

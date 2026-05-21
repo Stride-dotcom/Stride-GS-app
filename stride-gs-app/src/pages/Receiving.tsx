@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { useLocation } from 'react-router-dom';
 import {
   useReactTable, getCoreRowModel, getSortedRowModel,
   flexRender, createColumnHelper,
@@ -15,6 +15,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { usePhotos } from '../hooks/usePhotos';
 import { useDocuments } from '../hooks/useDocuments';
 import { useClients } from '../hooks/useClients';
+import { useGoBack } from '../hooks/useGoBack';
 import { DockIntakeForm } from '../components/shipments/DockIntakeForm';
 
 import { LocationPicker } from '../components/shared/LocationPicker';
@@ -1592,7 +1593,8 @@ function SummaryField({ label, value, mono, icon }: { label: string; value: stri
 
 // ─── Stage 2 fetcher — loads the DOCK row, builds Stage1Prefill ─────────────
 function Stage2Loader({ shipmentNo }: { shipmentNo: string }) {
-  const navigate = useNavigate();
+  // History-aware back for the "Couldn't open Stage 2" error state below.
+  const goBack = useGoBack('/shipments');
   const { user } = useAuth();
   const { clients } = useClients();
   const [stage1, setStage1] = useState<Stage1Prefill | null>(null);
@@ -1670,7 +1672,7 @@ function Stage2Loader({ shipmentNo }: { shipmentNo: string }) {
         <div style={{ fontSize: 14, fontWeight: 600, color: theme.colors.text }}>Couldn't open Stage 2</div>
         <div style={{ fontSize: 12, color: theme.colors.textSecondary, marginTop: 4 }}>{error || 'Unknown error.'}</div>
         <button
-          onClick={() => navigate('/shipments')}
+          onClick={goBack}
           style={{ marginTop: 16, padding: '8px 18px', fontSize: 13, fontWeight: 600, border: 'none', borderRadius: 8, background: theme.colors.orange, color: '#fff', cursor: 'pointer', fontFamily: 'inherit' }}
         >Back to Shipments</button>
       </div>

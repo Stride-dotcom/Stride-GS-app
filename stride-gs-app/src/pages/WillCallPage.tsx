@@ -11,6 +11,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { AlertCircle, Loader2, SearchX, ShieldX } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useWillCallDetail } from '../hooks/useWillCallDetail';
+import { useGoBack } from '../hooks/useGoBack';
 import { WillCallDetailPanel } from '../components/shared/WillCallDetailPanel';
 import { theme } from '../styles/theme';
 import type { ApiWillCall } from '../lib/api';
@@ -41,6 +42,9 @@ function PageState({ icon: Icon, color, title, body, actions }: {
 export function WillCallPage() {
   const { wcNumber } = useParams<{ wcNumber: string }>();
   const navigate = useNavigate();
+  // History-aware back for error/onClose paths; `navigate` is kept for
+  // forward will-call → will-call jumps from inside the detail panel.
+  const goBack = useGoBack('/will-calls');
   useAuth();
   const { wc: fetchedWc, status, error, refetch } = useWillCallDetail(wcNumber);
 
@@ -98,12 +102,12 @@ export function WillCallPage() {
       </div>
     );
   }
-  if (status === 'access-denied') return <PageState icon={ShieldX} color={theme.colors.statusRed} title="Access Denied" body="You don't have permission to view this will call." actions={<button onClick={() => navigate(-1)} style={backBtnStyle}>Go Back</button>} />;
-  if (status === 'not-found')    return <PageState icon={SearchX} color={theme.colors.textMuted} title="Will Call Not Found" body={`No will call "${wcNumber}" was found.`} actions={<button onClick={() => navigate('/will-calls')} style={backBtnStyle}>Back to Will Calls</button>} />;
+  if (status === 'access-denied') return <PageState icon={ShieldX} color={theme.colors.statusRed} title="Access Denied" body="You don't have permission to view this will call." actions={<button onClick={goBack} style={backBtnStyle}>Go Back</button>} />;
+  if (status === 'not-found')    return <PageState icon={SearchX} color={theme.colors.textMuted} title="Will Call Not Found" body={`No will call "${wcNumber}" was found.`} actions={<button onClick={goBack} style={backBtnStyle}>Back to Will Calls</button>} />;
   if (status === 'error') {
     return (
       <PageState icon={AlertCircle} color={theme.colors.statusRed} title="Failed to Load Will Call" body={error || 'An unexpected error occurred.'}
-        actions={<div style={{ display: 'flex', gap: 12 }}><button onClick={refetch} style={{ ...backBtnStyle, color: theme.colors.primary }}>Retry</button><button onClick={() => navigate('/will-calls')} style={backBtnStyle}>Back to Will Calls</button></div>}
+        actions={<div style={{ display: 'flex', gap: 12 }}><button onClick={refetch} style={{ ...backBtnStyle, color: theme.colors.primary }}>Retry</button><button onClick={goBack} style={backBtnStyle}>Back to Will Calls</button></div>}
       />
     );
   }
@@ -115,7 +119,7 @@ export function WillCallPage() {
     <WillCallDetailPanel
       renderAsPage
       wc={wc}
-      onClose={() => navigate(-1)}
+      onClose={goBack}
       onWcUpdated={handleWcUpdated}
       onNavigateToWc={(n) => navigate(`/will-calls/${encodeURIComponent(n)}`)}
       applyWcPatch={applyWcPatch as unknown as (wcNumber: string, patch: Record<string, unknown>) => void}

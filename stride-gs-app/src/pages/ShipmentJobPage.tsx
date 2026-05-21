@@ -5,9 +5,10 @@
  * Renders ShipmentDetailPanel directly — no client filter required.
  */
 import React, { useState, useEffect, useMemo } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useClients } from '../hooks/useClients';
+import { useGoBack } from '../hooks/useGoBack';
 import { ShipmentDetailPanel } from '../components/shared/ShipmentDetailPanel';
 import { theme } from '../styles/theme';
 import { fetchShipmentByNoFromSupabase } from '../lib/supabaseQueries';
@@ -16,7 +17,10 @@ import { ArrowLeft, AlertCircle, SearchX, Loader2 } from 'lucide-react';
 
 export function ShipmentJobPage() {
   const { shipmentNo } = useParams<{ shipmentNo: string }>();
-  const navigate = useNavigate();
+  // Job page reached via email CTA → in-app history usually empty;
+  // useGoBack falls back to dashboard (/) for parity with the legacy
+  // hardcoded navigate('/') calls.
+  const goBack = useGoBack('/');
   const { user } = useAuth();
   const { apiClients } = useClients();
 
@@ -93,7 +97,7 @@ export function ShipmentJobPage() {
         <div style={{ fontSize: 14, color: theme.colors.textMuted, textAlign: 'center', maxWidth: 400 }}>
           No shipment with number <code style={{ fontSize: 13, background: theme.colors.bgSubtle, padding: '2px 6px', borderRadius: 4 }}>{shipmentNo}</code> was found.
         </div>
-        <button onClick={() => navigate('/')} style={linkBtnStyle}>
+        <button onClick={goBack} style={linkBtnStyle}>
           <ArrowLeft size={14} /> Back to Dashboard
         </button>
       </div>
@@ -111,7 +115,7 @@ export function ShipmentJobPage() {
         </div>
         <div style={{ display: 'flex', gap: 12 }}>
           <button onClick={() => window.location.reload()} style={{ ...linkBtnStyle, color: theme.colors.primary }}>Retry</button>
-          <button onClick={() => navigate('/')} style={linkBtnStyle}>
+          <button onClick={goBack} style={linkBtnStyle}>
             <ArrowLeft size={14} /> Back to Dashboard
           </button>
         </div>
@@ -128,7 +132,7 @@ export function ShipmentJobPage() {
       <div style={{ background: '#FFFFFF', borderRadius: 20, padding: 24, border: '1px solid rgba(0,0,0,0.04)', flex: 1, overflow: 'auto' }}>
         <ShipmentDetailPanel
           shipment={shipmentForPanel}
-          onClose={() => navigate('/')}
+          onClose={goBack}
           userRole={user?.role}
           isParent={user?.isParent}
           onItemsChanged={() => {}}
