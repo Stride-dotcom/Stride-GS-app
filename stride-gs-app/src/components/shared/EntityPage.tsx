@@ -15,8 +15,8 @@
  */
 import React, { useMemo, useState } from 'react';
 import { ArrowLeft } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
 import { useIsMobile } from '../../hooks/useIsMobile';
+import { useGoBack } from '../../hooks/useGoBack';
 import { PhotosPanel, DocumentsPanel, NotesPanel } from './EntityAttachments';
 import { EntityHistory } from './EntityHistory';
 import { usePhotos, type EntityType as PhotoEntityType } from '../../hooks/usePhotos';
@@ -326,7 +326,10 @@ export function EntityPage(props: EntityPageConfig) {
     footer,
   } = props;
 
-  const navigate = useNavigate();
+  // History-aware back. Pops the SPA stack so the user lands on the previous
+  // page with filters/search/tab state intact. `backTo` (when provided) is
+  // the fallback for direct-linked entries with no history to pop.
+  const goBack = useGoBack(backTo || '/');
   const { isMobile } = useIsMobile();
 
   const builtIn = useBuiltInEntityTabs(builtInTabs);
@@ -367,10 +370,7 @@ export function EntityPage(props: EntityPageConfig) {
     return finalTabs[0]?.id ?? '';
   });
 
-  const handleBack = () => {
-    if (backTo) navigate(backTo);
-    else navigate(-1);
-  };
+  const handleBack = goBack;
 
   return (
     <div style={{
