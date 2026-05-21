@@ -1483,6 +1483,16 @@ export function OrderPage() {
   // the Review queue.
   const [pushingDt, setPushingDt] = useState(false);
   const [pushDtError, setPushDtError] = useState<string | null>(null);
+  // Per-order "Sync from DT" button — declared at the top with the other
+  // useState calls so it runs unconditionally on every render. Originally
+  // placed alongside handleSyncFromDt further down (line ~2200) which
+  // sat BELOW the early `if (status === 'loading') return` exit at
+  // line ~1947 → on the loading render the hook never ran but on the
+  // post-load render it did → React error #310 "Rendered more hooks
+  // than during the previous render" crashed every order page.
+  // Rules-of-hooks: declare ALL state at the top, before any early
+  // return.
+  const [syncingFromDt, setSyncingFromDt] = useState(false);
   // Re-push confirmation (Save & Resync on an already-pushed order).
   // Holds the diff summary while the operator decides whether to
   // re-push. null = dialog closed. The Supabase save has ALREADY
@@ -2197,7 +2207,12 @@ export function OrderPage() {
   //   • Verifying a push was received by checking what comes back
   // Fire-and-forget UX: toast on completion, refetch the order so the
   // page reflects whatever changed.
-  const [syncingFromDt, setSyncingFromDt] = useState(false);
+  //
+  // NOTE: the useState(syncingFromDt) declaration for this handler lives
+  // up top with the other state hooks (look for `setSyncingFromDt` ~
+  // line 1495). It MUST stay above the early `if (status === 'loading')
+  // return` to satisfy the Rules of Hooks — otherwise React error #310
+  // crashes every order page (PR #491 originally got this wrong).
   const handleSyncFromDt = async () => {
     if (!order || syncingFromDt) return;
     setSyncingFromDt(true);
