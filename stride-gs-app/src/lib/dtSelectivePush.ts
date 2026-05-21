@@ -16,14 +16,17 @@
 export type DtFieldGroup = 'items' | 'date' | 'contact' | 'notes' | 'custom';
 
 // dt_orders column → which DT field group it maps to. A column NOT in
-// this map is not pushed to DT at all (e.g. review_status, po_number,
-// pricing) and so never triggers a re-push on its own.
+// this map is not pushed to DT at all (e.g. review_status, pricing)
+// and so never triggers a re-push on its own.
 //
 // sidemark + client_reference live here under `items` because they are
 // rendered into every item's <description> by the edge function's
 // buildItemDesc — changing them must regenerate the <items> block.
 // coverage/billing/details/notes all surface in the <description> CDATA
-// or <notes> block → `notes`. service_time → `custom`.
+// or <notes> block → `notes`. service_time + po_number → `custom`
+// (po_number lands in DT's <additional_field_1> per dt-push-order v36
+// so a later PO edit visibly updates DT without rewriting anything else;
+// pre-v36 po_number was create-time only).
 const COLUMN_GROUP: Readonly<Record<string, DtFieldGroup>> = {
   local_service_date: 'date',
   window_start_local: 'date',
@@ -46,6 +49,7 @@ const COLUMN_GROUP: Readonly<Record<string, DtFieldGroup>> = {
   sidemark: 'items',
   client_reference: 'items',
   service_time_minutes: 'custom',
+  po_number: 'custom',
 };
 
 export const DT_GROUP_LABEL: Readonly<Record<DtFieldGroup, string>> = {
@@ -79,6 +83,7 @@ const COLUMN_LABEL: Readonly<Record<string, string>> = {
   sidemark: 'Sidemark',
   client_reference: 'Client reference',
   service_time_minutes: 'Service time',
+  po_number: 'PO / Reference number',
 };
 
 export interface DtFieldChange {

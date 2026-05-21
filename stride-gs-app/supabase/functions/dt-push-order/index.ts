@@ -1,5 +1,19 @@
 /**
- * dt-push-order — Supabase Edge Function (Phase 2c) — v35 2026-05-20 PST
+ * dt-push-order — Supabase Edge Function (Phase 2c) — v36 2026-05-20 PST
+ * v36: Emit order.po_number into <additional_field_1>. Pre-v36 the
+ *      po_number was baked into dt_identifier at create-time only;
+ *      later PO edits had nowhere to land on the DT side because no
+ *      XML element carried the value. v36 puts it in custom field
+ *      slot 1 so dispatchers can search/see it after initial create.
+ *      Belongs to the `custom` field group alongside the existing
+ *      additional_field_3 (Attachments) emission. The
+ *      <additional_fields> block is now built from a per-slot list so
+ *      we can grow into _2 / _4 / _5 later without touching the
+ *      assembly logic. Empty values on a slot skip that slot
+ *      individually; the whole block is omitted when no slot has a
+ *      value. DT-side configuration: label additional_field_1 as
+ *      "PO / Reference" in the DT account's custom-field settings.
+ *
  * v35: Capture DT dispatch id from the add_order response and write it
  *      to dt_orders.dt_dispatch_id when present. DT's add_order response
  *      can include the newly-imported order's dispatch id alongside the
@@ -671,12 +685,32 @@ function buildOrderXml(
     ? `\n    <notes count="${noteEntries.length}">\n${noteEntries.join('\n')}\n    </notes>`
     : '';
 
-  // DT custom field #3 = "Attachments" tag (part of the `custom` group).
-  // Only emit when we have a value AND the group is in scope — DT rejects
-  // empty <additional_field_3/> on some accounts, and a scoped push that
-  // didn't touch custom fields must leave DT's value alone.
-  const attachmentsXml = attachmentsField && include('custom')
-    ? `\n    <additional_fields>\n      <additional_field_3>${xmlEscape(attachmentsField)}</additional_field_3>\n    </additional_fields>`
+  // DT additional fields (custom group). Two slots emitted today:
+  //   • additional_field_1 = "PO / Reference" — order.po_number. Visible
+  //     on the DT order page so dispatchers can search by customer PO
+  //     after the initial create. Was previously baked into the
+  //     dt_identifier (order number) at create time only; later edits
+  //     to po_number had no effect on DT until this v36 change.
+  //   • additional_field_3 = "Attachments" — the public share URL.
+  //
+  // Both belong to the `custom` field group: a partial push that
+  // didn't touch custom fields skips the entire <additional_fields>
+  // block so DT keeps whatever the dispatcher may have annotated.
+  // Empty values on individual fields are skipped (some DT accounts
+  // reject empty <additional_field_N/>); the block is omitted entirely
+  // when no field has a value.
+  const customFieldEntries: string[] = [];
+  if (include('custom')) {
+    const poVal = (order.po_number || '').trim();
+    if (poVal) {
+      customFieldEntries.push(`      <additional_field_1>${xmlEscape(poVal)}</additional_field_1>`);
+    }
+    if (attachmentsField) {
+      customFieldEntries.push(`      <additional_field_3>${xmlEscape(attachmentsField)}</additional_field_3>`);
+    }
+  }
+  const attachmentsXml = customFieldEntries.length > 0
+    ? `\n    <additional_fields>\n${customFieldEntries.join('\n')}\n    </additional_fields>`
     : '';
 
   // ── Conditional block assembly ────────────────────────────────────────
