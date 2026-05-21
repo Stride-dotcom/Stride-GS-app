@@ -12,9 +12,10 @@
  * used elsewhere in the app).
  */
 import React, { useEffect, useMemo, useState } from 'react';
-import { useParams, useSearchParams, useNavigate } from 'react-router-dom';
+import { useParams, useSearchParams } from 'react-router-dom';
 import { Loader2, Printer, ArrowLeft, AlertCircle, SearchX } from 'lucide-react';
 import { theme } from '../styles/theme';
+import { useGoBack } from '../hooks/useGoBack';
 import { supabase } from '../lib/supabase';
 
 const STRIDE_LOGO_URL =
@@ -87,7 +88,9 @@ export function InvoicePage() {
   const [searchParams] = useSearchParams();
   const tenantId = searchParams.get('client') || '';
   const autoPrint = searchParams.get('print') === '1';
-  const navigate = useNavigate();
+  // History-aware back. Invoice page is commonly opened from email CTA so
+  // history is often empty — useGoBack falls back to /billing.
+  const goBack = useGoBack('/billing');
 
   const [rows, setRows] = useState<InvoiceLineRow[]>([]);
   const [client, setClient] = useState<InvoiceClient | null>(null);
@@ -244,7 +247,7 @@ export function InvoicePage() {
           {tenantId ? ' for this client' : ''} was found. It may have been voided, or
           you may not have permission to view it.
         </div>
-        <button onClick={() => navigate('/billing')} style={backBtnStyle}>
+        <button onClick={goBack} style={backBtnStyle}>
           <ArrowLeft size={14} /> Back to Billing
         </button>
       </div>
@@ -272,7 +275,7 @@ export function InvoicePage() {
         <div style={{ fontSize: 13, color: theme.colors.textMuted, maxWidth: 500 }}>
           {errMsg}
         </div>
-        <button onClick={() => navigate('/billing')} style={backBtnStyle}>
+        <button onClick={goBack} style={backBtnStyle}>
           <ArrowLeft size={14} /> Back to Billing
         </button>
       </div>
@@ -319,7 +322,7 @@ export function InvoicePage() {
           background: '#fff',
         }}
       >
-        <button onClick={() => navigate(-1)} style={backBtnStyle}>
+        <button onClick={goBack} style={backBtnStyle}>
           <ArrowLeft size={14} /> Back
         </button>
         <div style={{ fontSize: 13, color: theme.colors.textMuted }}>

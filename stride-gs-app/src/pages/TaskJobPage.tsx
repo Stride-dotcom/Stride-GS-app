@@ -7,6 +7,7 @@ import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useTaskDetail } from '../hooks/useTaskDetail';
+import { useGoBack } from '../hooks/useGoBack';
 import { TaskDetailPanel } from '../components/shared/TaskDetailPanel';
 import { theme } from '../styles/theme';
 import type { ApiTask } from '../lib/api';
@@ -15,6 +16,10 @@ import { ArrowLeft, AlertCircle, SearchX, ShieldX, Loader2 } from 'lucide-react'
 export function TaskJobPage() {
   const { taskId } = useParams<{ taskId: string }>();
   const navigate = useNavigate();
+  // Job page is reached via email CTA → in-app history is usually empty;
+  // useGoBack falls back to dashboard (/) for parity with the legacy hardcoded
+  // navigate('/') calls. `navigate` stays for the forward open-item path.
+  const goBack = useGoBack('/');
   const location = useLocation();
   useAuth(); // Ensure auth context is loaded (required for new-tab bootstrap)
   const clientHint = new URLSearchParams(location.search).get('client') || undefined;
@@ -96,7 +101,7 @@ export function TaskJobPage() {
         <div style={{ fontSize: 14, color: theme.colors.textMuted, textAlign: 'center', maxWidth: 400 }}>
           You don't have permission to view this task. It belongs to a client outside your access scope.
         </div>
-        <button onClick={() => navigate('/')} style={linkBtnStyle}>
+        <button onClick={goBack} style={linkBtnStyle}>
           <ArrowLeft size={14} /> Back to Dashboard
         </button>
       </div>
@@ -112,7 +117,7 @@ export function TaskJobPage() {
         <div style={{ fontSize: 14, color: theme.colors.textMuted, textAlign: 'center', maxWidth: 400 }}>
           No task with ID <code style={{ fontSize: 13, background: theme.colors.bgSubtle, padding: '2px 6px', borderRadius: 4 }}>{taskId}</code> was found in any accessible client sheet.
         </div>
-        <button onClick={() => navigate('/')} style={linkBtnStyle}>
+        <button onClick={goBack} style={linkBtnStyle}>
           <ArrowLeft size={14} /> Back to Dashboard
         </button>
       </div>
@@ -130,7 +135,7 @@ export function TaskJobPage() {
         </div>
         <div style={{ display: 'flex', gap: 12 }}>
           <button onClick={refetch} style={{ ...linkBtnStyle, color: theme.colors.primary }}>Retry</button>
-          <button onClick={() => navigate('/')} style={linkBtnStyle}>
+          <button onClick={goBack} style={linkBtnStyle}>
             <ArrowLeft size={14} /> Back to Dashboard
           </button>
         </div>
@@ -166,7 +171,7 @@ export function TaskJobPage() {
       <div style={{ flex: 1 }}>
         <TaskDetailPanel
           task={displayTask}
-          onClose={() => navigate('/')}
+          onClose={goBack}
           onTaskUpdated={handleTaskUpdated}
           onNavigateToItem={(itemId) => navigate('/inventory', { state: { openItemId: itemId } })}
           itemRepairs={relatedRepairs}
