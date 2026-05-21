@@ -1,13 +1,21 @@
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import {
   useReactTable, getCoreRowModel, getSortedRowModel,
   flexRender, createColumnHelper,
   type SortingState, type VisibilityState,
 } from '@tanstack/react-table';
 import { useTablePreferences } from '../hooks/useTablePreferences';
-import { Plus, Copy, X, Check, Truck, Package, AlertTriangle, Printer, ClipboardPaste, ChevronDown, ChevronRight, ChevronUp, Zap, Settings2 } from 'lucide-react';
+import { Plus, Copy, X, Check, Truck, Package, AlertTriangle, Printer, ClipboardPaste, ChevronDown, ChevronRight, ChevronUp, Zap, Settings2, Camera, FileText as DocIcon, Loader2 } from 'lucide-react';
 import { theme } from '../styles/theme';
 import { AutocompleteSelect } from '../components/shared/AutocompleteSelect';
+import { supabase } from '../lib/supabase';
+import { fetchShipmentByNoFromSupabase } from '../lib/supabaseQueries';
+import { useAuth } from '../contexts/AuthContext';
+import { usePhotos } from '../hooks/usePhotos';
+import { useDocuments } from '../hooks/useDocuments';
+import { useClients } from '../hooks/useClients';
+import { DockIntakeForm } from '../components/shipments/DockIntakeForm';
 
 import { LocationPicker } from '../components/shared/LocationPicker';
 import { AutocompleteInput } from '../components/shared/AutocompleteInput';
@@ -101,7 +109,26 @@ const th: React.CSSProperties = { padding: '8px 6px', textAlign: 'left', fontWei
 const td: React.CSSProperties = { padding: '4px 4px', borderBottom: `1px solid ${theme.colors.borderLight}`, verticalAlign: 'middle' };
 
 
-function NewShipmentForm() {
+/**
+ * Stage-1 prefill payload — passed to `NewShipmentForm` when the user opens
+ * an "In Progress" shipment from the Shipments list. The form runs the same
+ * existing GAS `completeShipment` flow at submit, then reconciles the dock
+ * intake row against the new GAS-created shipment (see `handleStage2Reconcile`
+ * inside `NewShipmentForm`).
+ */
+export interface Stage1Prefill {
+  dockShipmentNo: string;          // DOCK-YYYYMMDD-XXXX from Stage 1
+  clientSheetId: string;
+  clientName: string;
+  carrier: string;
+  tracking: string;
+  notes: string;                    // raw notes (may contain "PO/Ref:" prefix)
+  dockPieceCount: number | null;
+  dockCompletedAt: string | null;
+  dockCompletedBy: string | null;
+}
+
+function NewShipmentForm({ stage1 }: { stage1?: Stage1Prefill } = {}) {
   const { isMobile } = useIsMobile();
 
   // ─── Table preferences (column visibility + order, persisted per user) ────
@@ -114,11 +141,11 @@ function NewShipmentForm() {
   const [dragOverColId, setDragOverColId] = useState<string | null>(null);
   const [showColToggle, setShowColToggle] = useState(false);
 
-  const [client, setClient] = useState('');
-  const [clientSheetId, setClientSheetId] = useState('');
-  const [carrier, setCarrier] = useState('');
-  const [tracking, setTracking] = useState('');
-  const [notes, setNotes] = useState('');
+  const [client, setClient] = useState(stage1?.clientName ?? '');
+  const [clientSheetId, setClientSheetId] = useState(stage1?.clientSheetId ?? '');
+  const [carrier, setCarrier] = useState(stage1?.carrier ?? '');
+  const [tracking, setTracking] = useState(stage1?.tracking ?? '');
+  const [notes, setNotes] = useState(stage1?.notes ?? '');
   const [receiveDate, setReceiveDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [chargeReceiving, setChargeReceiving] = useState(true);
   const [autoPrintLabels, setAutoPrintLabels] = useState(() => localStorage.getItem('stride_auto_print_labels') === 'true');
@@ -602,12 +629,67 @@ function NewShipmentForm() {
         return;
       }
 
+      const newShipmentNo = resp.data.shipmentNo || '';
+
+      // ─── Stage 2 reconciliation ────────────────────────────────────────
+      // When this submit came from a Stage 1 dock intake, we need to:
+      //   1. Copy the dock_* metadata onto the GAS-created shipment row
+      //      (which arrived in Supabase via GAS write-through with default
+      //      inbound_status='expected') and mark it 'received'.
+      //   2. Re-link photos + documents from the DOCK shipment_number to
+      //      the new SHP number so the operator's dock-door photos show up
+      //      on the formal shipment record.
+      //   3. Delete the DOCK row so the shipments list shows a single row
+      //      per physical shipment.
+      //
+      // Each step is best-effort + isolated — a failure on photo re-link
+      // doesn't roll back the GAS write (which already succeeded and
+      // produced inventory rows + billing). We surface warnings instead.
+      const reconcileWarnings: string[] = [];
+      if (stage1 && newShipmentNo) {
+        try {
+          await supabase.from('shipments')
+            .update({
+              inbound_status: 'received',
+              dock_piece_count: stage1.dockPieceCount,
+              dock_completed_at: stage1.dockCompletedAt,
+              dock_completed_by: stage1.dockCompletedBy,
+            })
+            .eq('shipment_number', newShipmentNo);
+        } catch (e) {
+          reconcileWarnings.push(`Could not stamp dock metadata onto ${newShipmentNo}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+        try {
+          await supabase.from('item_photos')
+            .update({ entity_id: newShipmentNo })
+            .eq('entity_type', 'shipment')
+            .eq('entity_id', stage1.dockShipmentNo);
+        } catch (e) {
+          reconcileWarnings.push(`Could not move dock photos from ${stage1.dockShipmentNo} → ${newShipmentNo}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+        try {
+          await supabase.from('documents')
+            .update({ context_id: newShipmentNo })
+            .eq('context_type', 'shipment')
+            .eq('context_id', stage1.dockShipmentNo);
+        } catch (e) {
+          reconcileWarnings.push(`Could not move dock documents from ${stage1.dockShipmentNo} → ${newShipmentNo}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+        try {
+          await supabase.from('shipments')
+            .delete()
+            .eq('shipment_number', stage1.dockShipmentNo);
+        } catch (e) {
+          reconcileWarnings.push(`Could not remove dock intake row ${stage1.dockShipmentNo}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+
       setSubmitResult({
-        shipmentNo: resp.data.shipmentNo || '',
+        shipmentNo: newShipmentNo,
         itemCount: resp.data.itemCount || filledItems.length,
         tasksCreated: resp.data.tasksCreated || 0,
         billingRows: resp.data.billingRows || 0,
-        warnings: resp.data.warnings,
+        warnings: [...(resp.data.warnings ?? []), ...reconcileWarnings],
       });
 
       // Auto-print labels if toggle is on
@@ -621,7 +703,7 @@ function NewShipmentForm() {
     } finally {
       setSubmitting(false);
     }
-  }, [client, clientSheetId, filledItems, apiConfigured, carrier, tracking, notes, receiveDate, chargeReceiving, autoPrintLabels, printItemLabels]);
+  }, [client, clientSheetId, filledItems, apiConfigured, carrier, tracking, notes, receiveDate, chargeReceiving, autoPrintLabels, printItemLabels, stage1]);
 
   // ─── TanStack Table setup ─────────────────────────────────────────────────
 
@@ -927,7 +1009,18 @@ function NewShipmentForm() {
         message="Hold tight — completing your shipment"
         subMessage="Adding items to inventory, generating the receiving doc, and emailing the client. This can take 10–20 seconds."
       />
-      <div style={{ marginBottom: 16, fontSize: 20, fontWeight: 700, letterSpacing: '2px', color: '#1C1C1C' }}>STRIDE LOGISTICS · RECEIVING</div>
+      <div style={{ marginBottom: 16, fontSize: 20, fontWeight: 700, letterSpacing: '2px', color: '#1C1C1C' }}>
+        STRIDE LOGISTICS · RECEIVING
+        {stage1 && (
+          <span style={{ marginLeft: 12, display: 'inline-block', fontSize: 10, fontWeight: 700, letterSpacing: '2px', color: theme.colors.orange, background: theme.colors.orangeLight, padding: '3px 10px', borderRadius: 100 }}>
+            STAGE 2 · {stage1.dockShipmentNo}
+          </span>
+        )}
+      </div>
+      {/* Stage 1 read-only summary — shown only in Stage 2 mode. */}
+      {stage1 && (
+        <Stage1Summary stage1={stage1} isMobile={isMobile} />
+      )}
       {/* Shipment Header */}
       <div style={{ background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: isMobile ? 8 : 12, padding: isMobile ? 12 : 20, marginBottom: isMobile ? 10 : 16 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
@@ -1371,6 +1464,195 @@ function NewShipmentForm() {
   );
 }
 
+// ─── Stage 1 summary banner ─────────────────────────────────────────────────
+// Read-only header shown above the items grid when the operator opened an
+// "In Progress" shipment for Stage 2. Pulls photos + documents straight from
+// Supabase via the same hooks Stage 1 used, so anything the dock operator
+// captured shows up here without extra plumbing.
+function Stage1Summary({ stage1, isMobile }: { stage1: Stage1Prefill; isMobile: boolean }) {
+  const { photos } = usePhotos({
+    entityType: 'shipment', entityId: stage1.dockShipmentNo, tenantId: stage1.clientSheetId || null,
+  });
+  const { documents } = useDocuments({
+    contextType: 'shipment', contextId: stage1.dockShipmentNo, tenantId: stage1.clientSheetId || null,
+  });
+
+  const completedAtPretty = stage1.dockCompletedAt
+    ? new Date(stage1.dockCompletedAt).toLocaleString()
+    : '—';
+
+  return (
+    <div style={{
+      background: '#FFF7F0', border: `1px solid ${theme.colors.orange}`,
+      borderRadius: isMobile ? 8 : 12,
+      padding: isMobile ? 12 : 16, marginBottom: isMobile ? 10 : 14,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+        <Truck size={16} color={theme.colors.orange} />
+        <span style={{ fontSize: 13, fontWeight: 700, color: theme.colors.orange, letterSpacing: '0.5px' }}>
+          DOCK INTAKE SUMMARY
+        </span>
+        <span style={{ fontSize: 11, color: theme.colors.textSecondary }}>
+          Captured at the dock during Stage 1 — read-only.
+        </span>
+      </div>
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(4, 1fr)',
+        gap: 12,
+      }}>
+        <SummaryField label="Client" value={stage1.clientName || '—'} />
+        <SummaryField label="Piece Count" value={stage1.dockPieceCount != null ? String(stage1.dockPieceCount) : '—'} />
+        <SummaryField label="Carrier" value={stage1.carrier || '—'} />
+        <SummaryField label="Tracking #" value={stage1.tracking || '—'} mono />
+        <SummaryField label="Completed By" value={stage1.dockCompletedBy || '—'} />
+        <SummaryField label="Completed At" value={completedAtPretty} />
+        <SummaryField label="Photos" value={String(photos.length)} icon={<Camera size={12} color={theme.colors.orange} />} />
+        <SummaryField label="Documents" value={String(documents.length)} icon={<DocIcon size={12} color={theme.colors.orange} />} />
+      </div>
+      {stage1.notes && (
+        <div style={{
+          marginTop: 10, padding: 8,
+          background: '#fff', border: `1px solid ${theme.colors.borderLight}`, borderRadius: 6,
+          fontSize: 12, color: theme.colors.textSecondary, whiteSpace: 'pre-wrap', lineHeight: 1.4,
+        }}>
+          {stage1.notes}
+        </div>
+      )}
+      {photos.length > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>
+          {photos.slice(0, 8).map(p => (
+            <div
+              key={p.id}
+              title={p.file_name}
+              style={{
+                width: 52, height: 52, borderRadius: 6, flexShrink: 0,
+                background: `#E5E7EB url(${p.thumbnail_url || p.storage_url || ''}) center/cover`,
+                border: '1px solid rgba(0,0,0,0.08)',
+              }}
+            />
+          ))}
+          {photos.length > 8 && (
+            <span style={{ fontSize: 11, color: theme.colors.textMuted, fontWeight: 600, alignSelf: 'center' }}>
+              +{photos.length - 8}
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SummaryField({ label, value, mono, icon }: { label: string; value: string; mono?: boolean; icon?: React.ReactNode }) {
+  return (
+    <div>
+      <div style={{ fontSize: 10, fontWeight: 600, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 2, display: 'flex', alignItems: 'center', gap: 4 }}>
+        {icon}{label}
+      </div>
+      <div style={{ fontSize: 13, fontWeight: 600, color: theme.colors.text, fontFamily: mono ? 'monospace' : 'inherit' }}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
+// ─── Stage 2 fetcher — loads the DOCK row, builds Stage1Prefill ─────────────
+function Stage2Loader({ shipmentNo }: { shipmentNo: string }) {
+  const navigate = useNavigate();
+  const { user } = useAuth();
+  const { clients } = useClients();
+  const [stage1, setStage1] = useState<Stage1Prefill | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  // Stable ref so the fetch effect doesn't re-run every time clients[] is a
+  // fresh reference (useClients returns a new array on every Settings change).
+  const clientsRef = useRef(clients);
+  clientsRef.current = clients;
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    (async () => {
+      const row = await fetchShipmentByNoFromSupabase(shipmentNo);
+      if (cancelled) return;
+      if (!row) {
+        setError(`Shipment ${shipmentNo} not found.`);
+        setLoading(false);
+        return;
+      }
+      // Reasonable access check: admin/staff can open anything they query;
+      // client-role users only see their own tenant. The Supabase fetch
+      // doesn't enforce row-level access for cross-tenant reads, but the
+      // anon-key role's RLS does — so a hostile fetch already returns null.
+      if (user?.role === 'client') {
+        const allowed = (user.accessibleClientSheetIds || []);
+        if (!allowed.includes(row.clientSheetId)) {
+          setError('You do not have access to this shipment.');
+          setLoading(false);
+          return;
+        }
+      }
+      // Resolve clientName from the row's tenant_id via the local clients
+      // list. `fetchShipmentByNoFromSupabase` leaves clientName blank; we
+      // need a real name for the autocomplete select + the Stage 1 summary
+      // header to read correctly.
+      const resolvedName = clientsRef.current.find(c => c.id === row.clientSheetId)?.name || '';
+      const prefill: Stage1Prefill = {
+        dockShipmentNo: row.shipmentNumber,
+        clientSheetId: row.clientSheetId,
+        clientName: resolvedName,
+        carrier: row.carrier || '',
+        tracking: row.trackingNumber || '',
+        notes: row.notes || '',
+        dockPieceCount: row.dockPieceCount ?? null,
+        dockCompletedAt: row.dockCompletedAt ?? null,
+        dockCompletedBy: row.dockCompletedBy ?? null,
+      };
+      setStage1(prefill);
+      setLoading(false);
+    })().catch(err => {
+      if (cancelled) return;
+      setError(err instanceof Error ? err.message : String(err));
+      setLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [shipmentNo, user?.role]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (loading) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 240, gap: 10, color: theme.colors.textMuted }}>
+        <Loader2 size={18} style={{ animation: 'spin 1s linear infinite' }} />
+        <span style={{ fontSize: 13 }}>Loading dock intake {shipmentNo}…</span>
+        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+      </div>
+    );
+  }
+  if (error || !stage1) {
+    return (
+      <div style={{ padding: 32, textAlign: 'center' }}>
+        <AlertTriangle size={28} color={theme.colors.statusRed} style={{ marginBottom: 8 }} />
+        <div style={{ fontSize: 14, fontWeight: 600, color: theme.colors.text }}>Couldn't open Stage 2</div>
+        <div style={{ fontSize: 12, color: theme.colors.textSecondary, marginTop: 4 }}>{error || 'Unknown error.'}</div>
+        <button
+          onClick={() => navigate('/shipments')}
+          style={{ marginTop: 16, padding: '8px 18px', fontSize: 13, fontWeight: 600, border: 'none', borderRadius: 8, background: theme.colors.orange, color: '#fff', cursor: 'pointer', fontFamily: 'inherit' }}
+        >Back to Shipments</button>
+      </div>
+    );
+  }
+  return <NewShipmentForm stage1={stage1} />;
+}
+
 export function Receiving() {
-  return <NewShipmentForm />;
+  // Stage 2 mode is triggered by `?shipmentNo=DOCK-...` on the URL. Anything
+  // else (no param, or empty param) renders the new Stage 1 dock intake form.
+  const location = useLocation();
+  const shipmentNo = useMemo(() => {
+    const params = new URLSearchParams(location.search);
+    return (params.get('shipmentNo') || '').trim();
+  }, [location.search]);
+  if (shipmentNo) return <Stage2Loader shipmentNo={shipmentNo} />;
+  return <DockIntakeForm />;
 }
