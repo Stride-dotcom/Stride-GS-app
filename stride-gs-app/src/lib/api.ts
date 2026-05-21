@@ -362,6 +362,11 @@ export interface ApiTask {
   assignedTo: string;
   startedAt?: string;
   customPrice?: number;
+  /** Number of items this task covers — defaults to 1, editable by
+   *  staff via BillingPreviewCard. complete_task_atomic multiplies
+   *  qty × rate when inserting the ledger row. Added 2026-05-21 with
+   *  migration 20260521210000. */
+  qty?: number;
   taskFolderUrl?: string;
   shipmentFolderUrl?: string;
   shipmentPhotosUrl?: string;

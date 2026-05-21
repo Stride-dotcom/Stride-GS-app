@@ -20,6 +20,7 @@ import { postCompleteTask, postCompleteTaskSb, postStartTask, postUpdateTaskNote
 import { useFeatureFlag } from '../../contexts/FeatureFlagContext';
 import { generateTaskWorkOrderPdf } from '../../lib/workOrderPdf';
 import { writeSyncFailed } from '../../lib/syncEvents';
+import { supabase } from '../../lib/supabase';
 import { entityEvents } from '../../lib/entityEvents';
 import { useLocations } from '../../hooks/useLocations';
 import { useIsMobile } from '../../hooks/useIsMobile';
@@ -209,6 +210,57 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
       onTaskUpdated?.();
     }
   }, [apiConfigured, clientSheetId, task.taskId, mergeTaskPatch, clearTaskPatch, onTaskUpdated]);
+
+  // Persist primary qty edits — direct Supabase update to public.tasks.qty
+  // since completeTask is already Supabase-authoritative (active_backend
+  // flag = 'supabase' verified 2026-05-21). No GAS API endpoint needed.
+  // The completion RPC complete_task_atomic (updated in pair migration
+  // 20260521210100) reads v_task.qty and bills qty × rate on the next
+  // completion, so editing qty here flows through to the ledger row
+  // when the task is marked Complete.
+  //
+  // Sheet-side note: tasks.qty does NOT have a reverse-writethrough to
+  // the per-tenant Tasks sheet (no __writeThroughReverseTasks_ writer
+  // exists in the GAS framework yet). Anyone reading the sheet directly
+  // will see stale qty=1. Supabase is the authoritative source for
+  // completion + billing, so the ledger row + invoice will reflect the
+  // updated qty correctly. Acceptable for now; add a tasks writer if
+  // the staleness becomes a problem for sheet-only readers.
+  //
+  // Custom-price semantic note: this PR shifts custom_price from acting
+  // as a TOTAL override to acting as a PER-PIECE override. An operator
+  // who previously set custom_price=$150 (intending it as the total)
+  // and now bumps qty to 3 will get $450, NOT $150. The
+  // BillingPreviewCard's qty × rate breakdown surfaces this visibly,
+  // but operators editing pre-migration custom_price values should
+  // double-check the per-piece value matches their intent.
+  //
+  // Optimistic via mergeTaskPatch; .select('task_id') so we can verify
+  // exactly one row was updated. A zero-row result means RLS rejected
+  // the write (or task_id moved); we revert the optimistic patch and
+  // surface a visible error rather than silently leaving the UI in a
+  // lie. RLS policies tasks_update_client / tasks_update_staff added
+  // in migration 20260521210200 close the silent-filter case but the
+  // verify guard stays as defense-in-depth.
+  const handleUpdatePrimaryQty = useCallback(async (qty: number) => {
+    if (!clientSheetId || !task.taskId) return;
+    const safeQty = Math.max(1, Math.round(qty) || 1);
+    mergeTaskPatch?.(task.taskId, { qty: safeQty });
+    const { data, error } = await supabase
+      .from('tasks')
+      .update({ qty: safeQty })
+      .eq('tenant_id', clientSheetId)
+      .eq('task_id', task.taskId)
+      .select('task_id');
+    if (error || !data || data.length === 0) {
+      const msg = error?.message || 'No row updated (RLS or task_id mismatch)';
+      console.warn('[TaskDetailPanel] update tasks.qty failed:', msg);
+      clearTaskPatch?.(task.taskId);
+      alert(`Could not save quantity: ${msg}`);
+      return;
+    }
+    onTaskUpdated?.();
+  }, [clientSheetId, task.taskId, mergeTaskPatch, clearTaskPatch, onTaskUpdated]);
 
   const [reopenLoading, setReopenLoading] = useState(false);
   const [reopenError, setReopenError] = useState<string | null>(null);
@@ -995,10 +1047,12 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
             svcCode={task.svcCode || task.serviceCode || task.type || null}
             itemClass={task.itemClass || null}
             customPrice={task.customPrice != null ? Number(task.customPrice) : null}
+            primaryQty={task.qty != null ? Number(task.qty) : 1}
             addons={addons}
             visible={canEditAddons}
             editable={canEditAddons && isOpen && !completed}
             onUpdatePrimaryRate={handleUpdatePrimaryRate}
+            onUpdatePrimaryQty={handleUpdatePrimaryQty}
             onAddAddon={async (input) => { await addAddon(input); }}
             onUpdateAddon={async (id, patch) => { await updateAddon(id, patch); }}
             onDeleteAddon={async (id) => { await deleteAddon(id); }}
