@@ -114,6 +114,15 @@ export function useShipments(autoFetch = true, filterClientSheetId?: string | st
         notes: b.notes,
         invoiceUrl: b.invoiceUrl || '',
         folderUrl: b.folderUrl || '',
+        // 2-stage receiving fields aren't carried by the batch endpoint yet —
+        // batch responses come from the GAS-side `getBatchData` which doesn't
+        // read the new Supabase columns. The Shipments page reads them from
+        // the individual Supabase path; for the batch-data path (client users),
+        // we leave inboundStatus blank so the UI falls back to legacy "Received".
+        inboundStatus: (b as any).inboundStatus || '',
+        dockPieceCount: (b as any).dockPieceCount ?? null,
+        dockCompletedAt: (b as any).dockCompletedAt ?? null,
+        dockCompletedBy: (b as any).dockCompletedBy ?? null,
       } as ApiShipment));
     }
     // Individual path: resolve "(single)" clientName using the clients list
