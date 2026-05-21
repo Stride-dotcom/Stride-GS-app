@@ -1881,6 +1881,13 @@ export function OrderPage() {
       details: order.details, driver_notes: order.driverNotes,
       internal_notes: order.internalNotes, sidemark: order.sidemark,
       client_reference: order.clientReference,
+      // po_number — added 2026-05-20 alongside dt-push-order v36
+      // <additional_field_1> emit so editing the PO from inline-edit
+      // actually re-pushes the new value to DT. Pre-fix the column
+      // was patched on the dt_orders row but the selective-push diff
+      // couldn't see it, so summarizeDtChanges returned no groups and
+      // no DT push fired.
+      po_number: order.poNumber,
     };
     const payload: Record<string, unknown> = {
       contact_name: edit.contactName.trim(), contact_address: edit.contactAddress.trim(),
@@ -1893,6 +1900,7 @@ export function OrderPage() {
       details: edit.details.trim(), driver_notes: edit.driverNotes.trim(),
       internal_notes: edit.internalNotes.trim(), sidemark: edit.sidemark.trim(),
       client_reference: edit.clientReference.trim(),
+      po_number: edit.poNumber.trim(),
     };
     const summary = summarizeDtChanges(snapshot, payload, false);
 
