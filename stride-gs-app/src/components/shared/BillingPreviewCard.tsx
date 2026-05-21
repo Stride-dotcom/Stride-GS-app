@@ -353,7 +353,19 @@ export function BillingPreviewCard({
   );
   const projectedAddonsTotal = projectedAddons.reduce((sum, a) => sum + (a.total ?? 0), 0);
 
+  // "Already booked" means the primary line has a LIVE ledger row.
+  // Voided rows do not count — the whole point of Void is to release
+  // the slot so a fresh billing can be written on re-completion (which
+  // is exactly what happens after a reopen). Pre-fix, a reopened task
+  // left its voided ledger row in `recorded` and this check still
+  // matched it, which hid the entire Projected section → operator saw
+  // "rate 0, can't edit qty or rate or add charges" after reopen, with
+  // no recovery path. The same trap would have hit Will Call and
+  // Repair reopens too once any of their flows produced a voided row
+  // for the same entity; gating on r.status !== 'Void' covers all
+  // three entity types in one place.
   const primaryAlreadyBooked = primary && recorded.some(r => {
+    if (r.status === 'Void') return false;
     if (entityType === 'task') {
       return r.ledger_row_id === `${primary.code}-TASK-${entityId}`;
     }
