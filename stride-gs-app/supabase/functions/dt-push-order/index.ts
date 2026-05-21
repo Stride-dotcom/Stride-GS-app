@@ -1,5 +1,11 @@
 /**
- * dt-push-order — Supabase Edge Function (Phase 2c) — v38 2026-05-21 PST
+ * dt-push-order — Supabase Edge Function (Phase 2c) — v38.1 2026-05-21 PST
+ * v38.1: Pickup-stamp marker moved from leading prefix to trailing
+ *      suffix per operator request. Item identity (vendor / description
+ *      / sidemark) leads; "[✓ Picked up M/D DRIVER]" appears at the
+ *      end. PU_MARKER_RE strips BOTH positions so v38-prefix-stamped
+ *      items get cleaned on re-push.
+ *
  * v38: Per-item pickup-stamp prefix on delivery-leg items. When a P+D
  *      pickup completes, stamp-pickup-on-linked-delivery sets
  *      dt_order_items.picked_up_at on each delivery item + writes
@@ -374,14 +380,23 @@ function cdataEscape(val: string): string {
 //   • Linked to a delivery (P+D pair): "PICK UP for Del <DT identifier>: …"
 //   • Standalone pickup back to the warehouse: "PU for return to whse: …"
 /**
- * Sentinel-matching regex for the v38 pickup prefix. Strips
- * "[✓ Picked up <M/D> <DRIVER>] " from a stored description so a
- * re-push that runs after DT has echoed the prefix back to us doesn't
+ * Sentinel-matching regex for the v38/v38.1 pickup marker. Strips
+ * "[✓ Picked up <M/D> <DRIVER>]" from a stored description so a
+ * re-push that runs after DT has echoed the marker back to us doesn't
  * accumulate it. Tolerant of any wording inside the brackets (varied
- * date formats, driver names with spaces) since the bracket pair +
- * trailing space is the anchor.
+ * date formats, driver names with spaces).
+ *
+ * Matches BOTH the historical leading-prefix shape (v38, deployed
+ * 2026-05-21) and the new trailing-suffix shape (v38.1, this commit).
+ * Stripping both ensures an item that was pushed with the v38 prefix
+ * and is re-pushed today gets the prefix cleaned off the front before
+ * the new suffix is appended at the end.
+ *
+ * The leading variant has trailing whitespace; the trailing variant has
+ * leading whitespace. The `g` flag + two anchored alternatives handle
+ * either position.
  */
-const PU_PREFIX_RE = /^\[✓ Picked up [^\]]+\]\s+/;
+const PU_MARKER_RE = /(?:^\[✓ Picked up [^\]]+\]\s+|\s+\[✓ Picked up [^\]]+\]$)/g;
 
 function buildItemDesc(
   it: DtOrderItemRow,
@@ -391,11 +406,12 @@ function buildItemDesc(
   linkedDeliveryIdentifier?: string,
   pickupDriverName?: string | null,
 ): string {
-  // Strip any pre-existing pickup prefix from the stored description
-  // before reassembly. dt-sync-statuses pulls DT's exported items back
-  // into dt_order_items.description, so without this strip the prefix
-  // would compound every cycle ("[✓ ...] [✓ ...] VENDOR | DESC").
-  const cleanDescription = String(it.description ?? '').replace(PU_PREFIX_RE, '').trim();
+  // Strip any pre-existing pickup marker (either historical v38 leading
+  // prefix or v38.1 trailing suffix) from the stored description before
+  // reassembly. dt-sync-statuses pulls DT's exported items back into
+  // dt_order_items.description, so without this strip the marker would
+  // compound every cycle ("[✓ ...] [✓ ...] VENDOR | DESC").
+  const cleanDescription = String(it.description ?? '').replace(PU_MARKER_RE, '').trim();
   const parts: string[] = [];
   if (it.vendor) parts.push(it.vendor);
   if (cleanDescription) parts.push(cleanDescription);
@@ -411,20 +427,27 @@ function buildItemDesc(
       : 'PU for return to whse: ';
     return `${prefix}${withRoom}`;
   }
-  // v38 — delivery-leg pickup-stamp prefix. When the linked PU leg has
-  // completed and this item's PU twin was picked up, prepend a visible
+  // v38 — delivery-leg pickup-stamp marker. When the linked PU leg has
+  // completed and this item's PU twin was picked up, append a visible
   // confirmation so the DT dispatcher view + driver app both show
-  // "[✓ Picked up M/D DRIVER] DOLPHIN CHAIR - LIVING ROOM" inline.
+  // "DOLPHIN CHAIR - LIVING ROOM [✓ Picked up M/D DRIVER]" inline.
   // The data already lives on Stride's side (dt_order_items.picked_up_at
   // + dt_orders.linked_pickup_driver_name); v38 just propagates it into
   // DT's per-item description on the next push-back from dt-sync-statuses.
+  //
+  // v38.1 (2026-05-21) — moved from leading prefix to trailing suffix
+  // per operator request. The item identity (vendor / description /
+  // sidemark) is what dispatchers scan for first; the pickup-confirmation
+  // is metadata that reads more naturally at the end. PU_MARKER_RE
+  // matches BOTH positions so v38-prefix-stamped items still get
+  // cleaned up properly on the next re-push.
   if (it.picked_up_at) {
     const d = new Date(it.picked_up_at);
     if (!Number.isNaN(d.getTime())) {
       const mdy = `${d.getUTCMonth() + 1}/${d.getUTCDate()}`;
       const drv = (pickupDriverName || '').trim();
-      const tag = drv ? `[✓ Picked up ${mdy} ${drv}] ` : `[✓ Picked up ${mdy}] `;
-      return `${tag}${withRoom}`;
+      const tag = drv ? ` [✓ Picked up ${mdy} ${drv}]` : ` [✓ Picked up ${mdy}]`;
+      return `${withRoom}${tag}`;
     }
   }
   return withRoom;
