@@ -5,9 +5,10 @@
  * Full RepairDetailPanel parity.
  */
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { useRepairDetail } from '../hooks/useRepairDetail';
+import { useGoBack } from '../hooks/useGoBack';
 import { RepairDetailPanel } from '../components/shared/RepairDetailPanel';
 import { theme } from '../styles/theme';
 import type { ApiRepair } from '../lib/api';
@@ -15,7 +16,9 @@ import { ArrowLeft, AlertCircle, SearchX, ShieldX, Loader2 } from 'lucide-react'
 
 export function RepairJobPage() {
   const { repairId } = useParams<{ repairId: string }>();
-  const navigate = useNavigate();
+  // History-aware back. Job pages are often opened from email CTAs so
+  // history may be empty — useGoBack falls back to /repairs in that case.
+  const goBack = useGoBack('/repairs');
   useAuth();
 
   const { repair: fetchedRepair, status, error, refetch } = useRepairDetail(repairId);
@@ -83,7 +86,7 @@ export function RepairJobPage() {
         <div style={{ fontSize: 14, color: theme.colors.textMuted, textAlign: 'center', maxWidth: 400 }}>
           You don't have permission to view this repair.
         </div>
-        <button onClick={() => navigate('/repairs')} style={linkBtnStyle}><ArrowLeft size={14} /> Back to Repairs</button>
+        <button onClick={goBack} style={linkBtnStyle}><ArrowLeft size={14} /> Back to Repairs</button>
       </div>
     );
   }
@@ -96,7 +99,7 @@ export function RepairJobPage() {
         <div style={{ fontSize: 14, color: theme.colors.textMuted, textAlign: 'center', maxWidth: 400 }}>
           No repair with ID <code style={{ fontSize: 13, background: theme.colors.bgSubtle, padding: '2px 6px', borderRadius: 4 }}>{repairId}</code> was found.
         </div>
-        <button onClick={() => navigate('/repairs')} style={linkBtnStyle}><ArrowLeft size={14} /> Back to Repairs</button>
+        <button onClick={goBack} style={linkBtnStyle}><ArrowLeft size={14} /> Back to Repairs</button>
       </div>
     );
   }
@@ -109,7 +112,7 @@ export function RepairJobPage() {
         <div style={{ fontSize: 14, color: theme.colors.textMuted }}>{error || 'An unexpected error occurred.'}</div>
         <div style={{ display: 'flex', gap: 12 }}>
           <button onClick={refetch} style={{ ...linkBtnStyle, color: theme.colors.primary }}>Retry</button>
-          <button onClick={() => navigate('/repairs')} style={linkBtnStyle}><ArrowLeft size={14} /> Back to Repairs</button>
+          <button onClick={goBack} style={linkBtnStyle}><ArrowLeft size={14} /> Back to Repairs</button>
         </div>
       </div>
     );
@@ -138,7 +141,7 @@ export function RepairJobPage() {
       <div style={{ flex: 1 }}>
         <RepairDetailPanel
           repair={displayRepair}
-          onClose={() => navigate('/repairs')}
+          onClose={goBack}
           onRepairUpdated={handleRepairUpdated}
           applyRepairPatch={applyRepairPatch}
           mergeRepairPatch={mergeRepairPatch}

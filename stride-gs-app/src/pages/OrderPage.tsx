@@ -23,6 +23,7 @@ import { theme } from '../styles/theme';
 import { BtnSpinner } from '../components/ui/BtnSpinner';
 import { useAuth } from '../contexts/AuthContext';
 import { useOrderDetail } from '../hooks/useOrderDetail';
+import { useGoBack } from '../hooks/useGoBack';
 import {
   fetchDtOrderByIdFromSupabase,
   fetchDtOrderHistory,
@@ -1286,6 +1287,9 @@ function CompletionTab({
 export function OrderPage() {
   const { orderId } = useParams<{ orderId: string }>();
   const navigate = useNavigate();
+  // History-aware back for error/not-found and post-delete. `navigate` is
+  // still used for forward links (open inventory items, etc.).
+  const goBack = useGoBack('/orders');
   const { user } = useAuth();
   const isMobile = useIsMobile();
   const canReview = user?.role === 'admin' || user?.role === 'staff';
@@ -1953,11 +1957,11 @@ export function OrderPage() {
       </div>
     );
   }
-  if (status === 'not-found') return <PageState icon={SearchX} color={theme.colors.textMuted} title="Order Not Found" body={`No order found with this ID.`} actions={<button onClick={() => navigate('/orders')} style={backBtnStyle}>Back to Orders</button>} />;
+  if (status === 'not-found') return <PageState icon={SearchX} color={theme.colors.textMuted} title="Order Not Found" body={`No order found with this ID.`} actions={<button onClick={goBack} style={backBtnStyle}>Back to Orders</button>} />;
   if (status === 'error') {
     return (
       <PageState icon={AlertCircle} color={theme.colors.statusRed} title="Failed to Load Order" body={error || 'An unexpected error occurred.'}
-        actions={<div style={{ display: 'flex', gap: 12 }}><button onClick={refetch} style={{ ...backBtnStyle, color: theme.colors.primary }}>Retry</button><button onClick={() => navigate('/orders')} style={backBtnStyle}>Back to Orders</button></div>}
+        actions={<div style={{ display: 'flex', gap: 12 }}><button onClick={refetch} style={{ ...backBtnStyle, color: theme.colors.primary }}>Retry</button><button onClick={goBack} style={backBtnStyle}>Back to Orders</button></div>}
       />
     );
   }
@@ -2192,7 +2196,10 @@ export function OrderPage() {
       const { error } = await supabase.from('dt_orders').delete().eq('id', order.id);
       if (error) throw new Error(error.message);
       refetch();
-      navigate('/orders');
+      // Post-delete: bounce back to wherever the user came from (typically
+      // the orders list). If they direct-linked into this order from email,
+      // history-back can't help → fallback is /orders.
+      goBack();
     } catch (e) {
       alert(`Discard failed: ${e instanceof Error ? e.message : String(e)}`);
     }

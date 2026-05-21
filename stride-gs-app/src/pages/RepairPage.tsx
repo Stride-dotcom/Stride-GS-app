@@ -12,6 +12,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { AlertCircle, Loader2, SearchX, ShieldX } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useRepairDetail } from '../hooks/useRepairDetail';
+import { useGoBack } from '../hooks/useGoBack';
 import { RepairDetailPanel } from '../components/shared/RepairDetailPanel';
 import { theme } from '../styles/theme';
 import type { ApiRepair } from '../lib/api';
@@ -42,6 +43,9 @@ function PageState({ icon: Icon, color, title, body, actions }: {
 export function RepairPage() {
   const { repairId } = useParams<{ repairId: string }>();
   const navigate = useNavigate();
+  // History-aware back for error/onClose paths; `navigate` is kept for
+  // forward links (open item from inside the detail panel).
+  const goBack = useGoBack('/repairs');
   useAuth();
   const { repair: fetchedRepair, status, error, refetch } = useRepairDetail(repairId);
 
@@ -100,12 +104,12 @@ export function RepairPage() {
       </div>
     );
   }
-  if (status === 'access-denied') return <PageState icon={ShieldX} color={theme.colors.statusRed} title="Access Denied" body="You don't have permission to view this repair." actions={<button onClick={() => navigate(-1)} style={backBtnStyle}>Go Back</button>} />;
-  if (status === 'not-found')    return <PageState icon={SearchX} color={theme.colors.textMuted} title="Repair Not Found" body={`No repair with ID "${repairId}" was found.`} actions={<button onClick={() => navigate('/repairs')} style={backBtnStyle}>Back to Repairs</button>} />;
+  if (status === 'access-denied') return <PageState icon={ShieldX} color={theme.colors.statusRed} title="Access Denied" body="You don't have permission to view this repair." actions={<button onClick={goBack} style={backBtnStyle}>Go Back</button>} />;
+  if (status === 'not-found')    return <PageState icon={SearchX} color={theme.colors.textMuted} title="Repair Not Found" body={`No repair with ID "${repairId}" was found.`} actions={<button onClick={goBack} style={backBtnStyle}>Back to Repairs</button>} />;
   if (status === 'error') {
     return (
       <PageState icon={AlertCircle} color={theme.colors.statusRed} title="Failed to Load Repair" body={error || 'An unexpected error occurred.'}
-        actions={<div style={{ display: 'flex', gap: 12 }}><button onClick={refetch} style={{ ...backBtnStyle, color: theme.colors.primary }}>Retry</button><button onClick={() => navigate('/repairs')} style={backBtnStyle}>Back to Repairs</button></div>}
+        actions={<div style={{ display: 'flex', gap: 12 }}><button onClick={refetch} style={{ ...backBtnStyle, color: theme.colors.primary }}>Retry</button><button onClick={goBack} style={backBtnStyle}>Back to Repairs</button></div>}
       />
     );
   }
@@ -117,7 +121,7 @@ export function RepairPage() {
     <RepairDetailPanel
       renderAsPage
       repair={repair}
-      onClose={() => navigate(-1)}
+      onClose={goBack}
       onRepairUpdated={handleRepairUpdated}
       onNavigateToItem={(itemId) => navigate(`/inventory/${encodeURIComponent(itemId)}`)}
       applyRepairPatch={applyRepairPatch}
