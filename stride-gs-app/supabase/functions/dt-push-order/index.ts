@@ -1,5 +1,19 @@
 /**
- * dt-push-order — Supabase Edge Function (Phase 2c) — v37 2026-05-21 PST
+ * dt-push-order — Supabase Edge Function (Phase 2c) — v38 2026-05-21 PST
+ * v38: Per-item pickup-stamp prefix on delivery-leg items. When a P+D
+ *      pickup completes, stamp-pickup-on-linked-delivery sets
+ *      dt_order_items.picked_up_at on each delivery item + writes
+ *      dt_orders.linked_pickup_driver_name. v38 buildItemDesc then
+ *      prefixes the per-item DT description with "[✓ Picked up M/D
+ *      DRIVER] " so the DT dispatcher view + driver app both show
+ *      pickup confirmation inline on the delivery items. Strips any
+ *      pre-existing prefix from the input description so it can't
+ *      accumulate when DT echoes it back through dt-sync-statuses.
+ *      Pair with dt-sync-statuses change that fires the push-back
+ *      when itemsStamped > 0 (not only when Tier-B propagation
+ *      changed qty/notes) so the first sync after pickup actually
+ *      gets the stamp into DT.
+ *
  * v37: <description> emission now gated on `pushed_to_dt_at IS NULL`
  *      (initial push only). Pre-v37 the description was regenerated
  *      from Stride state on every re-push that included the `notes`
@@ -271,6 +285,12 @@ interface DtOrderRow {
   paid_at: string | null;
   paid_amount: number | null;
   paid_method: string | null;
+  /** v38 — driver name from the linked PU leg, stamped on the delivery
+   *  by stamp-pickup-on-linked-delivery once the pickup completes.
+   *  buildItemDesc passes this into the per-item "[✓ Picked up M/D
+   *  DRIVER] " prefix on delivery-leg items. Null until PU completes
+   *  or on standalone (non-P+D) orders. */
+  linked_pickup_driver_name: string | null;
 }
 
 interface DtOrderItemRow {
@@ -286,6 +306,13 @@ interface DtOrderItemRow {
   cubic_feet: number | null;
   room: string | null;
   extras: Record<string, unknown> | null;
+  /** v38 — set by stamp-pickup-on-linked-delivery on a delivery-leg item
+   *  when its linked PU item completed. buildItemDesc prefixes the DT
+   *  item description with "[✓ Picked up M/D DRIVER] " so the DT driver
+   *  app + dispatcher view shows pickup confirmation inline on each
+   *  delivery item. Null on pickup-leg items + on delivery items
+   *  whose linked PU hasn't finished yet. */
+  picked_up_at: string | null;
 }
 
 // Logical field groups the caller can scope a re-push to. Required
@@ -346,27 +373,61 @@ function cdataEscape(val: string): string {
 // better understand what the pu items belong to"):
 //   • Linked to a delivery (P+D pair): "PICK UP for Del <DT identifier>: …"
 //   • Standalone pickup back to the warehouse: "PU for return to whse: …"
+/**
+ * Sentinel-matching regex for the v38 pickup prefix. Strips
+ * "[✓ Picked up <M/D> <DRIVER>] " from a stored description so a
+ * re-push that runs after DT has echoed the prefix back to us doesn't
+ * accumulate it. Tolerant of any wording inside the brackets (varied
+ * date formats, driver names with spaces) since the bracket pair +
+ * trailing space is the anchor.
+ */
+const PU_PREFIX_RE = /^\[✓ Picked up [^\]]+\]\s+/;
+
 function buildItemDesc(
   it: DtOrderItemRow,
   isPickupLeg: boolean,
   sidemark?: string,
   reference?: string,
   linkedDeliveryIdentifier?: string,
+  pickupDriverName?: string | null,
 ): string {
+  // Strip any pre-existing pickup prefix from the stored description
+  // before reassembly. dt-sync-statuses pulls DT's exported items back
+  // into dt_order_items.description, so without this strip the prefix
+  // would compound every cycle ("[✓ ...] [✓ ...] VENDOR | DESC").
+  const cleanDescription = String(it.description ?? '').replace(PU_PREFIX_RE, '').trim();
   const parts: string[] = [];
   if (it.vendor) parts.push(it.vendor);
-  if (it.description) parts.push(it.description);
+  if (cleanDescription) parts.push(cleanDescription);
   if (sidemark) parts.push(`SM: ${sidemark}`);
   if (reference) parts.push(`Ref: ${reference}`);
-  const base = parts.join(' | ') || it.description || '';
+  const base = parts.join(' | ') || cleanDescription;
   const extrasRoom = (it.extras && typeof it.extras === 'object' ? (it.extras as Record<string, unknown>).room : null);
   const room = (it.room || extrasRoom || '').toString().trim();
   const withRoom = room ? `${base} - ${room}` : base;
-  if (!isPickupLeg) return withRoom;
-  const prefix = linkedDeliveryIdentifier
-    ? `PICK UP for Del ${linkedDeliveryIdentifier}: `
-    : 'PU for return to whse: ';
-  return `${prefix}${withRoom}`;
+  if (isPickupLeg) {
+    const prefix = linkedDeliveryIdentifier
+      ? `PICK UP for Del ${linkedDeliveryIdentifier}: `
+      : 'PU for return to whse: ';
+    return `${prefix}${withRoom}`;
+  }
+  // v38 — delivery-leg pickup-stamp prefix. When the linked PU leg has
+  // completed and this item's PU twin was picked up, prepend a visible
+  // confirmation so the DT dispatcher view + driver app both show
+  // "[✓ Picked up M/D DRIVER] DOLPHIN CHAIR - LIVING ROOM" inline.
+  // The data already lives on Stride's side (dt_order_items.picked_up_at
+  // + dt_orders.linked_pickup_driver_name); v38 just propagates it into
+  // DT's per-item description on the next push-back from dt-sync-statuses.
+  if (it.picked_up_at) {
+    const d = new Date(it.picked_up_at);
+    if (!Number.isNaN(d.getTime())) {
+      const mdy = `${d.getUTCMonth() + 1}/${d.getUTCDate()}`;
+      const drv = (pickupDriverName || '').trim();
+      const tag = drv ? `[✓ Picked up ${mdy} ${drv}] ` : `[✓ Picked up ${mdy}] `;
+      return `${tag}${withRoom}`;
+    }
+  }
+  return withRoom;
 }
 
 // Build the DT order description with billing info
@@ -630,6 +691,13 @@ function buildOrderXml(
       order.sidemark || undefined,
       order.client_reference || undefined,
       isPickupLeg ? linkedDeliveryInfo?.identifier : undefined,
+      // v38 — pass the linked pickup driver name from the order row so
+      // buildItemDesc can render "[✓ Picked up M/D DRIVER] " on
+      // delivery-leg items whose linked PU has completed. Null/undefined
+      // on pickup-leg items + on delivery items where the PU hasn't
+      // finished yet (picked_up_at IS NULL on the item gates the
+      // emission anyway).
+      isPickupLeg ? null : order.linked_pickup_driver_name,
     );
     const cubeVal = it.cubic_feet != null ? `\n      <cube>${it.cubic_feet}</cube>` : '';
     // Warehouse location for the piece — drives where dispatch/
@@ -1027,7 +1095,7 @@ Deno.serve(async (req: Request) => {
   // ── 1. Fetch primary order ────────────────────────────────────────────
   const { data: order, error: orderErr } = await supabase
     .from('dt_orders')
-    .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_phone2, contact_email, local_service_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, order_notes, driver_notes, internal_notes, service_time_minutes, review_status, pushed_to_dt_at, billing_method, order_total, base_delivery_fee, extra_items_count, extra_items_fee, accessorials_json, accessorials_total, coverage_option_id, coverage_charge, declared_value, billing_review_status, paid_at, paid_amount, paid_method')
+    .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_phone2, contact_email, local_service_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, order_notes, driver_notes, internal_notes, service_time_minutes, review_status, pushed_to_dt_at, billing_method, order_total, base_delivery_fee, extra_items_count, extra_items_fee, accessorials_json, accessorials_total, coverage_option_id, coverage_charge, declared_value, billing_review_status, paid_at, paid_amount, paid_method, linked_pickup_driver_name')
     .eq('id', orderId)
     .maybeSingle();
 
@@ -1069,7 +1137,7 @@ Deno.serve(async (req: Request) => {
   // a republish. A republish should reflect Stride's current state.
   const { data: items, error: itemsErr } = await supabase
     .from('dt_order_items')
-    .select('id, inventory_id, dt_item_code, description, quantity, vendor, class_name, cubic_feet, room, extras')
+    .select('id, inventory_id, dt_item_code, description, quantity, vendor, class_name, cubic_feet, room, extras, picked_up_at')
     .eq('dt_order_id', orderId)
     .is('removed_at', null);
 
@@ -1134,7 +1202,7 @@ Deno.serve(async (req: Request) => {
     // works the same either direction.
     const { data: linkedOrder, error: linkedErr } = await supabase
       .from('dt_orders')
-      .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_phone2, contact_email, local_service_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, order_notes, driver_notes, internal_notes, service_time_minutes, review_status, pushed_to_dt_at, billing_method, order_total, base_delivery_fee, extra_items_count, extra_items_fee, accessorials_json, accessorials_total, billing_review_status, paid_at, paid_amount, paid_method')
+      .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_phone2, contact_email, local_service_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, order_notes, driver_notes, internal_notes, service_time_minutes, review_status, pushed_to_dt_at, billing_method, order_total, base_delivery_fee, extra_items_count, extra_items_fee, accessorials_json, accessorials_total, billing_review_status, paid_at, paid_amount, paid_method, linked_pickup_driver_name')
       .eq('id', orderTyped.linked_order_id)
       .maybeSingle();
 
@@ -1172,7 +1240,7 @@ Deno.serve(async (req: Request) => {
       await pruneDuplicateOrderItems(supabase, linkedTyped.id);
       const { data: linkedItems } = await supabase
         .from('dt_order_items')
-        .select('id, inventory_id, dt_item_code, description, quantity, vendor, class_name, cubic_feet, room, extras')
+        .select('id, inventory_id, dt_item_code, description, quantity, vendor, class_name, cubic_feet, room, extras, picked_up_at')
         .eq('dt_order_id', linkedTyped.id)
         .is('removed_at', null);
       const linkedItemsTyped = (linkedItems || []) as DtOrderItemRow[];

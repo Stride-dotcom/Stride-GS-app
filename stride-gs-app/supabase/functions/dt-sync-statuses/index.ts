@@ -879,7 +879,16 @@ Deno.serve(async (req) => {
         // state, so a single invocation suffices regardless of how many
         // items changed. Fire-and-forget — failures land in
         // dt_orders.push_error / sync_events for FailedOperationsDrawer.
-        if (stampResult.fired && stampResult.itemsPropagated.length > 0 && stampResult.linkedDeliveryId) {
+        // v2026-05-21 — fire on itemsStamped > 0 too, not only on
+        // itemsPropagated > 0. dt-push-order v38 includes
+        // "[✓ Picked up M/D DRIVER] " in each delivery item's DT
+        // description when picked_up_at is set. Pre-v38 picked_up_at
+        // alone (no qty/notes change) didn't trigger the push-back, so
+        // DT never learned about the pickup confirmation on the
+        // delivery leg. Now the first sync cycle after PU finishes
+        // fires the delivery push-back even if Tier-B propagation had
+        // nothing else to copy.
+        if (stampResult.fired && (stampResult.itemsPropagated.length > 0 || stampResult.itemsStamped > 0) && stampResult.linkedDeliveryId) {
           const pushUrl = `${Deno.env.get('SUPABASE_URL')}/functions/v1/dt-push-order`;
           const svcKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
           const linkedDeliveryId = stampResult.linkedDeliveryId;
