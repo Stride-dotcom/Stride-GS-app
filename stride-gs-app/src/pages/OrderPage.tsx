@@ -1886,8 +1886,10 @@ export function OrderPage() {
       // actually re-pushes the new value to DT. Pre-fix the column
       // was patched on the dt_orders row but the selective-push diff
       // couldn't see it, so summarizeDtChanges returned no groups and
-      // no DT push fired.
-      po_number: order.poNumber,
+      // no DT push fired. Trimmed on the snapshot side too so a DB
+      // value with stray whitespace doesn't phantom-diff against the
+      // payload (which is always trimmed).
+      po_number: (order.poNumber || '').trim(),
     };
     const payload: Record<string, unknown> = {
       contact_name: edit.contactName.trim(), contact_address: edit.contactAddress.trim(),

@@ -690,7 +690,7 @@ function buildOrderXml(
   //     on the DT order page so dispatchers can search by customer PO
   //     after the initial create. Was previously baked into the
   //     dt_identifier (order number) at create time only; later edits
-  //     to po_number had no effect on DT until this v35 change.
+  //     to po_number had no effect on DT until this v36 change.
   //   • additional_field_3 = "Attachments" — the public share URL.
   //
   // Both belong to the `custom` field group: a partial push that
