@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { useLocation } from 'react-router-dom';
 import {
   useReactTable, getCoreRowModel, getSortedRowModel,
   flexRender, createColumnHelper,
@@ -180,7 +180,6 @@ const td: React.CSSProperties = { padding: '4px 4px', borderBottom: `1px solid $
  */
 function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
   const { isMobile } = useIsMobile();
-  const navigate = useNavigate();
   const goBack = useGoBack('/shipments');
   const { user } = useAuth();
 
@@ -251,10 +250,85 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
   // Pulls the shipments row + draft items for `existingDockNo` once liveClients
   // has loaded enough to resolve clientName. Guarded by a one-shot ref so a
   // late re-render of liveClients doesn't restomp operator edits.
+  //
+  // Timeout safety net: if the clients API never returns (network down,
+  // GAS misconfig, the autoFetch=false code paths still apply, etc.), we'd
+  // hang the operator on an infinite spinner. After 8 seconds without
+  // liveClients we proceed anyway and leave the client-name display blank
+  // (the underlying tenant_id is enough to make Save / Complete work).
   const hydratedRef = useRef(false);
   useEffect(() => {
     if (!existingDockNo || hydratedRef.current) return;
-    if (liveClients.length === 0) return; // wait for the client list
+    if (liveClients.length > 0) {
+      // Ready — fall through to the main effect below.
+    } else {
+      // Schedule a timeout fallback that fires once even if liveClients
+      // never arrives. The main effect re-runs when liveClients updates,
+      // and the hydratedRef short-circuit means whichever path runs first
+      // wins; the other one no-ops.
+      const t = setTimeout(() => {
+        if (!hydratedRef.current) {
+          // Force-run the hydrate path with an empty clients list. The
+          // clientName fallback in the resolver below handles that case.
+          hydratedRef.current = true;
+          (async () => {
+            try {
+              const row = await fetchShipmentByNoFromSupabase(existingDockNo);
+              if (!row) {
+                setHydrateError(`Couldn't find dock intake ${existingDockNo}. It may have been completed or deleted.`);
+              } else {
+                setClientSheetId(row.clientSheetId);
+                setClient(''); // unresolved — clients API hasn't returned
+                setCarrier(row.carrier || '');
+                setTracking(row.trackingNumber || '');
+                setPieceCount(row.dockPieceCount != null ? String(row.dockPieceCount) : '');
+                const { reference: parsedRef, notes: parsedNotes } = unpackNotes(row.notes);
+                setReference(parsedRef);
+                setNotes(parsedNotes);
+                setSavedDockCompletedAt(row.dockCompletedAt ?? null);
+                setSavedDockCompletedBy(row.dockCompletedBy ?? null);
+                setHasSavedDraft(true);
+                // Draft items load — same logic as the main path, repeated
+                // here so the timeout fallback is self-contained.
+                const { data: drafts } = await supabase
+                  .from('dock_draft_items')
+                  .select('*')
+                  .eq('tenant_id', row.clientSheetId)
+                  .eq('dock_shipment_number', existingDockNo)
+                  .order('display_order', { ascending: true });
+                if (drafts && drafts.length > 0) {
+                  setItems(drafts.map((d): DockItem => ({
+                    id: d.id,
+                    itemId: d.item_id || '',
+                    reference: d.reference || '',
+                    vendor: d.vendor || '',
+                    description: d.description || '',
+                    itemClass: d.item_class || '',
+                    qty: d.qty ?? 1,
+                    location: d.location || '',
+                    sidemark: d.sidemark || '',
+                    room: d.room || '',
+                    needsInspection: !!d.needs_inspection,
+                    needsAssembly: !!d.needs_assembly,
+                    itemNotes: d.item_notes || '',
+                    weight: d.weight != null ? Number(d.weight) : undefined,
+                    addons: Array.isArray(d.addons) ? d.addons : [],
+                    autoAppliedAddons: Array.isArray(d.auto_applied_addons) ? d.auto_applied_addons : [],
+                    dismissedAddons: Array.isArray(d.dismissed_addons) ? d.dismissed_addons : [],
+                    expanded: false,
+                  })));
+                }
+              }
+            } catch (e) {
+              setHydrateError(e instanceof Error ? e.message : String(e));
+            } finally {
+              setHydrating(false);
+            }
+          })();
+        }
+      }, 8000);
+      return () => clearTimeout(t);
+    }
     hydratedRef.current = true;
     let cancelled = false;
     (async () => {
@@ -1023,13 +1097,13 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
       // survive.
       const upsertResult = await supabase
         .from('shipments')
-        .upsert(buildShipmentRow(targetDockNo), { onConflict: 'shipment_number' });
+        .upsert(buildShipmentRow(targetDockNo), { onConflict: 'tenant_id,shipment_number' });
       let upsertError = upsertResult.error;
       if (upsertError && !hasSavedDraft && isDockNumberCollision(upsertError)) {
         const retryNo = generateDockNumber();
         const retry = await supabase
           .from('shipments')
-          .upsert(buildShipmentRow(retryNo), { onConflict: 'shipment_number' });
+          .upsert(buildShipmentRow(retryNo), { onConflict: 'tenant_id,shipment_number' });
         if (!retry.error) {
           // Re-tag any photos/docs already uploaded under the original
           // dockNo onto the retry number. Tenant-scoped to defend against
@@ -1064,27 +1138,38 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
       if (partialItems.length > 0) {
         const { error: insErr } = await supabase.from('dock_draft_items')
           .insert(buildDraftRows(targetDockNo));
-        if (insErr) throw new Error(`Failed to save draft items: ${insErr.message}`);
+        if (insErr) {
+          // DELETE succeeded, INSERT failed → operator's items are wiped from
+          // Supabase but still in their grid (React state untouched). Surface
+          // that explicitly so they know the right next move is "tap Save
+          // for Later again" rather than walking away thinking it saved.
+          throw new Error(
+            `Items NOT saved — your dock fields are stored, but the items grid couldn't be persisted: ${insErr.message}. Tap Save for Later again to retry; your entries are still on screen.`
+          );
+        }
       }
 
       // Mark as saved + remember the stamps for the next save.
       setHasSavedDraft(true);
       setSavedDockCompletedAt(dockCompletedAt);
       setSavedDockCompletedBy(dockCompletedBy);
-      // Persist the DOCK number in the URL so a hard refresh resumes the
-      // same draft. `replace: true` so back nav still works correctly.
-      navigate(`/receiving?shipmentNo=${encodeURIComponent(targetDockNo)}`, { replace: true });
       // Notify the shipments list so the In Progress row updates without a
       // manual refresh. Use `emitFromRealtime` (not `emit`) since the row
       // is already authoritative in Supabase from our direct write.
       try { entityEvents.emitFromRealtime('shipment', targetDockNo); } catch { /* noop */ }
+      // goBack() pops to wherever they came from (typically /shipments with
+      // filters intact). Falls back to /shipments when there's no in-app
+      // history. We don't navigate(`/receiving?shipmentNo=...`) before this:
+      // the user is leaving the page, so persisting the URL is dead work —
+      // when they reopen via the In Progress list they'll get the canonical
+      // shipmentNo back from the row anyway.
       goBack();
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : String(err));
     } finally {
       setSavingDraft(false);
     }
-  }, [clientSheetId, carrier, tracking, notes, reference, pieceCount, items, dockNo, hasSavedDraft, savedDockCompletedAt, savedDockCompletedBy, user?.email, navigate, goBack]);
+  }, [clientSheetId, carrier, tracking, notes, reference, pieceCount, items, dockNo, hasSavedDraft, savedDockCompletedAt, savedDockCompletedBy, user?.email, goBack]);
 
   // ─── TanStack Table setup ─────────────────────────────────────────────────
 
