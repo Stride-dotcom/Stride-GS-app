@@ -246,6 +246,24 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
     contextType: 'shipment', contextId: dockNo, tenantId: photoTenant,
   });
 
+  // ─── Save for Later gating ──────────────────────────────────────────────
+  // Three preconditions for Save for Later — picked one by one against
+  // operator feedback after the unified flow shipped:
+  //   1. A client must be chosen (Supabase row has tenant_id NOT NULL).
+  //   2. A positive piece count must be entered (mirrors the gate the
+  //      original DockIntakeForm had — a dock intake without a piece count
+  //      is a half-formed receiving record).
+  //   3. At least one dock-floor photo must be attached. Photos document
+  //      what physically arrived and protect both Stride and the client
+  //      against later damage / shortage disputes — operators were
+  //      occasionally saving rows with zero proof, leaving claims
+  //      unauditable.
+  const pieceCountValid = useMemo(() => {
+    const n = parseInt(pieceCount, 10);
+    return Number.isFinite(n) && n > 0;
+  }, [pieceCount]);
+  const hasAtLeastOnePhoto = photos.length > 0;
+
   // ─── Reopen hydrator ────────────────────────────────────────────────────
   // Pulls the shipments row + draft items for `existingDockNo` once liveClients
   // has loaded enough to resolve clientName. Guarded by a one-shot ref so a
@@ -1596,15 +1614,25 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
             />
           </div>
           <div>
-            <label style={{ fontSize: 11, fontWeight: 500, color: theme.colors.textMuted, display: 'block', marginBottom: 3, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Piece Count</label>
+            <label style={{ fontSize: 11, fontWeight: 500, color: theme.colors.textMuted, display: 'block', marginBottom: 3, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+              Piece Count <span style={{ color: theme.colors.orange }}>*</span>
+              <span style={{ marginLeft: 6, fontSize: 9, fontWeight: 700, color: theme.colors.orange, letterSpacing: '0.05em' }}>REQUIRED</span>
+            </label>
             <input
               type="number"
-              min={0}
+              min={1}
               value={pieceCount}
               onChange={e => setPieceCount(e.target.value)}
               placeholder="e.g. 12"
+              aria-required="true"
               inputMode="numeric"
-              style={{ ...cellInput, padding: '8px 10px', fontSize: 13 }}
+              style={{
+                ...cellInput, padding: '8px 10px', fontSize: 13,
+                // Amber outline while invalid — snaps to neutral once the
+                // operator enters a positive integer. Matches the cue the
+                // legacy DockIntakeForm used.
+                borderColor: pieceCountValid ? theme.colors.borderLight : theme.colors.statusAmber,
+              }}
             />
           </div>
           <div>
@@ -1636,11 +1664,36 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
             doesn't need to exist yet — these attach to `dockNo` and ride
             forward through Save for Later and Complete Receiving alike. */}
         <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 12, marginTop: 14 }}>
-          <div style={{ background: '#FAFBFC', border: `1px solid ${theme.colors.borderLight}`, borderRadius: 10, padding: isMobile ? 12 : 14 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10, fontSize: 12, fontWeight: 600, color: theme.colors.text }}>
+          <div style={{
+            background: '#FAFBFC',
+            // Amber outline + tinted background while no photo is attached
+            // — same visual language as the Piece Count REQUIRED state. Once
+            // a photo is uploaded the panel reverts to the neutral border.
+            border: `1px solid ${hasAtLeastOnePhoto ? theme.colors.borderLight : theme.colors.statusAmber}`,
+            borderRadius: 10,
+            padding: isMobile ? 12 : 14,
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10, fontSize: 12, fontWeight: 600, color: theme.colors.text, flexWrap: 'wrap' }}>
               <Camera size={14} color={theme.colors.orange} />
               Dock Photos ({photos.length})
+              <span style={{ color: theme.colors.orange }}>*</span>
+              <span style={{ fontSize: 9, fontWeight: 700, color: theme.colors.orange, letterSpacing: '0.05em' }}>REQUIRED</span>
             </div>
+            {/* Empty-state nag — only shows while a client is picked (otherwise
+                the disabled "Select a client to enable…" copy below already
+                tells the operator why they can't act). */}
+            {clientSheetId && !hasAtLeastOnePhoto && (
+              <div style={{
+                fontSize: 11, fontWeight: 600,
+                color: '#92400E', background: '#FEF3C7',
+                border: '1px solid #F59E0B', borderRadius: 6,
+                padding: '6px 10px', marginBottom: 10,
+                display: 'flex', alignItems: 'center', gap: 6,
+              }}>
+                <AlertTriangle size={12} />
+                At least 1 photo required before you can save.
+              </div>
+            )}
             {!clientSheetId ? (
               <div style={{ fontSize: 12, color: theme.colors.textMuted, fontStyle: 'italic', padding: '10px 12px', border: `1px dashed ${theme.colors.borderLight}`, borderRadius: 8, textAlign: 'center' }}>
                 Select a client to enable photo upload.
@@ -2036,25 +2089,40 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
             {/* Save for Later — always visible whenever a client is picked.
                 Persists dock fields + any items entered so far, sets
                 inbound_status='in_progress', returns to /shipments. The
-                operator picks back up by clicking the In Progress row. */}
-            <button
-              onClick={handleSaveForLater}
-              disabled={!client || submitting || savingDraft}
-              title={!client ? 'Pick a client first' : 'Save dock intake + items entered so far. You can come back later from the In Progress tab.'}
-              style={{
-                padding: '9px 18px', fontSize: 13, fontWeight: 600, borderRadius: 8,
-                border: `1px solid ${(!client || submitting || savingDraft) ? theme.colors.border : theme.colors.orange}`,
-                background: '#fff',
-                color: (!client || submitting || savingDraft) ? theme.colors.textMuted : theme.colors.orange,
-                cursor: (!client || submitting || savingDraft) ? 'not-allowed' : 'pointer',
-                fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 6,
-              }}
-            >
-              {savingDraft
-                ? <><Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> Saving…</>
-                : <><Save size={14} /> Save for Later</>
-              }
-            </button>
+                operator picks back up by clicking the In Progress row.
+                Gated on client + positive piece count + at least one photo
+                (see `pieceCountValid` / `hasAtLeastOnePhoto` above for why). */}
+            {(() => {
+              const saveBlocked = !client || !pieceCountValid || !hasAtLeastOnePhoto || submitting || savingDraft;
+              // Tooltip surfaces the most specific reason, in the same order
+              // an operator scans the form top-to-bottom — pick the first
+              // unmet precondition.
+              const saveBlockedReason =
+                !client ? 'Pick a client first.'
+                : !pieceCountValid ? 'Enter a piece count (positive number).'
+                : !hasAtLeastOnePhoto ? 'Take or upload at least one dock photo.'
+                : null;
+              return (
+                <button
+                  onClick={handleSaveForLater}
+                  disabled={saveBlocked}
+                  title={saveBlockedReason || 'Save dock intake + items entered so far. You can come back later from the In Progress tab.'}
+                  style={{
+                    padding: '9px 18px', fontSize: 13, fontWeight: 600, borderRadius: 8,
+                    border: `1px solid ${saveBlocked ? theme.colors.border : theme.colors.orange}`,
+                    background: '#fff',
+                    color: saveBlocked ? theme.colors.textMuted : theme.colors.orange,
+                    cursor: saveBlocked ? 'not-allowed' : 'pointer',
+                    fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 6,
+                  }}
+                >
+                  {savingDraft
+                    ? <><Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> Saving…</>
+                    : <><Save size={14} /> Save for Later</>
+                  }
+                </button>
+              );
+            })()}
             {/* Complete Receiving — runs the full GAS flow. Hidden until at
                 least one item row has actual content. Operators who just
                 want to capture dock metadata use Save for Later instead. */}
