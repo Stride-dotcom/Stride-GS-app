@@ -82,6 +82,13 @@ interface Props {
   editable?: boolean;
   /** Persist primary rate. Pass `null` to clear the override. */
   onUpdatePrimaryRate?: (rate: number | null) => Promise<unknown>;
+  /** Initial qty for the primary line. Defaults to 1. Only meaningful
+   *  for task/repair entities — Will Call computes per-item totals
+   *  from wcItems and ignores this. */
+  primaryQty?: number;
+  /** Persist primary qty edits. When omitted the qty input renders
+   *  read-only. */
+  onUpdatePrimaryQty?: (qty: number) => Promise<unknown>;
   /** Persist a new addon row. */
   onAddAddon?: (input: AddEntityAddonInput) => Promise<unknown>;
   /** Persist qty/rate edit on an existing addon. */
@@ -142,6 +149,7 @@ export function BillingPreviewCard({
   addons, visible = true, defaultOpen = false,
   editable = false,
   onUpdatePrimaryRate, onAddAddon, onUpdateAddon, onDeleteAddon,
+  primaryQty, onUpdatePrimaryQty,
 }: Props) {
   const [open, setOpen] = useState(defaultOpen);
   const [recorded, setRecorded] = useState<BillingRow[]>([]);
@@ -185,6 +193,19 @@ export function BillingPreviewCard({
   const primaryRate = isNaN(primaryRateNum) ? 0 : primaryRateNum;
   const primaryIsOverride = primary && Math.abs(primaryRate - primary.catalogRate) > 0.0001;
 
+  // Primary qty — task/repair entities. Editable when onUpdatePrimaryQty
+  // is supplied; otherwise display-only. Default = 1 for parity with the
+  // pre-2026-05-21 hardcoded behaviour (matches complete_task_atomic's
+  // COALESCE(v_task.qty, 1) for tasks created before the column existed).
+  // Will Call ignores this — the wcGroupedByClass path computes one row
+  // per item from wcItems.
+  const initialPrimaryQty = Math.max(1, Math.round(Number(primaryQty ?? 1)) || 1);
+  const [primaryQtyDraft, setPrimaryQtyDraft] = useState(String(initialPrimaryQty));
+  useEffect(() => {
+    setPrimaryQtyDraft(String(initialPrimaryQty));
+  }, [initialPrimaryQty]);
+  const primaryQtyNum = Math.max(1, Math.round(Number(primaryQtyDraft)) || 1);
+
   // ── Will Call: per-item × class projection ──────────────────────────────
   // Tasks/Repairs bill one row at qty=1 with a single class; WCs bill one
   // row PER ITEM with rate keyed on each item's class. The catalog WC rates
@@ -222,9 +243,12 @@ export function BillingPreviewCard({
   }, [isWillCall, wcItems, services, svcCode]);
 
   // primaryTotal still feeds the bottom-line "Projected: $X" + grand total.
-  // For WC we use the summed across all classes; for task/repair the existing
-  // "qty=1, rate=primaryRate" model.
-  const primaryTotal = isWillCall && wcGroupedByClass ? wcGroupedByClass.total : primaryRate;
+  // For WC we use the summed across all classes; for task/repair primary
+  // is now qty × rate (2026-05-21 — was always qty=1 × rate). qty defaults
+  // to 1 so existing single-piece tasks render identically.
+  const primaryTotal = isWillCall && wcGroupedByClass
+    ? wcGroupedByClass.total
+    : primaryQtyNum * primaryRate;
 
   const primarySaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const schedulePrimarySave = useCallback((newRate: number) => {
@@ -435,8 +459,22 @@ export function BillingPreviewCard({
                     serviceName={primary.name}
                     serviceCode={primary.code}
                     classCode={primary.billing === 'class_based' ? itemClass : null}
-                    qty={1}
-                    qtyEditable={false}
+                    qty={primaryQtyNum}
+                    qtyEditable={editable && !!onUpdatePrimaryQty}
+                    qtyDraft={primaryQtyDraft}
+                    onQtyChange={(v) => {
+                      // Local-only update — defer persistence to onQtyBlur
+                      // so each keystroke isn't a network round-trip. Same
+                      // pattern the addon rows use for their qty inputs.
+                      setPrimaryQtyDraft(v);
+                    }}
+                    onQtyBlur={() => {
+                      const n = Math.max(1, Math.round(Number(primaryQtyDraft)) || 1);
+                      if (n !== initialPrimaryQty && onUpdatePrimaryQty) {
+                        void onUpdatePrimaryQty(n);
+                      }
+                      setPrimaryQtyDraft(String(n));
+                    }}
                     rate={primaryRate}
                     rateEditable={editable && !!onUpdatePrimaryRate}
                     rateDraft={primaryRateDraft}
@@ -446,7 +484,7 @@ export function BillingPreviewCard({
                       if (!isNaN(num)) schedulePrimarySave(num);
                     }}
                     onRateBlur={flushPrimarySave}
-                    total={primaryRate}
+                    total={primaryTotal}
                     hasError={primary.missing && !primaryIsOverride}
                     badge={primaryIsOverride ? 'Override' : null}
                     onResetOverride={primaryIsOverride && editable ? resetPrimary : undefined}
@@ -606,7 +644,7 @@ const inputStyleCompact: React.CSSProperties = {
 
 function ProjectedRow({
   serviceName, serviceCode, classCode,
-  qty, qtyEditable, qtyDraft, onQtyChange,
+  qty, qtyEditable, qtyDraft, onQtyChange, onQtyBlur,
   rate, rateEditable, rateDraft, onRateChange, onRateBlur,
   total, primary, hasError, badge, onResetOverride, catalogRate,
 }: {
@@ -617,6 +655,7 @@ function ProjectedRow({
   qtyEditable?: boolean;
   qtyDraft?: string;
   onQtyChange?: (v: string) => void;
+  onQtyBlur?: () => void;
   rate: number;
   rateEditable?: boolean;
   rateDraft?: string;
@@ -672,9 +711,10 @@ function ProjectedRow({
             <span>Qty</span>
             {qtyEditable && onQtyChange ? (
               <input
-                type="number" min={0} step={1}
+                type="number" min={1} step={1}
                 value={qtyDraft ?? String(qty)}
                 onChange={e => onQtyChange(e.target.value)}
+                onBlur={onQtyBlur}
                 style={{ ...inputStyleCompact, width: 50 }}
               />
             ) : (

@@ -84,6 +84,11 @@ export interface Task {
   billed: boolean;
   billedAmount?: number;
   customPrice?: number;
+  /** Number of items this task covers — defaults to 1, editable via
+   *  BillingPreviewCard's primary line. complete_task_atomic
+   *  multiplies qty × rate when inserting the ledger row.
+   *  Added 2026-05-21 with migration 20260521210000. */
+  qty?: number;
   taskFolderUrl?: string;
   shipmentFolderUrl?: string;
   shipmentPhotosUrl?: string;

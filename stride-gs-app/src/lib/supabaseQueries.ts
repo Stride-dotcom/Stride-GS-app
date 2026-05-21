@@ -320,6 +320,7 @@ interface SupabaseTaskRow {
   client_name: string | null;
   due_date: string | null;
   priority: string | null;
+  qty: number | null;
 }
 
 /**
@@ -1202,6 +1203,12 @@ function mapSupabaseTaskRow(row: SupabaseTaskRow, clientNameMap?: ClientNameMap)
     assignedTo: row.assigned_to || '',
     startedAt: row.started_at || '',
     customPrice: row.custom_price ?? undefined,
+    // tasks.qty — 2026-05-21, added so per-task quantities (inspection
+    // finds extras in a box, etc.) bill as qty × rate. Default 1 mirrors
+    // the column DEFAULT and the COALESCE in complete_task_atomic so
+    // pre-migration tasks (where the row may not yet have qty) still
+    // render as "1 × rate".
+    qty: row.qty ?? 1,
     taskFolderUrl: row.task_folder_url || '',
     shipmentFolderUrl: row.shipment_folder_url || '',
     dueDate: row.due_date || undefined,
