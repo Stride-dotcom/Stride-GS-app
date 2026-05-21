@@ -127,7 +127,11 @@ export function DockIntakeForm() {
     return Number.isFinite(n) && n > 0 ? n : null;
   }, [pieceCount]);
 
-  const canSubmit = !!clientSheetId && !!clientName && !submitting;
+  // Piece count is now required — dock intake without a piece count is
+  // effectively a half-formed receiving record (no way to reconcile what
+  // physically showed up against what items land in Stage 2). Operators get
+  // a disabled submit + a visual cue on the label until they enter a value.
+  const canSubmit = !!clientSheetId && !!clientName && pieceCountNum != null && !submitting;
 
   const handleComplete = useCallback(async () => {
     if (!canSubmit) return;
@@ -304,15 +308,25 @@ export function DockIntakeForm() {
             />
           </div>
           <div>
-            <label style={labelStyle}>Piece Count</label>
+            <label style={labelStyle}>
+              Piece Count <span style={{ color: theme.colors.orange }}>*</span>
+              <span style={{ marginLeft: 6, fontSize: 9, fontWeight: 700, color: theme.colors.orange, letterSpacing: '0.05em' }}>REQUIRED</span>
+            </label>
             <input
               type="number"
-              min={0}
+              min={1}
               value={pieceCount}
               onChange={e => setPieceCount(e.target.value)}
               placeholder="e.g. 12"
               inputMode="numeric"
-              style={inputStyle}
+              aria-required="true"
+              style={{
+                ...inputStyle,
+                // Subtle amber outline while empty, snapping to neutral
+                // once a valid positive integer is entered. Mirrors how the
+                // existing receiving form flags required-but-empty fields.
+                borderColor: pieceCountNum == null ? theme.colors.statusAmber : theme.colors.borderLight,
+              }}
             />
           </div>
           <div>
