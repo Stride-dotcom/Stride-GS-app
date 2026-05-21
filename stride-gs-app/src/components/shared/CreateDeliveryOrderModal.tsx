@@ -3641,6 +3641,16 @@ export function CreateDeliveryOrderModal({
           details: mode === 'service_only'
             ? (serviceDescription.trim() ? serviceDescription.trim() : (details.trim() || null))
             : (details.trim() || null),
+          // driver_notes + internal_notes — added 2026-05-20. The
+          // single-leg "Edit Full Order on an existing pushed order"
+          // editPayload silently dropped these two fields; every other
+          // save path (P+D create, draft promote, convert-to-PD,
+          // dedicated P+D edit) included them. Users editing notes in
+          // this branch saw the textareas accept input and the Save
+          // button confirm, but the dt_orders UPDATE never carried the
+          // values and the next read came back to the prior content.
+          driver_notes: driverNotes.trim() || null,
+          internal_notes: internalNotes.trim() || null,
           billing_method: billingMethod,
           service_time_minutes: effectiveServiceTime || null,
           order_type: mode,
