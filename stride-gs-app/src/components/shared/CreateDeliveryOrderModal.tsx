@@ -2255,13 +2255,32 @@ export function CreateDeliveryOrderModal({
         .sort()
         .join('§');
       originalOrderSnapshotRef.current = {
+        // tenant_id captured so a client-swap edit (i.e. changing the
+        // CLIENT on the order) is visible to summarizeDtChanges. The
+        // edit-save UPDATE always rewrites tenant_id from clientSheetId,
+        // but pre-fix the diff classifier never saw it on the snapshot
+        // side, so a client-only change registered as "no DT-relevant
+        // change" and the re-push was silently skipped — DT kept the
+        // original account. dtSelectivePush groups tenant_id as 'custom';
+        // the <account> XML element is always emitted in dt-push-order's
+        // identity block, so the new account name lands on DT as soon
+        // as the partial push fires.
+        tenant_id:          r.tenant_id ?? null,
         local_service_date: r.local_service_date ?? null,
         window_start_local: r.window_start_local ?? null,
         window_end_local:   r.window_end_local ?? null,
         po_number:          r.po_number ?? null,
         sidemark:           r.sidemark ?? null,
+        client_reference:   r.client_reference ?? null,
         details:            r.details ?? null,
         driver_notes:       r.driver_notes ?? null,
+        // internal_notes + order_notes captured for the same reason as
+        // tenant_id above — these are valid DT-push targets per
+        // COLUMN_GROUP['notes'] but were missing from the snapshot, so
+        // editing ONLY one of them would have registered as "no change"
+        // and skipped the push.
+        internal_notes:     r.internal_notes ?? null,
+        order_notes:        r.order_notes ?? null,
         contact_name:       r.contact_name ?? null,
         contact_address:    r.contact_address ?? null,
         contact_city:       r.contact_city ?? null,
