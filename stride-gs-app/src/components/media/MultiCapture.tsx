@@ -67,15 +67,25 @@ export function MultiCapture({
   maxItems = DEFAULT_MAX, compact, label, fullWidth,
 }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const reopenTimerRef = useRef<number | null>(null);
+  const mountedRef = useRef(true);
+  const savingRef = useRef(false);
   const [pending, setPending] = useState<PendingItem[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  useEffect(() => { savingRef.current = saving; }, [saving]);
 
   // Revoke object URLs on unmount so the browser can reclaim the memory.
   // The per-item cleanup in `remove` / `save` handles the happy path; this
   // covers unmounts mid-capture.
   useEffect(() => {
-    return () => { pending.forEach(p => URL.revokeObjectURL(p.preview)); };
+    return () => {
+      mountedRef.current = false;
+      if (reopenTimerRef.current !== null) {
+        window.clearTimeout(reopenTimerRef.current);
+      }
+      pending.forEach(p => URL.revokeObjectURL(p.preview));
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -96,7 +106,25 @@ export function MultiCapture({
     }));
     setPending(prev => [...prev, ...next]);
     setError(null);
-  }, [pending.length, maxItems, mode]);
+
+    // Auto-reopen the camera so a warehouse user can rip through a stack of
+    // pages / damage shots without re-tapping Take Photo between each. iOS
+    // Safari's `capture="environment"` is single-shot — programmatically
+    // re-clicking the hidden input after a short delay is the working
+    // workaround (delay lets the native camera UI finish tearing down).
+    // To stop capturing, the user dismisses the camera modal; no onChange
+    // fires on cancel, so the loop ends cleanly.
+    const nextPendingCount = pending.length + next.length;
+    if (nextPendingCount < maxItems && !disabled) {
+      if (reopenTimerRef.current !== null) {
+        window.clearTimeout(reopenTimerRef.current);
+      }
+      reopenTimerRef.current = window.setTimeout(() => {
+        reopenTimerRef.current = null;
+        if (mountedRef.current && !savingRef.current) inputRef.current?.click();
+      }, 200);
+    }
+  }, [pending.length, maxItems, mode, disabled]);
 
   const removePending = useCallback((id: string) => {
     setPending(prev => {
