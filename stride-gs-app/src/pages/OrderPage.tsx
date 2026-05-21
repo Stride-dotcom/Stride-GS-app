@@ -17,7 +17,7 @@ import {
   // Release Items stay inline as the chosen primary; Print PDF, Edit
   // Full Order, Request Revision, Reject, and Discard Draft collapse
   // into the FAB overflow on mobile.
-  Printer, Edit3, XCircle, Trash2,
+  Printer, Edit3, XCircle, Trash2, RefreshCw,
 } from 'lucide-react';
 import { theme } from '../styles/theme';
 import { BtnSpinner } from '../components/ui/BtnSpinner';
@@ -2184,6 +2184,48 @@ export function OrderPage() {
 
   const handlePrintPdf = () => { generateOrderPdf(order); };
 
+  // ── Per-order "Sync from DT" — manual trigger ──────────────────────────
+  // Invokes dt-sync-statuses with body {orderId} so the operator can
+  // refresh a single order's state from DT immediately instead of waiting
+  // for the next cron cycle (~5 min). The edge function's singleOrderId
+  // branch bypasses the broader active-scope query and pulls just this
+  // order's export.xml. Useful when:
+  //   • Driver just finished a pickup leg and operator wants the linked
+  //     delivery to show the propagated "Picked up by X" stamp NOW
+  //   • Dispatcher edited the order in DT directly and operator wants the
+  //     Stride mirror to reflect that without waiting
+  //   • Verifying a push was received by checking what comes back
+  // Fire-and-forget UX: toast on completion, refetch the order so the
+  // page reflects whatever changed.
+  const [syncingFromDt, setSyncingFromDt] = useState(false);
+  const handleSyncFromDt = async () => {
+    if (!order || syncingFromDt) return;
+    setSyncingFromDt(true);
+    try {
+      const { data, error } = await supabase.functions.invoke('dt-sync-statuses', {
+        body: { orderId: order.id },
+      });
+      if (error) throw new Error(error.message);
+      const res = (data ?? {}) as { ok?: boolean; checked?: number; updated?: number; error?: string };
+      if (res.ok === false) throw new Error(res.error || 'Sync returned ok:false');
+      // Re-fetch the order so any newly-synced fields (status, driver,
+      // notes, items) repaint immediately. No toast — the visible state
+      // change IS the confirmation; res.updated > 0 means something
+      // changed, =0 means DT had nothing new (still a successful sync).
+      const fresh = await fetchDtOrderByIdFromSupabase(order.id);
+      if (fresh) setLocalOrder(fresh);
+      refetch();
+      // Silently no-op on success. Keep the syncingFromDt flag visible
+      // long enough that the operator sees the spinner finish.
+      void res;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      alert(`Sync from DT failed: ${msg}`);
+    } finally {
+      setSyncingFromDt(false);
+    }
+  };
+
   const handleDiscardDraft = async () => {
     if (!window.confirm("Discard this draft? This can't be undone.")) return;
     lastMutationAtRef.current = Date.now();
@@ -2335,6 +2377,21 @@ export function OrderPage() {
     />
   ) : null;
 
+  // Sync from DT — manual single-order refresh. Only meaningful once
+  // an order has been pushed to DT (no DT side to pull from before
+  // that). Hidden on drafts + unpushed orders. Useful for pulling DT
+  // dispatcher edits or pickup-stamp propagation immediately instead
+  // of waiting for the next dt-sync-statuses cron cycle.
+  const syncFromDtButton = !editing && !!order.pushedToDtAt ? (
+    <EPFooterButton
+      key="sync-from-dt"
+      label={syncingFromDt ? 'Syncing…' : 'Sync from DT'}
+      variant="secondary"
+      onClick={handleSyncFromDt}
+      disabled={syncingFromDt}
+    />
+  ) : null;
+
   // ─── Mobile FAB actions ──────────────────────────────────────────────
   // Pattern matches TaskDetailPanel / RepairDetailPanel / WillCallDetailPanel:
   // the most state-relevant action stays as a visible inline pill, every-
@@ -2355,6 +2412,7 @@ export function OrderPage() {
   //   - Request Revision / Reject: reviewer-only (canReview)
   const fabActions: FABAction[] = !editing ? [
     { label: 'Print PDF', icon: <Printer size={16} />, onClick: handlePrintPdf },
+    ...(order.pushedToDtAt ? [{ label: syncingFromDt ? 'Syncing…' : 'Sync from DT', icon: <RefreshCw size={16} />, onClick: () => { void handleSyncFromDt(); } }] : []),
     ...(isOrderEditable ? [{ label: 'Edit Full Order', icon: <Edit3 size={16} />, onClick: handleEditFullOrder }] : []),
     ...(showDiscardDraft ? [{ label: 'Discard Draft', icon: <Trash2 size={16} />, onClick: () => { void handleDiscardDraft(); }, color: '#B91C1C' }] : []),
     ...(showReviewActions ? [
@@ -2413,6 +2471,7 @@ export function OrderPage() {
   const desktopFooterContent = !editing ? (
     <>
       {printButton}
+      {syncFromDtButton}
       {discardDraftButton}
       {/* Edit Full Order — opens the create-order modal in edit mode.
           Available to anyone with access to the order while it's
