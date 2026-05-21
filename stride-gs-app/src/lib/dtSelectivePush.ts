@@ -50,6 +50,17 @@ const COLUMN_GROUP: Readonly<Record<string, DtFieldGroup>> = {
   client_reference: 'items',
   service_time_minutes: 'custom',
   po_number: 'custom',
+  // tenant_id classified as `custom` so changing the CLIENT on an
+  // existing pushed order triggers a partial DT push. <account> is
+  // always emitted in the XML regardless of changedFields, so the
+  // new account name lands on DT as soon as ANY push fires; the
+  // entry here ensures a client-only edit (no other DT-relevant
+  // change) actually fires that push instead of being silently
+  // skipped as "nothing DT-relevant changed". Whether DT's add_order
+  // honours an account swap on an existing dt_identifier is a DT-
+  // side semantics question to verify; the React side now does its
+  // part.
+  tenant_id: 'custom',
 };
 
 export const DT_GROUP_LABEL: Readonly<Record<DtFieldGroup, string>> = {
@@ -84,6 +95,7 @@ const COLUMN_LABEL: Readonly<Record<string, string>> = {
   client_reference: 'Client reference',
   service_time_minutes: 'Service time',
   po_number: 'PO / Reference number',
+  tenant_id: 'Client / DT account',
 };
 
 export interface DtFieldChange {
