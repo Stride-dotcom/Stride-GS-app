@@ -6,7 +6,7 @@
  * useOrderDetail and renders Details / Items / Activity tabs.
  */
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams } from 'react-router-dom';
 import {
   AlertCircle, Loader2, SearchX, Pencil, X,
   CheckCircle2, Clock3, DollarSign, MapPin, Phone,
@@ -1286,9 +1286,7 @@ function CompletionTab({
 
 export function OrderPage() {
   const { orderId } = useParams<{ orderId: string }>();
-  const navigate = useNavigate();
-  // History-aware back for error/not-found and post-delete. `navigate` is
-  // still used for forward links (open inventory items, etc.).
+  // History-aware back for error/not-found and post-delete.
   const goBack = useGoBack('/orders');
   const { user } = useAuth();
   const isMobile = useIsMobile();
