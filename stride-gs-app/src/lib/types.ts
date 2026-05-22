@@ -104,6 +104,7 @@ export type TaskType =
   | 'Storage'
   | 'Delivery'
   | 'Will Call'
+  | 'Split'
   | 'Other';
 
 export type TaskStatus = 'Open' | 'In Progress' | 'Completed' | 'Cancelled';
@@ -116,6 +117,7 @@ export type ServiceCode =
   | 'STOR'
   | 'DLVR'
   | 'WCPU'
+  | 'SPLIT'
   | 'OTHER';
 
 /** One line item on a repair quote. svcCode comes from the

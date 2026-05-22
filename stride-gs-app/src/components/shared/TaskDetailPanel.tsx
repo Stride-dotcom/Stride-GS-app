@@ -33,6 +33,7 @@ import { useTaskAddons } from '../../hooks/useTaskAddons';
 import { BillingPreviewCard } from './BillingPreviewCard';
 import { ClientAcceptAsIsAction } from '../notes/ClientAcceptAsIsAction';
 import { EntityNotesInline } from '../notes/EntityNotesInline';
+import { SplitTaskPanel } from './SplitTaskPanel';
 
 import type { Task, Repair, InventoryItem } from '../../lib/types';
 interface Props {
@@ -801,8 +802,27 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
   // TabbedDetailPanel call below — the tab body functions stay intact
   // and can be hoisted into their own files if needed later.
 
+  const isSplitTask = String(task.type || task.svcCode || '').toUpperCase() === 'SPLIT';
+
   const renderDetailsTab = () => (
     <div style={{ padding: 20 }}>
+
+          {/* Split workflow — only on Split tasks. Pulls workflow params
+              from task.metadata.split_workflow and exposes the Apply Split
+              button that fires the GAS → Postgres RPC → SB→Sheet chain. */}
+          {isSplitTask && clientSheetId && (
+            <SplitTaskPanel
+              task={{
+                taskId: task.taskId,
+                status: task.status,
+                type: task.type,
+                itemId: task.itemId,
+                metadata: (task as any).metadata,
+              }}
+              clientSheetId={clientSheetId}
+              onCompleted={() => onTaskUpdated?.()}
+            />
+          )}
 
           {/* Item Info Card */}
           {task.itemId && (
