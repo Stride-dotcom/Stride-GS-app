@@ -79,20 +79,22 @@ export const GAS_TO_SB_MAP: Record<string, RouteEntry> = {
   createWillCall:      { ef: 'create-will-call-sb',    flagKey: 'createWillCall' },
   processWcRelease:    { ef: 'process-wc-release-sb',  flagKey: 'processWcRelease' },
 
+  // P2 — task/repair field updates. GAS splits each into a separate
+  // doPost case (updateTaskNotes / updateTaskCustomPrice / etc.); the
+  // SB side consolidates them into one EF per entity that accepts any
+  // subset of editable fields. All four task actions share the
+  // `updateTask` feature flag — flipping one canary's flag routes all
+  // four React save-on-blur paths to update-task-sb.
+  updateTaskNotes:        { ef: 'update-task-sb',   flagKey: 'updateTask' },
+  updateTaskCustomPrice:  { ef: 'update-task-sb',   flagKey: 'updateTask' },
+  updateTaskDueDate:      { ef: 'update-task-sb',   flagKey: 'updateTask' },
+  updateTaskPriority:     { ef: 'update-task-sb',   flagKey: 'updateTask' },
+  updateRepairNotes:      { ef: 'update-repair-sb', flagKey: 'updateRepair' },
+
   // The following actions have flag rows seeded (parity-on shadow handlers
   // exist) but NO SB-primary EF deployed yet. Adding them here would
   // route flag-flips to 404. Build their real -sb EF first, then add
   // here in the same PR as the deploy.
-  //
-  //   completeShipment:     receiveShipment flag — handler exists in scope
-  //                         but NOT shipped in this PR. Complexity: shipment
-  //                         number generation, idempotency-tag dedup, N
-  //                         inventory inserts, auto-INSP/ASM task creation,
-  //                         receiving billing rows, Drive folder creation,
-  //                         shipment-received email. ~3-hour port; deferred
-  //                         to a dedicated follow-up PR.
-  //   updateTask:           updateTask flag, no update-task-sb EF yet
-  //   updateRepair:         updateRepair flag, no update-repair-sb EF yet
   //   updateShipment:       updateShipment flag, no update-shipment-sb EF
   //   startTask:            startTask flag, no start-task-sb EF
   //   startRepair:          startRepair flag, no start-repair-sb EF
