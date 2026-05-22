@@ -9,7 +9,7 @@ export interface UseOrderDetailResult {
   order: DtOrderForUI | null;
   status: OrderDetailStatus;
   error: string | null;
-  refetch: () => void;
+  refetch: (opts?: { silent?: boolean }) => void;
 }
 
 export function useOrderDetail(orderId: string | undefined): UseOrderDetailResult {

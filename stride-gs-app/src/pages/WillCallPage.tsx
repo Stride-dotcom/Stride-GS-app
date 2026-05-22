@@ -65,7 +65,8 @@ export function WillCallPage() {
 
   const scheduleRefresh = useCallback(() => {
     if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
-    refreshTimerRef.current = setTimeout(() => { refetch(); }, 2500);
+    // Silent: post-save safety-net refetch should not flash the spinner.
+    refreshTimerRef.current = setTimeout(() => { refetch({ silent: true }); }, 2500);
   }, [refetch]);
 
   useEffect(() => {

@@ -78,7 +78,11 @@ export function TaskPage() {
 
   const scheduleRefresh = useCallback(() => {
     if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
-    refreshTimerRef.current = setTimeout(() => { refetch(); }, 2500);
+    // Silent so the post-save safety-net refetch doesn't flash the spinner
+    // over the detail panel. The optimistic state in localTask already
+    // shows the user's edit; this just grabs the authoritative server row
+    // after GAS write-through to Supabase has had time to land.
+    refreshTimerRef.current = setTimeout(() => { refetch({ silent: true }); }, 2500);
   }, [refetch]);
 
   useEffect(() => {

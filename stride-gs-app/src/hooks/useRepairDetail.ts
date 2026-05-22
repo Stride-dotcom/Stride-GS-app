@@ -25,7 +25,7 @@ export interface UseRepairDetailResult {
   status: RepairDetailStatus;
   error: string | null;
   source: 'supabase' | 'legacy' | null;
-  refetch: () => void;
+  refetch: (opts?: { silent?: boolean }) => void;
 }
 
 export function useRepairDetail(repairId: string | undefined): UseRepairDetailResult {

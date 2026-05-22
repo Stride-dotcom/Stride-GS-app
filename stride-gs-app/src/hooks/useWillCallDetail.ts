@@ -20,7 +20,7 @@ export interface UseWillCallDetailResult {
   status: WillCallDetailStatus;
   error: string | null;
   source: 'supabase' | 'legacy' | null;
-  refetch: () => void;
+  refetch: (opts?: { silent?: boolean }) => void;
 }
 
 export function useWillCallDetail(wcNumber: string | undefined): UseWillCallDetailResult {

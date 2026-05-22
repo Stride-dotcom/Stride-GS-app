@@ -48,8 +48,11 @@ export function TaskJobPage() {
   // has had time to land.
   const scheduleRefresh = useCallback(() => {
     if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    // Silent: post-save safety-net refetch should not flash the spinner over
+    // the panel — the optimistic state in localTask already paints the user's
+    // edit; this just reconciles with the server row after write-through.
     refreshTimerRef.current = setTimeout(() => {
-      refetch();
+      refetch({ silent: true });
     }, 2500);
   }, [refetch]);
 

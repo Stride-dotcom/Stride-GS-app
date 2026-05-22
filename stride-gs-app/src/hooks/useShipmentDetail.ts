@@ -13,7 +13,7 @@ export interface UseShipmentDetailResult {
   items: ApiShipmentItem[];
   status: ShipmentDetailStatus;
   error: string | null;
-  refetch: () => void;
+  refetch: (opts?: { silent?: boolean }) => void;
 }
 
 export function useShipmentDetail(shipmentNo: string | undefined): UseShipmentDetailResult {
