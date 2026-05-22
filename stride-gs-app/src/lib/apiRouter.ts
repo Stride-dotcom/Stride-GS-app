@@ -91,6 +91,10 @@ export const GAS_TO_SB_MAP: Record<string, RouteEntry> = {
   updateTaskPriority:     { ef: 'update-task-sb',   flagKey: 'updateTask' },
   updateRepairNotes:      { ef: 'update-repair-sb', flagKey: 'updateRepair' },
 
+  // P5 — complex flows
+  completeShipment:       { ef: 'complete-shipment-sb', flagKey: 'receiveShipment' },
+  transferItems:          { ef: 'transfer-items-sb',    flagKey: 'transferItems' },
+
   // The following actions have flag rows seeded (parity-on shadow handlers
   // exist) but NO SB-primary EF deployed yet. Adding them here would
   // route flag-flips to 404. Build their real -sb EF first, then add
