@@ -1,5 +1,36 @@
 /**
- * dt-push-order — Supabase Edge Function (Phase 2c) — v38.1 2026-05-21 PST
+ * dt-push-order — Supabase Edge Function (Phase 2c) — v39 2026-05-22 PST
+ * v39: <delivery_date> prefers dt_orders.dt_scheduled_date over
+ *      local_service_date when the former is set. Pairs with the
+ *      dt-sync-statuses v19 change that mirrors DT's scheduled date
+ *      back into dt_scheduled_date every poll. The historical bug
+ *      this fixes: after the dispatcher reschedules an order in DT
+ *      (route move from Tuesday → Thursday), a re-push of the order
+ *      from Stride for an unrelated edit (item add, contact change)
+ *      would send <delivery_date>=local_service_date (still Tuesday,
+ *      our originally-requested date) and DT would treat that as a
+ *      reschedule, kicking the stop off its Thursday route. With
+ *      v39, the re-push sends Thursday back — DT's value, idempotent
+ *      — so the route assignment survives. dt_scheduled_date is
+ *      preserved as the source of truth; local_service_date stays
+ *      pinned to the originally-requested date for billing/audit.
+ *      Initial pushes (no pushed_to_dt_at) still use local_service_date
+ *      because DT hasn't scheduled anything yet — dt_scheduled_date is
+ *      null on those rows by definition.
+ *
+ *      Companion v19 behaviour in dt-sync-statuses re-aligns
+ *      local_service_date to dt_scheduled_date while the order is
+ *      still in "open" category statuses so the two stay coherent for
+ *      the UI; v39 here works whether or not that realign has run yet.
+ *
+ *      Pickup-completion re-push (fired by dt-sync-statuses after a
+ *      PU leg finishes — Tier-B item propagation back into DT) now
+ *      passes changedFields: ['items'] so the date group is omitted
+ *      entirely. Belt-and-suspenders alongside v39's dt_scheduled_date
+ *      preference: even on a legacy row where dt_scheduled_date hasn't
+ *      yet been mirrored, the pickup-completion re-push won't touch
+ *      DT's delivery date.
+ *
  * v38.1: Pickup-stamp marker moved from leading prefix to trailing
  *      suffix per operator request. Item identity (vendor / description
  *      / sidemark) leads; "[✓ Picked up M/D DRIVER]" appears at the
@@ -260,6 +291,12 @@ interface DtOrderRow {
   contact_phone2: string | null;
   contact_email: string | null;
   local_service_date: string | null;
+  /** v39 — DT-side scheduled date pulled by dt-sync-statuses from
+   *  export.xml. When non-null, buildOrderXml uses this value for
+   *  <delivery_date> in preference to local_service_date so re-pushes
+   *  don't kick the stop off its DT-assigned route. Null until the
+   *  first sync after initial push. */
+  dt_scheduled_date: string | null;
   window_start_local: string | null;
   window_end_local: string | null;
   po_number: string | null;
@@ -834,8 +871,18 @@ function buildOrderXml(
     ? `\n      <phone1>${xmlEscape(order.contact_phone || '')}</phone1>\n      <phone2>${xmlEscape(order.contact_phone2 || '')}</phone2>\n      <email>${xmlEscape(order.contact_email || '')}</email>`
     : '';
 
+  // v39 — prefer dt_scheduled_date (mirrored from DT's export.xml by
+  // dt-sync-statuses v19) over local_service_date when set. This keeps
+  // re-pushes idempotent against the dispatcher's route assignment: if
+  // DT moved the stop from Tuesday → Thursday, dt_scheduled_date holds
+  // Thursday, local_service_date still holds Tuesday (the originally-
+  // requested date kept for billing/audit), and the re-push echoes
+  // Thursday back to DT so the route survives. Falls back to
+  // local_service_date when dt_scheduled_date is null (initial push,
+  // or any row that hasn't been synced yet).
+  const deliveryDateForDt = order.dt_scheduled_date ?? order.local_service_date ?? '';
   const dateXml = include('date')
-    ? `\n    <delivery_date>${xmlEscape(order.local_service_date || '')}</delivery_date>\n    <request_time_window_start>${xmlEscape(winStart)}</request_time_window_start>\n    <request_time_window_end>${xmlEscape(winEnd)}</request_time_window_end>`
+    ? `\n    <delivery_date>${xmlEscape(deliveryDateForDt)}</delivery_date>\n    <request_time_window_start>${xmlEscape(winStart)}</request_time_window_start>\n    <request_time_window_end>${xmlEscape(winEnd)}</request_time_window_end>`
     : '';
 
   // <description> = the dispatcher-facing "Order Details" block on the
@@ -1118,7 +1165,7 @@ Deno.serve(async (req: Request) => {
   // ── 1. Fetch primary order ────────────────────────────────────────────
   const { data: order, error: orderErr } = await supabase
     .from('dt_orders')
-    .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_phone2, contact_email, local_service_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, order_notes, driver_notes, internal_notes, service_time_minutes, review_status, pushed_to_dt_at, billing_method, order_total, base_delivery_fee, extra_items_count, extra_items_fee, accessorials_json, accessorials_total, coverage_option_id, coverage_charge, declared_value, billing_review_status, paid_at, paid_amount, paid_method, linked_pickup_driver_name')
+    .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_phone2, contact_email, local_service_date, dt_scheduled_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, order_notes, driver_notes, internal_notes, service_time_minutes, review_status, pushed_to_dt_at, billing_method, order_total, base_delivery_fee, extra_items_count, extra_items_fee, accessorials_json, accessorials_total, coverage_option_id, coverage_charge, declared_value, billing_review_status, paid_at, paid_amount, paid_method, linked_pickup_driver_name')
     .eq('id', orderId)
     .maybeSingle();
 
@@ -1225,7 +1272,7 @@ Deno.serve(async (req: Request) => {
     // works the same either direction.
     const { data: linkedOrder, error: linkedErr } = await supabase
       .from('dt_orders')
-      .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_phone2, contact_email, local_service_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, order_notes, driver_notes, internal_notes, service_time_minutes, review_status, pushed_to_dt_at, billing_method, order_total, base_delivery_fee, extra_items_count, extra_items_fee, accessorials_json, accessorials_total, billing_review_status, paid_at, paid_amount, paid_method, linked_pickup_driver_name')
+      .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_phone2, contact_email, local_service_date, dt_scheduled_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, order_notes, driver_notes, internal_notes, service_time_minutes, review_status, pushed_to_dt_at, billing_method, order_total, base_delivery_fee, extra_items_count, extra_items_fee, accessorials_json, accessorials_total, billing_review_status, paid_at, paid_amount, paid_method, linked_pickup_driver_name')
       .eq('id', orderTyped.linked_order_id)
       .maybeSingle();
 
@@ -1246,6 +1293,14 @@ Deno.serve(async (req: Request) => {
       // window since DT's pickup card renders both side-by-side.
       if (!pickupRow.local_service_date && deliveryRow.local_service_date) {
         pickupRow.local_service_date = deliveryRow.local_service_date;
+      }
+      // v39 — same fallback for dt_scheduled_date (DT-side mirrored date).
+      // A P+D pair shares the calendar day on both legs in DT, so when only
+      // the delivery has been synced (e.g. the pickup row was never pushed
+      // before) we want the pickup re-push to carry the delivery's DT date
+      // so DT keeps the pair coherent on its side.
+      if (!pickupRow.dt_scheduled_date && deliveryRow.dt_scheduled_date) {
+        pickupRow.dt_scheduled_date = deliveryRow.dt_scheduled_date;
       }
       if (!pickupRow.window_start_local && deliveryRow.window_start_local) {
         pickupRow.window_start_local = deliveryRow.window_start_local;
