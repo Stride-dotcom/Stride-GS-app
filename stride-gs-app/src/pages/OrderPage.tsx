@@ -2321,15 +2321,35 @@ export function OrderPage() {
       performedBy: user?.email ?? null,
     });
     try {
-      let to = (order.contactEmail || '').trim();
-      if (!to) to = (order.createdByEmail || '').trim();
-      if (!to && order.createdByUser) {
-        const { data: prof } = await supabase
-          .from('profiles')
-          .select('email')
-          .eq('id', order.createdByUser)
-          .maybeSingle();
-        to = String(prof?.email || '').trim();
+      // For client-submitted orders, the approval email goes to the person
+      // who submitted the order (createdByUser), NOT the delivery contact.
+      // The delivery contact is the end customer who didn't submit anything
+      // and would be confused by an approval email from Stride.
+      // For public-form / staff-created orders, fall back to contactEmail.
+      let to = '';
+      const isClientSubmitted = order.createdByRole === 'client';
+      if (isClientSubmitted) {
+        to = (order.createdByEmail || '').trim();
+        if (!to && order.createdByUser) {
+          const { data: prof } = await supabase
+            .from('profiles')
+            .select('email')
+            .eq('id', order.createdByUser)
+            .maybeSingle();
+          to = String(prof?.email || '').trim();
+        }
+        if (!to) to = (order.contactEmail || '').trim();
+      } else {
+        to = (order.contactEmail || '').trim();
+        if (!to) to = (order.createdByEmail || '').trim();
+        if (!to && order.createdByUser) {
+          const { data: prof } = await supabase
+            .from('profiles')
+            .select('email')
+            .eq('id', order.createdByUser)
+            .maybeSingle();
+          to = String(prof?.email || '').trim();
+        }
       }
       if (to) {
         const hasPricedExtras = Array.isArray(order.accessorials)
