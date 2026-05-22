@@ -145,6 +145,15 @@ BEGIN
     RAISE EXCEPTION 'Task % not found in tenant %', p_task_id, p_tenant_id USING ERRCODE = '02000';
   END IF;
 
+  -- Reject non-SPLIT tasks before any further work. Without this gate the
+  -- idempotency branch below would happily return ok=true for any task
+  -- whose status is already Completed (so calling completeSplitTask with
+  -- e.g. an INSP task_id would silently succeed and confuse the caller).
+  IF UPPER(COALESCE(v_task.type, '')) NOT IN ('SPLIT', 'SPLIT ITEM') THEN
+    RAISE EXCEPTION 'Task % is type %, not SPLIT', p_task_id, v_task.type
+      USING ERRCODE = '22023';
+  END IF;
+
   v_meta := COALESCE(v_task.metadata, '{}'::jsonb);
   v_sw   := COALESCE(v_meta -> 'split_workflow', '{}'::jsonb);
 
@@ -190,12 +199,15 @@ BEGIN
     RAISE EXCEPTION 'Parent inventory % not found in tenant %', v_parent_id, p_tenant_id USING ERRCODE = '02000';
   END IF;
 
-  -- Defensive: parent qty may have drifted between request + completion.
-  -- Recompute keep_qty based on current parent qty so we never end up
-  -- with a negative leftover.
-  IF v_inv_parent.qty < v_keep_qty + v_leftover THEN
+  -- Parent qty must exactly equal keep_qty + leftover_qty. The dialog +
+  -- portal auto-fire paths always satisfy this (they read parent.qty as
+  -- groupedQty and pass keep+leftover=groupedQty), but a future caller
+  -- with keep+leftover<parent.qty would silently destroy the missing
+  -- units (parent gets set to keep_qty, only leftover_qty children are
+  -- created — the delta vanishes). Force the caller to be explicit.
+  IF v_inv_parent.qty <> v_keep_qty + v_leftover THEN
     RAISE EXCEPTION
-      'Parent qty (%) is less than keep_qty (%) + leftover_qty (%); cannot complete split',
+      'Parent qty (%) must equal keep_qty (%) + leftover_qty (%); cannot complete split',
       v_inv_parent.qty, v_keep_qty, v_leftover USING ERRCODE = '22023';
   END IF;
 

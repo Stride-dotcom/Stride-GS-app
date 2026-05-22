@@ -28981,10 +28981,20 @@ function api_mirrorSplitWriteback_(clientSheetId, taskId, parentItemId, childCod
         // column verbatim so the new rows inherit Vendor / Description /
         // Class / Sidemark / Location / Status / Receive Date / etc. — same
         // shape the RPC used when inserting into public.inventory.
+        // Idempotency: skip any child code that already exists on the Sheet
+        // (handles network retries + repeated `completeSplitTask` calls on
+        // an already-completed task — the RPC's idempotency branch returns
+        // the existing child codes, which we'd otherwise duplicate here).
         if (childCodes.length > 0) {
+          var existingChildIds = {};
+          for (var ev = 0; ev < values.length; ev++) {
+            var existingId = String(values[ev][idCol - 1] || "").trim();
+            if (existingId) existingChildIds[existingId] = true;
+          }
           var parentRowValues = values[parentRowIdx].slice();
           var newRows = [];
           for (var c = 0; c < childCodes.length; c++) {
+            if (existingChildIds[childCodes[c]]) continue;  // dedup
             var row = parentRowValues.slice();
             row[idCol - 1]  = childCodes[c];
             row[qtyCol - 1] = 1;
@@ -28992,13 +29002,15 @@ function api_mirrorSplitWriteback_(clientSheetId, taskId, parentItemId, childCod
             if (invHMap["Updated At"]) row[invHMap["Updated At"] - 1] = new Date();
             newRows.push(row);
           }
-          var lock = LockService.getScriptLock();
-          try {
-            lock.waitLock(15000);
-            var insertStart = api_getLastDataRow_(inv) + 1;
-            inv.getRange(insertStart, 1, newRows.length, newRows[0].length).setValues(newRows);
-          } finally {
-            lock.releaseLock();
+          if (newRows.length > 0) {
+            var lock = LockService.getScriptLock();
+            try {
+              lock.waitLock(15000);
+              var insertStart = api_getLastDataRow_(inv) + 1;
+              inv.getRange(insertStart, 1, newRows.length, newRows[0].length).setValues(newRows);
+            } finally {
+              lock.releaseLock();
+            }
           }
         }
       }
@@ -29020,9 +29032,24 @@ function api_mirrorSplitWriteback_(clientSheetId, taskId, parentItemId, childCod
       "ledger_row_id,status,invoice_no,client_name,date,svc_code,svc_name,category,item_id,description,item_class,qty,rate,total,task_id,repair_id,shipment_number,item_notes,sidemark,reference"
     );
     if (sel.ok && sel.rows && sel.rows.length > 0) {
+      // Idempotency: skip any Ledger Row ID already present on the Sheet.
+      // The RPC + this writeback are both idempotent on their own (RPC via
+      // ON CONFLICT DO NOTHING; writeback via this dedup), so retries are
+      // safe.
+      var existingLedgerIds = {};
+      var ledgerIdCol = billHMap["Ledger Row ID"];
+      if (ledgerIdCol && bill.getLastRow() >= 2) {
+        var billData = bill.getRange(2, ledgerIdCol, bill.getLastRow() - 1, 1).getValues();
+        for (var li = 0; li < billData.length; li++) {
+          var lid = String(billData[li][0] || "").trim();
+          if (lid) existingLedgerIds[lid] = true;
+        }
+      }
+
       var rows = [];
       for (var b = 0; b < sel.rows.length; b++) {
         var r = sel.rows[b];
+        if (existingLedgerIds[String(r.ledger_row_id || "")]) continue;  // dedup
         var row = api_buildRow_(billHMap, {
           "Ledger Row ID":  r.ledger_row_id,
           "Status":         r.status,
