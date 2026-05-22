@@ -72,44 +72,64 @@ export interface RouteEntry {
 export const GAS_TO_SB_MAP: Record<string, RouteEntry> = {
   // P2 — simple writes
   updateInventoryItem: { ef: 'update-item-sb',         flagKey: 'updateItem' },
+  updateTask:          { ef: 'update-task-sb',         flagKey: 'updateTask' },
+  updateRepairNotes:   { ef: 'update-repair-sb',       flagKey: 'updateRepair' },
 
   // P3 — operational
   batchCreateTasks:    { ef: 'batch-create-tasks-sb',  flagKey: 'createTask' },
   releaseItems:        { ef: 'release-items-sb',       flagKey: 'releaseItems' },
   createWillCall:      { ef: 'create-will-call-sb',    flagKey: 'createWillCall' },
   processWcRelease:    { ef: 'process-wc-release-sb',  flagKey: 'processWcRelease' },
+  transferItems:       { ef: 'transfer-items-sb',      flagKey: 'transferItems' },
 
-  // The following actions have flag rows seeded (parity-on shadow handlers
-  // exist) but NO SB-primary EF deployed yet. Adding them here would
-  // route flag-flips to 404. Build their real -sb EF first, then add
-  // here in the same PR as the deploy.
-  //
-  //   completeShipment:     receiveShipment flag — handler exists in scope
-  //                         but NOT shipped in this PR. Complexity: shipment
-  //                         number generation, idempotency-tag dedup, N
-  //                         inventory inserts, auto-INSP/ASM task creation,
-  //                         receiving billing rows, Drive folder creation,
-  //                         shipment-received email. ~3-hour port; deferred
-  //                         to a dedicated follow-up PR.
-  //   updateTask:           updateTask flag, no update-task-sb EF yet
-  //   updateRepair:         updateRepair flag, no update-repair-sb EF yet
+  // P3 — status changes. SB-primary EFs were built pre-router (each
+  // wired via per-component branching). Adding them here makes the
+  // routing layer aware so a future refactor onto apiPost is cheap;
+  // for any call site STILL using direct `supabase.functions.invoke(...)`
+  // the entry is a no-op (the router only fires on `apiPost`).
+  startTask:           { ef: 'start-task',             flagKey: 'startTask' },
+  startRepair:         { ef: 'start-repair-sb',        flagKey: 'startRepair' },
+  cancelRepair:        { ef: 'cancel-repair-sb',       flagKey: 'cancelRepair' },
+  sendRepairQuote:     { ef: 'send-repair-quote-sb',   flagKey: 'sendRepairQuote' },
+  respondToRepairQuote:{ ef: 'respond-repair-quote-sb',flagKey: 'respondRepairQuote' },
+  requestRepairQuote:  { ef: 'request-repair-quote-sb',flagKey: 'requestRepairQuote' },
+
+  // P3 — receiving / completion (new in this PR)
+  completeShipment:    { ef: 'complete-shipment-sb',   flagKey: 'receiveShipment' },
+
+  // P4a — billing-core
+  completeTask:        { ef: 'complete-task',          flagKey: 'completeTask' },
+  completeRepair:      { ef: 'complete-repair-sb',     flagKey: 'completeRepair' },
+  generateStorageCharges: { ef: 'commit-storage-charges-sb', flagKey: 'commitStorageCharges' },
+  createInvoice:       { ef: 'create-invoice-sb',      flagKey: 'createInvoice' },
+  voidInvoice:         { ef: 'void-invoice-sb',        flagKey: 'voidInvoice' },
+  reissueInvoice:      { ef: 'reissue-invoice-sb',     flagKey: 'reissueInvoice' },
+
+  // P5 — onboarding. Sheet provisioning STAYS GAS (Apps Script-only API
+  // for Sheets duplication); onboard-client-sb proxies the
+  // sheet-creation step back to GAS and writes the SB row(s) itself.
+  // Documented as a hybrid path on the EF.
+  onboardClient:       { ef: 'onboard-client-sb',      flagKey: 'onboardClient' },
+
+  // P6 — payments
+  qboCreateInvoice:    { ef: 'qbo-create-invoice-sb',  flagKey: 'qboCreateInvoice' },
+  createStaxInvoices:  { ef: 'create-stax-invoices-sb',flagKey: 'createStaxInvoices' },
+  runStaxCharges:      { ef: 'run-stax-charges-sb',    flagKey: 'runStaxCharges' },
+  importIIF:           { ef: 'import-iif-sb',          flagKey: 'importIIF' },
+
+  // P3 — email handlers (thin wrappers around send-email EF).
+  // Most current live traffic fires emails as server-side side-effects
+  // from host handlers; the entries below cover the apiPost path used
+  // by SB-primary host handlers and ad-hoc resend buttons.
+  sendShipmentEmail:    { ef: 'send-shipment-email-sb',      flagKey: 'sendShipmentEmail' },
+  sendTaskCompleteEmail:{ ef: 'send-task-complete-email-sb', flagKey: 'sendTaskCompleteEmail' },
+  sendWillCallEmails:   { ef: 'send-will-call-emails-sb',    flagKey: 'sendWillCallEmails' },
+
+  // Reports (read-only)
+  generateUnbilledReport: { ef: 'generate-unbilled-report-sb', flagKey: 'generateUnbilledReport' },
+
+  // Still gas-only — no SB-primary EF in this PR:
   //   updateShipment:       updateShipment flag, no update-shipment-sb EF
-  //   startTask:            startTask flag, no start-task-sb EF
-  //   startRepair:          startRepair flag, no start-repair-sb EF
-  //   transferItems:        transferItems flag, no transfer-items-sb EF
-  //   completeTask:         completeTask flag, no complete-task-sb EF
-  //   completeRepair:       completeRepair flag, no complete-repair-sb EF
-  //                         (handler exists in worktree, not yet merged)
-  //   commitStorageCharges: commitStorageCharges flag
-  //   createInvoice:        createInvoice flag
-  //   voidInvoice:          voidInvoice flag
-  //   reissueInvoice:       reissueInvoice flag
-  //   onboardClient:        onboardClient flag
-  //   qboCreateInvoice:     qboCreateInvoice flag
-  //   createStaxInvoices:   createStaxInvoices flag
-  //   runStaxCharges:       runStaxCharges flag
-  //   sendShipmentEmail:    sendShipmentEmail flag
-  //   sendWillCallEmails:   sendWillCallEmails flag
 };
 
 /**
