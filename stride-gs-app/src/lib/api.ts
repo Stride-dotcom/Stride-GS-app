@@ -3052,6 +3052,86 @@ export function postUpdateTaskPriority(
   );
 }
 
+// ─── Split Items ──────────────────────────────────────────────────────────────
+//
+// Splits a grouped inventory item (qty > 1) into individual single-qty rows.
+// The workflow is task-driven so it can be tracked, queued, and audited:
+//   1. createSplitTask  — staff/client requests a split → GAS creates a Task
+//      row (task_type='Split'), mirrors to Supabase tasks with split_workflow
+//      metadata, sends a 'Split Required' alert email to ops.
+//   2. completeSplitTask — warehouse marks the split as done → GAS calls
+//      Postgres rpc_complete_split_task which reduces parent qty, creates N
+//      child inventory rows, writes one SPLIT billing row per child, and
+//      stamps audit-log rows. GAS then writes the new rows + billing back
+//      to the Sheet so Consolidated Billing + the Inventory tab see them.
+
+export interface CreateSplitTaskPayload {
+  itemId: string;
+  groupedQty: number;
+  keepQty: number;
+  leftoverQty: number;
+  /** Free-form notes attached to the task — surfaces in the SplitTaskPanel. */
+  notes?: string;
+  /** Where the request originated: 'item' (staff on item page),
+   *  'will_call' / 'task' / 'disposal' (client portal partial-qty
+   *  detection). Determines the alert email template + the
+   *  metadata.split_workflow.origin_entity_* fields. */
+  origin?: 'item' | 'will_call' | 'task' | 'disposal';
+  originEntityId?: string;
+  originEntityNumber?: string;
+  requestedByEmail?: string | null;
+  requestedByName?: string | null;
+}
+
+export interface CreateSplitTaskResponse {
+  success: boolean;
+  taskId?: string;
+  alreadyExists?: boolean;
+  error?: string;
+}
+
+export function postCreateSplitTask(
+  payload: CreateSplitTaskPayload,
+  clientSheetId: string,
+  signal?: AbortSignal
+) {
+  return apiPost<CreateSplitTaskResponse>(
+    'createSplitTask',
+    payload as unknown as Record<string, unknown>,
+    { clientSheetId },
+    { signal }
+  );
+}
+
+export interface CompleteSplitTaskPayload {
+  taskId: string;
+}
+
+export interface CompleteSplitTaskResponse {
+  success: boolean;
+  alreadyCompleted?: boolean;
+  parentItemCode?: string;
+  childItemCodes?: string[];
+  error?: string;
+}
+
+export function postCompleteSplitTask(
+  payload: CompleteSplitTaskPayload,
+  clientSheetId: string,
+  signal?: AbortSignal
+) {
+  // Long timeout — the GAS handler chains through the Postgres RPC
+  // (atomic) and then runs the SB→Sheet writeback for new inventory
+  // rows + billing rows. Per-row writes can take a few seconds on big
+  // splits, so we lean on the LONG timeout that completeTask uses.
+  return apiPost<CompleteSplitTaskResponse>(
+    'completeSplitTask',
+    payload as unknown as Record<string, unknown>,
+    { clientSheetId },
+    { signal, timeoutMs: API_POST_TIMEOUT_LONG_MS }
+  );
+}
+
 // ─── Phase 8A: Maintenance ────────────────────────────────────────────────────
 
 export interface RefreshCachesPayload {
