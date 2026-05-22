@@ -314,7 +314,20 @@ export function OrderDetailPanel({ order, onClose, onUpdated }: Props) {
           <Section title="Schedule">
             {editing ? (
               <>
-                <EditField label="Service Date" value={edit.localServiceDate} onChange={v => setField('localServiceDate', v)} type="date" icon={<Calendar size={11} />} />
+                {/* Label as "Requested Date" when DT has scheduled to a
+                    different day — matches the OrderPage edit form. */}
+                <EditField
+                  label={order.dtScheduledDate && order.dtScheduledDate !== order.localServiceDate ? 'Requested Date' : 'Service Date'}
+                  value={edit.localServiceDate}
+                  onChange={v => setField('localServiceDate', v)}
+                  type="date"
+                  icon={<Calendar size={11} />}
+                />
+                {order.dtScheduledDate && order.dtScheduledDate !== order.localServiceDate && (
+                  <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: -8, marginBottom: 8, lineHeight: 1.5 }}>
+                    DT has this stop on <strong>{formatDate(order.dtScheduledDate)}</strong>. The Stride-side requested date is for billing/audit only.
+                  </div>
+                )}
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
                   <EditField label="Window Start" value={edit.windowStartLocal} onChange={v => setField('windowStartLocal', v)} type="time" icon={<Clock size={11} />} />
                   <EditField label="Window End"   value={edit.windowEndLocal}   onChange={v => setField('windowEndLocal', v)}   type="time" />
@@ -322,7 +335,21 @@ export function OrderDetailPanel({ order, onClose, onUpdated }: Props) {
               </>
             ) : (
               <>
-                <Field label="Service Date" value={formatDate(order.localServiceDate)} icon={<Calendar size={11} />} />
+                {/* Two-date display: see OrderPage's matching block for
+                    the why. "Requested" = the Stride-side date the order
+                    was created with; "Scheduled" = DT's current
+                    dispatcher-assigned date (mirrored back by
+                    dt-sync-statuses v19). They diverge after a DT-side
+                    route move; in that case render both rows so the
+                    operator sees the gap. */}
+                {order.dtScheduledDate && order.dtScheduledDate !== order.localServiceDate ? (
+                  <>
+                    <Field label="Requested" value={formatDate(order.localServiceDate)} icon={<Calendar size={11} />} />
+                    <Field label="Scheduled" value={formatDate(order.dtScheduledDate)} icon={<Calendar size={11} />} />
+                  </>
+                ) : (
+                  <Field label="Service Date" value={formatDate(order.dtScheduledDate || order.localServiceDate)} icon={<Calendar size={11} />} />
+                )}
                 <Field label="Time Window"  value={formatWindow(order.windowStartLocal, order.windowEndLocal, order.timezone)} icon={<Clock size={11} />} />
               </>
             )}

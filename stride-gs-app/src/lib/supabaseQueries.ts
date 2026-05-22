@@ -1831,6 +1831,12 @@ export interface SupabaseDtOrderRow {
   contact_longitude: number | null;
   pickup_address_json: Record<string, unknown> | null;
   local_service_date: string | null;
+  /** DT-side scheduled date pulled from export.xml by dt-sync-statuses
+   *  v19+. When non-null this is what dt-push-order sends in
+   *  <delivery_date> on re-pushes (preserves dispatcher route
+   *  assignments). UI shows this as "Scheduled" alongside the
+   *  Stride-requested "Requested" date. */
+  dt_scheduled_date: string | null;
   window_start_local: string | null;
   window_end_local: string | null;
   timezone: string;
@@ -1958,6 +1964,12 @@ export interface DtOrderForUI {
   contactPhone: string;
   contactEmail: string;
   localServiceDate: string;
+  /** DT-side scheduled date (date-only, YYYY-MM-DD). Empty string when DT
+   *  hasn't scheduled the order yet (initial push or sync hasn't run).
+   *  Distinct from localServiceDate (the Stride-requested date kept for
+   *  billing/audit). The OrderPage shows this as "Scheduled" alongside
+   *  "Requested" when the two diverge. */
+  dtScheduledDate: string;
   windowStartLocal: string;
   windowEndLocal: string;
   timezone: string;
@@ -2212,6 +2224,7 @@ export async function fetchDtOrdersFromSupabase(
         contactPhone: row.contact_phone ?? '',
         contactEmail: row.contact_email ?? '',
         localServiceDate: row.local_service_date ?? '',
+        dtScheduledDate: row.dt_scheduled_date ?? '',
         windowStartLocal: row.window_start_local ?? '',
         windowEndLocal: row.window_end_local ?? '',
         timezone: row.timezone,
@@ -2376,6 +2389,7 @@ export async function fetchDtOrderByIdFromSupabase(
       contactPhone: row.contact_phone ?? '',
       contactEmail: row.contact_email ?? '',
       localServiceDate: row.local_service_date ?? '',
+      dtScheduledDate: row.dt_scheduled_date ?? '',
       windowStartLocal: row.window_start_local ?? '',
       windowEndLocal: row.window_end_local ?? '',
       timezone: row.timezone,

@@ -1,5 +1,38 @@
 /**
- * dt-sync-statuses — Supabase Edge Function — v18 2026-05-20 PST
+ * dt-sync-statuses — Supabase Edge Function — v19 2026-05-22 PST
+ *
+ * v19: Mirror DT's scheduled date back into dt_orders.dt_scheduled_date
+ *      every poll (date-only portion of parsed.scheduled_at), and when
+ *      that value differs from local_service_date AND the order is in
+ *      a non-terminal "open" category (status_id resolves to category
+ *      'open' — new / scheduled / READY TO ROUTE), realign
+ *      local_service_date to DT's date so future re-pushes don't send
+ *      stale requested dates back and kick the stop off its route.
+ *      This is the date-side counterpart to the dt-push-order v39
+ *      change that prefers dt_scheduled_date over local_service_date
+ *      when building <delivery_date>. The v17 backfill block at the
+ *      end of the patch — which set local_service_date only when
+ *      currently NULL — is preserved unchanged for stranded-order
+ *      sweeps; v19's realign block fires only on the divergence case
+ *      (both columns set, values differ, status is open) so it never
+ *      clobbers an operator-set date on an order DT hasn't picked
+ *      back up yet.
+ *
+ *      Race window — known and accepted: if an operator edits the
+ *      Service Date in Stride but DOESN'T immediately push the change
+ *      to DT (closes the form without firing dt-push-order), the next
+ *      sync poll will see DT still holding the prior date and rewrite
+ *      local_service_date back to DT's value. Steady state: DT is the
+ *      schedule authority once an order has been pushed; an unpushed
+ *      Stride edit is treated as a draft until DT echoes it back. The
+ *      OrderPage save handler always invokes dt-push-order with the
+ *      `date` group when local_service_date diverges, so a normal
+ *      Save-and-Push closes the window. The leak path is the rare
+ *      "Save without push" route (an operator who explicitly skips
+ *      the push confirmation, or saves a date on a draft that hasn't
+ *      been routed yet — drafts have no DT-side row, so the realign
+ *      block can't fire). Documented here rather than blocked because
+ *      treating DT as authority is the entire point of the fix.
  *
  * v18: Dispatch-id backfill + status-field atomicity. Three changes
  *      addressing the "pushed but never matched back to DT" gap that
@@ -245,7 +278,7 @@ Deno.serve(async (req) => {
   // v9: sync every row with a dt_identifier that isn't already in a
   // terminal status. Drops the previous pushed_to_dt_at filter so
   // legacy reconciled rows (source='reconcile') also pull statuses.
-  const SELECT_COLS = 'id, dt_identifier, dt_dispatch_id, status_id, last_synced_at, tenant_id, paid_at, order_type, linked_order_id, local_service_date, pushed_to_dt_at';
+  const SELECT_COLS = 'id, dt_identifier, dt_dispatch_id, status_id, last_synced_at, tenant_id, paid_at, order_type, linked_order_id, local_service_date, dt_scheduled_date, pushed_to_dt_at';
 
   let query = supabase
     .from('dt_orders')
@@ -480,9 +513,48 @@ Deno.serve(async (req) => {
       // eligible for the auto-release block below (the helper bails
       // on local_service_date_missing).
       const existingServiceDate = (o as { local_service_date?: string | null }).local_service_date;
-      if (existingServiceDate == null) {
-        const schedIso = toIso(parsed.scheduled_at);
-        if (schedIso) patch.local_service_date = schedIso.slice(0, 10);
+      const schedIso = toIso(parsed.scheduled_at);
+      const schedDateOnly = schedIso ? schedIso.slice(0, 10) : null;
+      if (existingServiceDate == null && schedDateOnly) {
+        patch.local_service_date = schedDateOnly;
+      }
+
+      // v19: mirror DT's scheduled date into dt_orders.dt_scheduled_date
+      // on every poll so dt-push-order can prefer it for <delivery_date>
+      // on re-pushes (and the UI can show "Scheduled: M/D" alongside
+      // "Requested: M/D"). DT is the schedule authority once an order
+      // has been pushed — the dispatcher may move the stop to a different
+      // route/day after import, and we need to track that without
+      // overwriting our original requested date.
+      //
+      // Realign rule: when DT's scheduled date differs from our
+      // local_service_date AND the order is in a non-terminal "open"
+      // category (new / scheduled / READY TO ROUTE), update
+      // local_service_date so the next re-push sends DT's date back
+      // instead of our stale requested date. We gate on category='open'
+      // rather than the literal "scheduled" code so a route move while
+      // the stop is still pre-start is honored regardless of the exact
+      // sub-state DT uses. Once status moves into in_progress/completed
+      // /exception/cancelled the date is effectively locked and we leave
+      // local_service_date alone (preserves the originally-requested
+      // value for billing / audit purposes).
+      if (schedDateOnly) {
+        const existingDtDate = (o as { dt_scheduled_date?: string | null }).dt_scheduled_date;
+        if (existingDtDate !== schedDateOnly) {
+          patch.dt_scheduled_date = schedDateOnly;
+        }
+        const effectiveStatusId = finalStatusId ?? o.status_id;
+        const effectiveCategory = effectiveStatusId != null
+          ? allStatuses.find(s => s.id === effectiveStatusId)?.category
+          : null;
+        if (
+          effectiveCategory === 'open' &&
+          existingServiceDate != null &&
+          existingServiceDate !== schedDateOnly &&
+          patch.local_service_date == null
+        ) {
+          patch.local_service_date = schedDateOnly;
+        }
       }
 
       const { error: updErr } = await supabase.from('dt_orders').update(patch).eq('id', o.id);
@@ -903,8 +975,20 @@ Deno.serve(async (req) => {
           // sidesteps whatever the gateway didn't like about our
           // hand-rolled Bearer header. Pair with PR #488/#489 v38
           // which actually pushes the picked-up stamp into DT.
+          // v19: scope this push-back to ONLY the items group. Pickup
+          // completion never edits the delivery's date or contact — it
+          // just propagates per-item updates (delivered quantities,
+          // picked-up stamps) and triggers the delivery-leg manifest
+          // refresh. Pre-v19 we sent a FULL push, which included
+          // <delivery_date>=local_service_date and would overwrite the
+          // dispatcher's DT-assigned scheduled date if our local copy
+          // was stale, kicking the delivery off its route. Belt-and-
+          // suspenders alongside dt-push-order v39's dt_scheduled_date
+          // preference — even on a legacy row where the mirror hasn't
+          // populated dt_scheduled_date yet, omitting the date group
+          // entirely guarantees DT keeps its current schedule.
           const pushPromise = supabase.functions.invoke('dt-push-order', {
-            body: { orderId: linkedDeliveryId },
+            body: { orderId: linkedDeliveryId, changedFields: ['items'] },
           }).then(async (resp) => {
             const data = (resp.data ?? null) as { ok?: boolean; error?: string } | null;
             const err = resp.error;

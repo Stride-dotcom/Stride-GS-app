@@ -544,7 +544,24 @@ function DetailsTab({
         </div>
         {editing ? (
           <>
-            <EditField label="Service Date" value={edit.localServiceDate} onChange={v => setField('localServiceDate', v)} type="date" icon={<Calendar size={11} />} />
+            {/* Label as "Requested Date" when DT has already scheduled to
+                a different day — operator is editing the Stride-side
+                requested date, not the DT-side scheduled date. The DT
+                date is read-only here (mirrored back by sync) so we
+                surface it as a help line below the editor instead of a
+                separate edit field. */}
+            <EditField
+              label={order.dtScheduledDate && order.dtScheduledDate !== order.localServiceDate ? 'Requested Date' : 'Service Date'}
+              value={edit.localServiceDate}
+              onChange={v => setField('localServiceDate', v)}
+              type="date"
+              icon={<Calendar size={11} />}
+            />
+            {order.dtScheduledDate && order.dtScheduledDate !== order.localServiceDate && (
+              <div style={{ fontSize: 11, color: EP.textMuted, marginTop: -8, marginBottom: 4, lineHeight: 1.5 }}>
+                DT has this stop scheduled for <strong>{fmtDate(order.dtScheduledDate)}</strong>. Editing the requested date won't move it on DT's route — push a date change explicitly to do that.
+              </div>
+            )}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
               <EditField label="Window Start" value={edit.windowStartLocal} onChange={v => setField('windowStartLocal', v)} type="time" icon={<Clock size={11} />} />
               <EditField label="Window End"   value={edit.windowEndLocal}   onChange={v => setField('windowEndLocal', v)}   type="time" />
@@ -567,7 +584,24 @@ function DetailsTab({
           </>
         ) : (
           <>
-            <Field label="Service Date" value={fmtDate(order.localServiceDate)} icon={<Calendar size={11} />} />
+            {/* Two-date display: "Requested" is the Stride-side date the
+                customer/operator originally asked for (local_service_date).
+                "Scheduled" is the DT-side date the dispatcher actually
+                routed the order to (dt_scheduled_date, mirrored from
+                export.xml). When DT moves a stop to a different day,
+                Stride keeps the original requested date for billing/audit
+                while dt-push-order v39 uses the scheduled date on
+                re-pushes so the route survives. Only render "Scheduled"
+                separately when it differs from the requested date — same
+                date is the steady state and one row reads cleaner. */}
+            {order.dtScheduledDate && order.dtScheduledDate !== order.localServiceDate ? (
+              <>
+                <Field label="Requested" value={fmtDate(order.localServiceDate)} icon={<Calendar size={11} />} />
+                <Field label="Scheduled" value={fmtDate(order.dtScheduledDate)} icon={<Calendar size={11} />} />
+              </>
+            ) : (
+              <Field label="Service Date" value={fmtDate(order.dtScheduledDate || order.localServiceDate)} icon={<Calendar size={11} />} />
+            )}
             <Field label="Time Window"  value={fmtWindow(order.windowStartLocal, order.windowEndLocal, order.timezone)} icon={<Clock size={11} />} />
             {order.serviceTimeMinutes != null && order.serviceTimeMinutes > 0 && (
               <Field label="Service Time" value={`${order.serviceTimeMinutes} min`} icon={<Clock size={11} />} />
