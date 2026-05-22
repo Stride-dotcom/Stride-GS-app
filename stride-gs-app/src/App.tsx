@@ -40,6 +40,12 @@ import { PublicServiceRequest } from './pages/PublicServiceRequest';
 import { PublicOrderView } from './pages/PublicOrderView';
 import { PublicOrderLookup } from './pages/PublicOrderLookup';
 import { MessagesPage } from './components/messages/MessagesPage';
+import { startDocUploadQueueWorker } from './lib/docUploadQueue';
+
+// Boot the doc-upload retry worker once at module load — picks up any
+// auto-archive jobs that failed mid-render on a previous session and
+// re-fires them when we come back online. Idempotent.
+startDocUploadQueueWorker();
 
 /** Route guard — redirects to dashboard if user's role is not in the allowed list */
 function RoleGuard({ allowed, children }: { allowed: AuthUser['role'][]; children: React.ReactNode }) {

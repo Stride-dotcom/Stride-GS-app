@@ -21,7 +21,7 @@ import { BillingPreviewCard } from './BillingPreviewCard';
 import { useEntityAddons } from '../../hooks/useEntityAddons';
 import { postSendRepairQuote, postSendRepairQuoteSb, postRespondToRepairQuote, postRespondRepairQuoteSb, postCompleteRepair, postCompleteRepairSb, postStartRepair, postStartRepairSb, postCancelRepair, postCancelRepairSb, postUpdateRepairNotes, postReopenRepair, postCorrectRepairResult, postVoidRepairQuote, isApiConfigured } from '../../lib/api';
 import { useFeatureFlag } from '../../contexts/FeatureFlagContext';
-import { generateRepairWorkOrderPdf } from '../../lib/workOrderPdf';
+import { renderDoc, buildRepairTokens } from '../../lib/docRenderer';
 import { entityEvents } from '../../lib/entityEvents';
 import type { ApiRepair, SendRepairQuoteResponse, RespondToRepairQuoteResponse, CompleteRepairResponse, StartRepairResponse, SendRepairQuoteLine } from '../../lib/api';
 import { supabase } from '../../lib/supabase';
@@ -318,7 +318,10 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
     setPrintError(null);
     setPrintLoading(true);
     try {
-      await generateRepairWorkOrderPdf(repair);
+      await renderDoc('DOC_REPAIR_WORK_ORDER', buildRepairTokens(repair), {
+        action: 'print',
+        fileName: `Repair Work Order — ${repair.repairId}`,
+      });
     } catch (err) {
       setPrintError(err instanceof Error ? err.message : 'Work Order generation failed');
     } finally {
@@ -813,7 +816,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
             setSubmitError(errMsg + ' Start Repair status flip already applied — you can print the Work Order from the button below.');
           } else {
             // SB path doesn't produce a work-order URL — the React-side
-            // generator (lib/workOrderPdf.ts) handles printing. Keep the
+            // generator (lib/docRenderer.ts) handles printing. Keep the
             // optimistic startResult as the banner.
             onRepairUpdated?.();
             if (resp.mirrorOk === false) {
@@ -873,6 +876,19 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
     applyRepairPatch?.(repair.repairId, { status: 'Complete', completedDate: new Date().toISOString().slice(0, 10) });
     entityEvents.emit('repair', repair.repairId);
 
+    // Fire-and-forget auto-archive of the Repair Work Order PDF after
+    // either success branch lands. Failures silently queue for retry —
+    // completion already succeeded server-side.
+    const autoArchiveRepairWorkOrder = () => {
+      void renderDoc('DOC_REPAIR_WORK_ORDER', buildRepairTokens({ ...repair, status: 'Complete' }), {
+        action: 'upload',
+        fileName: `Stride_RepairWorkOrder_${repair.repairId}`,
+        tenantId: clientSheetId,
+        entityType: 'repair',
+        entityId: repair.repairId,
+      });
+    };
+
     // 2. Background GAS
     void (async () => {
       try {
@@ -903,6 +919,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
               warnings: [] as string[],
             } as unknown as CompleteRepairResponse);
             onRepairUpdated?.();
+            autoArchiveRepairWorkOrder();
             if (resp.mirrorOk === false) {
               console.warn('[completeRepair-sb] sheet mirror failed:', resp.mirrorError);
               setSubmitError(`Repair completed, but legacy sheet mirror failed (${resp.mirrorError ?? 'unknown'}). App state is correct; sheet will catch up on the next full sync.`);
@@ -923,6 +940,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
           } else {
             setCompleteResult(resp.data);
             onRepairUpdated?.();
+            autoArchiveRepairWorkOrder();
           }
         }
       } catch (err) {
@@ -1110,7 +1128,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
                   Work Order print button sits next to the Repair Folder so
                   staff can grab a printable form straight from this view —
                   same template (DOC_REPAIR_WORK_ORDER) the GAS generator
-                  uses, but rendered client-side via lib/workOrderPdf.ts.
+                  uses, but rendered client-side via lib/docRenderer.ts.
                   Gated to admin/staff (clients don't print warehouse
                   forms) and only after the repair has been approved (no
                   point printing a work order for a quote that hasn't been
