@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.226.0 — 2026-05-21 PST — [MIGRATION-P2/MIG-015] Extends `__writeThroughReverseInventory_` to support general field updates (mode b/c) alongside the legacy release-only path (mode a). Required by the new SB-primary `update-item-sb` Edge Function (companion in supabase/functions/update-item-sb/) which writes inventory edits to public.inventory then mirrors the changed fields back to the per-tenant Inventory sheet via this writer. New REVERSE_INV_FIELDS_ map (vendor / description / reference / sidemark / room / location / item_class / qty / item_notes / declared_value / coverage_option_id) drives column resolution via api_ensureColumn_ — case-insensitive + auto-append on miss (matches v38.158.0's handleUpdateInventoryItem_ landmine fix). Status + release_date stay on the legacy code path (idempotency check, parse-as-PT, ledger + auto-cancel side effects on Released-transition). Combined mode handles "status flip + sidemark edit in same save". Release-mode idempotency skip only fires when zero general fields were written this pass — a fields-only write never short-circuits even if the row already matches. v38.211.0 auto-cancel cascade source string changed from "Delivery" to "Reverse Writethrough" because the writer is now used for general edits too (the "Delivery" tag was specific to push-inventory-release-to-sheet, which is just one caller now). No other writer changes; REVERSE_WRITETHROUGH_TABLES_ registry unchanged; no React change; no migration. Per MIG-015: deploy this BEFORE flipping feature_flags.updateItem to active_backend='supabase' for any tenant — without it the SB writer's row payload (which omits status on general edits) would throw the legacy "row.status required" error and the canary would fail-closed on every save.
+   StrideAPI.gs — v38.227.0 — 2026-05-21 PST — [MIGRATION-P3/MIG-016] Sixth per-table reverse-writethrough writer: `__writeThroughReverseTasks_` replaces the stub for `tasks` in REVERSE_WRITETHROUGH_TABLES_. Insert + update upsert pattern by Task ID, mirrors REVERSE_TASK_FIELDS_ (task_id, type, status, item_id, vendor, description, location, sidemark, shipment_number, item_notes, task_notes, result, completed_at, cancelled_at, started_at, assigned_to, billed, due_date, priority, created). Required by the new SB-primary `batch-create-tasks-sb` Edge Function — without it the SB EF's per-task sheet-mirror fires hit the legacy stub and land in gs_sync_events. Auto-runs api_ensureTaskColumns_ on insert so Due Date + Priority columns exist on tenants whose template predates v38.214.0. Idempotent: re-running with the same payload either no-ops (already-matches) or writes the same cells (deterministic).
+   v38.226.0 — 2026-05-21 PST — [MIGRATION-P2/MIG-015] Extends `__writeThroughReverseInventory_` to support general field updates (mode b/c) alongside the legacy release-only path (mode a). Required by the new SB-primary `update-item-sb` Edge Function (companion in supabase/functions/update-item-sb/) which writes inventory edits to public.inventory then mirrors the changed fields back to the per-tenant Inventory sheet via this writer. New REVERSE_INV_FIELDS_ map (vendor / description / reference / sidemark / room / location / item_class / qty / item_notes / declared_value / coverage_option_id) drives column resolution via api_ensureColumn_ — case-insensitive + auto-append on miss (matches v38.158.0's handleUpdateInventoryItem_ landmine fix). Status + release_date stay on the legacy code path (idempotency check, parse-as-PT, ledger + auto-cancel side effects on Released-transition). Combined mode handles "status flip + sidemark edit in same save". Release-mode idempotency skip only fires when zero general fields were written this pass — a fields-only write never short-circuits even if the row already matches. v38.211.0 auto-cancel cascade source string changed from "Delivery" to "Reverse Writethrough" because the writer is now used for general edits too (the "Delivery" tag was specific to push-inventory-release-to-sheet, which is just one caller now). No other writer changes; REVERSE_WRITETHROUGH_TABLES_ registry unchanged; no React change; no migration. Per MIG-015: deploy this BEFORE flipping feature_flags.updateItem to active_backend='supabase' for any tenant — without it the SB writer's row payload (which omits status on general edits) would throw the legacy "row.status required" error and the canary would fail-closed on every save.
    v38.225.0 — 2026-05-21 PST — [Split Items workflow] New `createSplitTask` + `completeSplitTask` doPost cases backing the React Split feature (SplitItemDialog on ItemPage, SplitTaskPanel on TaskPage). `handleCreateSplitTask_` appends a SPLIT-type Task row to the per-tenant Tasks sheet + idempotency check against open SPLIT tasks for the same parent item via Supabase + supabaseUpsert_ to public.tasks WITH metadata.split_workflow (parent_item_id / grouped_qty / keep_qty / leftover_qty / requester / origin) + sends a 'Split Required' alert to info@stridenw.com. `handleCompleteSplitTask_` calls the atomic Postgres `rpc_complete_split_task` RPC (migration 20260521230100) which reduces parent inventory.qty, inserts N child inventory rows (qty=1, parent_item_id back-pointer, item_id_ledger entries), writes one SPLIT billing row per child at class-based rate from service_catalog, and stamps audit-log entries for parent + each child + the task. After the RPC succeeds, `api_mirrorSplitWriteback_` mirrors the post-RPC SB state back to the client Sheet: updates Inventory.qty on parent, appends N new Inventory rows cloning the parent row with qty=1 + 'Split from <parent>' in Item Notes, appends N SPLIT rows to Billing_Ledger (re-read from public.billing so the rate matches byte-for-byte), and flips the Tasks row to Status='Completed'. Idempotent end-to-end — re-running on a completed task returns the existing child codes; the sheet writeback only fires once because the RPC's already-completed branch hydrates from inventory.parent_item_id rather than re-creating rows. Service-catalog SPLIT row seeded by the same migration (code='SPLIT' / category='Warehouse' / billing='class_based' / unit='per_item' / sensible default rates) — idempotent INSERT preserves any manual rates the operator set in Price List. CRITICAL: leaves the v38.182 atomic invoice-counter and the rest of the billing landmines exactly as-is — this is purely additive.
    v38.224.0 — 2026-05-20 PST — [Supabase-authoritative client settings write-back] Fifth per-table writer registered against the P1.4 framework (after inventory v38.208, will_calls v38.213, repairs v38.215, billing v38.217): `__writeThroughReverseClients_` for the `clients` table replaces the stub. Inverts the GAS→Supabase invariant for client settings — when React / intake / any future Supabase-authoritative caller writes `public.clients` directly, this writer mirrors the row OUT to (a) the per-tenant Settings tab as key/value upserts keyed by `CLIENT_FIELDS_[*].clientSettingsKey` and (b) the CB Clients tab via per-column setValue keyed by `CLIENT_FIELDS_[*].cbHeader`. Both sheets must be touched: per-tenant Settings is what dock-intake reads `AUTO_INSPECTION` from (the Brian Paquette failure mode); CB Clients is what `handleResyncClients_` reads back when pushing to Supabase — without the CB write, a CB-driven resync would silently overwrite the SB-side change. Also writes SB-only fields (`notification_contacts`, `billing_contact_name`, `billing_email`, `billing_address`, `tax_exempt`, `tax_exempt_reason`, `resale_cert_expires`, `resale_cert_url`) into the per-tenant Settings tab as ops-visible key/value rows — they don't have a `cbHeader` so they don't touch CB Clients, matching migrations 20260426160000 / 20260504000000 which placed them in Supabase only. Idempotent by tenantId; re-firing with the same row produces the same sheet state. Op support is `update` only — inserts flow through `handleOnboardClient_` which has its own bespoke sheet-creation path. Failure semantics mirror the framework: a single-side failure (Settings tab present but CB write fails, or vice versa) returns success with details in `cbSkipped` / `perTenantSkipped` so the next sync pass catches up; a both-sides failure throws so `handleWriteThroughReverse_` lands the row in `gs_sync_events` for FailedOperationsDrawer pickup. Cache invalidation: matches `handleUpdateClient_` by removing `api_active_clients`/`clients`/`clients_all`/`api_client_name_map` from CacheService after the CB write so the next `handleGetClients_` reflects the fresh values. Companion Edge Function `push-client-settings-to-sheet` + Postgres trigger `propagate_clients_to_sheet` ship in the same PR — together they form the App → Supabase → GAS Sheet flow.
    v38.223.0 — 2026-05-18 PST — [CRITICAL auth fix] Onboarding created Supabase auth users with EMPTY raw_user_meta_data — broken since 2026-04-11 (73 client users affected). Root cause: createSupabaseAuthUser_ never sent user_metadata on the admin create, so every RLS policy (which keys off auth.jwt()->'user_metadata'->>'role' / ->>'clientSheetId') filtered these users out and they were invisible everywhere in the app. The apply-intake-on-submit Edge Function does NOT create auth users (only deactivates the intake link + propagates refresh-mode client data) so the bug is entirely GAS-side. Fix: createSupabaseAuthUser_ gains an optional `metadata` param and POSTs it as user_metadata; new helper api_buildAuthUserMetadata_(role, clientName, clientSpreadsheetId) centralizes the AuthContext contract — { role, clientName, clientSheetId, accessibleClientSheetIds } (NOT `tenantId` as first hypothesized — RLS + AuthContext.tsx both key off `clientSheetId` / `accessibleClientSheetIds`; a `tenantId` field would not have unblocked RLS). All FIVE auth-user-creation sites now stamp it: api_upsertClientUser_ (onboarding — the primary bug), handleCreateUser_ (admin add user), handleEnsureAuthUser_ (gap-fill), handleAdminSetUserPassword_ create branch, plus the helper itself. Remediation for the existing 73: createSupabaseAuthUser_'s 422 "already exists" branch now self-heals via api_backfillAuthUserMetadata_ — finds the user by email and merges metadata ONLY when their existing user_metadata has no `role` (idempotent; never trampling a live login-synced metadata). Re-running onboarding or clicking ensureAuthUser for any pre-fix user repairs them; a bulk remediation can also iterate handleEnsureAuthUser_ over the cohort. Scoping: the stamped shape mirrors AuthContext's full four-key inSync contract (role/clientSheetId/accessibleClientSheetIds/childClientSheetIds); childClientSheetIds is always [] because no RLS policy keys off it and parent→child scope expansion is resolved authoritatively by AuthContext on login (unchanged by this fix). The 73 are single-tenant onboarded clients so [] is correct for them. No schema/migration/React change.
@@ -2878,7 +2879,7 @@ function handleMirrorInventoryReleaseBulk_(payload, callerEmail) {
 
 var REVERSE_WRITETHROUGH_TABLES_ = {
   "inventory":         __writeThroughReverseInventory_,
-  "tasks":             __writeThroughReverseStub_,
+  "tasks":             __writeThroughReverseTasks_,
   "repairs":           __writeThroughReverseRepairs_,
   "shipments":         __writeThroughReverseStub_,
   "will_calls":        __writeThroughReverseWillCalls_,
@@ -3198,6 +3199,131 @@ function __writeThroughReverseRepairs_(ss, payload) {
     written[targets[m].sbKey] = targets[m].newValue;
   }
   return { rowNumber: foundRow, written: written };
+}
+
+/**
+ * v38.227.0 — [MIGRATION-P3 / MIG-016] Tasks reverse-writethrough writer.
+ * Sixth per-table writer against the P1.4 framework (inventory v38.208,
+ * will_calls v38.213, repairs v38.215, billing v38.217, clients v38.224).
+ *
+ * Fires from SB-primary Edge Functions that write public.tasks:
+ *   • `batch-create-tasks-sb`  — initial create. op='insert'.
+ *   • Future: update-task-sb, complete-task-sb, start-task-sb.
+ *
+ * Idempotent by Task ID — looks up the row, INSERTs if missing,
+ * UPDATEs in place if present. Same upsert pattern as the Repairs
+ * writer.
+ *
+ * Op support: 'insert' (find-or-append) and 'update' (find-or-throw).
+ * Tasks aren't deleted — cancel writes status='Cancelled'.
+ */
+var REVERSE_TASK_FIELDS_ = {
+  // SB column name → per-tenant Tasks sheet header
+  "task_id":          "Task ID",
+  "type":             "Type",
+  "status":           "Status",
+  "item_id":          "Item ID",
+  "vendor":           "Vendor",
+  "description":      "Description",
+  "location":         "Location",
+  "sidemark":         "Sidemark",
+  "shipment_number":  "Shipment #",
+  "item_notes":       "Item Notes",
+  "task_notes":       "Task Notes",
+  "result":           "Result",
+  "completed_at":     "Completed At",
+  "cancelled_at":     "Cancelled At",
+  "started_at":       "Started At",
+  "assigned_to":      "Assigned To",
+  "billed":           "Billed",
+  "due_date":         "Due Date",
+  "priority":         "Priority",
+  "created":          "Created"
+};
+
+function __writeThroughReverseTasks_(ss, payload) {
+  var rowId = payload && payload.rowId ? String(payload.rowId).trim() : "";
+  var row   = (payload && payload.row) || {};
+  var op    = payload && payload.op ? String(payload.op) : "";
+
+  if (op !== "update" && op !== "insert") {
+    throw new Error(
+      "__writeThroughReverseTasks_: op '" + op + "' not supported " +
+      "(supported: 'insert' | 'update'; cancel = status flip, not delete)."
+    );
+  }
+  if (!rowId) throw new Error("__writeThroughReverseTasks_: rowId (Task ID) required");
+
+  var taskSheet = ss.getSheetByName("Tasks");
+  if (!taskSheet) throw new Error("__writeThroughReverseTasks_: Tasks sheet not found on this tenant");
+
+  // Ensure Due Date + Priority columns exist (idempotent — adds headers if missing).
+  // Matches api_ensureTaskColumns_ from the GAS-primary batchCreateTasks path.
+  try { api_ensureTaskColumns_(taskSheet); } catch (_) {}
+
+  var hMap = api_getHeaderMap_(taskSheet);
+  var idCol = hMap["Task ID"];
+  if (!idCol) throw new Error("__writeThroughReverseTasks_: 'Task ID' column not found");
+
+  // Resolve which targeted fields are in the payload + map to columns.
+  // Skip unknown row keys silently.
+  var targets = [];
+  for (var sbKey in REVERSE_TASK_FIELDS_) {
+    if (!row.hasOwnProperty(sbKey)) continue;
+    var header = REVERSE_TASK_FIELDS_[sbKey];
+    var col = hMap[header];
+    if (!col) continue;
+    targets.push({ sbKey: sbKey, header: header, col: col, newValue: row[sbKey] });
+  }
+  if (targets.length === 0) {
+    throw new Error(
+      "__writeThroughReverseTasks_: row had no fields in REVERSE_TASK_FIELDS_ " +
+      "(payload keys: " + Object.keys(row).join(",") + ")"
+    );
+  }
+
+  // Find existing row by Task ID.
+  var lastRow = api_getLastDataRow_(taskSheet);
+  var foundRow = -1;
+  if (lastRow >= 2) {
+    var idValues = taskSheet.getRange(2, idCol, lastRow - 1, 1).getValues();
+    for (var i = 0; i < idValues.length; i++) {
+      if (String(idValues[i][0] || "").trim() === rowId) {
+        foundRow = i + 2;
+        break;
+      }
+    }
+  }
+
+  if (foundRow < 0) {
+    // INSERT path
+    var insertRowNum = lastRow + 1;
+    if (insertRowNum < 2) insertRowNum = 2;
+    var maxCol = taskSheet.getLastColumn();
+    var rowValues = new Array(maxCol);
+    for (var c = 0; c < maxCol; c++) rowValues[c] = '';
+    rowValues[idCol - 1] = rowId;
+    for (var t = 0; t < targets.length; t++) {
+      rowValues[targets[t].col - 1] = targets[t].newValue == null ? '' : targets[t].newValue;
+    }
+    taskSheet.getRange(insertRowNum, 1, 1, maxCol).setValues([rowValues]);
+    SpreadsheetApp.flush();
+    return { rowNumber: insertRowNum, inserted: true };
+  }
+
+  // UPDATE path — idempotent skip when every cell already matches
+  var allMatch = true;
+  for (var j = 0; j < targets.length; j++) {
+    var current = taskSheet.getRange(foundRow, targets[j].col).getValue();
+    if (String(current) !== String(targets[j].newValue)) { allMatch = false; break; }
+  }
+  if (allMatch) return { rowNumber: foundRow, skipped: true, reason: "already-matches" };
+
+  for (var k = 0; k < targets.length; k++) {
+    taskSheet.getRange(foundRow, targets[k].col).setValue(targets[k].newValue);
+  }
+  SpreadsheetApp.flush();
+  return { rowNumber: foundRow, updated: true };
 }
 
 /**

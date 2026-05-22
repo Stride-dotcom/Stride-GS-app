@@ -71,31 +71,39 @@ export interface RouteEntry {
 
 export const GAS_TO_SB_MAP: Record<string, RouteEntry> = {
   // P2 — simple writes
-  updateInventoryItem: { ef: 'update-item-sb', flagKey: 'updateItem' },
+  updateInventoryItem: { ef: 'update-item-sb',         flagKey: 'updateItem' },
+
+  // P3 — operational
+  batchCreateTasks:    { ef: 'batch-create-tasks-sb',  flagKey: 'createTask' },
+  releaseItems:        { ef: 'release-items-sb',       flagKey: 'releaseItems' },
+  createWillCall:      { ef: 'create-will-call-sb',    flagKey: 'createWillCall' },
+  processWcRelease:    { ef: 'process-wc-release-sb',  flagKey: 'processWcRelease' },
 
   // The following actions have flag rows seeded (parity-on shadow handlers
   // exist) but NO SB-primary EF deployed yet. Adding them here would
   // route flag-flips to 404. Build their real -sb EF first, then add
   // here in the same PR as the deploy.
   //
+  //   completeShipment:     receiveShipment flag — handler exists in scope
+  //                         but NOT shipped in this PR. Complexity: shipment
+  //                         number generation, idempotency-tag dedup, N
+  //                         inventory inserts, auto-INSP/ASM task creation,
+  //                         receiving billing rows, Drive folder creation,
+  //                         shipment-received email. ~3-hour port; deferred
+  //                         to a dedicated follow-up PR.
   //   updateTask:           updateTask flag, no update-task-sb EF yet
   //   updateRepair:         updateRepair flag, no update-repair-sb EF yet
   //   updateShipment:       updateShipment flag, no update-shipment-sb EF
   //   startTask:            startTask flag, no start-task-sb EF
   //   startRepair:          startRepair flag, no start-repair-sb EF
-  //   createBatchTasks:     createTask flag, no create-task-sb EF
-  //   createWillCall:       createWillCall flag, no create-will-call-sb EF
-  //   releaseItems:         releaseItems flag, no release-items-sb EF
   //   transferItems:        transferItems flag, no transfer-items-sb EF
   //   completeTask:         completeTask flag, no complete-task-sb EF
   //   completeRepair:       completeRepair flag, no complete-repair-sb EF
   //                         (handler exists in worktree, not yet merged)
-  //   processWcRelease:     processWcRelease flag
   //   commitStorageCharges: commitStorageCharges flag
   //   createInvoice:        createInvoice flag
   //   voidInvoice:          voidInvoice flag
   //   reissueInvoice:       reissueInvoice flag
-  //   receiveShipment:      receiveShipment flag
   //   onboardClient:        onboardClient flag
   //   qboCreateInvoice:     qboCreateInvoice flag
   //   createStaxInvoices:   createStaxInvoices flag
