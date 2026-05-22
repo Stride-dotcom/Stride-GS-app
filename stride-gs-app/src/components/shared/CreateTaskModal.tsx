@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
-import { X, Check, ClipboardList, Loader2, AlertTriangle } from 'lucide-react';
-import { postBatchCreateTasks } from '../../lib/api';
+import { X, Check, ClipboardList, Loader2, AlertTriangle, Split as SplitIcon } from 'lucide-react';
+import { postBatchCreateTasks, postCreateSplitTask } from '../../lib/api';
 import type { InventoryItem, Task } from '../../lib/types';
 import { usePricing } from '../../hooks/usePricing';
 import { useServiceCatalog } from '../../hooks/useServiceCatalog';
@@ -34,8 +34,13 @@ const CORE_TYPES = [
   { code: 'ASM',  name: 'Assembly' },
 ];
 
-// Exclude billing-only and special-flow types from the generic batch picker
-const EXCLUDE_CODES = new Set(['STOR', 'RCVG', 'REPAIR', 'RPR', 'WC', 'WCPU']);
+// Exclude billing-only and special-flow types from the generic batch picker.
+// SPLIT is excluded here because the batch picker creates one task per
+// (item, svcCode) combo via the generic `batchCreateTasks` handler, which
+// has no notion of grouped-qty splitting — Split tasks come exclusively
+// from the dedicated `createSplitTask` flow (Item detail page button, or
+// auto-create from this modal's grouped-item detection below).
+const EXCLUDE_CODES = new Set(['STOR', 'RCVG', 'REPAIR', 'RPR', 'WC', 'WCPU', 'SPLIT']);
 
 export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addOptimisticTask, removeOptimisticTask, clientName, existingTasks }: Props) {
   const { priceList } = usePricing(true);
@@ -57,6 +62,13 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
     return map;
   }, [serviceCatalog]);
   const [selectedCodes, setSelectedCodes] = useState<Set<string>>(new Set(['INSP']));
+
+  // Grouped-item detection — same notice the WC modal shows. Any item with
+  // qty > 1 will need a warehouse split before per-piece tasks can be done.
+  const groupedItems = useMemo(
+    () => items.filter(i => Number((i as { qty?: number }).qty) > 1),
+    [items],
+  );
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<{ created: number; skippedCount: number; taskIds: string[] } | null>(null);
   const [error, setError] = useState('');
@@ -168,6 +180,28 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
         for (const tid of (r.taskIds ?? [])) entityEvents.emit('task', tid);
         setResult({ created: r.created, skippedCount: r.skipped?.length ?? 0, taskIds: r.taskIds ?? [] });
         onSuccess(r.taskIds ?? []);
+
+        // Auto-create a Split task for every grouped item, so per-piece
+        // work can proceed against individual labels. Best-effort.
+        if (groupedItems.length > 0) {
+          await Promise.all(groupedItems.map(async (gi) => {
+            try {
+              const giQty = Number((gi as { qty?: number }).qty) || 1;
+              await postCreateSplitTask({
+                itemId: gi.itemId,
+                groupedQty: giQty,
+                keepQty: 1,
+                leftoverQty: Math.max(1, giQty - 1),
+                notes: `Auto-created alongside ${Array.from(selectedCodes).join('+')} tasks.`,
+                origin: 'task',
+                originEntityId: (r.taskIds ?? [])[0] || undefined,
+                originEntityNumber: (r.taskIds ?? [])[0] || undefined,
+              }, clientSheetId);
+            } catch (e) {
+              console.warn('[CreateTaskModal] auto-split create failed for', gi.itemId, e);
+            }
+          }));
+        }
       } else {
         // Rollback temp rows
         tempIds.forEach(id => removeOptimisticTask?.(id));
@@ -280,6 +314,26 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
                 ))}
               </div>
 
+              {groupedItems.length > 0 && (
+                <div style={{ padding: '10px 12px', borderRadius: 8, background: '#FFF7ED', border: '1px solid #FDBA74', marginBottom: 12 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                    <SplitIcon size={14} color="#C2410C" />
+                    <span style={{ fontSize: 12, fontWeight: 700, color: '#C2410C' }}>
+                      {groupedItems.length === 1 ? 'Grouped item detected' : `${groupedItems.length} grouped items detected`}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 12, color: '#7C2D12', lineHeight: 1.5 }}>
+                    {groupedItems.map((gi) => (
+                      <div key={gi.itemId}>
+                        Item <strong>{gi.itemId}</strong> has a grouped quantity of <strong>{Number((gi as { qty?: number }).qty) || 1}</strong>. The warehouse will split it before tasking individual pieces.
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ fontSize: 11, color: '#7C2D12', marginTop: 6 }}>
+                    A Split task will be auto-created and assigned to the warehouse team alongside this request.
+                  </div>
+                </div>
+              )}
               {conflicts.length > 0 && !dismissedConflicts && (
                 <div style={{ padding: '10px 12px', borderRadius: 8, background: '#FEF3C7', border: '1px solid #FCD34D', marginBottom: 12 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
