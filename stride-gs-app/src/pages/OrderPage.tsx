@@ -2329,6 +2329,9 @@ export function OrderPage() {
       let to = '';
       const isClientSubmitted = order.createdByRole === 'client';
       if (isClientSubmitted) {
+        // No contactEmail fallback here: if the creator can't be resolved,
+        // skip the email entirely rather than route it to the end customer
+        // (which is the exact PII-misrouting this branch exists to prevent).
         to = (order.createdByEmail || '').trim();
         if (!to && order.createdByUser) {
           const { data: prof } = await supabase
@@ -2338,7 +2341,6 @@ export function OrderPage() {
             .maybeSingle();
           to = String(prof?.email || '').trim();
         }
-        if (!to) to = (order.contactEmail || '').trim();
       } else {
         to = (order.contactEmail || '').trim();
         if (!to) to = (order.createdByEmail || '').trim();
