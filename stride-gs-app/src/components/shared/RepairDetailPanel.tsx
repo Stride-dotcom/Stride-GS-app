@@ -816,7 +816,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
             setSubmitError(errMsg + ' Start Repair status flip already applied — you can print the Work Order from the button below.');
           } else {
             // SB path doesn't produce a work-order URL — the React-side
-            // generator (lib/workOrderPdf.ts) handles printing. Keep the
+            // generator (lib/docRenderer.ts) handles printing. Keep the
             // optimistic startResult as the banner.
             onRepairUpdated?.();
             if (resp.mirrorOk === false) {
@@ -1128,7 +1128,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
                   Work Order print button sits next to the Repair Folder so
                   staff can grab a printable form straight from this view —
                   same template (DOC_REPAIR_WORK_ORDER) the GAS generator
-                  uses, but rendered client-side via lib/workOrderPdf.ts.
+                  uses, but rendered client-side via lib/docRenderer.ts.
                   Gated to admin/staff (clients don't print warehouse
                   forms) and only after the repair has been approved (no
                   point printing a work order for a quote that hasn't been

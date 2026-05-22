@@ -3421,7 +3421,7 @@ export async function postCancelRepairSb(
 // tenant. Otherwise stay on legacy postStartRepair GAS path. Behavior
 // mirrors GAS handleStartRepair_ — accepts 'Approved' (real start) or
 // 'In Progress' / 'Complete' (PDF re-run no-op). The PDF itself is
-// regenerated React-side via lib/workOrderPdf.ts; this function does
+// regenerated React-side via lib/docRenderer.ts; this function does
 // not touch the work-order doc.
 export interface StartRepairSbResponse {
   ok: boolean;
