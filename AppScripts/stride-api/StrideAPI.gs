@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.225.0 — 2026-05-21 PST — [Split Items workflow] New `createSplitTask` + `completeSplitTask` doPost cases backing the React Split feature (SplitItemDialog on ItemPage, SplitTaskPanel on TaskPage). `handleCreateSplitTask_` appends a SPLIT-type Task row to the per-tenant Tasks sheet + idempotency check against open SPLIT tasks for the same parent item via Supabase + supabaseUpsert_ to public.tasks WITH metadata.split_workflow (parent_item_id / grouped_qty / keep_qty / leftover_qty / requester / origin) + sends a 'Split Required' alert to info@stridenw.com. `handleCompleteSplitTask_` calls the atomic Postgres `rpc_complete_split_task` RPC (migration 20260521230100) which reduces parent inventory.qty, inserts N child inventory rows (qty=1, parent_item_id back-pointer, item_id_ledger entries), writes one SPLIT billing row per child at class-based rate from service_catalog, and stamps audit-log entries for parent + each child + the task. After the RPC succeeds, `api_mirrorSplitWriteback_` mirrors the post-RPC SB state back to the client Sheet: updates Inventory.qty on parent, appends N new Inventory rows cloning the parent row with qty=1 + 'Split from <parent>' in Item Notes, appends N SPLIT rows to Billing_Ledger (re-read from public.billing so the rate matches byte-for-byte), and flips the Tasks row to Status='Completed'. Idempotent end-to-end — re-running on a completed task returns the existing child codes; the sheet writeback only fires once because the RPC's already-completed branch hydrates from inventory.parent_item_id rather than re-creating rows. Service-catalog SPLIT row seeded by the same migration (code='SPLIT' / category='Warehouse' / billing='class_based' / unit='per_item' / sensible default rates) — idempotent INSERT preserves any manual rates the operator set in Price List. CRITICAL: leaves the v38.182 atomic invoice-counter and the rest of the billing landmines exactly as-is — this is purely additive.
+   StrideAPI.gs — v38.226.0 — 2026-05-21 PST — [MIGRATION-P2/MIG-015] Extends `__writeThroughReverseInventory_` to support general field updates (mode b/c) alongside the legacy release-only path (mode a). Required by the new SB-primary `update-item-sb` Edge Function (companion in supabase/functions/update-item-sb/) which writes inventory edits to public.inventory then mirrors the changed fields back to the per-tenant Inventory sheet via this writer. New REVERSE_INV_FIELDS_ map (vendor / description / reference / sidemark / room / location / item_class / qty / item_notes / declared_value / coverage_option_id) drives column resolution via api_ensureColumn_ — case-insensitive + auto-append on miss (matches v38.158.0's handleUpdateInventoryItem_ landmine fix). Status + release_date stay on the legacy code path (idempotency check, parse-as-PT, ledger + auto-cancel side effects on Released-transition). Combined mode handles "status flip + sidemark edit in same save". Release-mode idempotency skip only fires when zero general fields were written this pass — a fields-only write never short-circuits even if the row already matches. v38.211.0 auto-cancel cascade source string changed from "Delivery" to "Reverse Writethrough" because the writer is now used for general edits too (the "Delivery" tag was specific to push-inventory-release-to-sheet, which is just one caller now). No other writer changes; REVERSE_WRITETHROUGH_TABLES_ registry unchanged; no React change; no migration. Per MIG-015: deploy this BEFORE flipping feature_flags.updateItem to active_backend='supabase' for any tenant — without it the SB writer's row payload (which omits status on general edits) would throw the legacy "row.status required" error and the canary would fail-closed on every save.
+   v38.225.0 — 2026-05-21 PST — [Split Items workflow] New `createSplitTask` + `completeSplitTask` doPost cases backing the React Split feature (SplitItemDialog on ItemPage, SplitTaskPanel on TaskPage). `handleCreateSplitTask_` appends a SPLIT-type Task row to the per-tenant Tasks sheet + idempotency check against open SPLIT tasks for the same parent item via Supabase + supabaseUpsert_ to public.tasks WITH metadata.split_workflow (parent_item_id / grouped_qty / keep_qty / leftover_qty / requester / origin) + sends a 'Split Required' alert to info@stridenw.com. `handleCompleteSplitTask_` calls the atomic Postgres `rpc_complete_split_task` RPC (migration 20260521230100) which reduces parent inventory.qty, inserts N child inventory rows (qty=1, parent_item_id back-pointer, item_id_ledger entries), writes one SPLIT billing row per child at class-based rate from service_catalog, and stamps audit-log entries for parent + each child + the task. After the RPC succeeds, `api_mirrorSplitWriteback_` mirrors the post-RPC SB state back to the client Sheet: updates Inventory.qty on parent, appends N new Inventory rows cloning the parent row with qty=1 + 'Split from <parent>' in Item Notes, appends N SPLIT rows to Billing_Ledger (re-read from public.billing so the rate matches byte-for-byte), and flips the Tasks row to Status='Completed'. Idempotent end-to-end — re-running on a completed task returns the existing child codes; the sheet writeback only fires once because the RPC's already-completed branch hydrates from inventory.parent_item_id rather than re-creating rows. Service-catalog SPLIT row seeded by the same migration (code='SPLIT' / category='Warehouse' / billing='class_based' / unit='per_item' / sensible default rates) — idempotent INSERT preserves any manual rates the operator set in Price List. CRITICAL: leaves the v38.182 atomic invoice-counter and the rest of the billing landmines exactly as-is — this is purely additive.
    v38.224.0 — 2026-05-20 PST — [Supabase-authoritative client settings write-back] Fifth per-table writer registered against the P1.4 framework (after inventory v38.208, will_calls v38.213, repairs v38.215, billing v38.217): `__writeThroughReverseClients_` for the `clients` table replaces the stub. Inverts the GAS→Supabase invariant for client settings — when React / intake / any future Supabase-authoritative caller writes `public.clients` directly, this writer mirrors the row OUT to (a) the per-tenant Settings tab as key/value upserts keyed by `CLIENT_FIELDS_[*].clientSettingsKey` and (b) the CB Clients tab via per-column setValue keyed by `CLIENT_FIELDS_[*].cbHeader`. Both sheets must be touched: per-tenant Settings is what dock-intake reads `AUTO_INSPECTION` from (the Brian Paquette failure mode); CB Clients is what `handleResyncClients_` reads back when pushing to Supabase — without the CB write, a CB-driven resync would silently overwrite the SB-side change. Also writes SB-only fields (`notification_contacts`, `billing_contact_name`, `billing_email`, `billing_address`, `tax_exempt`, `tax_exempt_reason`, `resale_cert_expires`, `resale_cert_url`) into the per-tenant Settings tab as ops-visible key/value rows — they don't have a `cbHeader` so they don't touch CB Clients, matching migrations 20260426160000 / 20260504000000 which placed them in Supabase only. Idempotent by tenantId; re-firing with the same row produces the same sheet state. Op support is `update` only — inserts flow through `handleOnboardClient_` which has its own bespoke sheet-creation path. Failure semantics mirror the framework: a single-side failure (Settings tab present but CB write fails, or vice versa) returns success with details in `cbSkipped` / `perTenantSkipped` so the next sync pass catches up; a both-sides failure throws so `handleWriteThroughReverse_` lands the row in `gs_sync_events` for FailedOperationsDrawer pickup. Cache invalidation: matches `handleUpdateClient_` by removing `api_active_clients`/`clients`/`clients_all`/`api_client_name_map` from CacheService after the CB write so the next `handleGetClients_` reflects the fresh values. Companion Edge Function `push-client-settings-to-sheet` + Postgres trigger `propagate_clients_to_sheet` ship in the same PR — together they form the App → Supabase → GAS Sheet flow.
    v38.223.0 — 2026-05-18 PST — [CRITICAL auth fix] Onboarding created Supabase auth users with EMPTY raw_user_meta_data — broken since 2026-04-11 (73 client users affected). Root cause: createSupabaseAuthUser_ never sent user_metadata on the admin create, so every RLS policy (which keys off auth.jwt()->'user_metadata'->>'role' / ->>'clientSheetId') filtered these users out and they were invisible everywhere in the app. The apply-intake-on-submit Edge Function does NOT create auth users (only deactivates the intake link + propagates refresh-mode client data) so the bug is entirely GAS-side. Fix: createSupabaseAuthUser_ gains an optional `metadata` param and POSTs it as user_metadata; new helper api_buildAuthUserMetadata_(role, clientName, clientSpreadsheetId) centralizes the AuthContext contract — { role, clientName, clientSheetId, accessibleClientSheetIds } (NOT `tenantId` as first hypothesized — RLS + AuthContext.tsx both key off `clientSheetId` / `accessibleClientSheetIds`; a `tenantId` field would not have unblocked RLS). All FIVE auth-user-creation sites now stamp it: api_upsertClientUser_ (onboarding — the primary bug), handleCreateUser_ (admin add user), handleEnsureAuthUser_ (gap-fill), handleAdminSetUserPassword_ create branch, plus the helper itself. Remediation for the existing 73: createSupabaseAuthUser_'s 422 "already exists" branch now self-heals via api_backfillAuthUserMetadata_ — finds the user by email and merges metadata ONLY when their existing user_metadata has no `role` (idempotent; never trampling a live login-synced metadata). Re-running onboarding or clicking ensureAuthUser for any pre-fix user repairs them; a bulk remediation can also iterate handleEnsureAuthUser_ over the cohort. Scoping: the stamped shape mirrors AuthContext's full four-key inSync contract (role/clientSheetId/accessibleClientSheetIds/childClientSheetIds); childClientSheetIds is always [] because no RLS policy keys off it and parent→child scope expansion is resolved authoritatively by AuthContext on login (unchanged by this fix). The 73 are single-tenant onboarded clients so [] is correct for them. No schema/migration/React change.
    v38.222.0 — 2026-05-14 PST — [BILLING bridge] CB Consolidated_Ledger auto-reconcile from public.billing on every QBO push. Closes the silent-drop class that bit INV-001152 (and the six other stuck invoices from the 2026-05-05 / 2026-05-06 cycle): handleCreateInvoice_'s CB dedup-skip at ~line 25303, plus the symmetry gaps in handleVoidInvoice_ / handleReopenTask_ (open backlog #5 / #7), let CB Consolidated_Ledger drift behind per-tenant Billing_Ledger + public.billing. handleQboCreateInvoice_ reads CB for the grouping pass, so any row that diverged got silently dropped from the push payload (React sent N invoices, GAS grouped <N). New helper `reconcileCbFromBilling_(invoiceNos)` reads public.billing as the source of truth, indexes CB by Ledger Row ID, and either UPDATEs the matching CB row in place (Status / Invoice # / Sidemark / Client / svc fields) or APPENDs a fresh CB row for IDs missing from CB. Idempotent — re-running is a no-op when state matches. handleQboCreateInvoice_ derives the set of invoice numbers covered by the incoming ledger_row_ids (one supabaseSelect_ on public.billing.invoice_no), calls the reconciler before reading CB, then proceeds with the existing grouping pass against the post-reconcile state. Wrapped in try/catch so a Supabase outage degrades to the prior behavior (silent skip of drifted rows) instead of blocking the push. NOT a structural fix — the underlying CB-symmetry bugs are intentionally left in place per MIG-005 (CB is retired in P4b). This is a transitional bridge that keeps billing accurate during the migration window.
@@ -2488,14 +2489,12 @@ function __writeThroughReverseStub_(_ss, payload) {
 
 /**
  * v38.208.0 — Inventory reverse-writethrough writer. First real
- * implementation against the P1.4 framework. Fires from the Edge
- * Function `push-inventory-release-to-sheet` after the React
- * OrderPage commits an inventory.status='Released' + release_date
- * write directly to Supabase. This writer mirrors that single-row
- * change into the per-tenant Inventory sheet so legacy readers
- * (handleCreateInvoice_'s storage-charge dedup, api_fullClientSync_,
- * QBO push, etc.) see the same state until invoice generation flips
- * to Supabase-primary in P4a.
+ * implementation against the P1.4 framework. Fires from two Edge
+ * Functions today:
+ *   • `push-inventory-release-to-sheet` — release flow (status +
+ *     release_date only). Original v38.208.0 contract.
+ *   • `update-item-sb` — general field update flow (any editable
+ *     subset). v38.226.0 extension below.
  *
  * Contract — receives (ss, payload):
  *   ss      — SpreadsheetApp.openById(tenantId), already validated +
@@ -2503,15 +2502,50 @@ function __writeThroughReverseStub_(_ss, payload) {
  *   payload — { tenantId, table:'inventory', op:'update', row:{...},
  *               rowId:<Item ID>, requestId?, correlationId? }
  *
- * Idempotent by Item ID: looks up the row, no-ops when the row
- * already matches the target status + date. Throws on any
- * unrecoverable error so handleWriteThroughReverse_ catches it and
- * writes gs_sync_events for the FailedOperationsDrawer.
+ * Two modes, detected from row contents:
+ *
+ *   (a) Release mode (legacy): row carries `status` and optional
+ *       `release_date`. The writer treats this as the v38.208.0
+ *       contract — writes Status + Release Date, fires
+ *       api_ledgerUpdateStatus_ + auto-cancel-open-work on a Released
+ *       transition. Idempotent re-runs skip when already-matches.
+ *
+ *   (b) General field update mode (v38.226.0+): row carries any
+ *       subset of REVERSE_INV_FIELDS_ keys (no `status`). The writer
+ *       resolves the column case-insensitively via api_ensureColumn_
+ *       (matching handleUpdateInventoryItem_'s landmine fix — see
+ *       v38.158.0) and setValue's each. Idempotent re-runs OK
+ *       because setValue is deterministic per input.
+ *
+ *   (c) Combined: row carries `status` plus other fields. The writer
+ *       writes the general fields first, then runs the release-mode
+ *       block. This covers the SB-primary updateItem path where
+ *       Justin flips status to Released AND edits sidemark in the
+ *       same save.
  *
  * Op support: only 'update' for now. Insert/delete on inventory
- * aren't part of any active migration path (manual release is
- * update-only). Future migrations can extend.
+ * aren't part of any active migration path. Future migrations can
+ * extend.
  */
+var REVERSE_INV_FIELDS_ = {
+  // SB column name → Inventory sheet header. Keep in sync with
+  // FIELD_MAP in supabase/functions/update-item-sb/index.ts and with
+  // sbInventoryRow_ (the GAS→SB mirror direction).
+  vendor:             "Vendor",
+  description:        "Description",
+  reference:          "Reference",
+  sidemark:           "Sidemark",
+  room:               "Room",
+  location:           "Location",
+  item_class:         "Class",
+  qty:                "Qty",
+  // status is handled by the release-mode block (it triggers ledger +
+  // auto-cancel side effects). It's intentionally NOT in this map.
+  item_notes:         "Item Notes",
+  declared_value:     "Declared Value",
+  coverage_option_id: "Coverage Option"
+};
+
 function __writeThroughReverseInventory_(ss, payload) {
   var rowId = payload && payload.rowId ? String(payload.rowId).trim() : "";
   var row   = (payload && payload.row) || {};
@@ -2530,10 +2564,8 @@ function __writeThroughReverseInventory_(ss, payload) {
 
   var invMap = api_getHeaderMap_(inv);
   var itemIdCol  = invMap["Item ID"];
-  var statusCol  = invMap["Status"];
-  var relDateCol = invMap["Release Date"];
-  if (!itemIdCol || !statusCol || !relDateCol) {
-    throw new Error("__writeThroughReverseInventory_: missing required columns (Item ID, Status, Release Date)");
+  if (!itemIdCol) {
+    throw new Error("__writeThroughReverseInventory_: missing required column (Item ID)");
   }
 
   // api_getLastDataRow_ guards against trailing-blank-row pollution
@@ -2554,60 +2586,112 @@ function __writeThroughReverseInventory_(ss, payload) {
     throw new Error("__writeThroughReverseInventory_: Item ID '" + rowId + "' not found in Inventory sheet");
   }
 
-  var newStatus = row.status != null ? String(row.status) : "";
-  var newReleaseDateStr = row.release_date != null ? String(row.release_date) : "";
-  if (!newStatus) throw new Error("__writeThroughReverseInventory_: row.status required");
+  var hasStatus = row.status != null && String(row.status) !== "";
+  var writtenFields = [];
 
-  // Parse YYYY-MM-DD safely. The Date constructor with a plain ISO
-  // date string treats it as UTC, which drops back to the previous
-  // calendar day in PT. Parse the components explicitly so a release
-  // dated 2026-05-12 stays 2026-05-12 in the sheet.
-  var parsedDate = null;
-  if (newReleaseDateStr) {
-    var dateOnly = newReleaseDateStr.slice(0, 10);
-    var dParts = dateOnly.split("-");
-    if (dParts.length === 3) {
-      var d = new Date(parseInt(dParts[0], 10), parseInt(dParts[1], 10) - 1, parseInt(dParts[2], 10));
-      if (!isNaN(d.getTime())) parsedDate = d;
-    }
+  // ── Mode (b) / (c): general field updates ─────────────────────────
+  // Iterate REVERSE_INV_FIELDS_ rather than row keys so an unexpected
+  // payload key doesn't accidentally try to write a non-mapped column.
+  for (var fk in REVERSE_INV_FIELDS_) {
+    if (!Object.prototype.hasOwnProperty.call(row, fk)) continue;
+    if (row[fk] === undefined) continue;
+    var headerName = REVERSE_INV_FIELDS_[fk];
+    var col = api_ensureColumn_(inv, headerName);
+    // api_ensureColumn_ resolves case-insensitively + appends the
+    // column if missing, matching v38.158.0's landmine fix in
+    // handleUpdateInventoryItem_.
+    inv.getRange(foundRow, col).setValue(row[fk]);
+    writtenFields.push(fk);
   }
 
-  // Idempotency — skip when the row already matches. Cheap two-cell
-  // read + compare avoids a redundant setValue round-trip on every
-  // retry from a flaky network / FailedOperationsDrawer replay.
-  var currentStatus = String(inv.getRange(foundRow, statusCol).getValue() || "").trim();
-  if (currentStatus === newStatus && parsedDate) {
-    var currentRelDate = inv.getRange(foundRow, relDateCol).getValue();
-    if (currentRelDate instanceof Date
-      && currentRelDate.getFullYear() === parsedDate.getFullYear()
-      && currentRelDate.getMonth() === parsedDate.getMonth()
-      && currentRelDate.getDate() === parsedDate.getDate()) {
+  // ── Mode (a) / (c): status + release_date ─────────────────────────
+  if (hasStatus) {
+    var statusCol  = invMap["Status"];
+    var relDateCol = invMap["Release Date"];
+    if (!statusCol || !relDateCol) {
+      throw new Error("__writeThroughReverseInventory_: missing required columns (Status, Release Date) for release-mode write");
+    }
+
+    var newStatus = String(row.status);
+    var newReleaseDateStr = row.release_date != null ? String(row.release_date) : "";
+
+    // Parse YYYY-MM-DD safely (UTC-shift dodge — see v38.208.0 notes).
+    var parsedDate = null;
+    if (newReleaseDateStr) {
+      var dateOnly = newReleaseDateStr.slice(0, 10);
+      var dParts = dateOnly.split("-");
+      if (dParts.length === 3) {
+        var d = new Date(parseInt(dParts[0], 10), parseInt(dParts[1], 10) - 1, parseInt(dParts[2], 10));
+        if (!isNaN(d.getTime())) parsedDate = d;
+      }
+    }
+
+    // Idempotency — skip when the row already matches AND no general
+    // fields were written this pass (a no-op general+status pair is
+    // legitimately skippable; a fields-only write means we need to
+    // emit a cell write regardless of status match).
+    var currentStatus = String(inv.getRange(foundRow, statusCol).getValue() || "").trim();
+    var statusAlreadyMatches = (currentStatus === newStatus);
+    var dateAlreadyMatches = false;
+    if (parsedDate) {
+      var currentRelDate = inv.getRange(foundRow, relDateCol).getValue();
+      if (currentRelDate instanceof Date
+        && currentRelDate.getFullYear() === parsedDate.getFullYear()
+        && currentRelDate.getMonth() === parsedDate.getMonth()
+        && currentRelDate.getDate() === parsedDate.getDate()) {
+        dateAlreadyMatches = true;
+      }
+    } else if (newReleaseDateStr === "") {
+      // Release date clear (status='Active' from updateItem) — match
+      // is "current cell is empty/blank".
+      var curCell = inv.getRange(foundRow, relDateCol).getValue();
+      dateAlreadyMatches = (curCell === "" || curCell === null);
+    }
+
+    if (statusAlreadyMatches && dateAlreadyMatches && writtenFields.length === 0) {
       return { rowNumber: foundRow, skipped: true, reason: "already-matches-target-state" };
     }
-  }
 
-  inv.getRange(foundRow, statusCol).setValue(newStatus);
-  if (parsedDate) inv.getRange(foundRow, relDateCol).setValue(parsedDate);
+    if (!statusAlreadyMatches) {
+      inv.getRange(foundRow, statusCol).setValue(newStatus);
+      writtenFields.push("status");
+    }
+    if (parsedDate) {
+      inv.getRange(foundRow, relDateCol).setValue(parsedDate);
+      writtenFields.push("release_date");
+    } else if (newReleaseDateStr === "") {
+      // Explicit clear (v38.177.0 — status → Active clears release date)
+      inv.getRange(foundRow, relDateCol).setValue("");
+      writtenFields.push("release_date_cleared");
+    }
 
-  // Slot-ledger update — matches the doPost releaseItems case (which
-  // also fires api_ledgerUpdateStatus_ after the sheet write). Marks
-  // the Item ID as "released" so it can't be reissued for a new
-  // inventory row. Best-effort: a ledger outage logs and continues.
-  if (newStatus === "Released") {
-    try { api_ledgerUpdateStatus_([rowId], "released", null); }
-    catch (lerr) { Logger.log("__writeThroughReverseInventory_ ledger update non-fatal: " + lerr); }
+    // Slot-ledger update + auto-cancel ONLY when this is a true
+    // Released-transition (current → Released). The SB-primary
+    // update-item-sb handler does its own SB-side auto-cancel before
+    // calling this writer, so the GAS-side sweep here is the
+    // sheet-mirror of those same cancellations. It's also the only
+    // path for the legacy release-only callers (push-inventory-release-
+    // to-sheet, handleMirrorInventoryReleaseBulk_ callers).
+    if (newStatus === "Released" && !statusAlreadyMatches) {
+      try { api_ledgerUpdateStatus_([rowId], "released", null); }
+      catch (lerr) { Logger.log("__writeThroughReverseInventory_ ledger update non-fatal: " + lerr); }
 
-    // v38.211.0 — Auto-cancel open Tasks / Repairs for this item. DT-Finished
-    // release means the piece left the warehouse on a delivery; whatever
-    // INSP / ASM / repair was queued can't happen anymore.
-    try {
-      var dtCancel = api_cancelOpenWorkOnRelease_(ss, [rowId], "Delivery", "");
-      if (dtCancel.tasksCancelled > 0 || dtCancel.repairsCancelled > 0) {
-        Logger.log("__writeThroughReverseInventory_ auto-cancelled tasks=" +
-          dtCancel.tasksCancelled + " repairs=" + dtCancel.repairsCancelled + " for " + rowId);
+      try {
+        var dtCancel = api_cancelOpenWorkOnRelease_(ss, [rowId], "Reverse Writethrough", "");
+        if (dtCancel.tasksCancelled > 0 || dtCancel.repairsCancelled > 0) {
+          Logger.log("__writeThroughReverseInventory_ auto-cancelled tasks=" +
+            dtCancel.tasksCancelled + " repairs=" + dtCancel.repairsCancelled + " for " + rowId);
+        }
+      } catch (cerr) {
+        Logger.log("__writeThroughReverseInventory_ auto-cancel non-fatal: " + cerr);
       }
-    } catch (cerr) {
-      Logger.log("__writeThroughReverseInventory_ auto-cancel non-fatal: " + cerr);
+    }
+  } else {
+    // ── Mode (b): general fields only, no status ────────────────────
+    // If nothing was written, the payload was empty — return a clear
+    // skip so the caller can distinguish from a real write.
+    if (writtenFields.length === 0) {
+      return { rowNumber: foundRow, skipped: true, reason: "no-fields-to-write" };
     }
   }
 
@@ -2615,7 +2699,7 @@ function __writeThroughReverseInventory_(ss, payload) {
   // resync caller) see committed values rather than batched writes.
   SpreadsheetApp.flush();
 
-  return { rowNumber: foundRow, status: newStatus, releaseDate: newReleaseDateStr };
+  return { rowNumber: foundRow, writtenFields: writtenFields };
 }
 
 // Registry. Future per-table writers replace the stub. Keep this list
