@@ -127,10 +127,32 @@ Deno.serve(async (req: Request) => {
   const todayIso      = new Date().toISOString().slice(0, 10);
   const dueOnOrBefore = String(body.dueOnOrBefore ?? '').trim() || todayIso;
 
+  // Admin-only gate. `public.stax_invoices` is a FLEET-WIDE table by
+  // design (no tenant_id column — mirrors the global Stax Auto Pay
+  // spreadsheet). The GAS path enforces this via `withStaffGuard_`;
+  // mirror that by requiring the caller's JWT to carry role admin/staff.
+  // Without this, any authenticated user with the anon key could trigger
+  // real card charges across the fleet (this handler is real money).
+  const authHeader = req.headers.get('Authorization') || '';
+  const callerToken = authHeader.replace(/^Bearer\s+/i, '').trim();
+  if (!callerToken) {
+    return jsonResponse({ error: 'Authorization header required', code: 'UNAUTHENTICATED' }, 401);
+  }
+  const anonSb = createClient(supabaseUrl, Deno.env.get('SUPABASE_ANON_KEY') ?? '');
+  const { data: userData, error: authErr } = await anonSb.auth.getUser(callerToken);
+  if (authErr || !userData?.user) {
+    return jsonResponse({ error: 'Invalid token', code: 'UNAUTHENTICATED' }, 401);
+  }
+  const callerRole = String((userData.user.user_metadata as { role?: string })?.role ?? '').toLowerCase();
+  if (callerRole !== 'admin' && callerRole !== 'staff') {
+    return jsonResponse({ error: 'admin/staff role required', code: 'FORBIDDEN' }, 403);
+  }
+
   // ── Load CREATED stax_invoices rows due on/before the cutoff ─────────
   // due_date column is text "YYYY-MM-DD" (per migration), so lexicographic
   // compare works on ISO dates. Auto-charge gate is in the row's
   // auto_charge column (mirrored from CB Clients by GAS).
+  // NOTE: stax_invoices has no tenant_id by design — fleet-wide admin tool.
   const { data: rows, error: selErr } = await sb
     .from('stax_invoices')
     .select('id, qb_invoice_no, customer, stax_customer_id, stax_id, due_date, amount, status, auto_charge')
@@ -145,6 +167,8 @@ Deno.serve(async (req: Request) => {
     String(r.stax_id ?? '').trim() && String(r.stax_customer_id ?? '').trim());
 
   // Pre-load per-client auto_charge flag for the client gate.
+  // `clients` lookup is fleet-wide on purpose — stax_invoices.customer
+  // can reference any tenant's client name (each clients row IS a tenant).
   const customerNames = Array.from(new Set(candidates.map((r: { customer?: string }) => String(r.customer ?? '').trim()).filter(Boolean)));
   const clientAutoCharge: Record<string, boolean> = {};
   if (customerNames.length > 0) {

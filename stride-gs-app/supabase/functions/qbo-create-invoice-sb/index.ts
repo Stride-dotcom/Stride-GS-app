@@ -134,6 +134,25 @@ Deno.serve(async (req: Request) => {
 
   const sb = createClient(supabaseUrl, serviceKey);
 
+  // Admin-only gate. QBO push is a real money path; GAS enforces via
+  // `withStaffGuard_`. Without an explicit role check the anon-key
+  // bundled in every browser build would be enough to push invoices.
+  const authHeader = req.headers.get('Authorization') || '';
+  const callerToken = authHeader.replace(/^Bearer\s+/i, '').trim();
+  if (!callerToken) {
+    return jsonResponse({ error: 'Authorization header required', code: 'UNAUTHENTICATED' }, 401);
+  }
+  const anonKey = Deno.env.get('SUPABASE_ANON_KEY') ?? '';
+  const authClient = createClient(supabaseUrl, anonKey);
+  const { data: userData, error: authErr } = await authClient.auth.getUser(callerToken);
+  if (authErr || !userData?.user) {
+    return jsonResponse({ error: 'Invalid token', code: 'UNAUTHENTICATED' }, 401);
+  }
+  const callerRole = String((userData.user.user_metadata as { role?: string })?.role ?? '').toLowerCase();
+  if (callerRole !== 'admin' && callerRole !== 'staff') {
+    return jsonResponse({ error: 'admin/staff role required', code: 'FORBIDDEN' }, 403);
+  }
+
   // ── Resolve QBO customerId ──────────────────────────────────────────
   // GAS path: qbo_resolveCustomerAndSubJob_ does a search by name, then
   // creates the customer if missing, then optionally creates a
@@ -265,12 +284,15 @@ Deno.serve(async (req: Request) => {
 
   // ── Stamp public.invoice_tracking.qbo_pushed_at ─────────────────────
   // GAS path writes qbo_pushed_at via a PATCH at StrideAPI.gs:43257.
-  // We do the same. Best-effort — the QBO write is committed already.
+  // invoice_no is the primary key (globally unique via next_invoice_no()
+  // atomic sequence) so collision across tenants is impossible by design,
+  // but we add the tenant_id filter as defense-in-depth.
   try {
     const { error: itErr } = await sb
       .from('invoice_tracking')
       .update({ qbo_pushed_at: new Date().toISOString() })
-      .eq('invoice_no', invoiceNo);
+      .eq('invoice_no', invoiceNo)
+      .eq('tenant_id', tenantId);
     if (itErr) console.error('[qbo-create-invoice-sb] invoice_tracking stamp failed:', itErr.message);
   } catch (e) {
     console.error('[qbo-create-invoice-sb] invoice_tracking stamp threw:', e);

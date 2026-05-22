@@ -109,6 +109,25 @@ Deno.serve(async (req: Request) => {
   }
   const sb = createClient(supabaseUrl, serviceKey);
 
+  // Admin-only gate. `public.stax_invoices` is FLEET-WIDE by design;
+  // GAS path enforces via `withStaffGuard_`. Without this any
+  // authenticated user could overwrite Stax-side billing records.
+  const authHeader = req.headers.get('Authorization') || '';
+  const callerToken = authHeader.replace(/^Bearer\s+/i, '').trim();
+  if (!callerToken) {
+    return jsonResponse({ error: 'Authorization header required', code: 'UNAUTHENTICATED' }, 401);
+  }
+  const anonKey = Deno.env.get('SUPABASE_ANON_KEY') ?? '';
+  const authClient = createClient(supabaseUrl, anonKey);
+  const { data: userData, error: authErr } = await authClient.auth.getUser(callerToken);
+  if (authErr || !userData?.user) {
+    return jsonResponse({ error: 'Invalid token', code: 'UNAUTHENTICATED' }, 401);
+  }
+  const callerRole = String((userData.user.user_metadata as { role?: string })?.role ?? '').toLowerCase();
+  if (callerRole !== 'admin' && callerRole !== 'staff') {
+    return jsonResponse({ error: 'admin/staff role required', code: 'FORBIDDEN' }, 403);
+  }
+
   // ── Decode input ─────────────────────────────────────────────────────
   // Prefer iifContent (raw text). fileContent is treated as base64 to
   // remain backward-compatible with the GAS payload contract.

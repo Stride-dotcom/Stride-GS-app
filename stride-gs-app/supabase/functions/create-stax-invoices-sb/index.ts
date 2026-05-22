@@ -103,8 +103,30 @@ Deno.serve(async (req: Request) => {
     ? body.invoiceNos.map((s) => String(s).trim()).filter(Boolean)
     : null;
 
+  // Admin-only gate. `public.stax_invoices` is FLEET-WIDE by design
+  // (no tenant_id column — mirrors the global Stax Auto Pay spreadsheet).
+  // GAS path enforces via `withStaffGuard_`; mirror that here. Without
+  // it any authenticated user with the anon key could push every tenant's
+  // PENDING invoices to Stax. Real money — fail closed.
+  const authHeader = req.headers.get('Authorization') || '';
+  const callerToken = authHeader.replace(/^Bearer\s+/i, '').trim();
+  if (!callerToken) {
+    return jsonResponse({ error: 'Authorization header required', code: 'UNAUTHENTICATED' }, 401);
+  }
+  const anonKey = Deno.env.get('SUPABASE_ANON_KEY') ?? '';
+  const authClient = createClient(supabaseUrl, anonKey);
+  const { data: userData, error: authErr } = await authClient.auth.getUser(callerToken);
+  if (authErr || !userData?.user) {
+    return jsonResponse({ error: 'Invalid token', code: 'UNAUTHENTICATED' }, 401);
+  }
+  const callerRole = String((userData.user.user_metadata as { role?: string })?.role ?? '').toLowerCase();
+  if (callerRole !== 'admin' && callerRole !== 'staff') {
+    return jsonResponse({ error: 'admin/staff role required', code: 'FORBIDDEN' }, 403);
+  }
+
   // ── Load candidate stax_invoices rows ────────────────────────────────
   // Gate: status='PENDING' AND stax_id IS NULL/empty.
+  // NOTE: stax_invoices has no tenant_id by design — fleet-wide admin tool.
   let query = sb
     .from('stax_invoices')
     .select('id, qb_invoice_no, customer, stax_customer_id, invoice_date, due_date, amount, line_items_json, status, stax_id')
@@ -137,6 +159,8 @@ Deno.serve(async (req: Request) => {
   const customerNames = Array.from(new Set(candidates.map((r: { customer?: string }) => String(r.customer ?? '').trim()).filter(Boolean)));
   const clientMap: Record<string, string> = {};   // upper(name) → stax_customer_id
   if (customerNames.length > 0) {
+    // Fleet-wide clients lookup: stax_invoices.customer can reference
+    // any tenant's client name (each public.clients row IS a tenant).
     const { data: clientRows, error: clientsErr } = await sb
       .from('clients')
       .select('name, stax_customer_id')
