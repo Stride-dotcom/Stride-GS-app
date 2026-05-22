@@ -29,6 +29,7 @@ import { ItemDetailPanel, type LinkedRecord } from '../components/shared/ItemDet
 import { CreateWillCallModal } from '../components/shared/CreateWillCallModal';
 import { CreateTaskModal } from '../components/shared/CreateTaskModal';
 import { TransferItemsModal } from '../components/shared/TransferItemsModal';
+import { SplitItemDialog } from '../components/shared/SplitItemDialog';
 import type { ApiInventoryItem } from '../lib/api';
 import type { InventoryItem } from '../lib/types';
 import { entityEvents } from '../lib/entityEvents';
@@ -161,6 +162,7 @@ function ItemPageInner({ item, onRefetch }: { item: ApiInventoryItem; onRefetch:
   const [showCreateTaskModal, setShowCreateTaskModal] = useState(false);
   const [showCreateWcModal, setShowCreateWcModal] = useState(false);
   const [showTransferModal, setShowTransferModal] = useState(false);
+  const [showSplitDialog, setShowSplitDialog] = useState(false);
 
   // Cross-entity navigation from linked-record buttons inside the panel.
   const handleNavigateToRecord = useCallback(
@@ -213,6 +215,7 @@ function ItemPageInner({ item, onRefetch }: { item: ApiInventoryItem; onRefetch:
         onCreateTask={() => setShowCreateTaskModal(true)}
         onCreateWillCall={() => setShowCreateWcModal(true)}
         onTransfer={canTransfer ? () => setShowTransferModal(true) : undefined}
+        onSplit={item.qty > 1 ? () => setShowSplitDialog(true) : undefined}
         itemTasks={itemTasks}
         itemRepairs={itemRepairs}
         itemWillCalls={itemWillCalls}
@@ -279,6 +282,29 @@ function ItemPageInner({ item, onRefetch }: { item: ApiInventoryItem; onRefetch:
           clearItemPatch={clearItemPatch}
         />
       )}
+
+      {/* ── Split Item Dialog ── */}
+      <SplitItemDialog
+        open={showSplitDialog}
+        onClose={() => setShowSplitDialog(false)}
+        item={{
+          itemId: item.itemId,
+          qty: item.qty,
+          description: item.description,
+          vendor: item.vendor,
+          itemClass: item.itemClass,
+          sidemark: item.sidemark,
+          location: item.location,
+        }}
+        clientSheetId={clientSheetId}
+        origin="item"
+        onCreated={(taskId) => {
+          // Navigate to the new Split task page so warehouse staff
+          // (or the requester) lands directly on the workflow panel.
+          navigate(`/tasks/${encodeURIComponent(taskId)}${clientSheetId ? `?client=${encodeURIComponent(clientSheetId)}` : ''}`);
+          onRefetch();
+        }}
+      />
     </>
   );
 }

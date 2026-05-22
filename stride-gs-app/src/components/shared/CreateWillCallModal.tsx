@@ -1,9 +1,9 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { X, Search, Check, Loader2, CheckCircle2, AlertTriangle } from 'lucide-react';
+import { X, Search, Check, Loader2, CheckCircle2, AlertTriangle, Split as SplitIcon } from 'lucide-react';
 import { AutocompleteSelect } from './AutocompleteSelect';
 import { theme } from '../../styles/theme';
 import { WriteButton } from './WriteButton';
-import { postCreateWillCall, isApiConfigured } from '../../lib/api';
+import { postCreateWillCall, postCreateSplitTask, isApiConfigured } from '../../lib/api';
 import type { CreateWillCallResponse } from '../../lib/api';
 import { useClients } from '../../hooks/useClients';
 import { useAuth } from '../../contexts/AuthContext';
@@ -79,6 +79,15 @@ export function CreateWillCallModal({ onClose, onSubmit, preSelectedItemIds = []
   }, [activeItems, searchTerm]);
 
   const selectedItems = useMemo(() => allItems.filter(i => selectedIds.has(i.itemId)), [allItems, selectedIds]);
+
+  // Grouped-item detection — any item with qty > 1 will need a warehouse
+  // split before it can be partially released. We surface a notice on the
+  // review step and auto-create one Split task per grouped item *after*
+  // the WC create succeeds (so the WC carries the link back to the split).
+  const groupedItems = useMemo(
+    () => selectedItems.filter(i => Number(i.qty) > 1),
+    [selectedItems],
+  );
 
   // Check selected items against existing active will calls (exclude
   // optimistic TEMP entries and the just-created WC).
@@ -186,6 +195,35 @@ export function CreateWillCallModal({ onClose, onSubmit, preSelectedItemIds = []
         // first refetch lands within 1-3s once write-through completes.
         entityEvents.emit('will_call', resp.data.wcNumber || '');
         onSubmit?.({ client, pickupParty, items: [...selectedIds], wcNumber: resp.data.wcNumber });
+
+        // Auto-create Split tasks for every grouped item (qty > 1). The
+        // warehouse needs these split into single-qty rows before the will
+        // call can be partially released. Best-effort — a failure here
+        // surfaces as a soft warning on the success screen but does NOT
+        // roll back the WC (which is already committed).
+        if (groupedItems.length > 0) {
+          const wcNumber = resp.data.wcNumber || '';
+          await Promise.all(groupedItems.map(async (gi) => {
+            try {
+              await postCreateSplitTask({
+                itemId: gi.itemId,
+                groupedQty: Number(gi.qty) || 1,
+                keepQty: 1,
+                // Default split = all qty into individual items. Warehouse
+                // can adjust during completion if they need different math.
+                leftoverQty: Math.max(1, (Number(gi.qty) || 1) - 1),
+                notes: `Auto-created for Will Call ${wcNumber}.`,
+                origin: 'will_call',
+                originEntityId: wcNumber,
+                originEntityNumber: wcNumber,
+                requestedByEmail: user?.email || null,
+                requestedByName: (user as { displayName?: string } | null)?.displayName || null,
+              }, clientSheetId);
+            } catch (e) {
+              console.warn('[CreateWillCallModal] auto-split create failed for', gi.itemId, e);
+            }
+          }));
+        }
       }
     } catch (err) {
       removeOptimisticWc?.(tempWcNum); // rollback
@@ -343,6 +381,26 @@ export function CreateWillCallModal({ onClose, onSubmit, preSelectedItemIds = []
                 {cod && <div style={{ marginTop: 10, fontSize: 13 }}><span style={{ background: '#FEF3C7', color: '#B45309', padding: '2px 8px', borderRadius: 8, fontSize: 11, fontWeight: 600 }}>COD: ${codAmount || '0'}</span></div>}
                 {wcNotes && <div style={{ marginTop: 10, fontSize: 12, color: theme.colors.textSecondary }}><strong>Notes:</strong> {wcNotes}</div>}
               </div>
+              {groupedItems.length > 0 && (
+                <div style={{ padding: '10px 12px', borderRadius: 8, background: '#FFF7ED', border: '1px solid #FDBA74', marginBottom: 12 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                    <SplitIcon size={14} color="#C2410C" />
+                    <span style={{ fontSize: 12, fontWeight: 700, color: '#C2410C' }}>
+                      {groupedItems.length === 1 ? 'Grouped item detected' : `${groupedItems.length} grouped items detected`}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 12, color: '#7C2D12', lineHeight: 1.5 }}>
+                    {groupedItems.map((gi) => (
+                      <div key={gi.itemId}>
+                        Item <strong>{gi.itemId}</strong> has a grouped quantity of <strong>{Number(gi.qty)}</strong>. The warehouse will split it before processing this request.
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ fontSize: 11, color: '#7C2D12', marginTop: 6 }}>
+                    A Split task will be auto-created and assigned to the warehouse team after the will call is submitted.
+                  </div>
+                </div>
+              )}
               {wcConflicts.length > 0 && (
                 <div style={{ padding: '10px 12px', borderRadius: 8, background: '#FEF2F2', border: '1px solid #FECACA', marginBottom: 12 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
