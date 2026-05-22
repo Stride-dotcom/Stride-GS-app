@@ -1,6 +1,8 @@
 # Stride GS App — Build Status
 
-> Last updated: 2026-05-21 ([feat/migration/route-and-update-item][MIGRATION-P2-P3/MIG-016] **SB-primary routing layer + 5 real -sb handlers (round 2).** Round 1 shipped routing + `update-item-sb`. Round 2 extends with 4 more handlers: `batch-create-tasks-sb` (createTask — service_catalog lookup, task ID generation, open-task dedup), `release-items-sb` (bulk release with item_notes append + auto-cancel open Tasks/Repairs cascade), `create-will-call-sb` (WC fee via service_catalog + per-client discount, active-WC dedup), `process-wc-release-sb` (item release + Unbilled billing for non-COD, idempotent on ledger_row_id to preserve Invoiced/Void history). StrideAPI v38.227.0: new `__writeThroughReverseTasks_` writer (6th per-table writer; insert + update upsert by Task ID; required by batch-create-tasks-sb). GAS_TO_SB_MAP now covers 5 actions: updateInventoryItem, batchCreateTasks, releaseItems, createWillCall, processWcRelease. **completeShipment intentionally deferred** to its own PR — 3+ hour port (Drive folders, shipment-received email, auto-INSP/ASM task creation, receiving billing, idempotency tag dedup; shipping half-built is worse than not shipping). Canary-acceptable gaps documented in each EF's header comment: WC partial release doesn't yet create a child WC for remaining items (operator creates manually); WC release email skipped (operator uses legacy GAS path); WC addons flush skipped; batchCreateTasks task-ID has narrow race on concurrent (tenant,item,svc) tuple. tsc + `npm run build` clean.).
+> Last updated: 2026-05-22 ([feat/migration/round-3-handlers][MIGRATION-P2-P5/MIG-016] **Round 3: 4 more SB-primary handlers.** PR #502 merged 2026-05-22T06:20Z; React app deployed live with routing layer + 5 EFs (rounds 1+2). EF deploys remain operator-pending (`SUPABASE_ACCESS_TOKEN` not in builder env — confirmed retry on canonical). This branch adds: `update-task-sb` (consolidates 4 GAS task-update actions — notes/customPrice/dueDate/priority — into one EF with shared `updateTask` flag), `update-repair-sb` (mirrors handleUpdateRepairNotes_'s broader scope: notes+vendor+scheduledDate+startDate+itemNotes+taskNotes), `complete-shipment-sb` (real port of handleCompleteShipment_ — Shipment# via `next_shipment_no()` SEQUENCE, `[IK:<key>]` dedup via shipments.notes substring, dup-item guard, inventory inserts, auto-INSP/ASM tasks with `clientTrustsFlags` + `autoInspection` fallback logic from v38.68.3, receiving billing + addons from `service_catalog` with per-client discount), `transfer-items-sb` (cross-tenant move — validates dest is active client, dup guard, mark source 'Transferred' + create dest 'Active' rows with `transfer_date`, void source Unbilled billing + recreate at dest with dest's discount re-applied; REPAIR/RPR skip discount per GAS). 9 new GAS_TO_SB_MAP entries (4 task variants + updateRepairNotes + completeShipment + transferItems). **Canary-acceptable gaps per EF** (each documented in header comment): complete-shipment-sb skips Drive folders + shipment-received email + Shipments sheet writer is still stub (drift until full-sync); transfer-items-sb skips open Tasks/Repairs port to destination (operator handles); update-task-sb cascade rows write SB-only (per-tenant sheet drift until full-sync). tsc + `npm run build` clean.).
+
+> Earlier 2026-05-21 ([feat/migration/route-and-update-item][MIGRATION-P2-P3/MIG-016] **SB-primary routing layer + 5 real -sb handlers (round 2).** Round 1 shipped routing + `update-item-sb`. Round 2 extends with 4 more handlers: `batch-create-tasks-sb` (createTask — service_catalog lookup, task ID generation, open-task dedup), `release-items-sb` (bulk release with item_notes append + auto-cancel open Tasks/Repairs cascade), `create-will-call-sb` (WC fee via service_catalog + per-client discount, active-WC dedup), `process-wc-release-sb` (item release + Unbilled billing for non-COD, idempotent on ledger_row_id to preserve Invoiced/Void history). StrideAPI v38.227.0: new `__writeThroughReverseTasks_` writer (6th per-table writer; insert + update upsert by Task ID; required by batch-create-tasks-sb). GAS_TO_SB_MAP now covers 5 actions: updateInventoryItem, batchCreateTasks, releaseItems, createWillCall, processWcRelease. **completeShipment intentionally deferred** to its own PR — 3+ hour port (Drive folders, shipment-received email, auto-INSP/ASM task creation, receiving billing, idempotency tag dedup; shipping half-built is worse than not shipping). Canary-acceptable gaps documented in each EF's header comment: WC partial release doesn't yet create a child WC for remaining items (operator creates manually); WC release email skipped (operator uses legacy GAS path); WC addons flush skipped; batchCreateTasks task-ID has narrow race on concurrent (tenant,item,svc) tuple. tsc + `npm run build` clean.).
 
 > Earlier 2026-05-21 ([feat/migration/route-and-update-item — round 1][MIGRATION-P2/MIG-016] **First SB-primary routing layer + `update-item-sb` real handler.** New `src/lib/apiRouter.ts` (action→EF map + `invokeSupabaseHandler`); `apiPost` consults `resolveRoute` BEFORE the GAS path, routes to SB Edge Function when `feature_flags.<flagKey>.active_backend` resolves to `'supabase'` for the caller's tenant. Skips `fireShadow` on the SB path (SB IS the canonical path — nothing to shadow). Errors surface, never silently fall back to GAS — dual-write would be worse than a user-visible save failure. `update-item-sb` Edge Function: SB-primary handler for `updateInventoryItem`. Validates payload (mirrors `handleUpdateInventoryItem_` exactly — status whitelist, qty/declaredValue numeric/non-neg), UPDATEs `public.inventory`, cascades to open `public.tasks` + `public.repairs` for the SYNC_FIELDS subset, cascades Sidemark/Reference to Unbilled `public.billing` rows, auto-cancels open Tasks/Repairs on a true Released-transition with " | "-appended task_notes/repair_notes + per-row audit log (matches `api_cancelOpenWorkOnRelease_`), fires reverse-writethrough to per-tenant Inventory sheet, writes `entity_audit_log` matching the GAS shape exactly. Response shape is identical to GAS `handleUpdateInventoryItem_` so React callers stay agnostic. StrideAPI v38.226.0: extended `__writeThroughReverseInventory_` to handle general field updates (any subset of vendor/description/reference/sidemark/room/location/item_class/qty/item_notes/declared_value/coverage_option_id) alongside the legacy release-only path — required so the SB EF can mirror inventory edits back to the sheet without throwing 'row.status required'. Combined mode (status flip + sidemark edit in same save) covered. v38.211.0 auto-cancel source string changed from "Delivery" to "Reverse Writethrough" because the writer is now used for general edits too. New MIG-016 decision in MIGRATION_STATUS.md: Justin Demo canary override of MIG-007 — flag-flip directly without 3-layer verification, but only for tenants in `tenant_scope`. **Sheet-drift gap accepted on canary tenant:** cascade fan-out rows (Tasks/Repairs/Billing) are NOT individually mirrored back to the per-tenant sheets; full-sync cron backstops within ~5–30 min. Documented as canary-only trade-off. tsc + `npm run build` clean. **Operator deploy sequence is load-bearing — see Pending User Actions below.**).
 
@@ -1771,13 +1773,20 @@ Late-day session that started as a single production fire (release-items timing 
      ```
      v38.226.0 extended `__writeThroughReverseInventory_` (general field updates). v38.227.0 added `__writeThroughReverseTasks_` (insert + update path for the Tasks sheet, required by `batch-create-tasks-sb`). Both deployed by this one command.
 
-  3. **Deploy the 5 Edge Functions SECOND.** From a machine with `SUPABASE_ACCESS_TOKEN` or `supabase login`, from `C:\dev\Stride-GS-app\stride-gs-app`:
+  3. **Deploy the 9 Edge Functions SECOND.** From a machine with `SUPABASE_ACCESS_TOKEN` or `supabase login`, from `C:\dev\Stride-GS-app\stride-gs-app`:
      ```
+     # Round 1+2 (in PR #502 — code already on origin/source; deploys still pending):
      npx supabase functions deploy update-item-sb            --project-ref uqplppugeickmamycpuz
      npx supabase functions deploy batch-create-tasks-sb     --project-ref uqplppugeickmamycpuz
      npx supabase functions deploy release-items-sb          --project-ref uqplppugeickmamycpuz
      npx supabase functions deploy create-will-call-sb       --project-ref uqplppugeickmamycpuz
      npx supabase functions deploy process-wc-release-sb     --project-ref uqplppugeickmamycpuz
+
+     # Round 3 (this PR — pending merge):
+     npx supabase functions deploy update-task-sb            --project-ref uqplppugeickmamycpuz
+     npx supabase functions deploy update-repair-sb          --project-ref uqplppugeickmamycpuz
+     npx supabase functions deploy complete-shipment-sb      --project-ref uqplppugeickmamycpuz
+     npx supabase functions deploy transfer-items-sb         --project-ref uqplppugeickmamycpuz
      ```
      Default `--verify-jwt=true` is correct. No new function-level secrets needed — `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `GAS_API_URL`, `GAS_API_TOKEN` are all already configured.
 
@@ -1808,6 +1817,21 @@ Late-day session that started as a single production fire (release-items timing 
      UPDATE public.feature_flags SET active_backend='supabase',
             tenant_scope = ARRAY['<justin_demo_spreadsheet_id>']
       WHERE function_key = 'processWcRelease';
+
+     -- Round 5 (after round 3 PR deploys): updateTask + updateRepair (safe field edits)
+     UPDATE public.feature_flags SET active_backend='supabase',
+            tenant_scope = ARRAY['<justin_demo_spreadsheet_id>']
+      WHERE function_key IN ('updateTask', 'updateRepair');
+
+     -- Round 6: transferItems (cross-tenant move + billing void/recreate)
+     UPDATE public.feature_flags SET active_backend='supabase',
+            tenant_scope = ARRAY['<justin_demo_spreadsheet_id>']
+      WHERE function_key = 'transferItems';
+
+     -- Round 7: receiveShipment (highest-impact; creates inventory + tasks + billing)
+     UPDATE public.feature_flags SET active_backend='supabase',
+            tenant_scope = ARRAY['<justin_demo_spreadsheet_id>']
+      WHERE function_key = 'receiveShipment';
      ```
      Per MIG-010 scope semantics: Justin Demo routed to SB, every other tenant routed to GAS. Production tenants STAY ON GAS.
 
@@ -1817,6 +1841,10 @@ Late-day session that started as a single production fire (release-items timing 
      - `releaseItems` — bulk release N items; verify `public.inventory.status='Released'`, `release_date` set, open Tasks/Repairs cancelled, sheet reflects.
      - `createWillCall` — create a WC for N items; verify `public.will_calls` + `public.will_call_items` rows, WC fee computed correctly per item class, no dup if same item already on active WC.
      - `processWcRelease` — release subset of WC items; verify `public.will_call_items.status='Released'` for releasing items, parent WC status flipped (Released or Partial), Unbilled WC billing rows appear for non-COD, idempotent re-run does NOT corrupt Invoiced/Void rows.
+     - `updateTask` — edit notes / priority / due date / custom price on a task from TaskDetailPanel; verify `public.tasks` row updates + sheet mirror lands via tasks writer + `entity_audit_log` row with `source='supabase'`.
+     - `updateRepair` — edit notes / vendor / scheduled date / start date from RepairDetailPanel; verify `public.repairs` + sheet mirror via existing v38.215 repairs writer.
+     - `transferItems` — transfer N items from one tenant to another; verify source items flip to `Transferred`, destination gets `Active` rows with same item_id, Unbilled source billing voids + new Unbilled rows appear on destination with dest's discount applied.
+     - `receiveShipment` (completeShipment) — receive a multi-item shipment via the Receiving page; verify shipment row inserted with monotonic SHP-NNNNNN number, N inventory rows appear with `status='Active'`, auto-INSP tasks created for items with `needs_inspection=true`, RCVG billing rows in `Unbilled` with rate from service_catalog + per-client discount. **CRITICAL**: re-submit the same idempotency key — must return `alreadyProcessed: true` with the original shipmentNo, NOT create a second shipment.
 
   6. **Rollback** (per-flag, any time): `UPDATE feature_flags SET active_backend='gas', tenant_scope=NULL WHERE function_key='<key>';` instantly routes back to GAS. Master switch (Settings → Migration → emergency revert) covers fleet-wide.
 
@@ -1827,8 +1855,9 @@ Late-day session that started as a single production fire (release-items timing 
   - `processWcRelease`: partial release does NOT create a child WC for remaining items (operator creates manually); addons flush skipped; WC release email skipped (operator resends via legacy GAS path).
   - `batchCreateTasks`: task-ID race window on concurrent calls to the same `(tenant, item, svcCode)` tuple — rare in practice; future hardening via SECURITY DEFINER RPC.
   - `update-item-sb`: cascade fan-out rows (Tasks/Repairs cancellations on Released-transition) write to Supabase only; per-tenant sheet drift on those rows until full-sync cron.
-
-  **completeShipment / receiveShipment NOT in this PR** — separate follow-up PR. Complexity: shipment number SEQUENCE, idempotency-tag dedup against existing shipments, N inventory inserts, auto-INSP / auto-ASM task generation, receiving billing rows, Drive folder creation, shipment-received email. ~3-hour port; shipping half-built risks producing missing folder links + missing inventory rows in production.
+  - `complete-shipment-sb`: Drive folder creation + shipment-received email NOT fired by SB-primary path. Shipments reverse-writethrough writer is still a stub (Shipments sheet drift until full-sync). React's "Open folder" links may not work for SB-primary shipments until operator manually creates folders OR a Drive-creation EF ships.
+  - `transfer-items-sb`: open Tasks/Repairs port to destination NOT performed (operator handles manually if needed).
+  - `update-task-sb`: cascade rows write SB-only; tasks sheet drift on cascade rows until full-sync (the primary task row IS mirrored via the v38.227 tasks writer).
 
 - [ ] **Apply migration `20260520140000_clients_writeback_trigger.sql`** (feat/migration/client-settings-writeback) — creates `propagate_clients_to_sheet()` SECURITY DEFINER + `trg_propagate_clients_to_sheet` AFTER INSERT OR UPDATE trigger on `public.clients`. Builder env has no Supabase MCP / `SUPABASE_ACCESS_TOKEN`. Apply via `apply_migration(project_id='uqplppugeickmamycpuz', name='clients_writeback_trigger', query=<file contents>)` or paste into the Supabase SQL editor. Idempotent (`CREATE OR REPLACE FUNCTION` + `DROP TRIGGER IF EXISTS` before `CREATE`).
 - [ ] **Deploy `push-client-settings-to-sheet` Edge Function**. From a machine with `SUPABASE_ACCESS_TOKEN` set or `supabase login` run, from `C:\dev\Stride-GS-app\stride-gs-app`:
