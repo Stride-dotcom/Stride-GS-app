@@ -73,16 +73,55 @@ const FIELD_MAP: Record<string, { column: string; syncToWork: boolean }> = {
 
 const VALID_STATUSES = new Set(['Active', 'On Hold', 'Released', 'Transferred']);
 
-// Tasks status terminal states — same set as TASK_CLOSED in GAS handler.
+// Tasks status terminal states — same set as TASK_CLOSED in
+// handleUpdateInventoryItem_ (StrideAPI.gs:31705) AND in
+// api_cancelOpenWorkOnRelease_ (StrideAPI.gs:20459). Both GAS paths
+// agree on the Tasks terminal set, so one constant covers both
+// SB-side use cases (field cascade + auto-cancel).
 const TASK_TERMINAL = ['Completed', 'Cancelled'] as const;
-// Repairs terminal states — same set as REPAIR_CLOSED in
-// api_cancelOpenWorkOnRelease_ (StrideAPI.gs:20460).
-const REPAIR_TERMINAL = ['Complete', 'Completed', 'Cancelled', 'Declined', 'Failed'] as const;
+
+// Repairs terminal states — GAS uses TWO DIFFERENT SETS depending on
+// the use case, so we mirror that distinction here:
+//
+//   • Field cascade fan-out (handleUpdateInventoryItem_ at StrideAPI.gs:31706):
+//     REPAIR_CASCADE_TERMINAL = {Complete, Cancelled, Declined}
+//     A 'Completed'/'Failed' repair STILL gets its sidemark/reference/etc
+//     synced when the parent item's fields change. GAS's narrower set
+//     reflects "the work is over but the row data should still match
+//     the parent item." We match that here.
+//
+//   • Auto-cancel on Released-transition (api_cancelOpenWorkOnRelease_
+//     at StrideAPI.gs:20460):
+//     REPAIR_AUTOCANCEL_TERMINAL = {Complete, Completed, Cancelled, Declined, Failed}
+//     A repair already at any of these states is "done" and shouldn't
+//     be flipped to Cancelled. GAS's broader set guards against
+//     re-stamping a Failed repair as Cancelled (would re-write
+//     cancelled_at and append a misleading note).
+//
+// The two sets diverged historically because the cascade was written
+// against the older 4-state repair vocabulary and the auto-cancel
+// helper was written later against the post-v38.211 broader vocabulary.
+// MIG-016 byte-for-byte parity requires preserving both sets exactly.
+const REPAIR_CASCADE_TERMINAL    = ['Complete', 'Cancelled', 'Declined'] as const;
+const REPAIR_AUTOCANCEL_TERMINAL = ['Complete', 'Completed', 'Cancelled', 'Declined', 'Failed'] as const;
 
 // PostgREST `not in` filter — comma-joined values inside parens.
-// None of our status strings contain commas/parens so unquoted is safe.
-const TASK_TERMINAL_LIST   = `(${TASK_TERMINAL.join(',')})`;
-const REPAIR_TERMINAL_LIST = `(${REPAIR_TERMINAL.join(',')})`;
+// None of our status strings contain commas/parens so unquoted is
+// safe. Defensive check at module load below.
+const TASK_TERMINAL_LIST              = `(${TASK_TERMINAL.join(',')})`;
+const REPAIR_CASCADE_TERMINAL_LIST    = `(${REPAIR_CASCADE_TERMINAL.join(',')})`;
+const REPAIR_AUTOCANCEL_TERMINAL_LIST = `(${REPAIR_AUTOCANCEL_TERMINAL.join(',')})`;
+
+// Guard against a future status string containing ',' or '(' or ')'
+// silently breaking the postgrest `in` filter. Runs once at module
+// load — Deno will throw and the EF will fail to deploy if a future
+// editor adds e.g. "On Hold (Pending)" to either list without first
+// switching to PostgREST's quoted-value syntax.
+for (const s of [...TASK_TERMINAL, ...REPAIR_CASCADE_TERMINAL, ...REPAIR_AUTOCANCEL_TERMINAL]) {
+  if (s.includes(',') || s.includes('(') || s.includes(')')) {
+    throw new Error(`[update-item-sb] status "${s}" contains a postgrest "in"-filter special char — switch to quoted-value syntax before adding`);
+  }
+}
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -228,7 +267,11 @@ Deno.serve(async (req: Request) => {
       .update(cascadeRow)
       .eq('tenant_id', tenantId)
       .eq('item_id', itemId)
-      .not('status', 'in', REPAIR_TERMINAL_LIST)
+      // Field cascade uses the NARROWER repair-terminal set so a
+      // 'Completed'/'Failed' repair still picks up the new field
+      // values — matches handleUpdateInventoryItem_'s REPAIR_CLOSED
+      // set at StrideAPI.gs:31706.
+      .not('status', 'in', REPAIR_CASCADE_TERMINAL_LIST)
       .select('repair_id');
     if (rErr) {
       console.error('[update-item-sb] repairs cascade failed:', rErr.message);
@@ -238,7 +281,25 @@ Deno.serve(async (req: Request) => {
   }
 
   // ── 4. Cascade Sidemark/Reference to public.billing (Unbilled) ─────
-  // Mirrors api_propagateInvFieldsToBilling_'s status='Unbilled' filter.
+  // Mirrors api_propagateInvFieldsToBilling_'s status='Unbilled' filter
+  // (StrideAPI.gs:31563) — only Sidemark + Reference, only Unbilled
+  // rows, immutable history preserved.
+  //
+  // ⚠️ THREE-STORAGE-LAYER BILLING (landmine #5) — CANARY-ONLY GAP:
+  // GAS-side api_propagateInvFieldsToBilling_ writes the per-tenant
+  // Billing_Ledger sheet for CUSTOMIZED-schema clients in addition to
+  // updating public.billing (via subsequent resyncEntityToSupabase_).
+  // THIS HANDLER writes only public.billing. The per-tenant
+  // Billing_Ledger sheet drifts on the canary tenant until the next
+  // api_fullClientSync_ pass (~5–30 min). This is explicitly
+  // canary-acceptable per MIG-016: production tenants stay on GAS
+  // (per-tenant scope routes them to GAS), so the drift only affects
+  // the canary tenant (Justin Demo). Production-tenant rollout is
+  // GATED on either (a) a per-tenant Billing_Ledger reverse-writethrough
+  // writer for sidemark/reference field updates OR (b) acceptance that
+  // full-sync cron is the authoritative path. See MIGRATION_STATUS.md
+  // MIG-016 "Sheet-drift gap accepted on canary tenant" for the full
+  // rationale.
   const billingFanOut: Record<string, unknown> = {};
   if (Object.prototype.hasOwnProperty.call(updates, 'sidemark') && updates.sidemark !== undefined) {
     billingFanOut.sidemark = updates.sidemark;
@@ -444,7 +505,10 @@ async function cancelOpenWorkOnRelease(
       .select('repair_id, status, repair_notes')
       .eq('tenant_id', tenantId)
       .eq('item_id', itemId)
-      .not('status', 'in', REPAIR_TERMINAL_LIST);
+      // Auto-cancel uses the BROADER repair-terminal set so a
+      // 'Completed'/'Failed' repair isn't re-stamped as Cancelled —
+      // matches api_cancelOpenWorkOnRelease_ at StrideAPI.gs:20460.
+      .not('status', 'in', REPAIR_AUTOCANCEL_TERMINAL_LIST);
     if (selErr) {
       result.warnings.push(`Repair select failed: ${selErr.message}`);
     } else {
