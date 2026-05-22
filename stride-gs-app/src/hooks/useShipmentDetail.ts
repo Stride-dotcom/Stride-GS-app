@@ -34,7 +34,10 @@ export function useShipmentDetail(shipmentNo: string | undefined): UseShipmentDe
   const clientNameMapRef = useRef(clientNameMap);
   clientNameMapRef.current = clientNameMap;
 
-  const fetchShipment = useCallback(async () => {
+  // `silent: true` skips flipping status back to 'loading' — used for
+  // realtime-echo refetches so the page doesn't unmount the detail panel
+  // (and lose scroll position / open sub-tab state) on every save.
+  const fetchShipment = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
     if (!shipmentNo || !user) return;
 
     abortRef.current?.abort();
@@ -42,7 +45,7 @@ export function useShipmentDetail(shipmentNo: string | undefined): UseShipmentDe
     abortRef.current = controller;
     const fetchId = ++fetchCountRef.current;
 
-    setStatus('loading');
+    if (!silent) setStatus('loading');
     setError(null);
 
     try {
@@ -175,7 +178,7 @@ export function useShipmentDetail(shipmentNo: string | undefined): UseShipmentDe
   useEffect(() => {
     if (!shipmentNo) return;
     return entityEvents.subscribe((type, id) => {
-      if (type === 'shipment' && id === shipmentNo) void fetchShipment();
+      if (type === 'shipment' && id === shipmentNo) void fetchShipment({ silent: true });
     });
   }, [shipmentNo, fetchShipment]);
 

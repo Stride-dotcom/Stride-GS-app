@@ -41,7 +41,10 @@ export function useWillCallDetail(wcNumber: string | undefined): UseWillCallDeta
   const clientNameMapRef = useRef(clientNameMap);
   clientNameMapRef.current = clientNameMap;
 
-  const fetchWc = useCallback(async () => {
+  // `silent: true` skips flipping status back to 'loading' — used for
+  // realtime-echo refetches so the page doesn't unmount the detail panel
+  // (and lose scroll position / open sub-tab state) on every save.
+  const fetchWc = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
     if (!wcNumber || !user) return;
 
     abortRef.current?.abort();
@@ -49,7 +52,7 @@ export function useWillCallDetail(wcNumber: string | undefined): UseWillCallDeta
     abortRef.current = controller;
     const fetchId = ++fetchCountRef.current;
 
-    setStatus('loading');
+    if (!silent) setStatus('loading');
     setError(null);
 
     try {
@@ -120,11 +123,12 @@ export function useWillCallDetail(wcNumber: string | undefined): UseWillCallDeta
   }, [fetchWc]);
 
   // Realtime: refetch when this will-call is updated cross-tab/cross-user.
-  // Hooks into the central `useSupabaseRealtime` channel via entityEvents.
+  // Silent so the panel stays mounted (no scroll/tab state loss) — see
+  // useTaskDetail for full rationale.
   useEffect(() => {
     if (!wcNumber) return;
     return entityEvents.subscribe((type, id) => {
-      if (type === 'will_call' && id === wcNumber) void fetchWc();
+      if (type === 'will_call' && id === wcNumber) void fetchWc({ silent: true });
     });
   }, [wcNumber, fetchWc]);
 

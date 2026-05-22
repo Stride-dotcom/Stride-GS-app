@@ -35,11 +35,14 @@ export function useItemDetail(itemId: string | undefined): UseItemDetailResult {
   const clientNameMapRef = useRef(clientNameMap);
   clientNameMapRef.current = clientNameMap;
 
-  const fetchItem = useCallback(async () => {
+  // `silent: true` skips flipping status back to 'loading' — used for
+  // realtime-echo refetches so the page doesn't unmount the detail panel
+  // (and lose scroll position / open sub-tab state) on every save.
+  const fetchItem = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
     if (!itemId || !user) return;
 
     const seq = ++fetchCountRef.current;
-    setStatus('loading');
+    if (!silent) setStatus('loading');
     setError(null);
 
     try {
@@ -93,7 +96,7 @@ export function useItemDetail(itemId: string | undefined): UseItemDetailResult {
   useEffect(() => {
     if (!itemId) return;
     return entityEvents.subscribe((type, id) => {
-      if (type === 'inventory' && id === itemId) void fetchItem();
+      if (type === 'inventory' && id === itemId) void fetchItem({ silent: true });
     });
   }, [itemId, fetchItem]);
 

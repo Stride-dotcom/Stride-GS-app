@@ -46,7 +46,10 @@ export function useRepairDetail(repairId: string | undefined): UseRepairDetailRe
   const clientNameMapRef = useRef(clientNameMap);
   clientNameMapRef.current = clientNameMap;
 
-  const fetchRepair = useCallback(async () => {
+  // `silent: true` skips flipping status back to 'loading' — used for
+  // realtime-echo refetches so the page doesn't unmount the detail panel
+  // (and lose scroll position / open sub-tab state) on every save.
+  const fetchRepair = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
     if (!repairId || !user) return;
 
     abortRef.current?.abort();
@@ -54,7 +57,7 @@ export function useRepairDetail(repairId: string | undefined): UseRepairDetailRe
     abortRef.current = controller;
     const fetchId = ++fetchCountRef.current;
 
-    setStatus('loading');
+    if (!silent) setStatus('loading');
     setError(null);
 
     try {
@@ -161,11 +164,12 @@ export function useRepairDetail(repairId: string | undefined): UseRepairDetailRe
   }, [fetchRepair]);
 
   // Realtime: refetch when this repair is updated cross-tab/cross-user.
-  // Hooks into the central `useSupabaseRealtime` channel via entityEvents.
+  // Silent so the panel stays mounted (no scroll/tab state loss) — see
+  // useTaskDetail for full rationale.
   useEffect(() => {
     if (!repairId) return;
     return entityEvents.subscribe((type, id) => {
-      if (type === 'repair' && id === repairId) void fetchRepair();
+      if (type === 'repair' && id === repairId) void fetchRepair({ silent: true });
     });
   }, [repairId, fetchRepair]);
 

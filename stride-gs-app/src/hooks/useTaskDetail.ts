@@ -52,7 +52,11 @@ export function useTaskDetail(taskId: string | undefined, clientSheetIdHint?: st
   const clientNameMapRef = useRef(clientNameMap);
   clientNameMapRef.current = clientNameMap;
 
-  const fetchTask = useCallback(async () => {
+  // `silent: true` skips flipping status back to 'loading' — used for
+  // realtime-echo refetches so the page doesn't unmount the detail panel
+  // (and lose scroll position / open sub-tab state) on every save. The
+  // initial mount and explicit user-triggered refetches still spin.
+  const fetchTask = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
     if (!taskId || !user) return;
 
     // Abort previous in-flight request
@@ -61,7 +65,7 @@ export function useTaskDetail(taskId: string | undefined, clientSheetIdHint?: st
     abortRef.current = controller;
     const fetchId = ++fetchCountRef.current;
 
-    setStatus('loading');
+    if (!silent) setStatus('loading');
     setError(null);
 
     try {
@@ -194,19 +198,32 @@ export function useTaskDetail(taskId: string | undefined, clientSheetIdHint?: st
     return () => { abortRef.current?.abort(); };
   }, [fetchTask]);
 
-  // Realtime: refetch when THIS task (or a repair on the same item) is
-  // updated cross-tab / cross-user. useSupabaseRealtime (mounted once in
-  // AppLayout) emits debounced events on every Supabase write to the
-  // mirror tables; we listen for our own type + id and refetch silently
-  // so the open panel stays in sync without the user touching anything.
+  // Realtime: refetch when THIS task is updated cross-tab / cross-user.
+  // useSupabaseRealtime (mounted once in AppLayout) emits debounced events
+  // on every Supabase write to the mirror tables; we listen for our own
+  // type + id and refetch SILENTLY so the open panel stays in sync
+  // without flashing the "Loading task…" spinner over the panel (and
+  // losing scroll position / open sub-tab state) on every echo.
+  //
+  // v2026-05-21 — the `'repair'` branch used to fire on EVERY repair
+  // event in the system, guarded only by `task?.itemId` ("we have a task
+  // with an item"). It didn't compare the event's repair to this task's
+  // item, so editing any unrelated repair (e.g. another user marking a
+  // quote sent) refetched + re-rendered every open task page. Same
+  // shape as PR #437's redundant `'inventory'` listener on
+  // useShipmentDetail.
+  //
+  // The repair branch is removed entirely: relatedRepairs[] is populated
+  // from a separate fetchRepairsByItemIdFromSupabase call, and a stale
+  // related-repair list isn't a critical correctness issue. If we ever
+  // want true repair-aware refetch we'd need entityEvents.emit to carry
+  // a payload like `{ itemId }` so we can scope precisely.
   useEffect(() => {
     if (!taskId) return;
     return entityEvents.subscribe((type, id) => {
-      if (type === 'task' && id === taskId) void fetchTask();
-      // Repair changes on the same item also affect relatedRepairs[].
-      if (type === 'repair' && task?.itemId) void fetchTask();
+      if (type === 'task' && id === taskId) void fetchTask({ silent: true });
     });
-  }, [taskId, fetchTask, task?.itemId]);
+  }, [taskId, fetchTask]);
 
   return { task, relatedRepairs, status, error, source, refetch: fetchTask };
 }
