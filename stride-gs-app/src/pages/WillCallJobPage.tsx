@@ -118,7 +118,7 @@ export function WillCallJobPage() {
         <div style={{ fontSize: 18, fontWeight: 600 }}>Failed to Load Will Call</div>
         <div style={{ fontSize: 14, color: theme.colors.textMuted }}>{error || 'An unexpected error occurred.'}</div>
         <div style={{ display: 'flex', gap: 12 }}>
-          <button onClick={refetch} style={{ ...linkBtnStyle, color: theme.colors.primary }}>Retry</button>
+          <button onClick={() => refetch()} style={{ ...linkBtnStyle, color: theme.colors.primary }}>Retry</button>
           <button onClick={goBack} style={linkBtnStyle}><ArrowLeft size={14} /> Back to Will Calls</button>
         </div>
       </div>

@@ -137,7 +137,7 @@ export function TaskJobPage() {
           {error || 'An unexpected error occurred.'}
         </div>
         <div style={{ display: 'flex', gap: 12 }}>
-          <button onClick={refetch} style={{ ...linkBtnStyle, color: theme.colors.primary }}>Retry</button>
+          <button onClick={() => refetch()} style={{ ...linkBtnStyle, color: theme.colors.primary }}>Retry</button>
           <button onClick={goBack} style={linkBtnStyle}>
             <ArrowLeft size={14} /> Back to Dashboard
           </button>
