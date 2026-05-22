@@ -18,7 +18,7 @@ import { fmtDate, fmtDateTime, toDateInputValue } from '../../lib/constants';
 import { WriteButton } from './WriteButton';
 import { postCompleteTask, postCompleteTaskSb, postStartTask, postUpdateTaskNotes, postUpdateTaskCustomPrice, postRequestRepairQuote, postRequestRepairQuoteSb, postCancelTask, postCorrectTaskResult, postReopenTask, postUpdateInventoryItem, postUpdateTaskPriority, postUpdateTaskDueDate, isApiConfigured } from '../../lib/api';
 import { useFeatureFlag } from '../../contexts/FeatureFlagContext';
-import { generateTaskWorkOrderPdf } from '../../lib/workOrderPdf';
+import { renderDoc, buildTaskTokens } from '../../lib/docRenderer';
 import { writeSyncFailed } from '../../lib/syncEvents';
 import { supabase } from '../../lib/supabase';
 import { entityEvents } from '../../lib/entityEvents';
@@ -868,11 +868,13 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
                     size="sm"
                     icon={<FileText size={13} />}
                     onClick={async () => {
-                      // Client-side template render → print preview. The
-                      // template body (HTML + tokens) lives in
-                      // public.email_templates under DOC_TASK_WORK_ORDER;
-                      // see lib/workOrderPdf.ts for token mapping.
-                      await generateTaskWorkOrderPdf(task);
+                      // Client-side template render → print preview. Template
+                      // body + token vocabulary live in public.email_templates
+                      // under DOC_TASK_WORK_ORDER; see lib/docTokens.ts.
+                      await renderDoc('DOC_TASK_WORK_ORDER', buildTaskTokens(task), {
+                        action: 'print',
+                        fileName: `Work Order — ${task.taskId}`,
+                      });
                     }}
                   />
                 )}

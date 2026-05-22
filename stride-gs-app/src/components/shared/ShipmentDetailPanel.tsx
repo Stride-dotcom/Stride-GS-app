@@ -27,7 +27,7 @@ import { useDocuments } from '../../hooks/useDocuments';
 import { PhotosPanel as _PhotosPanel, DocumentsPanel as _DocumentsPanel, NotesPanel as _NotesPanel } from './EntityAttachments';
 import { EntityHistory } from './EntityHistory';
 import { InlineEditableCell } from './InlineEditableCell';
-import { generateReceivingDocPdf } from '../../lib/workOrderPdf';
+import { renderDoc, buildReceivingTokens } from '../../lib/docRenderer';
 
 /**
  * Phase 7A-7 + 2026-04-22 tabbed migration.
@@ -336,7 +336,7 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
   // print dialog. No GAS round-trip. Used by all three button surfaces
   // below (Quick Action card, page-mode footer pill, FAB).
   const handleGenerateReceivingDoc = useCallback(() => {
-    void generateReceivingDocPdf({
+    const tokens = buildReceivingTokens({
       shipmentNo:   shipment.shipmentNo,
       clientName:   shipment.client,
       carrier:      shipment.carrier,
@@ -354,6 +354,10 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
         sidemark:    i.sidemark,
         reference:   i.reference,
       })),
+    });
+    void renderDoc('DOC_RECEIVING', tokens, {
+      action: 'print',
+      fileName: `Receiving — ${shipment.shipmentNo}`,
     });
   }, [shipment, items, mergedItems]);
 

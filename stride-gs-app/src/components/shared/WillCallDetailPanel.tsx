@@ -21,7 +21,7 @@ import { ProcessingOverlay } from './ProcessingOverlay';
 import { BillingPreviewCard } from './BillingPreviewCard';
 import { useEntityAddons } from '../../hooks/useEntityAddons';
 import { postProcessWcRelease, postCancelWillCall, postRemoveItemsFromWillCall, postUpdateWillCall, postReopenWillCall, fetchWillCallById, isApiConfigured } from '../../lib/api';
-import { generateWillCallReleasePdf } from '../../lib/workOrderPdf';
+import { renderDoc, buildWillCallTokens } from '../../lib/docRenderer';
 import { fetchWcItemsFromSupabase } from '../../lib/supabaseQueries';
 import { supabase } from '../../lib/supabase';
 import { useClients } from '../../hooks/useClients';
@@ -518,7 +518,7 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
     setPrintDocError(null);
     setPrintDocLoading(true);
     try {
-      await generateWillCallReleasePdf({
+      const tokens = buildWillCallTokens({
         wcNumber: wc.wcNumber,
         clientName: wc.clientName,
         pickupParty: wc.pickupParty,
@@ -537,6 +537,10 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
           location: it.location,
           sidemark: it.sidemark,
         })),
+      });
+      await renderDoc('DOC_WILL_CALL_RELEASE', tokens, {
+        action: 'print',
+        fileName: `Will Call Release — ${wc.wcNumber}`,
       });
     } catch (err) {
       setPrintDocError(err instanceof Error ? err.message : 'Document generation failed');

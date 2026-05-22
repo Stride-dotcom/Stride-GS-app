@@ -21,7 +21,7 @@ import { BillingPreviewCard } from './BillingPreviewCard';
 import { useEntityAddons } from '../../hooks/useEntityAddons';
 import { postSendRepairQuote, postSendRepairQuoteSb, postRespondToRepairQuote, postRespondRepairQuoteSb, postCompleteRepair, postCompleteRepairSb, postStartRepair, postStartRepairSb, postCancelRepair, postCancelRepairSb, postUpdateRepairNotes, postReopenRepair, postCorrectRepairResult, postVoidRepairQuote, isApiConfigured } from '../../lib/api';
 import { useFeatureFlag } from '../../contexts/FeatureFlagContext';
-import { generateRepairWorkOrderPdf } from '../../lib/workOrderPdf';
+import { renderDoc, buildRepairTokens } from '../../lib/docRenderer';
 import { entityEvents } from '../../lib/entityEvents';
 import type { ApiRepair, SendRepairQuoteResponse, RespondToRepairQuoteResponse, CompleteRepairResponse, StartRepairResponse, SendRepairQuoteLine } from '../../lib/api';
 import { supabase } from '../../lib/supabase';
@@ -318,7 +318,10 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
     setPrintError(null);
     setPrintLoading(true);
     try {
-      await generateRepairWorkOrderPdf(repair);
+      await renderDoc('DOC_REPAIR_WORK_ORDER', buildRepairTokens(repair), {
+        action: 'print',
+        fileName: `Repair Work Order — ${repair.repairId}`,
+      });
     } catch (err) {
       setPrintError(err instanceof Error ? err.message : 'Work Order generation failed');
     } finally {
