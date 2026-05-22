@@ -1,5 +1,5 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
-import { X, Package, Calendar, FileText, ClipboardList, Wrench, Truck, ExternalLink, DollarSign, Ship, AlertCircle, MapPin, CheckCircle2, Pencil, Save, Loader2, FolderOpen, Plus, ChevronDown, Shield, Image as ImageIcon, StickyNote, Activity, BadgePercent } from 'lucide-react';
+import { X, Package, Calendar, FileText, ClipboardList, Wrench, Truck, ExternalLink, DollarSign, Ship, AlertCircle, MapPin, CheckCircle2, Pencil, Save, Loader2, FolderOpen, Plus, ChevronDown, Shield, Image as ImageIcon, StickyNote, Activity, BadgePercent, Split as SplitIcon } from 'lucide-react';
 import { StorageCreditsSection } from './StorageCreditsSection';
 import { FolderButton } from './FolderButton';
 import { ItemIdBadges } from './ItemIdBadges';
@@ -45,6 +45,9 @@ interface Props {
   onCreateTask?: () => void;
   onCreateWillCall?: () => void;
   onTransfer?: () => void;
+  /** Optional Split action — shown only when qty > 1. Wired by the
+   *  ItemPage which owns the dialog state + the SplitItemDialog modal. */
+  onSplit?: () => void;
   // History data — uses any[] to accept both frontend and API types
   itemTasks?: any[];
   itemRepairs?: any[];
@@ -548,7 +551,7 @@ export function ItemDetailPanel({
   item, onClose, photosFolderId, shipmentFolderUrl,
   linkedTasks = [], linkedRepairs = [], linkedWillCalls = [],
   onNavigateToRecord,
-  onCreateTask, onCreateWillCall, onTransfer,
+  onCreateTask, onCreateWillCall, onTransfer, onSplit,
   itemTasks = [], itemRepairs = [], itemWillCalls = [], itemBilling = [],
   itemShipment,
   userRole, classNames = [], locationNames = [], clientSheetId, onItemUpdated,
@@ -1208,6 +1211,7 @@ export function ItemDetailPanel({
         onCreateTask={onCreateTask}
         onCreateWillCall={onCreateWillCall}
         onTransfer={onTransfer}
+        onSplit={canSplit ? onSplit : undefined}
         onRequestRepair={handleRequestRepair}
         repairStatus={repairStatus ?? undefined}
         repairRequesting={repairRequesting}
@@ -1401,10 +1405,16 @@ export function ItemDetailPanel({
 
   // FAB action set mirrors the desktop pill row. Used on compact
   // viewports where the inline footer is suppressed below.
+  // Split shows only when the item is currently grouped (qty > 1). Once
+  // a split is applied the parent qty drops to keep_qty and the button
+  // disappears (or stays if keep_qty > 1, which is intentional — staff
+  // may want to split off more later).
+  const canSplit = !!onSplit && (Number(item?.qty) || 0) > 1;
   const fabActions: FABAction[] = isEditing ? [] : [
     ...(onCreateTask ? [{ label: 'Create Task', icon: <ClipboardList size={16} />, onClick: onCreateTask }] : []),
     ...(!repairStatus ? [{ label: repairRequesting ? 'Requesting…' : 'Repair Quote', icon: <Wrench size={16} />, onClick: () => void handleRequestRepair() }] : []),
     ...(onCreateWillCall ? [{ label: 'Add to WC', icon: <Truck size={16} />, onClick: onCreateWillCall }] : []),
+    ...(canSplit && onSplit ? [{ label: 'Split', icon: <SplitIcon size={16} />, onClick: onSplit }] : []),
     ...(onTransfer ? [{ label: 'Transfer', icon: <ExternalLink size={16} />, onClick: onTransfer }] : []),
     ...(canEditBasic ? [{ label: 'Edit', icon: <Pencil size={16} />, onClick: handleEditStart, color: theme.colors.orange }] : []),
   ];
@@ -1435,6 +1445,11 @@ export function ItemDetailPanel({
       {onCreateWillCall && (
         <button onClick={onCreateWillCall} style={darkPill}>
           <Truck size={13} /> Add to WC
+        </button>
+      )}
+      {canSplit && onSplit && (
+        <button onClick={onSplit} style={darkPill}>
+          <SplitIcon size={13} /> Split
         </button>
       )}
       {onTransfer && (
@@ -1602,12 +1617,15 @@ function NotesPanelProxy({
 // ── Actions dropdown (Quick Actions moved into header per mockup) ──────────
 
 function ItemActionsMenu({
-  onCreateTask, onCreateWillCall, onTransfer, onRequestRepair,
+  onCreateTask, onCreateWillCall, onTransfer, onSplit, onRequestRepair,
   repairStatus, repairRequesting, variant = 'dark',
 }: {
   onCreateTask?: () => void;
   onCreateWillCall?: () => void;
   onTransfer?: () => void;
+  /** Optional split action — only rendered when supplied (caller hides it
+   *  when item.qty <= 1 so we don't get a "Split" entry that fails). */
+  onSplit?: () => void;
   onRequestRepair: () => Promise<void>;
   repairStatus?: string;
   repairRequesting: boolean;
@@ -1682,6 +1700,11 @@ function ItemActionsMenu({
           {onCreateWillCall && (
             <button style={itemStyle} onClick={handle(onCreateWillCall)}>
               <Truck size={13} color={theme.colors.orange} /> Add to Will Call
+            </button>
+          )}
+          {onSplit && (
+            <button style={itemStyle} onClick={handle(onSplit)}>
+              <SplitIcon size={13} color={theme.colors.orange} /> Split Item
             </button>
           )}
           {onTransfer && (
