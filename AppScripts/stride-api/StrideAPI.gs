@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.224.0 — 2026-05-20 PST — [Supabase-authoritative client settings write-back] Fifth per-table writer registered against the P1.4 framework (after inventory v38.208, will_calls v38.213, repairs v38.215, billing v38.217): `__writeThroughReverseClients_` for the `clients` table replaces the stub. Inverts the GAS→Supabase invariant for client settings — when React / intake / any future Supabase-authoritative caller writes `public.clients` directly, this writer mirrors the row OUT to (a) the per-tenant Settings tab as key/value upserts keyed by `CLIENT_FIELDS_[*].clientSettingsKey` and (b) the CB Clients tab via per-column setValue keyed by `CLIENT_FIELDS_[*].cbHeader`. Both sheets must be touched: per-tenant Settings is what dock-intake reads `AUTO_INSPECTION` from (the Brian Paquette failure mode); CB Clients is what `handleResyncClients_` reads back when pushing to Supabase — without the CB write, a CB-driven resync would silently overwrite the SB-side change. Also writes SB-only fields (`notification_contacts`, `billing_contact_name`, `billing_email`, `billing_address`, `tax_exempt`, `tax_exempt_reason`, `resale_cert_expires`, `resale_cert_url`) into the per-tenant Settings tab as ops-visible key/value rows — they don't have a `cbHeader` so they don't touch CB Clients, matching migrations 20260426160000 / 20260504000000 which placed them in Supabase only. Idempotent by tenantId; re-firing with the same row produces the same sheet state. Op support is `update` only — inserts flow through `handleOnboardClient_` which has its own bespoke sheet-creation path. Failure semantics mirror the framework: a single-side failure (Settings tab present but CB write fails, or vice versa) returns success with details in `cbSkipped` / `perTenantSkipped` so the next sync pass catches up; a both-sides failure throws so `handleWriteThroughReverse_` lands the row in `gs_sync_events` for FailedOperationsDrawer pickup. Cache invalidation: matches `handleUpdateClient_` by removing `api_active_clients`/`clients`/`clients_all`/`api_client_name_map` from CacheService after the CB write so the next `handleGetClients_` reflects the fresh values. Companion Edge Function `push-client-settings-to-sheet` + Postgres trigger `propagate_clients_to_sheet` ship in the same PR — together they form the App → Supabase → GAS Sheet flow.
+   StrideAPI.gs — v38.225.0 — 2026-05-21 PST — [Split Items workflow] New `createSplitTask` + `completeSplitTask` doPost cases backing the React Split feature (SplitItemDialog on ItemPage, SplitTaskPanel on TaskPage). `handleCreateSplitTask_` appends a SPLIT-type Task row to the per-tenant Tasks sheet + idempotency check against open SPLIT tasks for the same parent item via Supabase + supabaseUpsert_ to public.tasks WITH metadata.split_workflow (parent_item_id / grouped_qty / keep_qty / leftover_qty / requester / origin) + sends a 'Split Required' alert to info@stridenw.com. `handleCompleteSplitTask_` calls the atomic Postgres `rpc_complete_split_task` RPC (migration 20260521230100) which reduces parent inventory.qty, inserts N child inventory rows (qty=1, parent_item_id back-pointer, item_id_ledger entries), writes one SPLIT billing row per child at class-based rate from service_catalog, and stamps audit-log entries for parent + each child + the task. After the RPC succeeds, `api_mirrorSplitWriteback_` mirrors the post-RPC SB state back to the client Sheet: updates Inventory.qty on parent, appends N new Inventory rows cloning the parent row with qty=1 + 'Split from <parent>' in Item Notes, appends N SPLIT rows to Billing_Ledger (re-read from public.billing so the rate matches byte-for-byte), and flips the Tasks row to Status='Completed'. Idempotent end-to-end — re-running on a completed task returns the existing child codes; the sheet writeback only fires once because the RPC's already-completed branch hydrates from inventory.parent_item_id rather than re-creating rows. Service-catalog SPLIT row seeded by the same migration (code='SPLIT' / category='Warehouse' / billing='class_based' / unit='per_item' / sensible default rates) — idempotent INSERT preserves any manual rates the operator set in Price List. CRITICAL: leaves the v38.182 atomic invoice-counter and the rest of the billing landmines exactly as-is — this is purely additive.
+   v38.224.0 — 2026-05-20 PST — [Supabase-authoritative client settings write-back] Fifth per-table writer registered against the P1.4 framework (after inventory v38.208, will_calls v38.213, repairs v38.215, billing v38.217): `__writeThroughReverseClients_` for the `clients` table replaces the stub. Inverts the GAS→Supabase invariant for client settings — when React / intake / any future Supabase-authoritative caller writes `public.clients` directly, this writer mirrors the row OUT to (a) the per-tenant Settings tab as key/value upserts keyed by `CLIENT_FIELDS_[*].clientSettingsKey` and (b) the CB Clients tab via per-column setValue keyed by `CLIENT_FIELDS_[*].cbHeader`. Both sheets must be touched: per-tenant Settings is what dock-intake reads `AUTO_INSPECTION` from (the Brian Paquette failure mode); CB Clients is what `handleResyncClients_` reads back when pushing to Supabase — without the CB write, a CB-driven resync would silently overwrite the SB-side change. Also writes SB-only fields (`notification_contacts`, `billing_contact_name`, `billing_email`, `billing_address`, `tax_exempt`, `tax_exempt_reason`, `resale_cert_expires`, `resale_cert_url`) into the per-tenant Settings tab as ops-visible key/value rows — they don't have a `cbHeader` so they don't touch CB Clients, matching migrations 20260426160000 / 20260504000000 which placed them in Supabase only. Idempotent by tenantId; re-firing with the same row produces the same sheet state. Op support is `update` only — inserts flow through `handleOnboardClient_` which has its own bespoke sheet-creation path. Failure semantics mirror the framework: a single-side failure (Settings tab present but CB write fails, or vice versa) returns success with details in `cbSkipped` / `perTenantSkipped` so the next sync pass catches up; a both-sides failure throws so `handleWriteThroughReverse_` lands the row in `gs_sync_events` for FailedOperationsDrawer pickup. Cache invalidation: matches `handleUpdateClient_` by removing `api_active_clients`/`clients`/`clients_all`/`api_client_name_map` from CacheService after the CB write so the next `handleGetClients_` reflects the fresh values. Companion Edge Function `push-client-settings-to-sheet` + Postgres trigger `propagate_clients_to_sheet` ship in the same PR — together they form the App → Supabase → GAS Sheet flow.
    v38.223.0 — 2026-05-18 PST — [CRITICAL auth fix] Onboarding created Supabase auth users with EMPTY raw_user_meta_data — broken since 2026-04-11 (73 client users affected). Root cause: createSupabaseAuthUser_ never sent user_metadata on the admin create, so every RLS policy (which keys off auth.jwt()->'user_metadata'->>'role' / ->>'clientSheetId') filtered these users out and they were invisible everywhere in the app. The apply-intake-on-submit Edge Function does NOT create auth users (only deactivates the intake link + propagates refresh-mode client data) so the bug is entirely GAS-side. Fix: createSupabaseAuthUser_ gains an optional `metadata` param and POSTs it as user_metadata; new helper api_buildAuthUserMetadata_(role, clientName, clientSpreadsheetId) centralizes the AuthContext contract — { role, clientName, clientSheetId, accessibleClientSheetIds } (NOT `tenantId` as first hypothesized — RLS + AuthContext.tsx both key off `clientSheetId` / `accessibleClientSheetIds`; a `tenantId` field would not have unblocked RLS). All FIVE auth-user-creation sites now stamp it: api_upsertClientUser_ (onboarding — the primary bug), handleCreateUser_ (admin add user), handleEnsureAuthUser_ (gap-fill), handleAdminSetUserPassword_ create branch, plus the helper itself. Remediation for the existing 73: createSupabaseAuthUser_'s 422 "already exists" branch now self-heals via api_backfillAuthUserMetadata_ — finds the user by email and merges metadata ONLY when their existing user_metadata has no `role` (idempotent; never trampling a live login-synced metadata). Re-running onboarding or clicking ensureAuthUser for any pre-fix user repairs them; a bulk remediation can also iterate handleEnsureAuthUser_ over the cohort. Scoping: the stamped shape mirrors AuthContext's full four-key inSync contract (role/clientSheetId/accessibleClientSheetIds/childClientSheetIds); childClientSheetIds is always [] because no RLS policy keys off it and parent→child scope expansion is resolved authoritatively by AuthContext on login (unchanged by this fix). The 73 are single-tenant onboarded clients so [] is correct for them. No schema/migration/React change.
    v38.222.0 — 2026-05-14 PST — [BILLING bridge] CB Consolidated_Ledger auto-reconcile from public.billing on every QBO push. Closes the silent-drop class that bit INV-001152 (and the six other stuck invoices from the 2026-05-05 / 2026-05-06 cycle): handleCreateInvoice_'s CB dedup-skip at ~line 25303, plus the symmetry gaps in handleVoidInvoice_ / handleReopenTask_ (open backlog #5 / #7), let CB Consolidated_Ledger drift behind per-tenant Billing_Ledger + public.billing. handleQboCreateInvoice_ reads CB for the grouping pass, so any row that diverged got silently dropped from the push payload (React sent N invoices, GAS grouped <N). New helper `reconcileCbFromBilling_(invoiceNos)` reads public.billing as the source of truth, indexes CB by Ledger Row ID, and either UPDATEs the matching CB row in place (Status / Invoice # / Sidemark / Client / svc fields) or APPENDs a fresh CB row for IDs missing from CB. Idempotent — re-running is a no-op when state matches. handleQboCreateInvoice_ derives the set of invoice numbers covered by the incoming ledger_row_ids (one supabaseSelect_ on public.billing.invoice_no), calls the reconciler before reading CB, then proceeds with the existing grouping pass against the post-reconcile state. Wrapped in try/catch so a Supabase outage degrades to the prior behavior (silent skip of drifted rows) instead of blocking the push. NOT a structural fix — the underlying CB-symmetry bugs are intentionally left in place per MIG-005 (CB is retired in P4b). This is a transitional bridge that keeps billing accurate during the migration window.
    v38.221.0 — 2026-05-14 PST — [MIGRATION-P3 SB→Sheet mirror for repairs] Extends __writeThroughReverseRepairs_ to support op='insert' (treats both 'insert' and 'update' as upserts: find row by Repair ID, append if missing, update if present — same idempotency invariants either way). Extends REVERSE_REPAIR_FIELDS_ with created_date / created_by / item_notes / task_notes / source_task_id so a fresh sheet row built by the insert path has the full create state. New admin function runBackfillSbOnlyRepairsToSheet(tenantIdArg?) (and the runBackfillSevaRepairsToSheet convenience wrapper) walks active CB clients, fetches every public.repairs row for the tenant, and inserts the missing ones into the per-tenant Repairs sheet via the writer — idempotent, so re-running is harmless. Companion edge function change in request-repair-quote-sb fires the writer with op='insert' after the RPC, so new multi-item repairs land on the sheet immediately instead of being SB-only and invisible to legacy readers. Closes the symmetric gap to v38.220.0: that PR stopped the GAS sync from DELETING SB-only rows; this PR stops the multi-item create flow from leaving them SB-only in the first place.
@@ -9024,6 +9025,32 @@ function doPost(e) {
           api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "task", entity_id: String(payload.taskId || ""), action_type: "start_task", requested_by: callerEmail, request_id: String(payload.requestId || "") });
           api_writeThrough_(r, "task", effectiveId, String(payload.taskId || ""));
           api_auditLog_("task", String(payload.taskId || ""), effectiveId, "start", { status: { new: "In Progress" } }, callerEmail);
+          return r;
+        });
+
+      // v38.225.0 — Split Items workflow.
+      // createSplitTask: appends a SPLIT-type Task row + supabase upsert with
+      //   metadata.split_workflow + 'Split Required' email alert. Idempotent —
+      //   if an open Split task for the same parent_item_id already exists, it
+      //   reuses it rather than creating a duplicate.
+      // completeSplitTask: orchestrates the atomic rpc_complete_split_task RPC
+      //   (parent qty reduced, N child inventory rows created, SPLIT billing
+      //   rows written, audit log entries), then mirrors the new inventory +
+      //   billing rows out to the client Sheet so legacy readers stay current.
+      case "createSplitTask":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          var r = handleCreateSplitTask_(effectiveId, payload, callerEmail);
+          invalidateClientCache_(effectiveId);
+          // Full sync mirrors the new Tasks row to Supabase incl. metadata.
+          api_fullClientSync_(effectiveId, ["task"]);
+          return r;
+        });
+
+      case "completeSplitTask":
+        return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
+          var r = handleCompleteSplitTask_(effectiveId, payload, callerEmail);
+          invalidateClientCache_(effectiveId);
+          api_fullClientSync_(effectiveId, ["inventory", "task", "billing"]);
           return r;
         });
 
@@ -28622,6 +28649,436 @@ function api_updateClientRow_(clientsSh, hMap, rowNum, payload) {
    Creates lightweight task rows for N items × M svcCodes.
    No Drive folders, no PDFs — deferred to "Start Task" checkbox.
    ================================================================ */
+
+// =========================================================================
+// Split Items workflow — handleCreateSplitTask_ + handleCompleteSplitTask_
+// =========================================================================
+// Backed by the rpc_complete_split_task Postgres function (migration
+// 20260521230100_split_items_schema_and_rpc.sql). The React side calls
+// `createSplitTask` from the Item detail page (staff) or client portal
+// partial-qty notice flows; the resulting Task row appears in the Tasks
+// list with type='SPLIT'. Warehouse staff later opens the task and calls
+// `completeSplitTask` which fires the atomic RPC.
+//
+// The RPC writes to public.inventory + public.billing + public.item_id_ledger
+// + public.entity_audit_log; THIS handler is responsible for mirroring those
+// writes back to the per-tenant Sheet (Inventory, Billing_Ledger, Tasks)
+// so legacy readers — CB invoice generation, QBO export, IIF, full client
+// sync — stay current.
+// =========================================================================
+
+function handleCreateSplitTask_(clientSheetId, payload, callerEmail) {
+  var itemId      = String(payload.itemId || "").trim();
+  var groupedQty  = Math.max(1, Math.floor(Number(payload.groupedQty) || 1));
+  var leftoverQty = Math.max(1, Math.floor(Number(payload.leftoverQty) || 1));
+  var keepQty     = Math.max(1, Math.floor(Number(payload.keepQty) || (groupedQty - leftoverQty)));
+  if (!itemId) return errorResponse_("itemId is required", "MISSING_PARAM");
+  if (groupedQty <= 1) return errorResponse_("groupedQty must be > 1 to split", "INVALID_PARAM");
+  if (keepQty + leftoverQty > groupedQty) {
+    return errorResponse_("keepQty + leftoverQty exceeds groupedQty", "INVALID_PARAM");
+  }
+  if (keepQty < 1 || leftoverQty < 1) {
+    return errorResponse_("keepQty and leftoverQty must each be >= 1", "INVALID_PARAM");
+  }
+
+  var ss;
+  try { ss = SpreadsheetApp.openById(clientSheetId); }
+  catch (e) { return errorResponse_("Could not open client spreadsheet: " + e.message, "CONFIG_ERROR"); }
+
+  var taskSheet = ss.getSheetByName("Tasks");
+  if (!taskSheet) return errorResponse_("Tasks sheet not found", "NOT_FOUND");
+  api_ensureTaskColumns_(taskSheet);
+
+  // Idempotency: reuse any open Split task already targeting this item.
+  // GAS does not (yet) store metadata.split_workflow on the Tasks sheet
+  // itself, so we look it up via Supabase where the metadata column lives.
+  var existing = supabaseSelect_(
+    "tasks",
+    "tenant_id=eq." + encodeURIComponent(clientSheetId) +
+    "&type=eq.SPLIT" +
+    "&status=in.(Open,In%20Progress)" +
+    "&item_id=eq." + encodeURIComponent(itemId),
+    "task_id,status"
+  );
+  if (existing.ok && existing.rows && existing.rows.length > 0) {
+    return jsonResponse_({
+      success: true,
+      taskId: String(existing.rows[0].task_id || ""),
+      alreadyExists: true
+    });
+  }
+
+  // Allocate a Task ID — same pattern as batchCreateTasks
+  var counter = api_nextTaskCounter_(taskSheet, "SPLIT", itemId, []);
+  var taskId  = "SPLIT-" + itemId + "-" + counter;
+  var now     = new Date();
+
+  // Read parent inventory row so we can copy display fields onto the task
+  // for the Tasks list / detail panel (mirrors batchCreateTasks shape).
+  var invSheet = ss.getSheetByName("Inventory");
+  var invFields = { vendor: "", description: "", location: "", sidemark: "", itemClass: "", itemNotes: "" };
+  if (invSheet && invSheet.getLastRow() >= 2) {
+    var hMap = api_getHeaderMap_(invSheet);
+    var idCol = hMap["Item ID"];
+    if (idCol) {
+      var data = invSheet.getRange(2, 1, invSheet.getLastRow() - 1, invSheet.getLastColumn()).getValues();
+      for (var r = 0; r < data.length; r++) {
+        if (String(data[r][idCol - 1] || "").trim() === itemId) {
+          invFields.vendor      = String(data[r][(hMap["Vendor"]      || 1) - 1] || "");
+          invFields.description = String(data[r][(hMap["Description"] || 1) - 1] || "");
+          invFields.location    = String(data[r][(hMap["Location"]    || 1) - 1] || "");
+          invFields.sidemark    = String(data[r][(hMap["Sidemark"]    || 1) - 1] || "");
+          invFields.itemClass   = String(data[r][(hMap["Item Class"]  || 1) - 1] || "");
+          invFields.itemNotes   = String(data[r][(hMap["Item Notes"]  || 1) - 1] || "");
+          break;
+        }
+      }
+    }
+  }
+
+  var taskHMap = api_getHeaderMap_(taskSheet);
+  var rowValues = api_buildRow_(taskHMap, {
+    "Task ID":      taskId,
+    "Type":         "Split Item",
+    "Status":       "Open",
+    "Item ID":      itemId,
+    "Vendor":       invFields.vendor,
+    "Description":  invFields.description,
+    "Location":     invFields.location,
+    "Sidemark":     invFields.sidemark,
+    "Created":      now,
+    "Item Notes":   invFields.itemNotes,
+    "Completed At": "",
+    "Cancelled At": "",
+    "Result":       "",
+    "Task Notes":   payload.notes ? String(payload.notes) : "",
+    "Svc Code":     "SPLIT",
+    "Billed":       false,
+    "Assigned To":  "",
+    "Start Task":   false,
+    "Started At":   "",
+    "Due Date":     "",
+    "Priority":     "High"
+  });
+
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(15000);
+    var insertStart = api_getLastDataRow_(taskSheet) + 1;
+    taskSheet.getRange(insertStart, 1, 1, rowValues.length).setValues([rowValues]);
+  } finally {
+    lock.releaseLock();
+  }
+
+  // Upsert the task to Supabase WITH the split_workflow metadata that the
+  // SplitTaskPanel reads on completion. Direct upsert (not via sbTaskRow_)
+  // because that helper doesn't carry metadata.
+  var splitWorkflow = {
+    parent_item_id:      itemId,
+    parent_item_code:    itemId,
+    grouped_qty:         groupedQty,
+    keep_qty:            keepQty,
+    leftover_qty:        leftoverQty,
+    requested_by_email:  payload.requestedByEmail || callerEmail || null,
+    requested_by_name:   payload.requestedByName || null,
+    request_notes:       payload.notes || null,
+    origin_entity_type:  String(payload.origin || "item"),
+    origin_entity_id:    payload.originEntityId ? String(payload.originEntityId) : null,
+    origin_entity_number: payload.originEntityNumber ? String(payload.originEntityNumber) : null,
+    created_at:          now.toISOString()
+  };
+
+  supabaseUpsert_("tasks", {
+    tenant_id:    clientSheetId,
+    task_id:      taskId,
+    item_id:      itemId,
+    type:         "SPLIT",
+    status:       "Open",
+    description:  "Split " + leftoverQty + " of " + groupedQty + " from " + itemId,
+    task_notes:   payload.notes ? String(payload.notes) : "",
+    item_notes:   invFields.itemNotes,
+    created:      now.toISOString(),
+    vendor:       invFields.vendor,
+    sidemark:     invFields.sidemark,
+    client_name:  api_lookupClientName_(clientSheetId),
+    priority:     "High",
+    qty:          leftoverQty,
+    metadata:     { split_workflow: splitWorkflow },
+    billed:       false,
+    updated_at:   now.toISOString()
+  });
+
+  // Audit log
+  api_auditLog_("task", taskId, clientSheetId, "create",
+    { summary: "Split task created", parent_item_id: itemId, leftover_qty: leftoverQty },
+    callerEmail);
+
+  // Best-effort 'Split Required' email to ops. The split-required alert is
+  // intentionally a plain MailApp.sendEmail so it works without provisioning
+  // a new templated record in email_templates. If/when we want a templated
+  // alert with tokens, swap to api_sendTemplatedEmail_ — same caller contract.
+  try {
+    api_sendSplitRequiredEmail_(splitWorkflow, taskId, clientSheetId);
+  } catch (e) {
+    Logger.log("handleCreateSplitTask_ email send failed (non-fatal): " + e);
+  }
+
+  api_bumpSummaryVersion_();
+  return jsonResponse_({ success: true, taskId: taskId, alreadyExists: false });
+}
+
+function api_sendSplitRequiredEmail_(splitWorkflow, taskId, clientSheetId) {
+  var to = "info@stridenw.com";
+  var clientName = api_lookupClientName_(clientSheetId) || "Stride Client";
+  var subject = "[Split Required] " + splitWorkflow.parent_item_id + " · " + clientName;
+  var deepLink = "https://www.mystridehub.com/#/tasks?open=" +
+    encodeURIComponent(taskId) + "&client=" + encodeURIComponent(clientSheetId);
+  var requester = splitWorkflow.requested_by_name || splitWorkflow.requested_by_email || "Unknown";
+  var lines = [
+    "A grouped inventory item requires a warehouse split before the next operation can proceed.",
+    "",
+    "Item:      " + splitWorkflow.parent_item_id,
+    "Client:    " + clientName,
+    "Keep on parent:  " + splitWorkflow.keep_qty,
+    "Split off:       " + splitWorkflow.leftover_qty,
+    "Grouped qty:     " + splitWorkflow.grouped_qty,
+    "Origin:    " + (splitWorkflow.origin_entity_type || "item") +
+      (splitWorkflow.origin_entity_number ? (" " + splitWorkflow.origin_entity_number) : ""),
+    "Requested by: " + requester,
+    splitWorkflow.request_notes ? ("\nNotes:\n" + splitWorkflow.request_notes) : "",
+    "",
+    "Open task: " + deepLink
+  ];
+  MailApp.sendEmail({
+    to: to,
+    subject: subject,
+    body: lines.join("\n")
+  });
+}
+
+function api_lookupClientName_(clientSheetId) {
+  try {
+    var sel = supabaseSelect_("clients", "spreadsheet_id=eq." + encodeURIComponent(clientSheetId), "name");
+    if (sel.ok && sel.rows && sel.rows[0]) return String(sel.rows[0].name || "");
+  } catch (_) {}
+  return "";
+}
+
+function handleCompleteSplitTask_(clientSheetId, payload, callerEmail) {
+  var taskId = String(payload.taskId || "").trim();
+  if (!taskId) return errorResponse_("taskId is required", "MISSING_PARAM");
+
+  // Fire the atomic Postgres RPC. The RPC is idempotent — re-running on a
+  // completed task returns already_completed=true with the existing child
+  // codes instead of throwing.
+  var url = prop_("SUPABASE_URL");
+  var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !key) {
+    return errorResponse_("Supabase credentials not configured", "CONFIG_ERROR");
+  }
+
+  var resp = UrlFetchApp.fetch(url + "/rest/v1/rpc/rpc_complete_split_task", {
+    method: "post",
+    contentType: "application/json",
+    headers: {
+      "Authorization": "Bearer " + key,
+      "apikey": key
+    },
+    payload: JSON.stringify({
+      p_tenant_id: clientSheetId,
+      p_task_id: taskId,
+      p_created_by: callerEmail || "system"
+    }),
+    muteHttpExceptions: true
+  });
+
+  var code = resp.getResponseCode();
+  var body = resp.getContentText() || "";
+  if (code < 200 || code >= 300) {
+    return errorResponse_("rpc_complete_split_task HTTP " + code + ": " + body.substring(0, 300), "RPC_ERROR");
+  }
+
+  var rpcResult;
+  try {
+    var parsed = JSON.parse(body);
+    // The function returns SETOF — Supabase REST returns an array. Take row[0].
+    rpcResult = Array.isArray(parsed) ? (parsed[0] || {}) : parsed;
+  } catch (e) {
+    return errorResponse_("Could not parse rpc_complete_split_task response: " + body.substring(0, 300), "PARSE_ERROR");
+  }
+
+  var childCodes = Array.isArray(rpcResult.child_item_codes) ? rpcResult.child_item_codes.map(String) : [];
+  var parentItemCode = rpcResult.parent_item_code ? String(rpcResult.parent_item_code) : "";
+  var alreadyCompleted = !!rpcResult.already_completed;
+
+  // Mirror SB writes back to the Sheets — best-effort. Failures land in
+  // gs_sync_events via api_writeThrough_ which the FailedOperationsDrawer
+  // surfaces for retry.
+  try {
+    api_mirrorSplitWriteback_(clientSheetId, taskId, parentItemCode, childCodes);
+  } catch (e) {
+    Logger.log("handleCompleteSplitTask_ writeback failed (non-fatal): " + e);
+  }
+
+  api_auditLog_("task", taskId, clientSheetId, "complete",
+    { status: { new: "Completed" }, child_item_codes: childCodes, source: "rpc" },
+    callerEmail);
+
+  return jsonResponse_({
+    success: true,
+    alreadyCompleted: alreadyCompleted,
+    parentItemCode: parentItemCode,
+    childItemCodes: childCodes
+  });
+}
+
+/**
+ * Mirror the post-RPC Supabase state back to the client Sheet:
+ *   1. Update Inventory.qty on the parent row.
+ *   2. Append N new Inventory rows (one per child) copying the parent's
+ *      display fields with qty=1.
+ *   3. Append N SPLIT rows to Billing_Ledger (one per child) using the
+ *      values the RPC already wrote to public.billing.
+ *   4. Flip the Tasks row to Completed + stamp Completed At.
+ *
+ * Best-effort. Each step is wrapped so a single failure doesn't abort the
+ * rest — the next full client sync will reconcile any drift.
+ */
+function api_mirrorSplitWriteback_(clientSheetId, taskId, parentItemId, childCodes) {
+  var ss = SpreadsheetApp.openById(clientSheetId);
+
+  // ── 1 + 2: Inventory (parent qty + new child rows) ───────────────
+  var inv = ss.getSheetByName("Inventory");
+  if (inv) {
+    var invHMap = api_getHeaderMap_(inv);
+    var idCol  = invHMap["Item ID"];
+    var qtyCol = invHMap["Qty"];
+    if (idCol && qtyCol && inv.getLastRow() >= 2) {
+      var range = inv.getRange(2, 1, inv.getLastRow() - 1, inv.getLastColumn());
+      var values = range.getValues();
+      var parentRowIdx = -1;
+      for (var i = 0; i < values.length; i++) {
+        if (String(values[i][idCol - 1] || "").trim() === parentItemId) {
+          parentRowIdx = i;
+          break;
+        }
+      }
+      if (parentRowIdx >= 0) {
+        // Re-read child qty from Supabase so the Sheet matches the post-RPC
+        // state byte-for-byte instead of trusting the React-supplied params.
+        var parentSel = supabaseSelect_(
+          "inventory",
+          "tenant_id=eq." + encodeURIComponent(clientSheetId) +
+          "&item_id=eq." + encodeURIComponent(parentItemId),
+          "qty"
+        );
+        if (parentSel.ok && parentSel.rows && parentSel.rows[0]) {
+          inv.getRange(parentRowIdx + 2, qtyCol).setValue(Number(parentSel.rows[0].qty) || 1);
+        }
+
+        // Build child rows by cloning the parent row + overriding Item ID +
+        // Qty + a couple of audit fields. We deliberately mirror every other
+        // column verbatim so the new rows inherit Vendor / Description /
+        // Class / Sidemark / Location / Status / Receive Date / etc. — same
+        // shape the RPC used when inserting into public.inventory.
+        if (childCodes.length > 0) {
+          var parentRowValues = values[parentRowIdx].slice();
+          var newRows = [];
+          for (var c = 0; c < childCodes.length; c++) {
+            var row = parentRowValues.slice();
+            row[idCol - 1]  = childCodes[c];
+            row[qtyCol - 1] = 1;
+            if (invHMap["Item Notes"]) row[invHMap["Item Notes"] - 1] = "Split from " + parentItemId;
+            if (invHMap["Updated At"]) row[invHMap["Updated At"] - 1] = new Date();
+            newRows.push(row);
+          }
+          var lock = LockService.getScriptLock();
+          try {
+            lock.waitLock(15000);
+            var insertStart = api_getLastDataRow_(inv) + 1;
+            inv.getRange(insertStart, 1, newRows.length, newRows[0].length).setValues(newRows);
+          } finally {
+            lock.releaseLock();
+          }
+        }
+      }
+    }
+  }
+
+  // ── 3: Billing_Ledger (SPLIT rows from SB) ───────────────────────
+  // Re-read the SPLIT rows the RPC wrote so we don't have to recompute the
+  // rate locally. PostgREST `ledger_row_id=like.SPLIT-TASK-{taskId}-*`
+  // matches all N rows in one call.
+  var bill = ss.getSheetByName("Billing_Ledger") || ss.getSheetByName("Billing Ledger");
+  if (bill) {
+    var billHMap = api_getHeaderMap_(bill);
+    var sel = supabaseSelect_(
+      "billing",
+      "tenant_id=eq." + encodeURIComponent(clientSheetId) +
+      "&task_id=eq." + encodeURIComponent(taskId) +
+      "&svc_code=eq.SPLIT",
+      "ledger_row_id,status,invoice_no,client_name,date,svc_code,svc_name,category,item_id,description,item_class,qty,rate,total,task_id,repair_id,shipment_number,item_notes,sidemark,reference"
+    );
+    if (sel.ok && sel.rows && sel.rows.length > 0) {
+      var rows = [];
+      for (var b = 0; b < sel.rows.length; b++) {
+        var r = sel.rows[b];
+        var row = api_buildRow_(billHMap, {
+          "Ledger Row ID":  r.ledger_row_id,
+          "Status":         r.status,
+          "Invoice #":      r.invoice_no || "",
+          "Client Name":    r.client_name || "",
+          "Date":           r.date || "",
+          "Svc Code":       r.svc_code || "",
+          "Svc Name":       r.svc_name || "",
+          "Category":       r.category || "",
+          "Item ID":        r.item_id || "",
+          "Description":    r.description || "",
+          "Item Class":     r.item_class || "",
+          "Qty":            r.qty != null ? Number(r.qty) : 1,
+          "Rate":           r.rate != null ? Number(r.rate) : 0,
+          "Total":          r.total != null ? Number(r.total) : 0,
+          "Task ID":        r.task_id || "",
+          "Repair ID":      r.repair_id || "",
+          "Shipment #":     r.shipment_number || "",
+          "Item Notes":     r.item_notes || "",
+          "Sidemark":       r.sidemark || "",
+          "Reference":      r.reference || ""
+        });
+        rows.push(row);
+      }
+      if (rows.length > 0) {
+        var bLock = LockService.getScriptLock();
+        try {
+          bLock.waitLock(15000);
+          var bStart = api_getLastDataRow_(bill) + 1;
+          bill.getRange(bStart, 1, rows.length, rows[0].length).setValues(rows);
+        } finally {
+          bLock.releaseLock();
+        }
+      }
+    }
+  }
+
+  // ── 4: Tasks sheet — flip status to Completed ────────────────────
+  var taskSheet = ss.getSheetByName("Tasks");
+  if (taskSheet && taskSheet.getLastRow() >= 2) {
+    var tHMap = api_getHeaderMap_(taskSheet);
+    var tIdCol = tHMap["Task ID"];
+    var tStatusCol = tHMap["Status"];
+    var tCompletedAtCol = tHMap["Completed At"];
+    if (tIdCol && tStatusCol) {
+      var tValues = taskSheet.getRange(2, 1, taskSheet.getLastRow() - 1, taskSheet.getLastColumn()).getValues();
+      for (var t = 0; t < tValues.length; t++) {
+        if (String(tValues[t][tIdCol - 1] || "").trim() === taskId) {
+          taskSheet.getRange(t + 2, tStatusCol).setValue("Completed");
+          if (tCompletedAtCol) taskSheet.getRange(t + 2, tCompletedAtCol).setValue(new Date());
+          break;
+        }
+      }
+    }
+  }
+}
 
 function handleBatchCreateTasks_(clientSheetId, payload) {
   var svcCodes = payload.svcCodes || [];
