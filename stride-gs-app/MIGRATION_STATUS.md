@@ -1,6 +1,8 @@
 # GAS → Supabase Migration — Living Status
 
-> Last updated: 2026-05-21 (round 2) — **[MIGRATION-P2-P3 / MIG-016] Round 2 adds 4 more real -sb handlers + tasks reverse-writethrough writer.** Routing layer + `update-item-sb` (round 1) + now `batch-create-tasks-sb` (createTask), `release-items-sb` (releaseItems), `create-will-call-sb` (createWillCall), `process-wc-release-sb` (processWcRelease). StrideAPI v38.227.0 introduces `__writeThroughReverseTasks_` — 6th per-table writer against the P1.4 framework. GAS_TO_SB_MAP now covers 5 actions. completeShipment intentionally deferred (3hr port; needs its own PR for Drive folders + email + auto-task creation). Per-function table updated below. Deployment is operator-pending per BUILD_STATUS.md Pending User Actions.
+> Last updated: 2026-05-22 — **[MIGRATION-P2/P3/P4a/P5/P6 / MIG-016 / MIG-017] Round 3: 17 new SB-primary handlers + admin-role gate on real-money EFs.** Branch `feat/migration/batch-handlers-and-routing` extends `GAS_TO_SB_MAP` to cover **28 actions** (was 5) — every previously-shadow-only flag now has a real `-sb` Edge Function in source. New handlers: P2 (`update-task-sb`, `update-repair-sb`, `transfer-items-sb`), P3 receive/email (`complete-shipment-sb`, `send-shipment-email-sb`, `send-task-complete-email-sb`, `send-will-call-emails-sb`), P4a billing-core (`create-invoice-sb`, `void-invoice-sb`, `reissue-invoice-sb`, `commit-storage-charges-sb`), P5 onboarding (`onboard-client-sb` — HYBRID, GAS retains Drive/Sheets provisioning), P6 payments (`qbo-create-invoice-sb`, `create-stax-invoices-sb`, `run-stax-charges-sb`, `import-iif-sb`), reports (`generate-unbilled-report-sb`). All follow the `update-item-sb` canonical pattern. Real-money handlers (Stax/QBO/IIF) gain new **MIG-017** explicit admin/staff role gate — closes the anon-key-bundled-in-browser-build vector. None of the 17 are flag-flipped yet (`active_backend='gas'`); each remains gated on MIG-007 layer-2 replay + layer-3 canary before any production tenant joins `tenant_scope`. Per-function table NOT updated this session — operator deploy + canary nomination drive the next state transitions. Phase status: P6 moves `not_started → in_progress` (P6 handlers now exist; not yet shadowed against `gas_call_log` corpus). Deploy is operator-pending per BUILD_STATUS.md "Pending User Actions" (builder env has no SUPABASE_ACCESS_TOKEN; 22 deploys queued).
+
+> Earlier 2026-05-21 (round 2) — **[MIGRATION-P2-P3 / MIG-016] Round 2 adds 4 more real -sb handlers + tasks reverse-writethrough writer.** Routing layer + `update-item-sb` (round 1) + now `batch-create-tasks-sb` (createTask), `release-items-sb` (releaseItems), `create-will-call-sb` (createWillCall), `process-wc-release-sb` (processWcRelease). StrideAPI v38.227.0 introduces `__writeThroughReverseTasks_` — 6th per-table writer against the P1.4 framework. GAS_TO_SB_MAP now covers 5 actions. completeShipment intentionally deferred (3hr port; needs its own PR for Drive folders + email + auto-task creation). Per-function table updated below. Deployment is operator-pending per BUILD_STATUS.md Pending User Actions.
 
 > Earlier 2026-05-21 (round 1) — **[MIGRATION-P2 / MIG-016] First SB-primary routing layer + `update-item-sb` real handler shipped (worktree, pending merge + deploy).** Branch `feat/migration/route-and-update-item` introduces `src/lib/apiRouter.ts` with `GAS_TO_SB_MAP` (action → EF slug + flag key) + `invokeSupabaseHandler`; `apiPost` consults `resolveRoute` BEFORE the GAS path. When `feature_flags.<flagKey>.active_backend` resolves to `'supabase'` for the caller's tenant, the call lands on the SB Edge Function instead of GAS. `update-item-sb` is the first real -sb handler (not a shadow): validates payload, UPDATEs `public.inventory`, cascades to open `public.tasks` + `public.repairs` for syncable fields, cascades Sidemark/Reference to Unbilled `public.billing` rows, auto-cancels open tasks/repairs on a true Released-transition (with " | <note>"-append matching GAS), fires reverse-writethrough to the per-tenant Inventory sheet, writes `entity_audit_log` matching the GAS shape exactly. StrideAPI v38.226.0 extends `__writeThroughReverseInventory_` to support general field updates (vendor / description / reference / sidemark / room / location / item_class / qty / item_notes / declared_value / coverage_option_id) alongside the legacy release-only path — required so the SB EF can mirror inventory edits back to the per-tenant sheet without throwing 'row.status required'. **New decision MIG-015 below** — Justin Demo Account canary override of MIG-007. Per-function table updated (`updateItem` moves to `handler_drafted`). **Deployment is operator-pending**: deploy GAS v38.226.0 FIRST, then deploy the EF, then flip the flag for Justin Demo only.
 
@@ -61,7 +63,7 @@ If you only have time for one section: read **Architectural Decisions** in full.
 | P4a — billing core | **in_progress** | `completeTask`, `completeRepair`, `processWcRelease`, `commitStorageCharges`, `createInvoice`, `voidInvoice`, `reissueInvoice` | Per-tenant + SB mirror + `invoice_tracking`. Shadows live + parity-clean: `completeTask` 146/0, `completeRepair` 1/0, `processWcRelease` 13/0; `commit-storage-charges-shadow` + `reissue-invoice-shadow` deployed. |
 | P4b — CB retirement | not_started | CB `Consolidated_Ledger` retire + QBO direct push (replacing IIF) | Prereq: P6's `qboCreateInvoice` ships first. |
 | P5 — complex flows | **in_progress** | `receiveShipment`, `transferItems`, `onboardClient` | `receive-shipment-shadow`, `transfer-items-shadow`, `onboard-client-shadow` deployed. `transferItems` 5/0; receive/onboard no parity volume yet. |
-| P6 — payments | not_started | `qboCreateInvoice`, `createStaxInvoices`, `runStaxCharges` | |
+| P6 — payments | **in_progress** | `qboCreateInvoice`, `createStaxInvoices`, `runStaxCharges`, `importIIF` | Real-money handlers built (PR `batch-handlers-and-routing`); admin/staff role gate per MIG-017; deploy operator-pending. `stax_invoices` table is fleet-wide by design (no tenant_id) — the role gate is the security boundary, not tenant isolation. |
 | P7 — decommission | not_started | GAS write-handler stubs, per-client GAS v5.0.0 freeze, time-driven trigger migration to pg_cron | |
 
 ### Phase 1 sub-tasks
@@ -357,6 +359,42 @@ The per-call-site `apiCall(...)` retrofit (the MIG-014 plan) would have required
 - `runShadow`'s existing sb-side `try/catch` + early-no-op on `parity_enabled=false` keeps the hot path clean for unregistered actions and disabled parity.
 
 **Scope:** Applies to functions whose React-side entry point is `apiPost(...)`. Functions that fire as server-side side-effects from a host handler (e.g. `sendShipmentEmail` from inside `receiveShipment`) are NOT wired here — their parity exercises via the host handler's parity check. Functions with no shadow EF deployed yet (`createInvoice`, `voidInvoice`, P6 payments, `importIIF`, `generateUnbilledReport`) are not registered and will not fire — adding the shadow + adding the registry entry happens in the same PR.
+
+### MIG-017 — Real-money handlers (Stax/QBO/IIF) enforce explicit admin/staff role check (2026-05-22)
+
+**Decision:** The four real-money Edge Functions — `qbo-create-invoice-sb`, `create-stax-invoices-sb`, `run-stax-charges-sb`, `import-iif-sb` — MUST validate the caller's JWT against `supabase.auth.getUser(token)` (anon-keyed client) and reject any caller whose `user_metadata.role` is not `'admin'` or `'staff'`. This check runs BEFORE any read of `public.stax_invoices` and BEFORE any external API call.
+
+**Rationale:**
+
+1. **The anon key is publicly bundled.** Every browser build ships `VITE_SUPABASE_ANON_KEY` so authenticated clients can call read-cache queries. `verify_jwt=true` at the gateway accepts any signed JWT — including JWTs minted by sign-up flows the public app supports. Without an explicit role check, a non-admin authenticated user could invoke the real-money handlers via direct `supabase.functions.invoke(...)` calls and trigger Stax charges or QBO pushes across the fleet.
+
+2. **`public.stax_invoices` has no `tenant_id` column.** Per migration `20260416120000_stax_invoices_cache_table.sql`, the table is explicitly an "admin-only internal tool" mirroring the global Stax Auto Pay spreadsheet. There is no tenant-isolation boundary — the security boundary IS the role check. A `.eq('tenant_id', ...)` filter on stax_invoices would not just be redundant, it would break fleet-wide semantics (the table has no such column).
+
+3. **GAS parity.** The GAS handlers (`handleRunStaxCharges_`, `handleCreateStaxInvoices_`, `handleImportIIF_`, `handleQboCreateInvoice_`) are all wrapped in `withStaffGuard_(callerEmail, ...)` which enforces the same admin/staff predicate by reading the user's CB Clients role. The SB-side handlers MUST mirror that behavior — silent divergence would be a regression of the legacy access control.
+
+**Implementation:** every real-money handler starts with this gate:
+
+```typescript
+const authHeader = req.headers.get('Authorization') || '';
+const callerToken = authHeader.replace(/^Bearer\s+/i, '').trim();
+if (!callerToken) {
+  return jsonResponse({ error: 'Authorization header required', code: 'UNAUTHENTICATED' }, 401);
+}
+const anonKey = Deno.env.get('SUPABASE_ANON_KEY') ?? '';
+const authClient = createClient(supabaseUrl, anonKey);
+const { data: userData, error: authErr } = await authClient.auth.getUser(callerToken);
+if (authErr || !userData?.user) {
+  return jsonResponse({ error: 'Invalid token', code: 'UNAUTHENTICATED' }, 401);
+}
+const callerRole = String((userData.user.user_metadata as { role?: string })?.role ?? '').toLowerCase();
+if (callerRole !== 'admin' && callerRole !== 'staff') {
+  return jsonResponse({ error: 'admin/staff role required', code: 'FORBIDDEN' }, 403);
+}
+```
+
+**Scope:** This decision applies to handlers that (a) write to fleet-wide tables (no `tenant_id`) AND (b) perform external API side effects with financial impact. It does NOT replace MIG-007's three-layer verification for tenant-scoped handlers — those still rely on per-tenant `tenant_id` filters as the primary boundary. The role check is additive to, not a substitute for, tenant scoping where tenant scoping exists.
+
+**Future extensions:** the same gate pattern can be applied to other admin-only EFs as they're built — `markBillingActivityResolved`, `qbExport`, `getStaxInvoiceBatches`, `regenerateIifForBatch`, `qbExcelExport` are all candidates per the StrideAPI.gs `withStaffGuard_` audit. Each new admin-only EF should add an entry referencing MIG-017 in its file header.
 
 ### MIG-016 — Justin Demo Account canary override of MIG-007; SB-primary routing via apiPost (2026-05-21)
 
