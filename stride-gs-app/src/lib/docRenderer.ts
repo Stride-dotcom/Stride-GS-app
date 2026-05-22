@@ -54,6 +54,15 @@ function applyTokens(html: string, tokens: Record<string, string>): string {
   // Replace EVERY occurrence of each token. Apps Script does the same via
   // `api_resolveDocTokens_` — global string split/join, no regex, so token
   // names that look regex-y still match literally.
+  //
+  // Substitution is RAW: values are not escaped here. The convention is that
+  // token KEYS whose name ends in `_HTML` / `_ROWS` / `_ROW` / `_BANNER_HTML`
+  // contain pre-built HTML fragments (escaping done at fragment-build time
+  // in docTokens.ts via esc()), and every OTHER token's value MUST already
+  // be esc()'d by its builder. If you add a new field to a buildXTokens
+  // helper, pass the value through esc() — otherwise injection from a
+  // user-controlled string (notes, sidemark, vendor) lands in the rendered
+  // doc unescaped.
   let out = html;
   for (const key of Object.keys(tokens)) {
     out = out.split(key).join(tokens[key]);

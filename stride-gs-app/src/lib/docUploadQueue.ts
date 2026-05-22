@@ -32,7 +32,12 @@ export interface QueuedUpload {
   tokens: Record<string, string>;
   fileName: string;
   tenantId: string;
-  entityType: 'shipment' | 'item' | 'task' | 'repair' | 'willcall' | 'claim' | 'client' | 'dt_order';
+  // Must match the `documents.context_type` CHECK constraint
+  // (migration 20260420130000). `dt_order` is intentionally NOT in this
+  // union — even though useDocuments.ts exposes it as a TS type, the
+  // CHECK constraint rejects it on insert. Add it here only after the
+  // CHECK is widened in a future migration.
+  entityType: 'shipment' | 'item' | 'task' | 'repair' | 'willcall' | 'claim' | 'client';
   entityId: string;
   /** ISO timestamp first enqueued — used to age out stale jobs */
   enqueuedAt: string;
@@ -100,7 +105,15 @@ export async function findExistingAutoDoc(
     .is('deleted_at', null)
     .limit(1)
     .maybeSingle();
-  if (error) return null;
+  if (error) {
+    // Indistinguishable from "no row found" if we just return null — but a
+    // transient RLS/network failure on the de-dupe lookup would let the
+    // queue re-upload and create a duplicate row. Log loudly so we notice
+    // a pattern; still return null so the caller proceeds (re-upload is
+    // recoverable via soft-delete; silently never archiving is not).
+    console.warn('[docUploadQueue] findExistingAutoDoc lookup failed:', error);
+    return null;
+  }
   return data ?? null;
 }
 
