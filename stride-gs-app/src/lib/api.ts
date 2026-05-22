@@ -10,6 +10,7 @@
 
 import { CLIENT_FIELD_SCHEMA_FINGERPRINT } from '../types/clientFields';
 import { fireShadow } from './fireShadow';
+import { resolveRoute, invokeSupabaseHandler } from './apiRouter';
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -1261,6 +1262,26 @@ export async function apiPost<T>(
   // Auto-generate requestId if not supplied
   const requestId = (body.requestId as string | undefined) ?? crypto.randomUUID();
   const bodyWithId: Record<string, unknown> = body.requestId ? body : { ...body, requestId };
+
+  // [MIGRATION] Route to Supabase Edge Function when feature_flag resolves
+  // to 'supabase' for this action + tenant. The router resolves the flag
+  // against the module-level FeatureFlagContext snapshot — no React
+  // dependency, safe to call from anywhere.
+  //
+  // SB path: caller gets the same ApiResponse<T> shape; the EF returns
+  // the same JSON body GAS would. Shadow is NOT fired (the SB call IS
+  // the canonical path; nothing to shadow).
+  //
+  // SB-path errors surface to the caller — we do NOT fall back to GAS.
+  // That would mask handler bugs and produce dual-write behavior. The
+  // flag flip is the operator's choice; revert the flag if the SB
+  // handler is broken.
+  //
+  // See src/lib/apiRouter.ts for the action→EF map and the routing rule.
+  const route = resolveRoute(action, extraParams?.clientSheetId ?? null);
+  if (route.backend === 'supabase') {
+    return invokeSupabaseHandler<T>(route.ef, bodyWithId, extraParams, requestId);
+  }
 
   if (!url) {
     return { data: null, error: 'API URL not configured. Go to Settings → Integrations.', ok: false, requestId };
