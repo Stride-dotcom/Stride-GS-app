@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.227.0 — 2026-05-21 PST — [MIGRATION-P3/MIG-016] Sixth per-table reverse-writethrough writer: `__writeThroughReverseTasks_` replaces the stub for `tasks` in REVERSE_WRITETHROUGH_TABLES_. Insert + update upsert pattern by Task ID, mirrors REVERSE_TASK_FIELDS_ (task_id, type, status, item_id, vendor, description, location, sidemark, shipment_number, item_notes, task_notes, result, completed_at, cancelled_at, started_at, assigned_to, billed, due_date, priority, created). Required by the new SB-primary `batch-create-tasks-sb` Edge Function — without it the SB EF's per-task sheet-mirror fires hit the legacy stub and land in gs_sync_events. Auto-runs api_ensureTaskColumns_ on insert so Due Date + Priority columns exist on tenants whose template predates v38.214.0. Idempotent: re-running with the same payload either no-ops (already-matches) or writes the same cells (deterministic).
+   StrideAPI.gs — v38.228.0 — 2026-05-22 PST — [DOCS] Removes all five `api_generateDocPdf_` call sites from completion / approval / release handlers in favor of the React DocRenderer (PR #507). The function definition is intentionally retained for reference. Sites disabled (each wrapped in /* */ with a dated marker, original block preserved): (1) handleCompleteShipment_ DOC_RECEIVING at ~line 17471 — `var pdfBlob = null` declaration kept so the downstream SHIPMENT_RECEIVED email send still compiles; api_sendTemplateEmail_'s `if (pdfBlob) mailOpts.attachments = [pdfBlob]` guard at line 18456 means a null blob sends the email with no attachment, matching the React-side flow where DocRenderer hosts the PDF in public.documents and the email CTAs deep-link there. (2) handleProcessRepairApproval_ DOC_REPAIR_WORK_ORDER at ~line 19550 (only fires on the Approve branch — Decline path unchanged). (3) handleStartRepair_ DOC_REPAIR_WORK_ORDER at ~line 20208 — this site never attached the PDF to an email (storage-only generation for the Docs tab), so removing it is a pure no-op for outbound comms. (4) handleProcessWcRelease_ DOC_WILL_CALL_RELEASE at ~line 21221. (5) handleGenerateWcDoc_ DOC_WILL_CALL_RELEASE at ~line 21698 — the dedicated reprint endpoint, now a no-op that still returns success for any straggling pre-deploy React callers; expected to be deleted entirely once the React renderer is the only caller in the wild. DOC_INVOICE path (jsPDF in React via `api_exportDocAsPdfBlob_`-adjacent flow) NOT touched per scope. No schema / RLS / React change in this PR; companion React changes for DocRenderer landed in PR #507.
+   v38.227.0 — 2026-05-21 PST — [MIGRATION-P3/MIG-016] Sixth per-table reverse-writethrough writer: `__writeThroughReverseTasks_` replaces the stub for `tasks` in REVERSE_WRITETHROUGH_TABLES_. Insert + update upsert pattern by Task ID, mirrors REVERSE_TASK_FIELDS_ (task_id, type, status, item_id, vendor, description, location, sidemark, shipment_number, item_notes, task_notes, result, completed_at, cancelled_at, started_at, assigned_to, billed, due_date, priority, created). Required by the new SB-primary `batch-create-tasks-sb` Edge Function — without it the SB EF's per-task sheet-mirror fires hit the legacy stub and land in gs_sync_events. Auto-runs api_ensureTaskColumns_ on insert so Due Date + Priority columns exist on tenants whose template predates v38.214.0. Idempotent: re-running with the same payload either no-ops (already-matches) or writes the same cells (deterministic).
    v38.226.0 — 2026-05-21 PST — [MIGRATION-P2/MIG-015] Extends `__writeThroughReverseInventory_` to support general field updates (mode b/c) alongside the legacy release-only path (mode a). Required by the new SB-primary `update-item-sb` Edge Function (companion in supabase/functions/update-item-sb/) which writes inventory edits to public.inventory then mirrors the changed fields back to the per-tenant Inventory sheet via this writer. New REVERSE_INV_FIELDS_ map (vendor / description / reference / sidemark / room / location / item_class / qty / item_notes / declared_value / coverage_option_id) drives column resolution via api_ensureColumn_ — case-insensitive + auto-append on miss (matches v38.158.0's handleUpdateInventoryItem_ landmine fix). Status + release_date stay on the legacy code path (idempotency check, parse-as-PT, ledger + auto-cancel side effects on Released-transition). Combined mode handles "status flip + sidemark edit in same save". Release-mode idempotency skip only fires when zero general fields were written this pass — a fields-only write never short-circuits even if the row already matches. v38.211.0 auto-cancel cascade source string changed from "Delivery" to "Reverse Writethrough" because the writer is now used for general edits too (the "Delivery" tag was specific to push-inventory-release-to-sheet, which is just one caller now). No other writer changes; REVERSE_WRITETHROUGH_TABLES_ registry unchanged; no React change; no migration. Per MIG-015: deploy this BEFORE flipping feature_flags.updateItem to active_backend='supabase' for any tenant — without it the SB writer's row payload (which omits status on general edits) would throw the legacy "row.status required" error and the canary would fail-closed on every save.
    v38.225.0 — 2026-05-21 PST — [Split Items workflow] New `createSplitTask` + `completeSplitTask` doPost cases backing the React Split feature (SplitItemDialog on ItemPage, SplitTaskPanel on TaskPage). `handleCreateSplitTask_` appends a SPLIT-type Task row to the per-tenant Tasks sheet + idempotency check against open SPLIT tasks for the same parent item via Supabase + supabaseUpsert_ to public.tasks WITH metadata.split_workflow (parent_item_id / grouped_qty / keep_qty / leftover_qty / requester / origin) + sends a 'Split Required' alert to info@stridenw.com. `handleCompleteSplitTask_` calls the atomic Postgres `rpc_complete_split_task` RPC (migration 20260521230100) which reduces parent inventory.qty, inserts N child inventory rows (qty=1, parent_item_id back-pointer, item_id_ledger entries), writes one SPLIT billing row per child at class-based rate from service_catalog, and stamps audit-log entries for parent + each child + the task. After the RPC succeeds, `api_mirrorSplitWriteback_` mirrors the post-RPC SB state back to the client Sheet: updates Inventory.qty on parent, appends N new Inventory rows cloning the parent row with qty=1 + 'Split from <parent>' in Item Notes, appends N SPLIT rows to Billing_Ledger (re-read from public.billing so the rate matches byte-for-byte), and flips the Tasks row to Status='Completed'. Idempotent end-to-end — re-running on a completed task returns the existing child codes; the sheet writeback only fires once because the RPC's already-completed branch hydrates from inventory.parent_item_id rather than re-creating rows. Service-catalog SPLIT row seeded by the same migration (code='SPLIT' / category='Warehouse' / billing='class_based' / unit='per_item' / sensible default rates) — idempotent INSERT preserves any manual rates the operator set in Price List. CRITICAL: leaves the v38.182 atomic invoice-counter and the rest of the billing landmines exactly as-is — this is purely additive.
    v38.224.0 — 2026-05-20 PST — [Supabase-authoritative client settings write-back] Fifth per-table writer registered against the P1.4 framework (after inventory v38.208, will_calls v38.213, repairs v38.215, billing v38.217): `__writeThroughReverseClients_` for the `clients` table replaces the stub. Inverts the GAS→Supabase invariant for client settings — when React / intake / any future Supabase-authoritative caller writes `public.clients` directly, this writer mirrors the row OUT to (a) the per-tenant Settings tab as key/value upserts keyed by `CLIENT_FIELDS_[*].clientSettingsKey` and (b) the CB Clients tab via per-column setValue keyed by `CLIENT_FIELDS_[*].cbHeader`. Both sheets must be touched: per-tenant Settings is what dock-intake reads `AUTO_INSPECTION` from (the Brian Paquette failure mode); CB Clients is what `handleResyncClients_` reads back when pushing to Supabase — without the CB write, a CB-driven resync would silently overwrite the SB-side change. Also writes SB-only fields (`notification_contacts`, `billing_contact_name`, `billing_email`, `billing_address`, `tax_exempt`, `tax_exempt_reason`, `resale_cert_expires`, `resale_cert_url`) into the per-tenant Settings tab as ops-visible key/value rows — they don't have a `cbHeader` so they don't touch CB Clients, matching migrations 20260426160000 / 20260504000000 which placed them in Supabase only. Idempotent by tenantId; re-firing with the same row produces the same sheet state. Op support is `update` only — inserts flow through `handleOnboardClient_` which has its own bespoke sheet-creation path. Failure semantics mirror the framework: a single-side failure (Settings tab present but CB write fails, or vice versa) returns success with details in `cbSkipped` / `perTenantSkipped` so the next sync pass catches up; a both-sides failure throws so `handleWriteThroughReverse_` lands the row in `gs_sync_events` for FailedOperationsDrawer pickup. Cache invalidation: matches `handleUpdateClient_` by removing `api_active_clients`/`clients`/`clients_all`/`api_client_name_map` from CacheService after the CB write so the next `handleGetClients_` reflects the fresh values. Companion Edge Function `push-client-settings-to-sheet` + Postgres trigger `propagate_clients_to_sheet` ship in the same PR — together they form the App → Supabase → GAS Sheet flow.
@@ -17423,8 +17424,9 @@ function handleCompleteShipment_(clientSheetId, payload) {
         };
 
         // Generate DOC_RECEIVING PDF
+        // PDF generation moved to React DocRenderer (PR #507) — 2026-05-22
         var pdfBlob = null;
-        try {
+        /* try {
           var pdfTokens = {};
           for (var tk in emailTokens) pdfTokens[tk] = emailTokens[tk];
 
@@ -17479,7 +17481,7 @@ function handleCompleteShipment_(clientSheetId, payload) {
           if (pdfResult.warning) warnings.push(pdfResult.warning);
         } catch (pdfErr) {
           warnings.push("Receiving PDF failed (non-fatal): " + pdfErr.message);
-        }
+        } */
 
         var emailResult = api_sendTemplateEmail_(settings, "SHIPMENT_RECEIVED", allRecip,
           "Shipment Received — " + clientName + " — " + shipmentNo, emailTokens, pdfBlob, clientSheetId);
@@ -19492,9 +19494,10 @@ function handleRespondToRepairQuote_(clientSheetId, payload) {
       };
 
       // Generate DOC_REPAIR_WORK_ORDER PDF for Approved (v24.0.0)
+      // PDF generation moved to React DocRenderer (PR #507) — 2026-05-22
       var pdfBlob = null;
       if (decision === "Approve") {
-        try {
+        /* try {
           // v38.141.0: per-repair Drive folder no longer created — work
           // order PDF lands in public.documents (Repair → Docs tab).
           var repairFolderUrl = "";
@@ -19556,7 +19559,7 @@ function handleRespondToRepairQuote_(clientSheetId, payload) {
           if (pdfResult.warning) warnings.push(pdfResult.warning);
         } catch (pdfErr) {
           warnings.push("Repair Work Order PDF failed (non-fatal): " + pdfErr.message);
-        }
+        } */
       }
 
       var emailResult = api_sendTemplateEmail_(settings, templateKey, allRecip,
@@ -20115,8 +20118,9 @@ function handleStartRepair_(clientSheetId, payload) {
   // v38.141.0: PDF generation is now Supabase-backed (lands in
   // public.documents → Docs tab). The previous gate on `repairFolderUrl`
   // is dropped — generation always runs.
+  // PDF generation moved to React DocRenderer (PR #507) — 2026-05-22
   var pdfGenerated = false;
-  try {
+  /* try {
     {
       var settings = api_readSettings_(ss);
       var clientName = String(settings["CLIENT_NAME"] || "").trim();
@@ -20214,7 +20218,7 @@ function handleStartRepair_(clientSheetId, payload) {
     }
   } catch (pdfErr) {
     warnings.push("Work Order PDF failed (non-fatal): " + pdfErr.message);
-  }
+  } */
 
   var startDateStr = Utilities.formatDate(now, Session.getScriptTimeZone(), "yyyy-MM-dd");
   api_bumpSummaryVersion_();
@@ -21208,8 +21212,9 @@ function handleProcessWcRelease_(clientSheetId, payload) {
         };
 
         // Generate DOC_WILL_CALL_RELEASE PDF (v24.0.0)
+        // PDF generation moved to React DocRenderer (PR #507) — 2026-05-22
         var relPdfBlob = null;
-        try {
+        /* try {
           // v38.141.0: PDF goes to public.documents (Docs tab), not Drive.
           // wcFolderUrl2 retained as a no-op for the api_generateDocPdf_
           // signature; entityCtx below is what actually routes the upload.
@@ -21225,7 +21230,7 @@ function handleProcessWcRelease_(clientSheetId, payload) {
           if (relPdfResult.warning) warnings.push(relPdfResult.warning);
         } catch (relPdfErr) {
           warnings.push("WC Release PDF failed (non-fatal): " + relPdfErr.message);
-        }
+        } */
 
         var emailResult = api_sendTemplateEmail_(settings, "WILL_CALL_RELEASE", allRecip,
           "Will Call Released: " + wcNumber,
@@ -21689,7 +21694,9 @@ function handleGenerateWcDoc_(clientSheetId, payload) {
     var wcFolderUrl = "";
 
     // Generate PDF
-    var pdfResult = api_generateDocPdf_(
+    // PDF generation moved to React DocRenderer (PR #507) — 2026-05-22
+    // Handler kept as a no-op for any straggling callers; React renderer is authoritative.
+    /* var pdfResult = api_generateDocPdf_(
       ss, "DOC_WILL_CALL_RELEASE",
       "Will_Call_" + wcNumber,
       null,
@@ -21698,7 +21705,7 @@ function handleGenerateWcDoc_(clientSheetId, payload) {
     );
     if (!pdfResult.blob && pdfResult.warning) {
       return jsonResponse_({ success: false, error: pdfResult.warning });
-    }
+    } */
 
     return jsonResponse_({ success: true, wcNumber: wcNumber, folderUrl: wcFolderUrl, itemCount: items.length });
   } catch (err) {
