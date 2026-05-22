@@ -12,3 +12,9 @@ interface ImportMetaEnv {
 interface ImportMeta {
   readonly env: ImportMetaEnv;
 }
+
+// Injected by vite.config.ts via `define`. Values are baked into the bundle
+// at build time so the running app can compare its own version against
+// /version.json polled from the server.
+declare const __APP_VERSION__: string;
+declare const __BUILD_TIME__: string;

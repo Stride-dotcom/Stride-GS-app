@@ -9,6 +9,7 @@ import { useIsMobile } from '../../hooks/useIsMobile';
 import { useFailedOperations } from '../../hooks/useFailedOperations';
 import { FailedOperationsDrawer } from '../shared/FailedOperationsDrawer';
 import { useSupabaseRealtime } from '../../hooks/useSupabaseRealtime';
+import { useVersionCheck } from '../../hooks/useVersionCheck';
 import { useAuth } from '../../contexts/AuthContext';
 import { useClients } from '../../hooks/useClients';
 import { usePricing } from '../../hooks/usePricing';
@@ -39,6 +40,10 @@ export function AppLayout() {
   // Phase 4: subscribe to Supabase Realtime on all 5 cache tables — all users see
   // changes within 1-2s of GAS write completing (write-through is Phase 3)
   useSupabaseRealtime();
+
+  // Poll /version.json every 5 min and silently reload on next navigation
+  // when a newer bundle has been deployed.
+  useVersionCheck();
 
   // Session 74: useNotifications() removed (notifications module deleted).
   // Unread count on the bell is driven by useMessages directly.
