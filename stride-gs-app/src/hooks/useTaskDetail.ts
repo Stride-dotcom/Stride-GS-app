@@ -28,7 +28,7 @@ export interface UseTaskDetailResult {
   status: TaskDetailStatus;
   error: string | null;
   source: 'supabase' | 'legacy' | null;
-  refetch: () => void;
+  refetch: (opts?: { silent?: boolean }) => void;
 }
 
 export function useTaskDetail(taskId: string | undefined, clientSheetIdHint?: string): UseTaskDetailResult {

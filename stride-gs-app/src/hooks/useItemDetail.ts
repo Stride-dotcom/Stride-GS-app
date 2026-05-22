@@ -16,7 +16,7 @@ export interface UseItemDetailResult {
   item: ApiInventoryItem | null;
   status: ItemDetailStatus;
   error: string | null;
-  refetch: () => void;
+  refetch: (opts?: { silent?: boolean }) => void;
 }
 
 export function useItemDetail(itemId: string | undefined): UseItemDetailResult {

@@ -67,7 +67,8 @@ export function RepairPage() {
 
   const scheduleRefresh = useCallback(() => {
     if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
-    refreshTimerRef.current = setTimeout(() => { refetch(); }, 2500);
+    // Silent: post-save safety-net refetch should not flash the spinner.
+    refreshTimerRef.current = setTimeout(() => { refetch({ silent: true }); }, 2500);
   }, [refetch]);
 
   useEffect(() => {
@@ -109,7 +110,7 @@ export function RepairPage() {
   if (status === 'error') {
     return (
       <PageState icon={AlertCircle} color={theme.colors.statusRed} title="Failed to Load Repair" body={error || 'An unexpected error occurred.'}
-        actions={<div style={{ display: 'flex', gap: 12 }}><button onClick={refetch} style={{ ...backBtnStyle, color: theme.colors.primary }}>Retry</button><button onClick={goBack} style={backBtnStyle}>Back to Repairs</button></div>}
+        actions={<div style={{ display: 'flex', gap: 12 }}><button onClick={() => refetch()} style={{ ...backBtnStyle, color: theme.colors.primary }}>Retry</button><button onClick={goBack} style={backBtnStyle}>Back to Repairs</button></div>}
       />
     );
   }

@@ -48,8 +48,11 @@ export function TaskJobPage() {
   // has had time to land.
   const scheduleRefresh = useCallback(() => {
     if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    // Silent: post-save safety-net refetch should not flash the spinner over
+    // the panel — the optimistic state in localTask already paints the user's
+    // edit; this just reconciles with the server row after write-through.
     refreshTimerRef.current = setTimeout(() => {
-      refetch();
+      refetch({ silent: true });
     }, 2500);
   }, [refetch]);
 
@@ -134,7 +137,7 @@ export function TaskJobPage() {
           {error || 'An unexpected error occurred.'}
         </div>
         <div style={{ display: 'flex', gap: 12 }}>
-          <button onClick={refetch} style={{ ...linkBtnStyle, color: theme.colors.primary }}>Retry</button>
+          <button onClick={() => refetch()} style={{ ...linkBtnStyle, color: theme.colors.primary }}>Retry</button>
           <button onClick={goBack} style={linkBtnStyle}>
             <ArrowLeft size={14} /> Back to Dashboard
           </button>

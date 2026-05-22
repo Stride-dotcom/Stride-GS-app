@@ -78,7 +78,11 @@ export function TaskPage() {
 
   const scheduleRefresh = useCallback(() => {
     if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
-    refreshTimerRef.current = setTimeout(() => { refetch(); }, 2500);
+    // Silent so the post-save safety-net refetch doesn't flash the spinner
+    // over the detail panel. The optimistic state in localTask already
+    // shows the user's edit; this just grabs the authoritative server row
+    // after GAS write-through to Supabase has had time to land.
+    refreshTimerRef.current = setTimeout(() => { refetch({ silent: true }); }, 2500);
   }, [refetch]);
 
   useEffect(() => {
@@ -123,7 +127,7 @@ export function TaskPage() {
   if (status === 'error') {
     return (
       <PageState icon={AlertCircle} color={theme.colors.statusRed} title="Failed to Load Task" body={error || 'An unexpected error occurred.'}
-        actions={<div style={{ display: 'flex', gap: 12 }}><button onClick={refetch} style={{ ...backBtnStyle, color: theme.colors.primary }}>Retry</button><button onClick={goBack} style={backBtnStyle}>Back to Tasks</button></div>}
+        actions={<div style={{ display: 'flex', gap: 12 }}><button onClick={() => refetch()} style={{ ...backBtnStyle, color: theme.colors.primary }}>Retry</button><button onClick={goBack} style={backBtnStyle}>Back to Tasks</button></div>}
       />
     );
   }
