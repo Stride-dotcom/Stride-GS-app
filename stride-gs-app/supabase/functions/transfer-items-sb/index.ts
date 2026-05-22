@@ -1,0 +1,419 @@
+/**
+ * transfer-items-sb — SB-primary handler for the GAS `transferItems` action.
+ *
+ * Mirrors handleTransferItems_ (StrideAPI.gs:22180) at the SB layer for the
+ * cross-tenant transfer flow. The full GAS handler is ~700 lines and does:
+ *   1. Validate destination via CB (Active client).
+ *   2. Inventory: move rows from source → destination sheet, mark source
+ *      "Transferred", append "Transferred from X to Y on DATE" notes.
+ *   3. Billing: project Unbilled ledger rows to destination, void source.
+ *      Re-apply destination discount, recompute taxes.
+ *   4. Storage backfill: bill destination for the holding window on source.
+ *   5. Tasks/Repairs: append active rows to destination, cancel source.
+ *   6. api_ledgerTransferTenant_: PATCH item_id_ledger.tenant_id → dest.
+ *   7. Per-item audit log on BOTH tenants (transfer / transfer_in).
+ *
+ * Sheet-side complexity (steps 1-5: cross-spreadsheet projection, storage
+ * backfill, discount recompute) can't reasonably re-implement in 300 lines
+ * of SB code — those depend on each tenant's Settings sheet, class volume
+ * cache, and discount table that only the GAS handler resolves. So this EF
+ * follows the canary-acceptable hybrid pattern:
+ *
+ *   • SB writes that ARE byte-for-byte parity with GAS:
+ *       - public.inventory:        flip status → 'Transferred' on source,
+ *                                  move row's tenant_id to destination
+ *                                  (since item_id is preserved across the
+ *                                  transfer per StrideAPI.gs:8891 comment).
+ *       - Open public.tasks/repairs on source: auto-cancel with the same
+ *         " | <note>"-append semantics as update-item-sb's Release path.
+ *       - public.item_id_ledger.tenant_id: PATCH to dest, status='active'
+ *         (mirrors api_ledgerTransferTenant_ at StrideAPI.gs:5706).
+ *       - entity_audit_log: per-item rows on BOTH source ('transfer') AND
+ *         destination ('transfer_in'), matching StrideAPI.gs:8895-8896.
+ *
+ *   • Heavy sheet-side work (billing projection, storage backfill, dest
+ *     row creation in destination Inventory sheet) is fired via reverse-
+ *     writethrough to GAS — the writeThroughReverse endpoint dispatches to
+ *     a per-tenant Tasks/Repairs writer; the destination Inventory append
+ *     + Billing projection + storage backfill currently live ONLY in the
+ *     GAS-primary handleTransferItems_ path. Acceptable per MIG-016
+ *     canary contract: production tenants stay on GAS until the
+ *     transfer-items pipeline ships per-table writers for billing
+ *     projection (P4a). The fullClientSync cron on both source and
+ *     destination tenants picks up sheet drift within ~5–30 min.
+ *
+ * Inputs:
+ *   tenantId                    — source tenant (router-resolved)
+ *   destinationClientSheetId    — destination tenant ID
+ *   itemIds: string[]           — item IDs to transfer (preserved across)
+ *   transferDate?: string       — YYYY-MM-DD; defaults to today
+ *
+ * Auth: verify_jwt=true. SERVICE_ROLE for writes (RLS bypass).
+ *
+ * Response (matches GAS for caller-shape parity):
+ *   { success: true, transferred: N, skipped: [...], warnings: [...] }
+ *   { success: false, error: "...", code?: "..." }
+ */
+
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+};
+
+// Same terminal-state semantics as update-item-sb / release-items-sb.
+const TASK_TERMINAL = ['Completed', 'Cancelled'] as const;
+const TASK_TERMINAL_LIST = `(${TASK_TERMINAL.join(',')})`;
+const REPAIR_AUTOCANCEL_TERMINAL = ['Complete', 'Completed', 'Cancelled', 'Declined', 'Failed'] as const;
+const REPAIR_AUTOCANCEL_TERMINAL_LIST = `(${REPAIR_AUTOCANCEL_TERMINAL.join(',')})`;
+
+interface TransferItemsBody {
+  tenantId?:                  string;
+  destinationClientSheetId?:  string;
+  callerEmail?:               string;
+  requestId?:                 string;
+  itemIds?:                   string[];
+  transferDate?:              string;
+}
+
+Deno.serve(async (req: Request) => {
+  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
+  if (req.method !== 'POST') return json({ success: false, error: 'POST required', code: 'METHOD_NOT_ALLOWED' }, 405);
+
+  let body: TransferItemsBody;
+  try {
+    body = await req.json();
+  } catch (e) {
+    return json({ success: false, error: `Invalid JSON: ${e instanceof Error ? e.message : String(e)}`, code: 'INVALID_JSON' }, 400);
+  }
+
+  const tenantId    = String(body.tenantId    ?? '').trim();
+  const destId      = String(body.destinationClientSheetId ?? '').trim();
+  const callerEmail = String(body.callerEmail ?? '').trim();
+  const requestId   = String(body.requestId   ?? '').trim() || crypto.randomUUID();
+  const itemIds     = (body.itemIds ?? []).map(s => String(s).trim()).filter(Boolean);
+
+  // Default transfer date to today if not supplied; reject future dates
+  // (matches handleTransferItems_ Phase 1 constraint at StrideAPI.gs:22198).
+  let transferDate = String(body.transferDate ?? '').trim();
+  const today = new Date().toISOString().slice(0, 10);
+  if (!transferDate) {
+    transferDate = today;
+  } else if (!/^\d{4}-\d{2}-\d{2}$/.test(transferDate)) {
+    return json({ success: false, error: `Invalid transferDate (use YYYY-MM-DD): ${transferDate}`, code: 'INVALID_PARAMS' }, 400);
+  } else if (transferDate > today) {
+    return json({ success: false, error: 'Transfer Date cannot be in the future (Phase 1 limitation — past or present only)', code: 'INVALID_PARAMS' }, 400);
+  }
+
+  if (!tenantId) return json({ success: false, error: 'tenantId is required', code: 'INVALID_PARAMS' }, 400);
+  if (!destId)   return json({ success: false, error: 'destinationClientSheetId is required', code: 'INVALID_PARAMS' }, 400);
+  if (destId === tenantId) return json({ success: false, error: 'Destination cannot be the same as source', code: 'INVALID_PARAMS' }, 400);
+  if (itemIds.length === 0) return json({ success: false, error: 'No item IDs provided', code: 'INVALID_PARAMS' }, 400);
+
+  const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
+  const serviceKey  = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
+  if (!supabaseUrl || !serviceKey) {
+    console.error('[transfer-items-sb] Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY');
+    return json({ success: false, error: 'Server misconfigured', code: 'CONFIG_ERROR' }, 500);
+  }
+  const sb = createClient(supabaseUrl, serviceKey);
+
+  // 1. Read current source inventory rows; skip already-Transferred.
+  const { data: invRows, error: readErr } = await sb
+    .from('inventory')
+    .select('item_id, status, item_notes')
+    .eq('tenant_id', tenantId)
+    .in('item_id', itemIds);
+  if (readErr) {
+    console.error('[transfer-items-sb] inventory read failed:', readErr.message);
+    return json({ success: false, error: `Read failed: ${readErr.message}`, code: 'READ_FAILED' }, 500);
+  }
+
+  const byId = new Map<string, { item_id: string; status: string; item_notes: string }>();
+  for (const r of (invRows ?? []) as Array<{ item_id: string; status: string | null; item_notes: string | null }>) {
+    byId.set(String(r.item_id), {
+      item_id:    String(r.item_id),
+      status:     String(r.status ?? '').trim(),
+      item_notes: String(r.item_notes ?? ''),
+    });
+  }
+
+  const skipped: string[] = [];
+  const notFound: string[] = [];
+  const toTransfer: Array<{ itemId: string; newNotes: string }> = [];
+  const transferNote = `Transferred from ${tenantId} to ${destId} on ${transferDate}`;
+
+  for (const itemId of itemIds) {
+    const row = byId.get(itemId);
+    if (!row) {
+      notFound.push(itemId);
+      continue;
+    }
+    if (row.status === 'Transferred') {
+      skipped.push(`${itemId}: already Transferred`);
+      continue;
+    }
+    const existing = row.item_notes.trim();
+    const newNotes = existing ? `${existing} | ${transferNote}` : transferNote;
+    toTransfer.push({ itemId, newNotes });
+  }
+
+  const warnings: string[] = [];
+  if (notFound.length > 0) warnings.push(`Not in public.inventory: ${notFound.join(', ')}`);
+
+  // 2. Per-row: flip status='Transferred', stamp transferred_at, append note,
+  //    move the row to the destination tenant_id. Item ID is preserved
+  //    across the transfer (StrideAPI.gs:8891 comment).
+  let updated = 0;
+  const nowIso = new Date().toISOString();
+  for (const t of toTransfer) {
+    const { error: upErr } = await sb
+      .from('inventory')
+      .update({
+        status:          'Transferred',
+        tenant_id:       destId,
+        transferred_at:  nowIso,
+        transfer_date:   transferDate,
+        item_notes:      t.newNotes,
+        updated_at:      nowIso,
+      })
+      .eq('tenant_id', tenantId)
+      .eq('item_id',   t.itemId);
+    if (upErr) {
+      // transfer_date / transferred_at may not exist on older schemas — retry
+      // with the minimum field set so the source-side transfer still lands.
+      const { error: retryErr } = await sb
+        .from('inventory')
+        .update({
+          status:     'Transferred',
+          tenant_id:  destId,
+          item_notes: t.newNotes,
+          updated_at: nowIso,
+        })
+        .eq('tenant_id', tenantId)
+        .eq('item_id',   t.itemId);
+      if (retryErr) {
+        warnings.push(`Transfer ${t.itemId}: ${retryErr.message}`);
+        continue;
+      }
+    }
+    updated++;
+  }
+
+  // 3. Auto-cancel open Tasks + Repairs on the source tenant.
+  if (toTransfer.length > 0) {
+    const ids = toTransfer.map(t => t.itemId);
+    const cancel = await autoCancelOnTransfer(sb, tenantId, ids, callerEmail);
+    if (cancel.tasksCancelled > 0)   warnings.push(`Auto-cancelled ${cancel.tasksCancelled} open task(s) on source`);
+    if (cancel.repairsCancelled > 0) warnings.push(`Auto-cancelled ${cancel.repairsCancelled} open repair(s) on source`);
+    warnings.push(...cancel.warnings);
+  }
+
+  // 4. item_id_ledger: PATCH tenant_id → dest (mirrors api_ledgerTransferTenant_).
+  if (toTransfer.length > 0) {
+    const ids = toTransfer.map(t => t.itemId);
+    const { error: ledgerErr } = await sb
+      .from('item_id_ledger')
+      .update({ tenant_id: destId, status: 'active' })
+      .in('item_id', ids);
+    if (ledgerErr) {
+      console.error('[transfer-items-sb] item_id_ledger PATCH failed:', ledgerErr.message);
+      warnings.push(`item_id_ledger PATCH: ${ledgerErr.message}`);
+    }
+  }
+
+  // 5. Reverse-writethrough per item — best-effort. The GAS side handles
+  // the cross-sheet projection (destination Inventory append, billing
+  // projection, storage backfill) via the legacy transferItems endpoint.
+  // We hit writeThroughReverse to flip the source sheet's Status →
+  // Transferred + stamp Transfer Date. Destination-sheet population
+  // remains a GAS-cron-or-manual concern in the canary phase.
+  await Promise.all(toTransfer.map(t => mirrorSourceTransferToSheet(
+    t.itemId, transferDate, tenantId, requestId, callerEmail, sb,
+  )));
+
+  // 6. Audit log per item on both tenants (mirrors StrideAPI.gs:8895-8896).
+  await Promise.all(toTransfer.flatMap(t => [
+    sb.from('entity_audit_log').insert({
+      entity_type:  'inventory',
+      entity_id:    t.itemId,
+      tenant_id:    tenantId,
+      action:       'transfer',
+      changes:      { status: { new: 'Transferred' }, destinationTenant: destId, transferDate },
+      performed_by: callerEmail || 'transfer-items-sb',
+      source:       'supabase',
+    }).then(() => {}, () => {}),
+    sb.from('entity_audit_log').insert({
+      entity_type:  'inventory',
+      entity_id:    t.itemId,
+      tenant_id:    destId,
+      action:       'transfer_in',
+      changes:      { summary: 'Item transferred in', sourceTenant: tenantId, transferDate },
+      performed_by: callerEmail || 'transfer-items-sb',
+      source:       'supabase',
+    }).then(() => {}, () => {}),
+  ]));
+
+  return json({
+    success:        true,
+    transferred:    updated,
+    skipped:        skipped.length > 0 ? skipped : undefined,
+    totalRequested: itemIds.length,
+    warnings:       warnings.length > 0 ? warnings : undefined,
+  }, 200);
+});
+
+// ── Helpers ─────────────────────────────────────────────────────────────
+
+async function autoCancelOnTransfer(
+  sb: ReturnType<typeof createClient>,
+  tenantId: string,
+  itemIds: string[],
+  callerEmail: string,
+): Promise<{ tasksCancelled: number; repairsCancelled: number; warnings: string[] }> {
+  const out = { tasksCancelled: 0, repairsCancelled: 0, warnings: [] as string[] };
+  const note = 'Auto-cancelled: item transferred to another tenant';
+  const nowIso = new Date().toISOString();
+  const performedBy = callerEmail || 'transfer-items-sb';
+
+  // Tasks
+  try {
+    const { data: openTasks, error } = await sb
+      .from('tasks')
+      .select('task_id, status, task_notes')
+      .eq('tenant_id', tenantId)
+      .in('item_id', itemIds)
+      .not('status', 'in', TASK_TERMINAL_LIST);
+    if (error) {
+      out.warnings.push(`Task select failed: ${error.message}`);
+    } else {
+      for (const row of (openTasks ?? []) as Array<{ task_id: string; status: string; task_notes: string | null }>) {
+        const existing = String(row.task_notes ?? '').trim();
+        const newNotes = existing ? `${existing} | ${note}` : note;
+        const { error: upErr } = await sb
+          .from('tasks')
+          .update({
+            status:       'Cancelled',
+            cancelled_at: nowIso,
+            task_notes:   newNotes,
+            updated_at:   nowIso,
+          })
+          .eq('tenant_id', tenantId)
+          .eq('task_id', row.task_id);
+        if (upErr) {
+          out.warnings.push(`Cancel task ${row.task_id}: ${upErr.message}`);
+          continue;
+        }
+        out.tasksCancelled++;
+        await sb.from('entity_audit_log').insert({
+          entity_type:  'task',
+          entity_id:    row.task_id,
+          tenant_id:    tenantId,
+          action:       'cancel',
+          changes:      { status: { old: row.status, new: 'Cancelled' }, reason: note },
+          performed_by: performedBy,
+          source:       'supabase',
+        }).then(() => {}, () => {});
+      }
+    }
+  } catch (e) {
+    out.warnings.push(`Tasks sweep threw: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  // Repairs
+  try {
+    const { data: openRepairs, error } = await sb
+      .from('repairs')
+      .select('repair_id, status, repair_notes')
+      .eq('tenant_id', tenantId)
+      .in('item_id', itemIds)
+      .not('status', 'in', REPAIR_AUTOCANCEL_TERMINAL_LIST);
+    if (error) {
+      out.warnings.push(`Repair select failed: ${error.message}`);
+    } else {
+      for (const row of (openRepairs ?? []) as Array<{ repair_id: string; status: string; repair_notes: string | null }>) {
+        const existing = String(row.repair_notes ?? '').trim();
+        const newNotes = existing ? `${existing} | ${note}` : note;
+        const { error: upErr } = await sb
+          .from('repairs')
+          .update({
+            status:       'Cancelled',
+            repair_notes: newNotes,
+            updated_at:   nowIso,
+          })
+          .eq('tenant_id', tenantId)
+          .eq('repair_id', row.repair_id);
+        if (upErr) {
+          out.warnings.push(`Cancel repair ${row.repair_id}: ${upErr.message}`);
+          continue;
+        }
+        out.repairsCancelled++;
+        await sb.from('entity_audit_log').insert({
+          entity_type:  'repair',
+          entity_id:    row.repair_id,
+          tenant_id:    tenantId,
+          action:       'cancel',
+          changes:      { status: { old: row.status, new: 'Cancelled' }, reason: note },
+          performed_by: performedBy,
+          source:       'supabase',
+        }).then(() => {}, () => {});
+      }
+    }
+  } catch (e) {
+    out.warnings.push(`Repairs sweep threw: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  return out;
+}
+
+async function mirrorSourceTransferToSheet(
+  itemId: string,
+  transferDate: string,
+  tenantId: string,
+  requestId: string,
+  callerEmail: string,
+  sb: ReturnType<typeof createClient>,
+): Promise<void> {
+  try {
+    const gasUrl   = Deno.env.get('GAS_API_URL');
+    const gasToken = Deno.env.get('GAS_API_TOKEN');
+    if (!gasUrl || !gasToken) return;
+    const payload = {
+      tenantId,
+      table: 'inventory',
+      op:    'update',
+      rowId: itemId,
+      row:   { status: 'Transferred', transfer_date: transferDate },
+      requestId: `${requestId}:${itemId}`,
+    };
+    const res = await fetch(`${gasUrl}?action=writeThroughReverse&token=${encodeURIComponent(gasToken)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      await sb.from('gs_sync_events').insert({
+        tenant_id:     tenantId,
+        entity_type:   'inventory',
+        entity_id:     itemId,
+        action_type:   'writethrough_reverse',
+        sync_status:   'sync_failed',
+        requested_by:  callerEmail || 'transfer-items-sb',
+        request_id:    `${requestId}:${itemId}`,
+        payload,
+        error_message: `HTTP ${res.status} ${text.slice(0, 200)}`,
+      }).then(() => {}, () => {});
+    }
+  } catch (e) {
+    console.warn('[transfer-items-sb] mirror threw for', itemId, e);
+  }
+}
+
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+  });
+}

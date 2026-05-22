@@ -1,6 +1,8 @@
 # Stride GS App — Build Status
 
-> Last updated: 2026-05-21 ([feat/migration/route-and-update-item][MIGRATION-P2-P3/MIG-016] **SB-primary routing layer + 5 real -sb handlers (round 2).** Round 1 shipped routing + `update-item-sb`. Round 2 extends with 4 more handlers: `batch-create-tasks-sb` (createTask — service_catalog lookup, task ID generation, open-task dedup), `release-items-sb` (bulk release with item_notes append + auto-cancel open Tasks/Repairs cascade), `create-will-call-sb` (WC fee via service_catalog + per-client discount, active-WC dedup), `process-wc-release-sb` (item release + Unbilled billing for non-COD, idempotent on ledger_row_id to preserve Invoiced/Void history). StrideAPI v38.227.0: new `__writeThroughReverseTasks_` writer (6th per-table writer; insert + update upsert by Task ID; required by batch-create-tasks-sb). GAS_TO_SB_MAP now covers 5 actions: updateInventoryItem, batchCreateTasks, releaseItems, createWillCall, processWcRelease. **completeShipment intentionally deferred** to its own PR — 3+ hour port (Drive folders, shipment-received email, auto-INSP/ASM task creation, receiving billing, idempotency tag dedup; shipping half-built is worse than not shipping). Canary-acceptable gaps documented in each EF's header comment: WC partial release doesn't yet create a child WC for remaining items (operator creates manually); WC release email skipped (operator uses legacy GAS path); WC addons flush skipped; batchCreateTasks task-ID has narrow race on concurrent (tenant,item,svc) tuple. tsc + `npm run build` clean.).
+> Last updated: 2026-05-22 ([feat/migration/batch-handlers-and-routing][MIGRATION-P2/P3/P4a/P5/P6 / MIG-016] **17 new SB-primary handlers + extended GAS_TO_SB_MAP.** Builds the next wave of `-sb` Edge Functions: P2 (update-task-sb, update-repair-sb, transfer-items-sb), P3 receive/email (complete-shipment-sb, send-shipment-email-sb, send-task-complete-email-sb, send-will-call-emails-sb), P4a billing (create-invoice-sb, void-invoice-sb, reissue-invoice-sb, commit-storage-charges-sb), P5 onboarding (onboard-client-sb — HYBRID: SB writes clients row, GAS keeps Drive/Sheets provisioning), P6 payments (qbo-create-invoice-sb, create-stax-invoices-sb, run-stax-charges-sb, import-iif-sb), reports (generate-unbilled-report-sb). All follow the update-item-sb canonical pattern: SERVICE_ROLE writes, payload validation, audit-log shape parity, best-effort reverse-writethrough with gs_sync_events on failure, error codes (INVALID_PARAMS/NOT_FOUND/UPDATE_FAILED/etc). Real-money handlers (Stax/QBO/IIF) gain explicit admin/staff role gate via `auth.getUser(token)` against anon client — mirrors GAS `withStaffGuard_`; closed gap where anon-bundled key alone could trigger fleet-wide charges. `GAS_TO_SB_MAP` extended to cover all 28 SB-primary action slots (8 pre-existing -sb EFs added to map for future apiPost refactor; 17 new entries for this PR; 4 explicit "still gas-only" comments preserved). All EFs use `Deno.serve` + `createClient` from esm.sh/@supabase/supabase-js@2. `create-invoice-sb` honors Landmines 2 (no React-side math), 3 (uses `next_invoice_no()` atomic SEQUENCE), 4 (re-verifies Unbilled status on both read filter and UPDATE WHERE), 5 (three-storage-layer documented as canary-acceptable drift per MIG-016). Documented FULL vs STUB scope in each handler header. Code review (Opus 4.7 fallback per locked-in checklist): caught 4 cross-tenant data-leak false-positives that were actually correct fleet-wide design (stax_invoices has no tenant_id by design — admin-only internal tool); explicit role checks added on the real-money handlers regardless. tsc + `npm run build` clean. **Deploy is operator-pending** — see Pending User Actions below.).
+
+> Earlier 2026-05-21 ([feat/migration/route-and-update-item][MIGRATION-P2-P3/MIG-016] **SB-primary routing layer + 5 real -sb handlers (round 2).** Round 1 shipped routing + `update-item-sb`. Round 2 extends with 4 more handlers: `batch-create-tasks-sb` (createTask — service_catalog lookup, task ID generation, open-task dedup), `release-items-sb` (bulk release with item_notes append + auto-cancel open Tasks/Repairs cascade), `create-will-call-sb` (WC fee via service_catalog + per-client discount, active-WC dedup), `process-wc-release-sb` (item release + Unbilled billing for non-COD, idempotent on ledger_row_id to preserve Invoiced/Void history). StrideAPI v38.227.0: new `__writeThroughReverseTasks_` writer (6th per-table writer; insert + update upsert by Task ID; required by batch-create-tasks-sb). GAS_TO_SB_MAP now covers 5 actions: updateInventoryItem, batchCreateTasks, releaseItems, createWillCall, processWcRelease. **completeShipment intentionally deferred** to its own PR — 3+ hour port (Drive folders, shipment-received email, auto-INSP/ASM task creation, receiving billing, idempotency tag dedup; shipping half-built is worse than not shipping). Canary-acceptable gaps documented in each EF's header comment: WC partial release doesn't yet create a child WC for remaining items (operator creates manually); WC release email skipped (operator uses legacy GAS path); WC addons flush skipped; batchCreateTasks task-ID has narrow race on concurrent (tenant,item,svc) tuple. tsc + `npm run build` clean.).
 
 > Earlier 2026-05-21 ([feat/migration/route-and-update-item — round 1][MIGRATION-P2/MIG-016] **First SB-primary routing layer + `update-item-sb` real handler.** New `src/lib/apiRouter.ts` (action→EF map + `invokeSupabaseHandler`); `apiPost` consults `resolveRoute` BEFORE the GAS path, routes to SB Edge Function when `feature_flags.<flagKey>.active_backend` resolves to `'supabase'` for the caller's tenant. Skips `fireShadow` on the SB path (SB IS the canonical path — nothing to shadow). Errors surface, never silently fall back to GAS — dual-write would be worse than a user-visible save failure. `update-item-sb` Edge Function: SB-primary handler for `updateInventoryItem`. Validates payload (mirrors `handleUpdateInventoryItem_` exactly — status whitelist, qty/declaredValue numeric/non-neg), UPDATEs `public.inventory`, cascades to open `public.tasks` + `public.repairs` for the SYNC_FIELDS subset, cascades Sidemark/Reference to Unbilled `public.billing` rows, auto-cancels open Tasks/Repairs on a true Released-transition with " | "-appended task_notes/repair_notes + per-row audit log (matches `api_cancelOpenWorkOnRelease_`), fires reverse-writethrough to per-tenant Inventory sheet, writes `entity_audit_log` matching the GAS shape exactly. Response shape is identical to GAS `handleUpdateInventoryItem_` so React callers stay agnostic. StrideAPI v38.226.0: extended `__writeThroughReverseInventory_` to handle general field updates (any subset of vendor/description/reference/sidemark/room/location/item_class/qty/item_notes/declared_value/coverage_option_id) alongside the legacy release-only path — required so the SB EF can mirror inventory edits back to the sheet without throwing 'row.status required'. Combined mode (status flip + sidemark edit in same save) covered. v38.211.0 auto-cancel source string changed from "Delivery" to "Reverse Writethrough" because the writer is now used for general edits too. New MIG-016 decision in MIGRATION_STATUS.md: Justin Demo canary override of MIG-007 — flag-flip directly without 3-layer verification, but only for tenants in `tenant_scope`. **Sheet-drift gap accepted on canary tenant:** cascade fan-out rows (Tasks/Repairs/Billing) are NOT individually mirrored back to the per-tenant sheets; full-sync cron backstops within ~5–30 min. Documented as canary-only trade-off. tsc + `npm run build` clean. **Operator deploy sequence is load-bearing — see Pending User Actions below.**).
 
@@ -1760,6 +1762,50 @@ Late-day session that started as a single production fire (release-items timing 
 ---
 
 ## Pending User Actions
+
+- [ ] **[MIGRATION-P2/P3/P4a/P5/P6 — feat/migration/batch-handlers-and-routing — operator deploy] Deploy 17 new + 4 existing SB-primary Edge Functions.** Builder env has no `SUPABASE_ACCESS_TOKEN`; run from a machine with `supabase login` complete. From `C:\dev\Stride-GS-app\stride-gs-app`:
+
+  ```bash
+  # Group A — newly built in this PR (build only; no flag flip yet)
+  npx supabase functions deploy update-task-sb              --project-ref uqplppugeickmamycpuz
+  npx supabase functions deploy update-repair-sb            --project-ref uqplppugeickmamycpuz
+  npx supabase functions deploy transfer-items-sb           --project-ref uqplppugeickmamycpuz
+  npx supabase functions deploy complete-shipment-sb        --project-ref uqplppugeickmamycpuz
+  npx supabase functions deploy send-shipment-email-sb      --project-ref uqplppugeickmamycpuz
+  npx supabase functions deploy send-task-complete-email-sb --project-ref uqplppugeickmamycpuz
+  npx supabase functions deploy send-will-call-emails-sb    --project-ref uqplppugeickmamycpuz
+  npx supabase functions deploy create-invoice-sb           --project-ref uqplppugeickmamycpuz
+  npx supabase functions deploy void-invoice-sb             --project-ref uqplppugeickmamycpuz
+  npx supabase functions deploy reissue-invoice-sb          --project-ref uqplppugeickmamycpuz
+  npx supabase functions deploy commit-storage-charges-sb   --project-ref uqplppugeickmamycpuz
+  npx supabase functions deploy onboard-client-sb           --project-ref uqplppugeickmamycpuz
+  npx supabase functions deploy qbo-create-invoice-sb       --project-ref uqplppugeickmamycpuz
+  npx supabase functions deploy create-stax-invoices-sb     --project-ref uqplppugeickmamycpuz
+  npx supabase functions deploy run-stax-charges-sb         --project-ref uqplppugeickmamycpuz
+  npx supabase functions deploy import-iif-sb               --project-ref uqplppugeickmamycpuz
+  npx supabase functions deploy generate-unbilled-report-sb --project-ref uqplppugeickmamycpuz
+
+  # Group B — previously built but never deployed
+  # (re-deploy after merge so the deployed bundle matches main)
+  npx supabase functions deploy update-item-sb              --project-ref uqplppugeickmamycpuz
+  npx supabase functions deploy batch-create-tasks-sb       --project-ref uqplppugeickmamycpuz
+  npx supabase functions deploy release-items-sb            --project-ref uqplppugeickmamycpuz
+  npx supabase functions deploy create-will-call-sb         --project-ref uqplppugeickmamycpuz
+  npx supabase functions deploy process-wc-release-sb       --project-ref uqplppugeickmamycpuz
+  ```
+
+  Default `--verify-jwt=true` is correct on all of them. **Required env-var configuration** (Supabase Dashboard → Functions → Secrets) — most should already be set; verify before deploying real-money handlers:
+
+  | Function | Required secrets |
+  |---|---|
+  | All -sb handlers | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_ANON_KEY`, `GAS_API_URL`, `GAS_API_TOKEN` |
+  | qbo-create-invoice-sb | + `QBO_CLIENT_ID`, `QBO_CLIENT_SECRET`, `QBO_REFRESH_TOKEN`, `QBO_REALM_ID`, optionally `QBO_ENVIRONMENT` (production/sandbox) |
+  | create-stax-invoices-sb | + `STAX_API_KEY` (optional — without it the handler runs SB-only dry-run mode) |
+  | run-stax-charges-sb | + `STAX_API_KEY` (REQUIRED — handler hard-fails without it; real money) |
+
+  Real-money handlers (qbo-create-invoice-sb, create-stax-invoices-sb, run-stax-charges-sb, import-iif-sb) enforce an explicit admin/staff role check via `auth.getUser(token)` — only operators with `user_metadata.role ∈ {'admin','staff'}` can invoke. Anon-key callers receive `401 UNAUTHENTICATED` / `403 FORBIDDEN`.
+
+  **Do NOT flip feature_flags for any of these functions yet.** Routing entries are in `GAS_TO_SB_MAP` so they'll route once the flag flips, but the production-tenant bar (MIG-007 layer-2 replay-clean + layer-3 canary) still applies. Justin nominates a canary tenant first; then per-flag flip + smoke test follows the same sequence used for `update-item-sb` in the prior PR.
 
 - [ ] **[MIGRATION-P2-P3/MIG-016 — operator deploy sequence, DO NOT REORDER]** Canary cutover on Justin Demo Account for the 5 SB-primary handlers shipped in this PR. The order below is load-bearing.
 
