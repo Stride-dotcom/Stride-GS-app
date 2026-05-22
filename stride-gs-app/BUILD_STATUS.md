@@ -1,6 +1,8 @@
 # Stride GS App — Build Status
 
-> Last updated: 2026-05-21 ([feat/migration/route-and-update-item][MIGRATION-P2/MIG-016] **First SB-primary routing layer + `update-item-sb` real handler.** New `src/lib/apiRouter.ts` (action→EF map + `invokeSupabaseHandler`); `apiPost` consults `resolveRoute` BEFORE the GAS path, routes to SB Edge Function when `feature_flags.<flagKey>.active_backend` resolves to `'supabase'` for the caller's tenant. Skips `fireShadow` on the SB path (SB IS the canonical path — nothing to shadow). Errors surface, never silently fall back to GAS — dual-write would be worse than a user-visible save failure. `update-item-sb` Edge Function: SB-primary handler for `updateInventoryItem`. Validates payload (mirrors `handleUpdateInventoryItem_` exactly — status whitelist, qty/declaredValue numeric/non-neg), UPDATEs `public.inventory`, cascades to open `public.tasks` + `public.repairs` for the SYNC_FIELDS subset, cascades Sidemark/Reference to Unbilled `public.billing` rows, auto-cancels open Tasks/Repairs on a true Released-transition with " | "-appended task_notes/repair_notes + per-row audit log (matches `api_cancelOpenWorkOnRelease_`), fires reverse-writethrough to per-tenant Inventory sheet, writes `entity_audit_log` matching the GAS shape exactly. Response shape is identical to GAS `handleUpdateInventoryItem_` so React callers stay agnostic. StrideAPI v38.226.0: extended `__writeThroughReverseInventory_` to handle general field updates (any subset of vendor/description/reference/sidemark/room/location/item_class/qty/item_notes/declared_value/coverage_option_id) alongside the legacy release-only path — required so the SB EF can mirror inventory edits back to the sheet without throwing 'row.status required'. Combined mode (status flip + sidemark edit in same save) covered. v38.211.0 auto-cancel source string changed from "Delivery" to "Reverse Writethrough" because the writer is now used for general edits too. New MIG-016 decision in MIGRATION_STATUS.md: Justin Demo canary override of MIG-007 — flag-flip directly without 3-layer verification, but only for tenants in `tenant_scope`. **Sheet-drift gap accepted on canary tenant:** cascade fan-out rows (Tasks/Repairs/Billing) are NOT individually mirrored back to the per-tenant sheets; full-sync cron backstops within ~5–30 min. Documented as canary-only trade-off. tsc + `npm run build` clean. **Operator deploy sequence is load-bearing — see Pending User Actions below.**).
+> Last updated: 2026-05-21 ([feat/migration/route-and-update-item][MIGRATION-P2-P3/MIG-016] **SB-primary routing layer + 5 real -sb handlers (round 2).** Round 1 shipped routing + `update-item-sb`. Round 2 extends with 4 more handlers: `batch-create-tasks-sb` (createTask — service_catalog lookup, task ID generation, open-task dedup), `release-items-sb` (bulk release with item_notes append + auto-cancel open Tasks/Repairs cascade), `create-will-call-sb` (WC fee via service_catalog + per-client discount, active-WC dedup), `process-wc-release-sb` (item release + Unbilled billing for non-COD, idempotent on ledger_row_id to preserve Invoiced/Void history). StrideAPI v38.227.0: new `__writeThroughReverseTasks_` writer (6th per-table writer; insert + update upsert by Task ID; required by batch-create-tasks-sb). GAS_TO_SB_MAP now covers 5 actions: updateInventoryItem, batchCreateTasks, releaseItems, createWillCall, processWcRelease. **completeShipment intentionally deferred** to its own PR — 3+ hour port (Drive folders, shipment-received email, auto-INSP/ASM task creation, receiving billing, idempotency tag dedup; shipping half-built is worse than not shipping). Canary-acceptable gaps documented in each EF's header comment: WC partial release doesn't yet create a child WC for remaining items (operator creates manually); WC release email skipped (operator uses legacy GAS path); WC addons flush skipped; batchCreateTasks task-ID has narrow race on concurrent (tenant,item,svc) tuple. tsc + `npm run build` clean.).
+
+> Earlier 2026-05-21 ([feat/migration/route-and-update-item — round 1][MIGRATION-P2/MIG-016] **First SB-primary routing layer + `update-item-sb` real handler.** New `src/lib/apiRouter.ts` (action→EF map + `invokeSupabaseHandler`); `apiPost` consults `resolveRoute` BEFORE the GAS path, routes to SB Edge Function when `feature_flags.<flagKey>.active_backend` resolves to `'supabase'` for the caller's tenant. Skips `fireShadow` on the SB path (SB IS the canonical path — nothing to shadow). Errors surface, never silently fall back to GAS — dual-write would be worse than a user-visible save failure. `update-item-sb` Edge Function: SB-primary handler for `updateInventoryItem`. Validates payload (mirrors `handleUpdateInventoryItem_` exactly — status whitelist, qty/declaredValue numeric/non-neg), UPDATEs `public.inventory`, cascades to open `public.tasks` + `public.repairs` for the SYNC_FIELDS subset, cascades Sidemark/Reference to Unbilled `public.billing` rows, auto-cancels open Tasks/Repairs on a true Released-transition with " | "-appended task_notes/repair_notes + per-row audit log (matches `api_cancelOpenWorkOnRelease_`), fires reverse-writethrough to per-tenant Inventory sheet, writes `entity_audit_log` matching the GAS shape exactly. Response shape is identical to GAS `handleUpdateInventoryItem_` so React callers stay agnostic. StrideAPI v38.226.0: extended `__writeThroughReverseInventory_` to handle general field updates (any subset of vendor/description/reference/sidemark/room/location/item_class/qty/item_notes/declared_value/coverage_option_id) alongside the legacy release-only path — required so the SB EF can mirror inventory edits back to the sheet without throwing 'row.status required'. Combined mode (status flip + sidemark edit in same save) covered. v38.211.0 auto-cancel source string changed from "Delivery" to "Reverse Writethrough" because the writer is now used for general edits too. New MIG-016 decision in MIGRATION_STATUS.md: Justin Demo canary override of MIG-007 — flag-flip directly without 3-layer verification, but only for tenants in `tenant_scope`. **Sheet-drift gap accepted on canary tenant:** cascade fan-out rows (Tasks/Repairs/Billing) are NOT individually mirrored back to the per-tenant sheets; full-sync cron backstops within ~5–30 min. Documented as canary-only trade-off. tsc + `npm run build` clean. **Operator deploy sequence is load-bearing — see Pending User Actions below.**).
 
 > Earlier 2026-05-20 ([feat/migration/wire-all-shadows][MIGRATION-P1.9] **Live audit-shape shadow firing wired into apiPost.** Closes the 2026-05-19 backlog item "only `startTask` + `completeTask` fire shadows from the React app today — every other function still needs its `apiCall` path wired for real-time shadowing" (and was actually only `startTask` — `completeTask` parity volume came from operator-run replay-shadow, not live). New `src/lib/shadowRegistry.ts` maps 20 GAS apiPost actions → flag key + shadow EF name + per-function audit-shape derivation + callId derivation; new `src/lib/fireShadow.ts` is the fire-and-forget wrapper around `runShadow` that uses the synthesized GAS audit shape (deterministic from the input payload) as the comparison baseline instead of the GAS handler's full response. Hook in `apiPost` (`src/lib/api.ts`): after every successful GAS call, `fireShadow(action, bodyWithId, extraParams?.clientSheetId)` runs — no-op for unregistered actions. Covers: updateInventoryItem, updateTaskNotes/Priority/DueDate/CustomPrice, updateRepairNotes, startTask, startRepair, cancelRepair, sendRepairQuote, respondToRepairQuote, requestRepairQuote, completeTask, completeRepair, batchCreateTasks, createWillCall, processWcRelease, releaseItems, transferItems, commitStorageRows, reissueInvoice, completeShipment, onboardClient. **startTask false-positive fix:** retired the previous `apiCall(...start-task SB primary...)` wrap in `TaskDetailPanel.tsx` that produced 41/41 timing-artifact mismatches (GAS ran first + started the task → SB primary ran second + got "already started" no-op → different shapes). New audit-shape compare against `start-task-shadow` is deterministic from the payload, independent of GAS-side state — should drop to 0 mismatches once traffic resumes. **Audit-shape derivation strategy:** payload-minus-identifiers as default; per-function overrides for fixed-shape shadows (startTask = `{status:{new:'In Progress'}}`, sendRepairQuote = `{status:{old:'Pending Quote',new:'Quote Sent'}}`, etc.); audit-shape derivation runs inside try/catch so a registry bug never propagates into the apiPost success path; runShadow's existing sb-side try/catch + early-no-op on `parity_enabled=false` keeps the hot path clean. **Code review (Opus 4.7 fallback per the locked-in checklist)** caught + fixed before merge: `updateInventoryItem` strip-set was a superset of update-item-shadow's actual `{itemId, requestId}` → narrowed; `requestRepairQuote` audit-shape was sort+comma-join while shadow returns `"Repair quote requested for items: " + JSON.stringify(arr).substring(0,200)` → mirrored exactly (would have flipped 9/0 clean to 9/9 mismatch otherwise); `completeRepair` had a `p.result` fallback that diverges from the shadow's `resultValue`-required validation → dropped; defensive try/catch added around fireShadow's synchronous spec derivation. Not wired (no shadow deployed): createInvoice, voidInvoice, qboCreateInvoice, createStaxInvoices, runStaxCharges, importIIF, generateUnbilledReport — those need P4a/P6 shadow EFs first. Email-side flags (sendShipmentEmail / sendTaskCompleteEmail / sendWillCallEmails) skipped because emails fire server-side from receiveShipment / completeTask / processWcRelease handlers, not from a separate React apiPost action — they'll exercise via the host handler's parity check. tsc + `npm run build` clean. Rebased onto `origin/source` after PR #479 (client-settings writeback) merged.).
 
@@ -1078,7 +1080,7 @@ The following were marked "GAS" in v1.0 but are already partially or fully migra
 | System | Version | Notes |
 |---|---|---|
 | React app (GitHub Pages) | Latest on `origin/source` | `npm run deploy` from source. Latest bundle: `index-C2xeMz3s.js`. |
-| StrideAPI.gs | **v38.226.0** (head; deploy pending — see MIG-016 Pending User Actions) | `__writeThroughReverseInventory_` extended for general field updates alongside legacy release-only path. Required by SB-primary `update-item-sb` Edge Function. Last deployed version remains v38.225.0 until operator runs `npm run push-api && npm run deploy-api` from `C:\dev\Stride-GS-app\AppScripts\stride-client-inventory` per the MIG-016 deploy sequence. |
+| StrideAPI.gs | **v38.227.0** (head; deploy pending — see MIG-016 Pending User Actions) | v38.226.0: `__writeThroughReverseInventory_` extended for general field updates. v38.227.0: new `__writeThroughReverseTasks_` writer (6th per-table writer; insert+update upsert by Task ID). Required by SB-primary `update-item-sb` + `batch-create-tasks-sb` Edge Functions. Deploy via `npm run push-api && npm run deploy-api` from `C:\dev\Stride-GS-app\AppScripts\stride-client-inventory` per the MIG-016 deploy sequence. |
 | Supabase | 70+ migrations applied | New `public.invoice_tracking` table (PR #285) — per-invoice push-state ledger with `qbo_pushed_at`, `stax_pushed_at`, `auto_charge` snapshot. RLS staff/admin only + service_role bypass. Realtime publication enabled. 176 historical invoices backfilled. `public.next_invoice_no()` Postgres SEQUENCE replaces the Master sheet RPC counter for invoice numbering. Multi-tenant RLS access (`user_has_tenant_access` helper) — clients with multiple tenant assignments can now read entity rows + storage objects across all accessible tenants. |
 | Client scripts | Rolled out to 49 active clients | Code.gs v4.6.0, Import.gs v4.3.0 |
 | StaxAutoPay.gs | v4.7.6 | Charge Log Customer/Transaction header fix |
@@ -1759,41 +1761,74 @@ Late-day session that started as a single production fire (release-items timing 
 
 ## Pending User Actions
 
-- [ ] **[MIGRATION-P2/MIG-016 — operator deploy sequence, DO NOT REORDER]** First SB-primary canary for `updateInventoryItem` on Justin Demo Account. The order below is load-bearing: skipping or reordering will fail-closed on every Justin-Demo save until repaired.
+- [ ] **[MIGRATION-P2-P3/MIG-016 — operator deploy sequence, DO NOT REORDER]** Canary cutover on Justin Demo Account for the 5 SB-primary handlers shipped in this PR. The order below is load-bearing.
 
-  1. **Merge + push branch** `feat/migration/route-and-update-item` → PR review → squash-merge to `source`. The React-side routing layer is dormant until step 4 (it only fires when the feature_flag resolves to 'supabase' for the caller's tenant), so the React deploy is order-independent — do it anytime after merge.
+  1. **Merge + push branch** `feat/migration/route-and-update-item` → PR review → squash-merge to `source`. The React-side routing layer is dormant until step 4 (only fires per-flag-per-tenant), so the React deploy via `npm run deploy` from canonical is order-independent — do it anytime after merge.
 
-  2. **Deploy StrideAPI v38.226.0 FIRST.** From `C:\dev\Stride-GS-app\AppScripts\stride-client-inventory`:
+  2. **Deploy StrideAPI v38.227.0 FIRST.** From `C:\dev\Stride-GS-app\AppScripts\stride-client-inventory`:
      ```
      npm run push-api && npm run deploy-api
      ```
-     This is the GAS-side `__writeThroughReverseInventory_` extension. Without it the SB EF's row payload throws `row.status required` from the old writer (the SB EF sends general-field payloads without `status` for non-status edits).
+     v38.226.0 extended `__writeThroughReverseInventory_` (general field updates). v38.227.0 added `__writeThroughReverseTasks_` (insert + update path for the Tasks sheet, required by `batch-create-tasks-sb`). Both deployed by this one command.
 
-  3. **Deploy `update-item-sb` Edge Function SECOND.** From a machine with `SUPABASE_ACCESS_TOKEN` or `supabase login`, from `C:\dev\Stride-GS-app\stride-gs-app`:
+  3. **Deploy the 5 Edge Functions SECOND.** From a machine with `SUPABASE_ACCESS_TOKEN` or `supabase login`, from `C:\dev\Stride-GS-app\stride-gs-app`:
      ```
-     npx supabase functions deploy update-item-sb --project-ref uqplppugeickmamycpuz
+     npx supabase functions deploy update-item-sb            --project-ref uqplppugeickmamycpuz
+     npx supabase functions deploy batch-create-tasks-sb     --project-ref uqplppugeickmamycpuz
+     npx supabase functions deploy release-items-sb          --project-ref uqplppugeickmamycpuz
+     npx supabase functions deploy create-will-call-sb       --project-ref uqplppugeickmamycpuz
+     npx supabase functions deploy process-wc-release-sb     --project-ref uqplppugeickmamycpuz
      ```
      Default `--verify-jwt=true` is correct. No new function-level secrets needed — `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `GAS_API_URL`, `GAS_API_TOKEN` are all already configured.
 
-  4. **Flip feature_flag for Justin Demo Account THIRD.** Replace `<justin_demo_spreadsheet_id>` with the actual tenant ID:
+  4. **Flip feature_flags for Justin Demo Account THIRD.** Replace `<justin_demo_spreadsheet_id>` with the actual tenant ID. Flip one flag at a time per the canary-incremental strategy:
      ```sql
-     UPDATE public.feature_flags
-        SET active_backend = 'supabase',
-            tenant_scope   = ARRAY['<justin_demo_spreadsheet_id>']
+     -- Round 1: updateItem (the safest — pure field edits)
+     UPDATE public.feature_flags SET active_backend='supabase',
+            tenant_scope = ARRAY['<justin_demo_spreadsheet_id>']
       WHERE function_key = 'updateItem';
+
+     -- Smoke test updateItem on Justin Demo. If clean, proceed:
+
+     -- Round 2: releaseItems + createTask (operational, non-billing)
+     UPDATE public.feature_flags SET active_backend='supabase',
+            tenant_scope = ARRAY['<justin_demo_spreadsheet_id>']
+      WHERE function_key IN ('releaseItems', 'createTask');
+
+     -- Smoke test. If clean, proceed:
+
+     -- Round 3: createWillCall (touches billing via WC fee)
+     UPDATE public.feature_flags SET active_backend='supabase',
+            tenant_scope = ARRAY['<justin_demo_spreadsheet_id>']
+      WHERE function_key = 'createWillCall';
+
+     -- Smoke test. If clean, proceed:
+
+     -- Round 4: processWcRelease (touches inventory release + billing)
+     UPDATE public.feature_flags SET active_backend='supabase',
+            tenant_scope = ARRAY['<justin_demo_spreadsheet_id>']
+      WHERE function_key = 'processWcRelease';
      ```
-     Per MIG-010 scope semantics: Justin Demo routed to SB, every other tenant routed to GAS (opposite-of-active-backend). Production tenants STAY ON GAS.
+     Per MIG-010 scope semantics: Justin Demo routed to SB, every other tenant routed to GAS. Production tenants STAY ON GAS.
 
-  5. **Smoke test on Justin Demo.** Edit one inventory row's Sidemark / Vendor / Item Notes from the React UI. Verify:
-     - The save succeeds (no error banner).
-     - `SELECT sidemark, updated_at FROM public.inventory WHERE tenant_id='<justin_demo>' AND item_id='<edited>';` shows the new value with a fresh `updated_at`.
-     - The per-tenant Inventory sheet's row reflects the same edit within a few seconds.
-     - `SELECT changes, source, performed_at FROM public.entity_audit_log WHERE entity_type='inventory' AND entity_id='<edited>' ORDER BY performed_at DESC LIMIT 1;` shows `source='supabase'` and `changes` containing the edited field.
-     - For a status edit (`Active → Released`), verify open Tasks/Repairs for that item are flipped to `Cancelled` with " | Auto-cancelled: item released via Manual Status Edit" appended to their notes.
+  5. **Per-flag smoke tests on Justin Demo.** For each flag flipped, exercise the corresponding React UI path:
+     - `updateItem` — edit Sidemark / Vendor / Item Notes on an inventory row; verify save lands in `public.inventory` + per-tenant Inventory sheet within seconds; `entity_audit_log` row with `source='supabase'`. Status flip to Released cancels open Tasks/Repairs with " | Auto-cancelled: ..." appended.
+     - `createTask` — bulk-create INSP tasks from Inventory page action bar; verify `public.tasks` rows appear with derived Task IDs; sheet mirror lands via the new tasks writer.
+     - `releaseItems` — bulk release N items; verify `public.inventory.status='Released'`, `release_date` set, open Tasks/Repairs cancelled, sheet reflects.
+     - `createWillCall` — create a WC for N items; verify `public.will_calls` + `public.will_call_items` rows, WC fee computed correctly per item class, no dup if same item already on active WC.
+     - `processWcRelease` — release subset of WC items; verify `public.will_call_items.status='Released'` for releasing items, parent WC status flipped (Released or Partial), Unbilled WC billing rows appear for non-COD, idempotent re-run does NOT corrupt Invoiced/Void rows.
 
-  6. **Rollback** (if anything looks off): `UPDATE public.feature_flags SET active_backend='gas', tenant_scope=NULL WHERE function_key='updateItem';` instantly routes Justin Demo back to GAS. The master switch (Settings → Migration → emergency revert) also covers this fleet-wide.
+  6. **Rollback** (per-flag, any time): `UPDATE feature_flags SET active_backend='gas', tenant_scope=NULL WHERE function_key='<key>';` instantly routes back to GAS. Master switch (Settings → Migration → emergency revert) covers fleet-wide.
 
-  **Production-tenant expansion** is GATED on MIG-007 — replay-clean over 90-day corpus + 14-day canary on Justin Demo without operator-reported regressions. Do NOT add production tenants to `tenant_scope` without that bar cleared per MIG-016's "Scope" section.
+  **Production-tenant expansion** is GATED on MIG-007 — replay-clean + 14-day canary on Justin Demo without regressions. Do NOT add production tenants to any `tenant_scope` without that bar cleared per MIG-016.
+
+  **Known canary-acceptable gaps** (documented per EF in its header comment):
+  - `createWillCall`: per-tenant `Will_Calls` + `WC_Items` sheet drift until full-sync cron (~5-30 min); will_calls writer is COD-only-update, items writer is stub.
+  - `processWcRelease`: partial release does NOT create a child WC for remaining items (operator creates manually); addons flush skipped; WC release email skipped (operator resends via legacy GAS path).
+  - `batchCreateTasks`: task-ID race window on concurrent calls to the same `(tenant, item, svcCode)` tuple — rare in practice; future hardening via SECURITY DEFINER RPC.
+  - `update-item-sb`: cascade fan-out rows (Tasks/Repairs cancellations on Released-transition) write to Supabase only; per-tenant sheet drift on those rows until full-sync cron.
+
+  **completeShipment / receiveShipment NOT in this PR** — separate follow-up PR. Complexity: shipment number SEQUENCE, idempotency-tag dedup against existing shipments, N inventory inserts, auto-INSP / auto-ASM task generation, receiving billing rows, Drive folder creation, shipment-received email. ~3-hour port; shipping half-built risks producing missing folder links + missing inventory rows in production.
 
 - [ ] **Apply migration `20260520140000_clients_writeback_trigger.sql`** (feat/migration/client-settings-writeback) — creates `propagate_clients_to_sheet()` SECURITY DEFINER + `trg_propagate_clients_to_sheet` AFTER INSERT OR UPDATE trigger on `public.clients`. Builder env has no Supabase MCP / `SUPABASE_ACCESS_TOKEN`. Apply via `apply_migration(project_id='uqplppugeickmamycpuz', name='clients_writeback_trigger', query=<file contents>)` or paste into the Supabase SQL editor. Idempotent (`CREATE OR REPLACE FUNCTION` + `DROP TRIGGER IF EXISTS` before `CREATE`).
 - [ ] **Deploy `push-client-settings-to-sheet` Edge Function**. From a machine with `SUPABASE_ACCESS_TOKEN` set or `supabase login` run, from `C:\dev\Stride-GS-app\stride-gs-app`:
