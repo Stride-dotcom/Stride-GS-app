@@ -876,6 +876,19 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
     applyRepairPatch?.(repair.repairId, { status: 'Complete', completedDate: new Date().toISOString().slice(0, 10) });
     entityEvents.emit('repair', repair.repairId);
 
+    // Fire-and-forget auto-archive of the Repair Work Order PDF after
+    // either success branch lands. Failures silently queue for retry —
+    // completion already succeeded server-side.
+    const autoArchiveRepairWorkOrder = () => {
+      void renderDoc('DOC_REPAIR_WORK_ORDER', buildRepairTokens({ ...repair, status: 'Complete' }), {
+        action: 'upload',
+        fileName: `Stride_RepairWorkOrder_${repair.repairId}`,
+        tenantId: clientSheetId,
+        entityType: 'repair',
+        entityId: repair.repairId,
+      });
+    };
+
     // 2. Background GAS
     void (async () => {
       try {
@@ -906,6 +919,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
               warnings: [] as string[],
             } as unknown as CompleteRepairResponse);
             onRepairUpdated?.();
+            autoArchiveRepairWorkOrder();
             if (resp.mirrorOk === false) {
               console.warn('[completeRepair-sb] sheet mirror failed:', resp.mirrorError);
               setSubmitError(`Repair completed, but legacy sheet mirror failed (${resp.mirrorError ?? 'unknown'}). App state is correct; sheet will catch up on the next full sync.`);
@@ -926,6 +940,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
           } else {
             setCompleteResult(resp.data);
             onRepairUpdated?.();
+            autoArchiveRepairWorkOrder();
           }
         }
       } catch (err) {

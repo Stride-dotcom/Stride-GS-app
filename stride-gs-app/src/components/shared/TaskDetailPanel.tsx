@@ -482,6 +482,20 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
     // Demo mode: no API or no client sheet — stop here, UI already reflects completion.
     if (!apiConfigured || !clientSheetId) return;
 
+    // Fire-and-forget auto-archive of the Work Order PDF after either
+    // success branch lands. Failures are silently queued in localStorage
+    // for retry on next app load (see docUploadQueue) — completion already
+    // succeeded server-side, so we never surface a render error here.
+    const autoArchiveWorkOrder = () => {
+      void renderDoc('DOC_TASK_WORK_ORDER', buildTaskTokens({ ...task, status: 'Completed' }), {
+        action: 'upload',
+        fileName: `Stride_WorkOrder_${task.taskId}`,
+        tenantId: clientSheetId,
+        entityType: 'task',
+        entityId: task.taskId,
+      });
+    };
+
     // 2. Background completion. [MIGRATION-P4a] flag-routed: both paths
     // produce the same end-state (tasks.status='Completed' + billing
     // row + addon flush + audit log). Only the authority differs. The
@@ -520,6 +534,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
               billingCreated: (sb.billingCount ?? 0) > 0,
             } as unknown as CompleteTaskResponse);
             onTaskUpdated?.();
+            autoArchiveWorkOrder();
             if (sb.mirrorOk === false) {
               console.warn('[completeTask-sb] sheet mirror failed:', sb.mirrorError);
               setSubmitError(`Task completed, but legacy sheet mirror failed (${sb.mirrorError ?? 'unknown'}). App state is correct; sheet will catch up on the next full sync.`);
@@ -559,6 +574,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
           // Refresh the banner with server-shaped data (e.g. billingCreated flag)
           setSubmitResult(resp.data);
           onTaskUpdated?.();
+          autoArchiveWorkOrder();
         }
       } catch (err) {
         // Network failure: roll back the disposal item patch too.

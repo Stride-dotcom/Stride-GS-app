@@ -633,6 +633,38 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
           setReleaseResult(resp.data);
           setEffectiveStatus(resp.data.isPartial ? 'Partial' : 'Released');
           onWcUpdated?.();
+          // Auto-archive the Release doc — best-effort, queued on failure.
+          // Pulls items from the current WC; for a partial release, the doc
+          // still shows the full WC manifest with sidemark/qty so the
+          // archive reflects everything that was pulled, not just the
+          // currently-released subset.
+          const tokens = buildWillCallTokens({
+            wcNumber: wc.wcNumber,
+            clientName: wc.clientName,
+            pickupParty: wc.pickupParty,
+            pickupPartyPhone: wc.pickupPartyPhone,
+            scheduledDate: wc.scheduledDate,
+            requestedBy: (wc as any).requestedBy || (wc as any).createdBy || (wc as any).createdByUser,
+            notes: wc.notes,
+            cod: wc.cod,
+            codAmount: wc.codAmount,
+            items: (wc.items || []).map((it: any) => ({
+              itemId: it.itemId,
+              qty: it.qty,
+              vendor: it.vendor,
+              description: it.description,
+              itemClass: it.itemClass || it.class,
+              location: it.location,
+              sidemark: it.sidemark,
+            })),
+          });
+          void renderDoc('DOC_WILL_CALL_RELEASE', tokens, {
+            action: 'upload',
+            fileName: `Stride_WillCallRelease_${wc.wcNumber}`,
+            tenantId: clientSheetId,
+            entityType: 'willcall',
+            entityId: wc.wcNumber,
+          });
         }
       } catch (err) {
         setReleaseError(

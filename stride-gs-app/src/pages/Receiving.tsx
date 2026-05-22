@@ -28,6 +28,7 @@ import { useAutocomplete } from '../hooks/useAutocomplete';
 import { useReceivingAddons, type ReceivingAddon } from '../hooks/useReceivingAddons';
 import { ReceivingRowMedia } from '../components/media/ReceivingRowMedia';
 import { isApiConfigured, postCompleteShipment, postCheckItemIdsAvailable, fetchAutoIdSetting, fetchNextItemId } from '../lib/api';
+import { renderDoc, buildReceivingTokens } from '../lib/docRenderer';
 import type { ShipmentItemPayload } from '../lib/api';
 import { ProcessingOverlay } from '../components/shared/ProcessingOverlay';
 import { useIsMobile } from '../hooks/useIsMobile';
@@ -1020,6 +1021,38 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
         billingRows: resp.data.billingRows || 0,
         warnings: [...(resp.data.warnings ?? []), ...reconcileWarnings],
       });
+
+      // Auto-archive a Receiving PDF into the documents bucket. Fires after
+      // the GAS write succeeded — failures queue silently for retry (see
+      // docUploadQueue) so we never block the operator on a render hiccup.
+      if (newShipmentNo && clientSheetId) {
+        const tokens = buildReceivingTokens({
+          shipmentNo:   newShipmentNo,
+          clientName:   client,
+          carrier:      carrier.trim(),
+          tracking:     tracking.trim(),
+          receivedDate: receiveDate,
+          notes,
+          totalItems:   filledItems.length,
+          items: filledItems.map(i => ({
+            itemId:      i.itemId,
+            qty:         i.qty,
+            vendor:      i.vendor,
+            description: i.description,
+            itemClass:   i.itemClass,
+            location:    i.location,
+            sidemark:    i.sidemark,
+            reference:   i.reference,
+          })),
+        });
+        void renderDoc('DOC_RECEIVING', tokens, {
+          action: 'upload',
+          fileName: `Stride_Receiving_${newShipmentNo}`,
+          tenantId: clientSheetId,
+          entityType: 'shipment',
+          entityId: newShipmentNo,
+        });
+      }
 
       // Auto-print labels if toggle is on
       if (autoPrintLabels && filledItems.length > 0) {
