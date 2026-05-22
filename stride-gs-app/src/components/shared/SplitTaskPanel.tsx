@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { CheckCircle2, ExternalLink, Loader2, Split as SplitIcon } from 'lucide-react';
 import { theme } from '../../styles/theme';
@@ -121,7 +121,7 @@ export function SplitTaskPanel({ task, clientSheetId, onCompleted }: SplitTaskPa
         setError(res.error || 'Could not complete Split task.');
         return;
       }
-      const data: CompleteSplitTaskResponse | undefined = res.data;
+      const data: CompleteSplitTaskResponse | undefined = res.data ?? undefined;
       if (!data?.success) {
         setError(data?.error || 'Could not complete Split task.');
         return;

@@ -1211,7 +1211,7 @@ export function ItemDetailPanel({
         onCreateTask={onCreateTask}
         onCreateWillCall={onCreateWillCall}
         onTransfer={onTransfer}
-        onSplit={canSplit ? onSplit : undefined}
+        onSplit={(Number(item?.qty) || 0) > 1 && onSplit ? onSplit : undefined}
         onRequestRepair={handleRequestRepair}
         repairStatus={repairStatus ?? undefined}
         repairRequesting={repairRequesting}

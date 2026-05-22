@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Loader2, Split as SplitIcon, X } from 'lucide-react';
 import { theme } from '../../styles/theme';
