@@ -29,7 +29,10 @@ export function useOrderDetail(orderId: string | undefined): UseOrderDetailResul
   const clientNameMapRef = useRef(clientNameMap);
   clientNameMapRef.current = clientNameMap;
 
-  const fetchOrder = useCallback(async () => {
+  // `silent: true` skips flipping status back to 'loading' — used for
+  // realtime-echo refetches so the page doesn't unmount the detail panel
+  // (and lose scroll position / open sub-tab state) on every save.
+  const fetchOrder = useCallback(async ({ silent = false }: { silent?: boolean } = {}) => {
     if (!orderId) return;
 
     abortRef.current?.abort();
@@ -37,7 +40,7 @@ export function useOrderDetail(orderId: string | undefined): UseOrderDetailResul
     abortRef.current = controller;
     const fetchId = ++fetchCountRef.current;
 
-    setStatus('loading');
+    if (!silent) setStatus('loading');
     setError(null);
 
     try {
@@ -67,7 +70,7 @@ export function useOrderDetail(orderId: string | undefined): UseOrderDetailResul
   useEffect(() => {
     if (!orderId) return;
     return entityEvents.subscribe((type, id) => {
-      if (type === 'order' && id === orderId) void fetchOrder();
+      if (type === 'order' && id === orderId) void fetchOrder({ silent: true });
     });
   }, [orderId, fetchOrder]);
 
