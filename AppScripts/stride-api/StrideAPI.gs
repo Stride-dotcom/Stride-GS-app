@@ -24390,6 +24390,12 @@ function handleQbExport_(payload) {
     staxImported: staxImported,
     staxUpdated: staxUpdated,
     staxSkipped: staxSkipped,
+    // 2026-05-23 — count of invoices the operator selected on Billing
+    // that we DIDN'T push because public.billing showed zero non-Void
+    // rows for that invoice number (fully voided post-creation). React
+    // surfaces this in the Stax export result toast so the operator can
+    // reconcile expected-vs-actual invoice counts.
+    skippedFullyVoided: typeof skippedFullyVoided === "number" ? skippedFullyVoided : 0,
     batchId: batchPersisted ? batchId : null
   });
 }
@@ -24540,6 +24546,7 @@ function handleRegenerateIifForBatch_(payload) {
     // Pull live SUMs in one batch — invoice numbers come straight from
     // the batch's stax_invoices rows.
     var liveSumByInvNo = {};
+    var sbReadOk = false;
     try {
       var batchInvoiceNos = [];
       for (var bni = 0; bni < invoices.length; bni++) {
@@ -24556,6 +24563,7 @@ function handleRegenerateIifForBatch_(payload) {
           "invoice_no,total"
         );
         if (bnSel.ok) {
+          sbReadOk = true;
           for (var bnsi = 0; bnsi < bnSel.rows.length; bnsi++) {
             var bnsNo = String(bnSel.rows[bnsi].invoice_no || "").trim();
             if (!bnsNo) continue;
@@ -24576,11 +24584,22 @@ function handleRegenerateIifForBatch_(payload) {
     for (var ii = 0; ii < invoices.length; ii++) {
       var inv = invoices[ii];
       var invNoKey = String(inv.qb_invoice_no || "").trim();
-      // Prefer the live billing SUM (current truth) over the snapshot
-      // amount we stored at first push.
-      var totalAmt = Object.prototype.hasOwnProperty.call(liveSumByInvNo, invNoKey)
-        ? liveSumByInvNo[invNoKey]
-        : Number(inv.amount || 0);
+      // Total resolution:
+      //   - Supabase read succeeded AND invoice has rows: use the live SUM.
+      //   - Supabase read succeeded AND invoice has NO rows: fully voided,
+      //     skip (don't emit a stale snapshot total).
+      //   - Supabase read failed entirely: fall back to inv.amount (the
+      //     snapshot at first push). Better than emitting nothing during
+      //     a Supabase outage when the operator just wants to regenerate
+      //     a historical batch's IIF.
+      var totalAmt;
+      if (sbReadOk) {
+        totalAmt = Object.prototype.hasOwnProperty.call(liveSumByInvNo, invNoKey)
+          ? liveSumByInvNo[invNoKey]
+          : 0;
+      } else {
+        totalAmt = Number(inv.amount || 0);
+      }
       // Skip invoices with no billing rows — emitting a $0 IIF row would
       // post $0 to Stax which is a silent under-collect.
       if (!(totalAmt > 0)) continue;
@@ -43328,6 +43347,7 @@ function handleQboCreateInvoice_(payload) {
   // the two passes independent — pre-reconcile is wrapped in try/catch
   // that may have failed silently.
   var resolvedInvoiceNos = {};
+  var sbResolveOk = false;
   try {
     var lrInList = ledgerRowIds
       .map(function(id) { return String(id || "").trim(); })
@@ -43341,6 +43361,7 @@ function handleQboCreateInvoice_(payload) {
         "invoice_no"
       );
       if (invNoSel.ok) {
+        sbResolveOk = true;
         for (var rin = 0; rin < invNoSel.rows.length; rin++) {
           var rinNo = String(invNoSel.rows[rin].invoice_no || "").trim();
           if (rinNo) resolvedInvoiceNos[rinNo] = true;
@@ -43359,8 +43380,9 @@ function handleQboCreateInvoice_(payload) {
   // land in the same order the operator sees on the Billing report.
   // Filter status != 'Void' so historically voided rows are excluded.
   var sbInvoiceRows = [];
+  var sbLineFetchOk = false;
   var resolvedInvoiceNoList = Object.keys(resolvedInvoiceNos);
-  if (resolvedInvoiceNoList.length > 0) {
+  if (sbResolveOk && resolvedInvoiceNoList.length > 0) {
     try {
       var invInFilter = resolvedInvoiceNoList
         .map(function(no) { return '"' + String(no).replace(/"/g, '') + '"'; })
@@ -43371,12 +43393,125 @@ function handleQboCreateInvoice_(payload) {
         "ledger_row_id,invoice_no,client_name,date,svc_code,svc_name,item_id,description,item_class,qty,rate,total,item_notes,sidemark,task_id,repair_id,shipment_number,category"
       );
       if (lineSel.ok) {
+        sbLineFetchOk = true;
         sbInvoiceRows = lineSel.rows;
       } else {
-        Logger.log("handleQboCreateInvoice_ Supabase line fetch returned ok=false — falling back to empty group set; CB consolVals stays unused for grouping (push may push nothing).");
+        Logger.log("handleQboCreateInvoice_ Supabase line fetch returned ok=false — falling back to CB Consolidated_Ledger scan.");
       }
     } catch (fetchErr) {
       Logger.log("handleQboCreateInvoice_ Supabase line fetch threw: " + fetchErr.message);
+    }
+  } else if (!sbResolveOk) {
+    Logger.log("handleQboCreateInvoice_ Supabase invoice-no resolve failed — falling back to CB Consolidated_Ledger scan.");
+  }
+
+  // Defense-in-depth fallback (landmine #14): if either Supabase read
+  // failed or returned zero rows when we expected lines (e.g. all rows
+  // genuinely voided in billing — let CB tell us instead of silently
+  // dropping the push), run the legacy CB-scan grouping. Pre-2026-05-23
+  // this was the ONLY path. The fallback is essentially free — consolVals
+  // is already loaded above for qbo_writeQboInvoiceId_ / duplicate-push
+  // checks. CB drift (the reason for the Supabase-first path) is rare
+  // versus a Supabase transient — the fallback errs on the side of
+  // pushing SOMETHING the operator can reconcile rather than silently
+  // returning "No matching Invoiced rows".
+  var useCbFallback = !sbLineFetchOk || sbInvoiceRows.length === 0;
+  if (useCbFallback) {
+    var filterIds = {};
+    ledgerRowIds.forEach(function(id) { filterIds[String(id).trim()] = true; });
+
+    for (var ci = 1; ci < consolVals.length; ci++) {
+      var ciStatus = String(consolVals[ci][consolHdr["STATUS"]] || "").trim().toUpperCase();
+      if (ciStatus !== "INVOICED") continue;
+
+      if (consolHdr["LEDGER ROW ID"] !== undefined) {
+        var ciLrid = String(consolVals[ci][consolHdr["LEDGER ROW ID"]] || "").trim();
+        if (!ciLrid || !filterIds[ciLrid]) continue;
+      }
+
+      var ciInvNo = String(consolVals[ci][consolHdr["INVOICE #"]] || "").trim();
+      var ciClient = String(consolVals[ci][consolHdr["CLIENT"]] || "").trim();
+      if (!ciInvNo || !ciClient) continue;
+
+      var rawSvcCi = consolHdr["SVC CODE"] !== undefined ? consolVals[ci][consolHdr["SVC CODE"]] : "";
+      var ciSvcCode = (rawSvcCi instanceof Date) ? "" : String(rawSvcCi || "").trim().toUpperCase();
+      var ciDateVal = consolHdr["DATE"] !== undefined ? consolVals[ci][consolHdr["DATE"]] : "";
+      var ciQty = consolHdr["QTY"] !== undefined ? (Number(consolVals[ci][consolHdr["QTY"]]) || 1) : 1;
+      var ciRate = consolHdr["RATE"] !== undefined ? Number(consolVals[ci][consolHdr["RATE"]] || 0) : 0;
+      var ciTotal = Number(consolVals[ci][consolHdr["TOTAL"]] || 0);
+      var ciDescription = consolHdr["DESCRIPTION"] !== undefined ? String(consolVals[ci][consolHdr["DESCRIPTION"]] || "").trim() : "";
+      var ciSidemark = consolHdr["SIDEMARK"] !== undefined ? String(consolVals[ci][consolHdr["SIDEMARK"]] || "").trim() : "";
+      var ciItemNotes = consolHdr["ITEM NOTES"] !== undefined ? String(consolVals[ci][consolHdr["ITEM NOTES"]] || "").trim() : "";
+      var ciItemId = consolHdr["ITEM ID"] !== undefined ? String(consolVals[ci][consolHdr["ITEM ID"]] || "").trim() : "";
+      var ciLedgerRowId = consolHdr["LEDGER ROW ID"] !== undefined ? String(consolVals[ci][consolHdr["LEDGER ROW ID"]] || "").trim() : "";
+
+      if (!ciSidemark && ciLedgerRowId && sidemarkFallback[ciLedgerRowId]) {
+        ciSidemark = sidemarkFallback[ciLedgerRowId];
+      }
+
+      var ciExportDesc = ciDescription;
+      if (ciSvcCode === "STOR") {
+        var ciPeriodStr = "";
+        if (ciItemNotes) {
+          var ciPm = ciItemNotes.match(/(\d{2}\/\d{2}\/\d{2,4})\s+to\s+(\d{2}\/\d{2}\/\d{2,4})/);
+          if (ciPm) ciPeriodStr = ciPm[1] + " to " + ciPm[2];
+        }
+        var ciParts = [];
+        if (ciPeriodStr) ciParts.push("Storage " + ciPeriodStr);
+        ciParts.push(ciQty + " day(s)");
+        if (ciDescription) ciParts.push(ciDescription);
+        if (ciItemId) ciParts.push("Item " + ciItemId);
+        ciExportDesc = ciParts.join(" — ");
+      } else {
+        var ciDescParts = [];
+        if (ciSidemark) ciDescParts.push(ciSidemark);
+        if (ciItemId) ciDescParts.push("Item " + ciItemId);
+        if (ciDescription) ciDescParts.push(ciDescription);
+        ciExportDesc = ciDescParts.join(" — ");
+      }
+
+      var ciClientInfo = clientInfoMap[ciClient.toUpperCase()] || {};
+      var ciQbCustName = ciClientInfo.qbCustomerName || ciClient;
+      var ciPayTerms = ciClientInfo.terms || "";
+      var ciInvDateStr = Utilities.formatDate(qboTodayDate, Session.getScriptTimeZone(), "yyyy-MM-dd");
+      var ciDueDateStr = ciInvDateStr;
+      var ciTermsMatch = String(ciPayTerms).toUpperCase().match(/NET\s*(\d+)/);
+      if (ciTermsMatch) {
+        var ciDueObj = new Date(qboTodayDate.getTime());
+        ciDueObj.setDate(ciDueObj.getDate() + parseInt(ciTermsMatch[1], 10));
+        ciDueDateStr = Utilities.formatDate(ciDueObj, Session.getScriptTimeZone(), "yyyy-MM-dd");
+      }
+
+      if (ciSvcCode !== "STOR") {
+        var ciBillingDateStr = api_qbFmtDate_(ciDateVal);
+        if (ciBillingDateStr && ciExportDesc && ciExportDesc.indexOf(ciBillingDateStr) === -1) {
+          ciExportDesc = ciExportDesc + " — Billed " + ciBillingDateStr;
+        }
+      }
+
+      if (!invoiceGroups[ciInvNo]) {
+        invoiceGroups[ciInvNo] = {
+          strideInvoiceNumber: ciInvNo,
+          clientName: ciQbCustName,
+          sidemark: ciSidemark,
+          separateBySidemark: ciClientInfo.separateBySidemark === true,
+          invoiceDate: ciInvDateStr,
+          dueDate: ciDueDateStr,
+          lineItems: [],
+          ledgerRowIds: []
+        };
+      }
+      invoiceGroups[ciInvNo].lineItems.push({
+        svcCode: ciSvcCode,
+        description: ciExportDesc,
+        qty: ciQty,
+        rate: ciRate,
+        total: ciTotal
+      });
+      if (ciLedgerRowId) invoiceGroups[ciInvNo].ledgerRowIds.push(ciLedgerRowId);
+      if (ciSidemark && !invoiceGroups[ciInvNo].sidemark) {
+        invoiceGroups[ciInvNo].sidemark = ciSidemark;
+      }
     }
   }
 
