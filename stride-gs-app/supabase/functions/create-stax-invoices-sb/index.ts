@@ -187,8 +187,44 @@ Deno.serve(async (req: Request) => {
     let   staxCust = String(row.stax_customer_id ?? '').trim();
     const invDate  = String(row.invoice_date ?? '').trim();
     const dueDate  = String(row.due_date     ?? '').trim();
-    const amount   = Number(row.amount       ?? 0);
     const lineItemsJson = String(row.line_items_json ?? '');
+
+    // 2026-05-23 — re-SUM live from public.billing at push time, in case
+    // billing rows were added/voided since the IIF was written. The
+    // simplified Stax flow (one TRNS+SPL per invoice on the GAS side)
+    // already writes stax_invoices.amount as the live SUM, but invoices
+    // can sit in PENDING for hours/days before this handler picks them
+    // up — a billing edit in that window would otherwise post the stale
+    // pre-edit amount to Stax. We prefer the live SUM; fall back to the
+    // row's stored amount on Supabase miss.
+    let amount = Number(row.amount ?? 0);
+    if (docNum) {
+      const { data: sumRows, error: sumErr } = await sb
+        .from('billing')
+        .select('total')
+        .eq('invoice_no', docNum)
+        .neq('status', 'Void');
+      if (!sumErr && Array.isArray(sumRows)) {
+        let liveSum = 0;
+        for (const sr of sumRows as Array<{ total?: number | string | null }>) {
+          const t = Number(sr.total ?? 0);
+          if (Number.isFinite(t)) liveSum += t;
+        }
+        if (sumRows.length > 0) amount = Number(liveSum.toFixed(2));
+        else amount = 0;
+        // Persist the corrected amount back to stax_invoices BEFORE the
+        // POST so the row reflects what we're about to charge. Same
+        // pattern handleRunStaxCharges_'s stax_reconcileInvoiceAmount_
+        // helper uses on the GAS side (v38.229.0).
+        if (amount !== Number(row.amount ?? 0)) {
+          await sb.from('stax_invoices').update({
+            amount,
+            notes:      `Re-summed from public.billing at ${new Date().toISOString()} (pre-push reconcile)`,
+            updated_at: new Date().toISOString(),
+          }).eq('id', row.id as string);
+        }
+      }
+    }
 
     // Fall back to clients map if stax_invoices row has no Stax Customer ID
     if (!staxCust && custName) {

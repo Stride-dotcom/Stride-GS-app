@@ -38140,78 +38140,60 @@ function handleCreateStaxInvoices_(payload) {
  */
 function stax_reconcileInvoiceAmount_(docNum, sheetAmt, staxInvId, custName) {
   try {
-    var cbId = prop_("CB_SPREADSHEET_ID");
-    if (!cbId) return { updated: false, reason: "CB_SPREADSHEET_ID not configured" };
-    var cbSS = SpreadsheetApp.openById(cbId);
-    var consolSh = cbSS.getSheetByName("Consolidated_Ledger");
-    if (!consolSh || consolSh.getLastRow() < 2) {
-      return { updated: false, reason: "Consolidated_Ledger empty or missing" };
-    }
-    var data = consolSh.getRange(1, 1, consolSh.getLastRow(), consolSh.getLastColumn()).getValues();
-    var hdr = {};
-    data[0].forEach(function(h, i) { hdr[String(h).trim().toUpperCase()] = i; });
-    var cStatus = hdr["STATUS"], cInvNo = hdr["INVOICE #"], cTotal = hdr["TOTAL"],
-        cSvcCode = hdr["SVC CODE"], cSvcName = hdr["SVC NAME"],
-        cItemId = hdr["ITEM ID"], cQty = hdr["QTY"], cRate = hdr["RATE"],
-        cNotes = hdr["ITEM NOTES"], cSidemark = hdr["SIDEMARK"];
-    if (cStatus === undefined || cInvNo === undefined || cTotal === undefined) {
-      return { updated: false, reason: "Consolidated_Ledger missing Status/Invoice #/Total columns" };
-    }
-
     var target = String(docNum || "").trim();
     if (!target) return { updated: false, reason: "Empty docNum" };
 
+    // 2026-05-23 — switched the source of truth from CB Consolidated_Ledger
+    // (which drifts behind public.billing after voids/reissues — see
+    // v38.222.0 reconcileCbFromBilling_) to public.billing directly.
+    // Pre-fix, a voided row that hadn't been propagated to CB would be
+    // re-summed here and inflate the Stax amount.
+    //
+    // Also matches the simplified-Stax shape (one summary line per
+    // invoice — line_items_json is single-element, total is the live
+    // SUM). The Stax PUT body uses one meta.lineItems entry.
     var ledgerSum = 0;
-    var sheetLines = [];   // shape matches handleQbExport_'s sLineItems writes
-    var staxApiLines = []; // shape matches stax_buildLineItems_'s output
-    for (var i = 1; i < data.length; i++) {
-      var s = String(data[i][cStatus] || "").trim().toUpperCase();
-      if (s !== "INVOICED") continue;
-      var inv = String(data[i][cInvNo] || "").trim();
-      if (inv !== target) continue;
-
-      var qty = cQty !== undefined ? (Number(data[i][cQty]) || 1) : 1;
-      var rate = cRate !== undefined ? Number(data[i][cRate] || 0) : 0;
-      var total = Number(data[i][cTotal] || 0);
-      var svcName = cSvcName !== undefined ? String(data[i][cSvcName] || "").trim() : "";
-      var svcCode = cSvcCode !== undefined ? String(data[i][cSvcCode] || "").trim().toUpperCase() : "";
-      var notes = cNotes !== undefined ? String(data[i][cNotes] || "").trim() : "";
-      var sidemark = cSidemark !== undefined ? String(data[i][cSidemark] || "").trim() : "";
-      var itemId = cItemId !== undefined ? String(data[i][cItemId] || "").trim() : "";
-
-      var memoParts = [];
-      if (svcName) memoParts.push(svcName);
-      if (sidemark) memoParts.push(sidemark);
-      if (itemId) memoParts.push(itemId);
-      if (notes) memoParts.push(notes);
-      var memo = memoParts.join(" - ");
-
-      ledgerSum += total;
-      sheetLines.push({
-        name: svcName || svcCode || "Line",
-        memo: memo,
-        qty: qty,
-        rate: rate,
-        amount: Number(total || 0)
-      });
-
-      var price = Math.abs(rate || 0);
-      if (!price && qty) price = Math.abs(total || 0) / Math.max(1, qty);
-      if (price > 0) {
-        staxApiLines.push({
-          item: svcName || svcCode || ("Line " + (sheetLines.length)),
-          details: memo,
-          quantity: qty,
-          price: price
-        });
+    var rowCount = 0;
+    var sbSel = supabaseSelect_(
+      "billing",
+      "invoice_no=eq." + encodeURIComponent(target) + "&status=neq.Void",
+      "total"
+    );
+    if (sbSel.ok) {
+      for (var sri = 0; sri < sbSel.rows.length; sri++) {
+        var srt = Number(sbSel.rows[sri].total || 0);
+        if (!isNaN(srt)) ledgerSum += srt;
+      }
+      rowCount = sbSel.rows.length;
+    } else {
+      // CB fallback ONLY when Supabase is unreachable — last-resort
+      // safety so a Supabase outage doesn't block all charge runs.
+      var cbId = prop_("CB_SPREADSHEET_ID");
+      if (!cbId) return { updated: false, reason: "Supabase unreachable + CB_SPREADSHEET_ID not configured" };
+      var cbSS = SpreadsheetApp.openById(cbId);
+      var consolSh = cbSS.getSheetByName("Consolidated_Ledger");
+      if (consolSh && consolSh.getLastRow() >= 2) {
+        var data = consolSh.getRange(1, 1, consolSh.getLastRow(), consolSh.getLastColumn()).getValues();
+        var hdr = {};
+        data[0].forEach(function(h, i) { hdr[String(h).trim().toUpperCase()] = i; });
+        var cStatus = hdr["STATUS"], cInvNo = hdr["INVOICE #"], cTotal = hdr["TOTAL"];
+        if (cStatus !== undefined && cInvNo !== undefined && cTotal !== undefined) {
+          for (var i = 1; i < data.length; i++) {
+            var s = String(data[i][cStatus] || "").trim().toUpperCase();
+            if (s !== "INVOICED") continue;
+            if (String(data[i][cInvNo] || "").trim() !== target) continue;
+            ledgerSum += Number(data[i][cTotal] || 0);
+            rowCount++;
+          }
+        }
       }
     }
 
-    if (sheetLines.length === 0) {
+    if (rowCount === 0) {
       return {
         skip: true,
-        reason: "No Invoiced ledger rows for " + target +
-                " — invoice may have been voided in CB. Charge skipped."
+        reason: "No non-Void billing rows for " + target +
+                " — invoice may have been fully voided. Charge skipped."
       };
     }
 
@@ -38221,16 +38203,21 @@ function stax_reconcileInvoiceAmount_(docNum, sheetAmt, staxInvId, custName) {
       return { updated: false };
     }
 
-    if (staxApiLines.length === 0) {
-      // All ledger rows had qty=0 and rate=0 — fall back to a single
-      // catch-all line carrying the total. Mirrors stax_buildLineItems_.
-      staxApiLines.push({
-        item: "QB Invoice #" + target,
-        details: "Invoice total",
-        quantity: 1,
-        price: ledgerAmt
-      });
-    }
+    // Single-line summary — matches the simplified Stax IIF shape.
+    var summaryLine = {
+      name: "Stride Logistics Services",
+      memo: "Invoice " + target,
+      qty: 1,
+      rate: ledgerAmt,
+      amount: ledgerAmt
+    };
+    var sheetLines = [summaryLine];
+    var staxApiLines = [{
+      item: "QB Invoice #" + target,
+      details: "Invoice " + target,
+      quantity: 1,
+      price: ledgerAmt
+    }];
 
     var custStr = String(custName || "").trim();
     var updatePayload = {
