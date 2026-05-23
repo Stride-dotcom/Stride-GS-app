@@ -23894,25 +23894,114 @@ function handleQbExport_(payload) {
     });
   }
 
-  // v38.78.0 — fetch Reference for all ledger row IDs being exported, append to
-  // each line's memo as "[Ref: xxx]" when non-empty. Single batched Supabase
-  // query; silently degrades to no-op if Supabase is unreachable.
-  var allLrids = [];
-  for (var inv0 = 0; inv0 < invoiceOrder.length; inv0++) {
-    var ls = invoiceMap[invoiceOrder[inv0]].lines;
-    for (var ll = 0; ll < ls.length; ll++) { if (ls[ll].ledgerRowId) allLrids.push(ls[ll].ledgerRowId); }
-  }
-  var refByLrid = api_fetchBillingReferencesByLedgerIds_(allLrids);
-  for (var invR = 0; invR < invoiceOrder.length; invR++) {
-    var rLines = invoiceMap[invoiceOrder[invR]].lines;
-    for (var rl = 0; rl < rLines.length; rl++) {
-      var ref = refByLrid[rLines[rl].ledgerRowId] || "";
-      if (ref) rLines[rl].memo = (rLines[rl].memo ? rLines[rl].memo + " " : "") + "[Ref: " + ref + "]";
-    }
-  }
-
   if (!invoiceOrder.length) {
     return errorResponse_("No Invoiced rows found to export", "NOT_FOUND");
+  }
+
+  // 2026-05-23 — Stax IIF simplification. Pre-fix this function emitted one
+  // TRNS + N SPL per invoice (one SPL per service line), and snapshot N
+  // entries to stax_invoices.line_items_json. That coupling caused the
+  // partial-snapshot class of bugs — Stax under-collected when billing
+  // rows were added (or voided) for an invoice number after the original
+  // Stax push (the v38.171.0 PENDING-only refresh guard locks
+  // line_items_json at first push, so the snapshot never re-syncs).
+  //
+  // New shape: ONE TRNS + ONE SPL per invoice. Total = LIVE SUM of
+  // public.billing.total WHERE invoice_no=X AND status!=Void, fetched at
+  // export time. stax_invoices.amount + a SINGLE-element line_items_json
+  // both carry that same live SUM, so any subsequent billing edit shows
+  // up on the next IIF re-export. Stax customer + Stride invoice number
+  // are preserved (DOCNUM column, meta.reference, memo) so the payment
+  // → QBO reconciliation flow is unchanged.
+  //
+  // Income account / item: take the qbAccount + qbItemName from the
+  // FIRST line we collected for the invoice (it's whatever svc code
+  // came first in CB; for storage invoices that's the STOR mapping).
+  // The single SPL still maps cleanly to QBO's income account when the
+  // operator later imports the IIF on the QBO side.
+  var sbSumByInvNo = {};
+  var sbReadOk = false;
+  try {
+    if (invoiceOrder.length > 0) {
+      var sumInList = invoiceOrder
+        .map(function(no) { return '"' + String(no).replace(/"/g, '') + '"'; })
+        .join(',');
+      var sumSel = supabaseSelect_(
+        "billing",
+        "invoice_no=in.(" + sumInList + ")&status=neq.Void",
+        "invoice_no,total"
+      );
+      if (sumSel.ok) {
+        sbReadOk = true;
+        for (var ssi = 0; ssi < sumSel.rows.length; ssi++) {
+          var ssNo = String(sumSel.rows[ssi].invoice_no || "").trim();
+          if (!ssNo) continue;
+          var ssTotal = Number(sumSel.rows[ssi].total || 0);
+          sbSumByInvNo[ssNo] = (sbSumByInvNo[ssNo] || 0) + (isNaN(ssTotal) ? 0 : ssTotal);
+        }
+      } else {
+        Logger.log("handleQbExport_ Supabase SUM read returned ok=false — falling back to CB row totals for the IIF (snapshot risk).");
+      }
+    }
+  } catch (sumErr) {
+    Logger.log("handleQbExport_ Supabase SUM read threw (non-fatal): " + sumErr.message);
+  }
+
+  // Collapse invoiceMap[*].lines to a single summary line per invoice.
+  // Pull the QB account/item from the first CB line; pull the total from
+  // the live Supabase SUM. When the Supabase read succeeded but an
+  // invoice's SUM is missing OR zero, the invoice is fully voided in
+  // billing — drop it from invoiceOrder so the IIF doesn't push $0 to
+  // Stax. When the Supabase read failed entirely, fall back to the CB
+  // sum (best we can do under degraded conditions; matches the
+  // pre-2026-05-23 behavior).
+  var keptInvoiceOrder = [];
+  var skippedFullyVoided = 0;
+  for (var ciInv = 0; ciInv < invoiceOrder.length; ciInv++) {
+    var cInvNoKey = invoiceOrder[ciInv];
+    var cInvData = invoiceMap[cInvNoKey];
+    if (!cInvData.lines.length) continue;
+    var firstLine = cInvData.lines[0];
+    var cbSumForInvoice = 0;
+    for (var cli = 0; cli < cInvData.lines.length; cli++) {
+      cbSumForInvoice += Number(cInvData.lines[cli].total || 0);
+    }
+    var liveTotal;
+    if (sbReadOk) {
+      // Authoritative read: missing key = no non-Void rows = fully voided.
+      liveTotal = Object.prototype.hasOwnProperty.call(sbSumByInvNo, cInvNoKey)
+        ? sbSumByInvNo[cInvNoKey]
+        : 0;
+      if (!(liveTotal > 0)) {
+        skippedFullyVoided++;
+        delete invoiceMap[cInvNoKey];
+        continue;
+      }
+    } else {
+      liveTotal = cbSumForInvoice;
+    }
+    cInvData.lines = [{
+      svcName:     "Stride Logistics Services",
+      memo:        "Invoice " + cInvNoKey,
+      qty:         1,
+      rate:        liveTotal,
+      total:       liveTotal,
+      qbAcct:      firstLine.qbAcct,
+      qbItemName:  firstLine.qbItemName || "Stride Logistics Services",
+      sidemark:    firstLine.sidemark || "",
+      svcDate:     firstLine.svcDate || cInvData.invDate,
+      ledgerRowId: ""
+    }];
+    keptInvoiceOrder.push(cInvNoKey);
+  }
+  invoiceOrder = keptInvoiceOrder;
+
+  if (!invoiceOrder.length) {
+    return errorResponse_(
+      "No Invoiced rows found to export" +
+        (skippedFullyVoided > 0 ? " (" + skippedFullyVoided + " invoice(s) skipped because all their billing rows are Void)" : ""),
+      "NOT_FOUND"
+    );
   }
 
   // Build IIF
@@ -24424,11 +24513,61 @@ function handleRegenerateIifForBatch_(payload) {
       };
     }
 
-    // Build the IIF the same way handleQbExport_ does. line_items_json
-    // already carries name/memo/qty/rate/amount per line, so most of
-    // the per-line work is just re-formatting. svc_code-to-account
-    // mapping comes from QB_Service_Mapping; if a line's name doesn't
-    // resolve to a code we fall back to a generic income account.
+    // 2026-05-23 — Simplified Stax IIF (matches handleQbExport_'s
+    // collapse). Generate ONE TRNS + ONE SPL per invoice with a LIVE
+    // SUM from public.billing.total WHERE invoice_no=X AND status!=Void.
+    // Falls back to stax_invoices.amount (the most recent push's total)
+    // when Supabase is unreachable so the regenerator still produces
+    // an IIF — operators can always re-export from Billing later to get
+    // the truly-live SUM.
+    //
+    // Income account / item: the first mapping entry from QB_Service_Mapping
+    // (alphabetical by svc code) acts as the default. Stride's chart of
+    // accounts only routes Stride invoices to one or two income accounts
+    // and the IIF is for Stax-side bookkeeping only — the QBO push
+    // already mapped per-svc-code via handleQboCreateInvoice_.
+    var defaultAcctEntry = null;
+    var mappingKeys = Object.keys(mapping).sort();
+    for (var dmi = 0; dmi < mappingKeys.length; dmi++) {
+      if (mapping[mappingKeys[dmi]] && mapping[mappingKeys[dmi]].qbAccount) {
+        defaultAcctEntry = mapping[mappingKeys[dmi]];
+        break;
+      }
+    }
+    var defaultQbAcct = (defaultAcctEntry && defaultAcctEntry.qbAccount) || "Stride Logistics Income";
+    var defaultQbItem = (defaultAcctEntry && defaultAcctEntry.qbItemName) || "Stride Logistics Services";
+
+    // Pull live SUMs in one batch — invoice numbers come straight from
+    // the batch's stax_invoices rows.
+    var liveSumByInvNo = {};
+    try {
+      var batchInvoiceNos = [];
+      for (var bni = 0; bni < invoices.length; bni++) {
+        var bn = String(invoices[bni].qb_invoice_no || "").trim();
+        if (bn) batchInvoiceNos.push(bn);
+      }
+      if (batchInvoiceNos.length > 0) {
+        var bnIn = batchInvoiceNos
+          .map(function(n) { return '"' + String(n).replace(/"/g, '') + '"'; })
+          .join(',');
+        var bnSel = supabaseSelect_(
+          "billing",
+          "invoice_no=in.(" + bnIn + ")&status=neq.Void",
+          "invoice_no,total"
+        );
+        if (bnSel.ok) {
+          for (var bnsi = 0; bnsi < bnSel.rows.length; bnsi++) {
+            var bnsNo = String(bnSel.rows[bnsi].invoice_no || "").trim();
+            if (!bnsNo) continue;
+            var bnsTotal = Number(bnSel.rows[bnsi].total || 0);
+            liveSumByInvNo[bnsNo] = (liveSumByInvNo[bnsNo] || 0) + (isNaN(bnsTotal) ? 0 : bnsTotal);
+          }
+        }
+      }
+    } catch (lsErr) {
+      Logger.log("handleRegenerateIifForBatch_ live-SUM read threw (non-fatal): " + lsErr.message);
+    }
+
     var iifLines = [];
     iifLines.push(["!TRNS","TRNSID","TRNSTYPE","DATE","ACCNT","NAME","CLASS","AMOUNT","DOCNUM","MEMO","CLEAR","TOPRINT","ADDR1","ADDR2","ADDR3","ADDR4","DUEDATE","TERMS","PAID"].join("\t"));
     iifLines.push(["!SPL","SPLID","TRNSTYPE","DATE","ACCNT","NAME","AMOUNT","DOCNUM","MEMO","QNTY","PRICE","INVITEM","TAXABLE"].join("\t"));
@@ -24436,36 +24575,29 @@ function handleRegenerateIifForBatch_(payload) {
     var lineCount = 0;
     for (var ii = 0; ii < invoices.length; ii++) {
       var inv = invoices[ii];
-      var lines;
-      try { lines = JSON.parse(inv.line_items_json || "[]"); } catch (_) { lines = []; }
-      if (!lines.length) continue;
-      var totalAmt = Number(inv.amount || 0);
+      var invNoKey = String(inv.qb_invoice_no || "").trim();
+      // Prefer the live billing SUM (current truth) over the snapshot
+      // amount we stored at first push.
+      var totalAmt = Object.prototype.hasOwnProperty.call(liveSumByInvNo, invNoKey)
+        ? liveSumByInvNo[invNoKey]
+        : Number(inv.amount || 0);
+      // Skip invoices with no billing rows — emitting a $0 IIF row would
+      // post $0 to Stax which is a silent under-collect.
+      if (!(totalAmt > 0)) continue;
       iifLines.push([
         "TRNS", "", "INVOICE", inv.invoice_date || "", "Accounts Receivable",
-        api_qbEsc_(inv.customer || ""), "", totalAmt.toFixed(2), api_qbEsc_(inv.qb_invoice_no || ""),
-        "Stride Logistics — " + (inv.qb_invoice_no || ""),
+        api_qbEsc_(inv.customer || ""), "", totalAmt.toFixed(2), api_qbEsc_(invNoKey),
+        "Stride Logistics — " + invNoKey,
         "N", "Y", "", "", "", "", inv.due_date || "", "", "N"
       ].join("\t"));
-      for (var li = 0; li < lines.length; li++) {
-        var line = lines[li];
-        var memo = String(line.memo || line.name || "");
-        var qty = Number(line.qty || 1);
-        var rate = Number(line.rate || 0);
-        var lineTotal = Number(line.amount != null ? line.amount : (qty * rate));
-        // Best-effort svc-code lookup from the line name; fall back to "Storage Charges" / first mapped account.
-        var svcUpper = String(line.name || "").toUpperCase();
-        var svcMap = mapping[svcUpper] || mapping[svcUpper.replace(/\s+.*$/, "")] || null;
-        var qbAcct = (svcMap && svcMap.qbAccount) || "Stride Logistics Income";
-        var qbItem = (svcMap && svcMap.qbItemName) || line.name || "";
-        iifLines.push([
-          "SPL", "", "INVOICE", inv.invoice_date || "",
-          api_qbEsc_(qbAcct), api_qbEsc_(inv.customer || ""),
-          (lineTotal * -1).toFixed(2), api_qbEsc_(inv.qb_invoice_no || ""),
-          api_qbEsc_(memo), qty, rate.toFixed(2),
-          api_qbEsc_(qbItem), "N"
-        ].join("\t"));
-        lineCount++;
-      }
+      iifLines.push([
+        "SPL", "", "INVOICE", inv.invoice_date || "",
+        api_qbEsc_(defaultQbAcct), api_qbEsc_(inv.customer || ""),
+        (totalAmt * -1).toFixed(2), api_qbEsc_(invNoKey),
+        api_qbEsc_("Invoice " + invNoKey), 1, totalAmt.toFixed(2),
+        api_qbEsc_(defaultQbItem), "N"
+      ].join("\t"));
+      lineCount++;
       iifLines.push("ENDTRNS");
     }
     var iifContent = iifLines.join("\r\n");
