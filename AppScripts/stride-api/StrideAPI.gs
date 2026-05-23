@@ -38196,6 +38196,10 @@ function handleRunStaxCharges_(payload) {
     var colKValues = colKRange.getValues();
     var colIChanged = false, colKChanged = false;
 
+    // v38.229.0 — Hoisted out of the per-row reconcile branch so we resolve
+    // header columns once per run instead of once per mismatch.
+    var staxColsForReconcile = stax_invoiceCols_(invSheet);
+
     // Payment method cache per customer
     var pmCache = {};
 
@@ -38268,9 +38272,9 @@ function handleRunStaxCharges_(payload) {
         continue;
       }
       if (_rec && _rec.updated) {
-        var _recCols = stax_invoiceCols_(invSheet);
-        invSheet.getRange(i + 2, _recCols.amount).setValue(_rec.newTotal);
-        invSheet.getRange(i + 2, _recCols.lineItems).setValue(_rec.newLineItemsJson);
+        invSheet.getRange(i + 2, staxColsForReconcile.amount).setValue(_rec.newTotal);
+        invSheet.getRange(i + 2, staxColsForReconcile.lineItems).setValue(_rec.newLineItemsJson);
+        SpreadsheetApp.flush();  // make the corrected amount visible before /pay
         totalRaw = _rec.newTotal;
         try {
           supabasePatch_("stax_invoices",
