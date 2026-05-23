@@ -62,6 +62,35 @@ interface CreateInvoiceBody {
   client?: string;
   sidemark?: string;
   ledgerRowIds?: string[];
+  /**
+   * 2026-05-23 — full row payload from the React caller, in display sort
+   * order (service date asc, svc code asc, item id asc). When provided we
+   * derive ledgerRowIds from it AND return updated rows in this same order
+   * so downstream consumers (PDF render, QBO push) see the report's order
+   * instead of the arbitrary Postgres scan order. Matches the GAS
+   * handleCreateInvoice_ payload shape so React can send one body that
+   * works for either backend.
+   */
+  rows?: Array<{
+    ledgerRowId?: string;
+    client?: string;
+    sidemark?: string;
+    date?: string;
+    svcCode?: string;
+    svcName?: string;
+    itemId?: string;
+    description?: string;
+    itemClass?: string;
+    qty?: number;
+    rate?: number;
+    total?: number;
+    notes?: string;
+    taskId?: string;
+    repairId?: string;
+    shipmentNo?: string;
+    category?: string;
+    sourceSheetId?: string;
+  }>;
 }
 
 interface BillingRow {
@@ -102,14 +131,25 @@ Deno.serve(async (req: Request) => {
   const requestId   = String(body.requestId   ?? '').trim() || crypto.randomUUID();
   const client      = String(body.client      ?? '').trim();
   const sidemark    = String(body.sidemark    ?? '').trim();
-  const ledgerRowIds = (body.ledgerRowIds ?? [])
-    .map(s => String(s).trim())
-    .filter(Boolean);
+
+  // 2026-05-23 — accept either `rows` (preferred, carries display sort
+  // order) OR `ledgerRowIds`. When both present, rows wins and we derive
+  // ledgerRowIds from it. The ordered-id list is what we use to sort the
+  // SELECT/UPDATE results so the returned `rows` carry the same order the
+  // caller sent — needed end-to-end for the PDF + QBO line ordering.
+  const payloadRows = Array.isArray(body.rows) ? body.rows : [];
+  const ledgerRowIds: string[] = payloadRows.length > 0
+    ? payloadRows.map(r => String(r?.ledgerRowId ?? '').trim()).filter(Boolean)
+    : (body.ledgerRowIds ?? []).map(s => String(s).trim()).filter(Boolean);
+  // Lookup: ledger_row_id → 0-based caller order. Used to sort the final
+  // updated array so order survives the SELECT/UPDATE round-trip.
+  const orderByLedgerId: Record<string, number> = {};
+  ledgerRowIds.forEach((id, i) => { orderByLedgerId[id] = i; });
 
   if (!tenantId) return json({ error: 'tenantId is required', code: 'INVALID_PARAMS' }, 400);
   if (!client)   return json({ error: 'client is required',   code: 'INVALID_PARAMS' }, 400);
   if (ledgerRowIds.length === 0) {
-    return json({ error: 'ledgerRowIds array is required and must be non-empty', code: 'INVALID_PARAMS' }, 400);
+    return json({ error: 'rows[] or ledgerRowIds[] is required and must be non-empty', code: 'INVALID_PARAMS' }, 400);
   }
 
   const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
@@ -213,11 +253,26 @@ Deno.serve(async (req: Request) => {
     console.error('[create-invoice-sb] billing update failed:', upErr.message);
     return json({ error: `Update failed: ${upErr.message}`, code: 'UPDATE_FAILED' }, 500);
   }
-  const updated = (updatedRaw ?? []) as BillingRow[];
-  if (updated.length === 0) {
+  const updatedUnsorted = (updatedRaw ?? []) as BillingRow[];
+  if (updatedUnsorted.length === 0) {
     // The Unbilled rows were sniped between read + update. Surface that.
     return json({ error: 'No rows updated (concurrent invoice may have grabbed them)', code: 'NO_ROWS_UPDATED' }, 409);
   }
+
+  // 2026-05-23 — preserve caller's display sort order on the response.
+  // Postgres returns the UPDATE's RETURNING in arbitrary scan order, so a
+  // 50-row invoice would round-trip rows in a scrambled order vs. what
+  // the caller sent. Sort by the orderByLedgerId map built from the
+  // caller's `rows` (or `ledgerRowIds`) so the React PDF render +
+  // downstream QBO push see (date, svc, item) ascending. Unknown ids
+  // fall to the end (shouldn't happen — they were just used to filter).
+  const updated = [...updatedUnsorted].sort((a, b) => {
+    const ai = orderByLedgerId[a.ledger_row_id];
+    const bi = orderByLedgerId[b.ledger_row_id];
+    const an = ai === undefined ? Number.MAX_SAFE_INTEGER : ai;
+    const bn = bi === undefined ? Number.MAX_SAFE_INTEGER : bi;
+    return an - bn;
+  });
 
   const total = updated.reduce((acc, r) => acc + Number(r.total ?? 0), 0);
 
