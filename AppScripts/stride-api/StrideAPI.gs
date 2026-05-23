@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.228.1 — 2026-05-22 PST — [DOCS] Header-comment syntax hotfix for v38.228.0. The v38.228.0 entry contained a literal block-comment-close sequence inside its prose, which prematurely terminated this outer header block comment and caused clasp push to reject the file with "SyntaxError: Unexpected identifier 'a' line: 2". Rewords the phrase to remove the offending sequence. No code change beyond the header.
+   StrideAPI.gs — v38.229.0 — 2026-05-23 PST — [BILLING] Stax IIF export + runStaxCharges always work from the FULL CB Consolidated_Ledger for each invoice number, never a partial snapshot of the rows the caller passed in. Two fixes in one ship — both close the same class of bug (Stax under-collects when billing rows are added to an invoice number after the original push). (1) handleQbExport_ + handleQbExcelExport_: pre-fix the optional `payload.ledgerRowIds` was used as a per-row filter on the lines emitted. So if Billing.tsx's Create Invoices flow passed only the newly-invoiced ledger row IDs (or an operator hand-picked a subset of Invoiced rows on Billing → Report and clicked Stax IIF or QB Excel), Stax received a line_items_json + Total covering only those rows even when the invoice number had additional Invoiced rows in CB. The Stax-side invoice was created with the partial Total via handleCreateStaxInvoices_ → /invoice, and the v38.171.0 PENDING-only refresh guard prevented later handleQbExport_ passes from updating it. Fix: treat `payload.ledgerRowIds` as a POINTER to the invoice numbers covered (first-pass scan resolves the IDs to invoice numbers, then the main loop emits ALL Invoiced rows for those invoice numbers regardless of whether each individual row's Ledger Row ID was in the original payload). Mirrors how handleQboCreateInvoice_ already groups by invoice number. (2) handleRunStaxCharges_: new safeguard right before /pay. New helper stax_reconcileInvoiceAmount_ sums every Invoiced ledger row for the charge target's QB Invoice #, compares to the Stax sheet's Total Amount, and if they differ by ≥ $0.01 issues PUT /invoice/<id> to refresh Stax (total + meta.lineItems) before charging — protects against rows added AFTER the original push that fix #1 cannot reach (status already flipped to CREATED so handleQbExport_'s re-write path is gated off). Writes the corrected amount + line_items_json back to the Stax Invoices sheet via header-resolved stax_invoiceCols_ and patches public.stax_invoices via supabasePatch_ so React reflects the new total. Logs a reconcile entry to the Run Log + stamps the chargelog. If the Stax PUT fails or the CB ledger has zero Invoiced rows for that invoice number (voided in CB after push), returns skip: caller marks CHARGE_FAILED + appends a RECONCILE_BLOCKED exception so the operator can intervene; no money moves. Companion notes: stats.apiErrors counts reconcile-blocked rows; no new field added to the response shape to keep this minimal. No schema change, no migration, no React change.
+   v38.228.1 — 2026-05-22 PST — [DOCS] Header-comment syntax hotfix for v38.228.0. The v38.228.0 entry contained a literal block-comment-close sequence inside its prose, which prematurely terminated this outer header block comment and caused clasp push to reject the file with "SyntaxError: Unexpected identifier 'a' line: 2". Rewords the phrase to remove the offending sequence. No code change beyond the header.
    v38.228.0 — 2026-05-22 PST — [DOCS] Removes all five `api_generateDocPdf_` call sites from completion / approval / release handlers in favor of the React DocRenderer (PR #507). The function definition is intentionally retained for reference. Sites disabled (each wrapped in a block comment with a dated marker, original block preserved): (1) handleCompleteShipment_ DOC_RECEIVING at ~line 17471 — `var pdfBlob = null` declaration kept so the downstream SHIPMENT_RECEIVED email send still compiles; api_sendTemplateEmail_'s `if (pdfBlob) mailOpts.attachments = [pdfBlob]` guard at line 18456 means a null blob sends the email with no attachment, matching the React-side flow where DocRenderer hosts the PDF in public.documents and the email CTAs deep-link there. (2) handleProcessRepairApproval_ DOC_REPAIR_WORK_ORDER at ~line 19550 (only fires on the Approve branch — Decline path unchanged). (3) handleStartRepair_ DOC_REPAIR_WORK_ORDER at ~line 20208 — this site never attached the PDF to an email (storage-only generation for the Docs tab), so removing it is a pure no-op for outbound comms. (4) handleProcessWcRelease_ DOC_WILL_CALL_RELEASE at ~line 21221. (5) handleGenerateWcDoc_ DOC_WILL_CALL_RELEASE at ~line 21698 — the dedicated reprint endpoint, now a no-op that still returns success for any straggling pre-deploy React callers; expected to be deleted entirely once the React renderer is the only caller in the wild. DOC_INVOICE path (jsPDF in React via `api_exportDocAsPdfBlob_`-adjacent flow) NOT touched per scope. No schema / RLS / React change in this PR; companion React changes for DocRenderer landed in PR #507.
    v38.227.0 — 2026-05-21 PST — [MIGRATION-P3/MIG-016] Sixth per-table reverse-writethrough writer: `__writeThroughReverseTasks_` replaces the stub for `tasks` in REVERSE_WRITETHROUGH_TABLES_. Insert + update upsert pattern by Task ID, mirrors REVERSE_TASK_FIELDS_ (task_id, type, status, item_id, vendor, description, location, sidemark, shipment_number, item_notes, task_notes, result, completed_at, cancelled_at, started_at, assigned_to, billed, due_date, priority, created). Required by the new SB-primary `batch-create-tasks-sb` Edge Function — without it the SB EF's per-task sheet-mirror fires hit the legacy stub and land in gs_sync_events. Auto-runs api_ensureTaskColumns_ on insert so Due Date + Priority columns exist on tenants whose template predates v38.214.0. Idempotent: re-running with the same payload either no-ops (already-matches) or writes the same cells (deterministic).
    v38.226.0 — 2026-05-21 PST — [MIGRATION-P2/MIG-015] Extends `__writeThroughReverseInventory_` to support general field updates (mode b/c) alongside the legacy release-only path (mode a). Required by the new SB-primary `update-item-sb` Edge Function (companion in supabase/functions/update-item-sb/) which writes inventory edits to public.inventory then mirrors the changed fields back to the per-tenant Inventory sheet via this writer. New REVERSE_INV_FIELDS_ map (vendor / description / reference / sidemark / room / location / item_class / qty / item_notes / declared_value / coverage_option_id) drives column resolution via api_ensureColumn_ — case-insensitive + auto-append on miss (matches v38.158.0's handleUpdateInventoryItem_ landmine fix). Status + release_date stay on the legacy code path (idempotency check, parse-as-PT, ledger + auto-cancel side effects on Released-transition). Combined mode handles "status flip + sidemark edit in same save". Release-mode idempotency skip only fires when zero general fields were written this pass — a fields-only write never short-circuits even if the row already matches. v38.211.0 auto-cancel cascade source string changed from "Delivery" to "Reverse Writethrough" because the writer is now used for general edits too (the "Delivery" tag was specific to push-inventory-release-to-sheet, which is just one caller now). No other writer changes; REVERSE_WRITETHROUGH_TABLES_ registry unchanged; no React change; no migration. Per MIG-015: deploy this BEFORE flipping feature_flags.updateItem to active_backend='supabase' for any tenant — without it the SB writer's row payload (which omits status on general edits) would throw the legacy "row.status required" error and the canary would fail-closed on every save.
@@ -23793,11 +23794,29 @@ function handleQbExport_(payload) {
   var cSidemark = consolHdr["SIDEMARK"];
   var cLedgerRowId = consolHdr["LEDGER ROW ID"];
 
-  // Optional filter by specific ledger row IDs
-  var filterIds = null;
-  if (payload.ledgerRowIds && payload.ledgerRowIds.length) {
-    filterIds = {};
+  // v38.229.0 — Caller-supplied ledgerRowIds is a POINTER to the invoice
+  // numbers being exported, never a per-row filter on the lines. Pre-fix the
+  // payload filtered rows directly: if Create Invoices passed only the
+  // newly-invoiced rows (or the operator hand-picked a subset of invoiced
+  // rows on the Billing → Report tab and clicked Stax IIF), Stax received a
+  // partial line_items_json and a partial Total, so the Stax-side invoice
+  // undercollected when charged. First pass resolves the row IDs to the set
+  // of invoice numbers; the main loop then includes every Invoiced row for
+  // those invoices regardless of whether its own Ledger Row ID was in the
+  // original payload. The legacy ledgerRowId per-row filter is removed.
+  var targetInvoiceNos = null;
+  if (payload.ledgerRowIds && payload.ledgerRowIds.length && cLedgerRowId !== undefined) {
+    var filterIds = {};
     payload.ledgerRowIds.forEach(function(id) { filterIds[String(id).trim()] = true; });
+    targetInvoiceNos = {};
+    for (var fpass = 1; fpass < consolVals.length; fpass++) {
+      var fStatus = String(consolVals[fpass][cStatus] || "").trim().toUpperCase();
+      if (fStatus !== "INVOICED") continue;
+      var fLrid = String(consolVals[fpass][cLedgerRowId] || "").trim();
+      if (!fLrid || !filterIds[fLrid]) continue;
+      var fInvNo = String(consolVals[fpass][cInvNo] || "").trim();
+      if (fInvNo) targetInvoiceNos[fInvNo] = true;
+    }
   }
 
   // v38.22.0: Invoice date = today (not billing period end date). Due date calculated from today.
@@ -23821,12 +23840,13 @@ function handleQbExport_(payload) {
     var status = String(consolVals[i][cStatus] || "").trim().toUpperCase();
     if (status !== "INVOICED") continue;
 
-    if (filterIds && cLedgerRowId !== undefined) {
-      var lrid = String(consolVals[i][cLedgerRowId] || "").trim();
-      if (!lrid || !filterIds[lrid]) continue;
-    }
-
     var invNo   = String(consolVals[i][cInvNo]   || "").trim();
+
+    // v38.229.0 — invoice-number-grain filter (see targetInvoiceNos comment
+    // above). When the caller scoped the export, we still scan ALL Invoiced
+    // rows but only emit lines for invoices in the target set.
+    if (targetInvoiceNos && (!invNo || !targetInvoiceNos[invNo])) continue;
+
     var client  = String(consolVals[i][cClient]  || "").trim();
     var svcCode = String(consolVals[i][cSvcCode] || "").trim().toUpperCase();
     var svcName = cSvcName !== undefined ? String(consolVals[i][cSvcName] || "").trim() : svcCode;
@@ -24592,11 +24612,24 @@ function handleQbExcelExport_(payload) {
   var consolHdr = {};
   consolVals[0].forEach(function(h, i) { consolHdr[String(h).trim().toUpperCase()] = i; });
 
-  // Optional filter by specific ledger row IDs
-  var filterIds = null;
-  if (payload.ledgerRowIds && payload.ledgerRowIds.length) {
-    filterIds = {};
-    payload.ledgerRowIds.forEach(function(id) { filterIds[String(id).trim()] = true; });
+  // v38.229.0 — Same invoice-number-grain export rule as handleQbExport_.
+  // ledgerRowIds is a pointer to invoice numbers, not a per-row filter — the
+  // Excel/QBO push otherwise misses every row added to an invoice after the
+  // original Create Invoices payload was built. Pass 1: resolve the row IDs
+  // to invoice numbers. Main loop (below) filters by invoice number instead.
+  var excelTargetInvoiceNos = null;
+  if (payload.ledgerRowIds && payload.ledgerRowIds.length && consolHdr["LEDGER ROW ID"] !== undefined) {
+    var excelFilterIds = {};
+    payload.ledgerRowIds.forEach(function(id) { excelFilterIds[String(id).trim()] = true; });
+    excelTargetInvoiceNos = {};
+    for (var efp = 1; efp < consolVals.length; efp++) {
+      var efStatus = String(consolVals[efp][consolHdr["STATUS"]] || "").trim().toUpperCase();
+      if (efStatus !== "INVOICED") continue;
+      var efLrid = String(consolVals[efp][consolHdr["LEDGER ROW ID"]] || "").trim();
+      if (!efLrid || !excelFilterIds[efLrid]) continue;
+      var efInvNo = String(consolVals[efp][consolHdr["INVOICE #"]] || "").trim();
+      if (efInvNo) excelTargetInvoiceNos[efInvNo] = true;
+    }
   }
 
   // Build ledgerRowId → sidemark fallback map from client Billing_Ledgers
@@ -24642,12 +24675,13 @@ function handleQbExcelExport_(payload) {
     var status = String(consolVals[i][consolHdr["STATUS"]] || "").trim().toUpperCase();
     if (status !== "INVOICED") continue;
 
-    if (filterIds && consolHdr["LEDGER ROW ID"] !== undefined) {
-      var lrid = String(consolVals[i][consolHdr["LEDGER ROW ID"]] || "").trim();
-      if (!lrid || !filterIds[lrid]) continue;
-    }
-
     var invNo = String(consolVals[i][consolHdr["INVOICE #"]] || "").trim();
+
+    // v38.229.0 — invoice-number-grain filter (see excelTargetInvoiceNos
+    // comment above). All rows of in-scope invoices are emitted regardless
+    // of whether their own Ledger Row ID was in the caller's payload.
+    if (excelTargetInvoiceNos && (!invNo || !excelTargetInvoiceNos[invNo])) continue;
+
     var client = String(consolVals[i][consolHdr["CLIENT"]] || "").trim();
     var rawSvc = consolHdr["SVC CODE"] !== undefined ? consolVals[i][consolHdr["SVC CODE"]] : "";
     // Guard: if cell contains a Date object (bad data), skip it
@@ -37938,6 +37972,173 @@ function handleCreateStaxInvoices_(payload) {
 // ─── Endpoint 2: runStaxCharges ─────────────────────────────────────────────
 
 /**
+ * v38.229.0 — Reconcile a single Stax invoice against the CB
+ * Consolidated_Ledger right before charging.
+ *
+ * Why: handleQbExport_ writes line_items_json + amount onto the Stax
+ * Invoices sheet at IIF-generation time. Once the row has flipped to
+ * status=CREATED (push-to-Stax complete), the v38.171.0 PENDING-only
+ * guard in handleQbExport_ stops re-refreshing it on subsequent IIF
+ * passes. So any billing rows added to the same invoice_no AFTER the
+ * push (manual fix-ups, late charges, post-invoice corrections via
+ * Re-issue) leave the sheet amount and the Stax-side invoice stale —
+ * runStaxCharges /pay would under-collect.
+ *
+ * What: sums every Invoiced ledger row for `docNum` from CB
+ * Consolidated_Ledger. If the sum differs from `sheetAmount` by ≥ $0.01,
+ * issues PUT /invoice/<id> to refresh Stax (total + meta.lineItems) and
+ * returns a payload the caller writes back to the sheet + Supabase. If
+ * no ledger rows exist (invoice was voided in CB), signals skip so the
+ * caller aborts the charge rather than billing a ghost invoice. Read-
+ * only of the ledger; the only mutation is the Stax PUT.
+ *
+ * @param {string} docNum     QB Invoice # on the Stax Invoices row
+ * @param {number} sheetAmt   Current Total Amount on the Stax sheet row
+ * @param {string} staxInvId  Stax-side invoice id (col H)
+ * @param {string} custName   Customer name (for memo on the PUT)
+ * @returns {Object} One of:
+ *   { updated: false, reason?: string } — amounts agree (within $0.01); proceed with sheetAmt
+ *   { updated: true,  newTotal: number, newLineItemsJson: string,
+ *     oldTotal: number, rowDelta: number } — Stax PUT succeeded; caller
+ *     should write newTotal/newLineItemsJson to sheet + Supabase and
+ *     charge the new amount
+ *   { skip: true,     reason: string }    — caller MUST skip the charge
+ *     (Stax PUT failed, ledger empty, or CB unreadable)
+ */
+function stax_reconcileInvoiceAmount_(docNum, sheetAmt, staxInvId, custName) {
+  try {
+    var cbId = prop_("CB_SPREADSHEET_ID");
+    if (!cbId) return { updated: false, reason: "CB_SPREADSHEET_ID not configured" };
+    var cbSS = SpreadsheetApp.openById(cbId);
+    var consolSh = cbSS.getSheetByName("Consolidated_Ledger");
+    if (!consolSh || consolSh.getLastRow() < 2) {
+      return { updated: false, reason: "Consolidated_Ledger empty or missing" };
+    }
+    var data = consolSh.getRange(1, 1, consolSh.getLastRow(), consolSh.getLastColumn()).getValues();
+    var hdr = {};
+    data[0].forEach(function(h, i) { hdr[String(h).trim().toUpperCase()] = i; });
+    var cStatus = hdr["STATUS"], cInvNo = hdr["INVOICE #"], cTotal = hdr["TOTAL"],
+        cSvcCode = hdr["SVC CODE"], cSvcName = hdr["SVC NAME"],
+        cItemId = hdr["ITEM ID"], cQty = hdr["QTY"], cRate = hdr["RATE"],
+        cNotes = hdr["ITEM NOTES"], cSidemark = hdr["SIDEMARK"];
+    if (cStatus === undefined || cInvNo === undefined || cTotal === undefined) {
+      return { updated: false, reason: "Consolidated_Ledger missing Status/Invoice #/Total columns" };
+    }
+
+    var target = String(docNum || "").trim();
+    if (!target) return { updated: false, reason: "Empty docNum" };
+
+    var ledgerSum = 0;
+    var sheetLines = [];   // shape matches handleQbExport_'s sLineItems writes
+    var staxApiLines = []; // shape matches stax_buildLineItems_'s output
+    for (var i = 1; i < data.length; i++) {
+      var s = String(data[i][cStatus] || "").trim().toUpperCase();
+      if (s !== "INVOICED") continue;
+      var inv = String(data[i][cInvNo] || "").trim();
+      if (inv !== target) continue;
+
+      var qty = cQty !== undefined ? (Number(data[i][cQty]) || 1) : 1;
+      var rate = cRate !== undefined ? Number(data[i][cRate] || 0) : 0;
+      var total = Number(data[i][cTotal] || 0);
+      var svcName = cSvcName !== undefined ? String(data[i][cSvcName] || "").trim() : "";
+      var svcCode = cSvcCode !== undefined ? String(data[i][cSvcCode] || "").trim().toUpperCase() : "";
+      var notes = cNotes !== undefined ? String(data[i][cNotes] || "").trim() : "";
+      var sidemark = cSidemark !== undefined ? String(data[i][cSidemark] || "").trim() : "";
+      var itemId = cItemId !== undefined ? String(data[i][cItemId] || "").trim() : "";
+
+      var memoParts = [];
+      if (svcName) memoParts.push(svcName);
+      if (sidemark) memoParts.push(sidemark);
+      if (itemId) memoParts.push(itemId);
+      if (notes) memoParts.push(notes);
+      var memo = memoParts.join(" - ");
+
+      ledgerSum += total;
+      sheetLines.push({
+        name: svcName || svcCode || "Line",
+        memo: memo,
+        qty: qty,
+        rate: rate,
+        amount: Number(total || 0)
+      });
+
+      var price = Math.abs(rate || 0);
+      if (!price && qty) price = Math.abs(total || 0) / Math.max(1, qty);
+      if (price > 0) {
+        staxApiLines.push({
+          item: svcName || svcCode || ("Line " + (sheetLines.length)),
+          details: memo,
+          quantity: qty,
+          price: price
+        });
+      }
+    }
+
+    if (sheetLines.length === 0) {
+      return {
+        skip: true,
+        reason: "No Invoiced ledger rows for " + target +
+                " — invoice may have been voided in CB. Charge skipped."
+      };
+    }
+
+    var ledgerAmt = Number(ledgerSum.toFixed(2));
+    var sheetAmtNum = Number(sheetAmt || 0);
+    if (Math.abs(sheetAmtNum - ledgerAmt) < 0.01) {
+      return { updated: false };
+    }
+
+    if (staxApiLines.length === 0) {
+      // All ledger rows had qty=0 and rate=0 — fall back to a single
+      // catch-all line carrying the total. Mirrors stax_buildLineItems_.
+      staxApiLines.push({
+        item: "QB Invoice #" + target,
+        details: "Invoice total",
+        quantity: 1,
+        price: ledgerAmt
+      });
+    }
+
+    var custStr = String(custName || "").trim();
+    var updatePayload = {
+      total: ledgerAmt,
+      meta: {
+        subtotal: ledgerAmt,
+        tax: 0,
+        memo: "QB #" + target + (custStr ? " - " + custStr : ""),
+        reference: target,
+        invoiceNumber: target,
+        lineItems: staxApiLines
+      }
+    };
+    var apiRes = stax_apiRequest_("PUT", "/invoice/" + staxInvId, updatePayload);
+    if (!apiRes.success) {
+      return {
+        skip: true,
+        reason: "Stax-side invoice update failed (PUT /invoice/" + staxInvId + "): " +
+                String(apiRes.error || "unknown") +
+                ". Sheet showed $" + sheetAmtNum.toFixed(2) +
+                " but CB ledger sums $" + ledgerAmt.toFixed(2) +
+                " — refusing to charge stale amount."
+      };
+    }
+
+    var newJson = "";
+    try { newJson = JSON.stringify(sheetLines); } catch (_) { newJson = "[]"; }
+
+    return {
+      updated: true,
+      newTotal: ledgerAmt,
+      newLineItemsJson: newJson,
+      oldTotal: sheetAmtNum,
+      rowDelta: sheetLines.length
+    };
+  } catch (e) {
+    return { updated: false, reason: "stax_reconcileInvoiceAmount_ error: " + (e && e.message ? e.message : String(e)) };
+  }
+}
+
+/**
  * POST runStaxCharges — Execute charges on all eligible CREATED invoices.
  * Mirrors StaxAutoPay.gs _executeChargeRun().
  * Admin-only. LockService protected. MAXIMUM CARE — real money operations.
@@ -37995,6 +38196,10 @@ function handleRunStaxCharges_(payload) {
     var colKValues = colKRange.getValues();
     var colIChanged = false, colKChanged = false;
 
+    // v38.229.0 — Hoisted out of the per-row reconcile branch so we resolve
+    // header columns once per run instead of once per mismatch.
+    var staxColsForReconcile = stax_invoiceCols_(invSheet);
+
     // Payment method cache per customer
     var pmCache = {};
 
@@ -38042,6 +38247,53 @@ function handleRunStaxCharges_(payload) {
       }
 
       stats.eligible++;
+
+      // v38.229.0 — Reconcile against CB Consolidated_Ledger before charging.
+      // If billing rows were added (or voided) on this invoice number AFTER
+      // handleQbExport_ wrote the Stax sheet row at PENDING-time, the sheet
+      // amount + Stax-side invoice are stale; /pay would under/over-collect.
+      // stax_reconcileInvoiceAmount_ refreshes Stax via PUT and signals the
+      // loop to either proceed with the new amount or skip the charge
+      // entirely (Stax PUT failed, or CB ledger now has zero Invoiced rows
+      // for this invoice number).
+      var _recOrigAmount = totalRaw;
+      var _rec = stax_reconcileInvoiceAmount_(docNum, totalRaw, staxInvId, custName);
+      if (_rec && _rec.skip) {
+        var _recReason = String(_rec.reason || "").substring(0, 180);
+        stax_appendChargeLog_(ss, docNum, staxInvId, staxCustId, custName, totalRaw,
+          "RECONCILE_BLOCKED", "", _recReason);
+        stax_appendException_(ss, docNum, custName, staxCustId, totalRaw, dueDate,
+          "RECONCILE_BLOCKED", payUrlBase + staxInvId);
+        colIValues[i][0] = "CHARGE_FAILED";
+        colKValues[i][0] = "Reconcile blocked: " + _recReason;
+        colIChanged = true; colKChanged = true;
+        stats.apiErrors++;
+        Logger.log("runStaxCharges reconcile blocked " + docNum + ": " + _recReason);
+        continue;
+      }
+      if (_rec && _rec.updated) {
+        invSheet.getRange(i + 2, staxColsForReconcile.amount).setValue(_rec.newTotal);
+        invSheet.getRange(i + 2, staxColsForReconcile.lineItems).setValue(_rec.newLineItemsJson);
+        SpreadsheetApp.flush();  // make the corrected amount visible before /pay
+        totalRaw = _rec.newTotal;
+        try {
+          supabasePatch_("stax_invoices",
+            "qb_invoice_no=eq." + encodeURIComponent(docNum),
+            {
+              amount: Number(_rec.newTotal || 0),
+              line_items_json: _rec.newLineItemsJson,
+              updated_at: new Date().toISOString()
+            }
+          );
+        } catch (_) { /* best-effort mirror */ }
+        stax_appendRunLog_(ss, "runStaxCharges:reconciled",
+          docNum + ": $" + Number(_recOrigAmount || 0).toFixed(2) + " -> $" +
+          Number(_rec.newTotal).toFixed(2) + " (" + _rec.rowDelta + " ledger rows)",
+          JSON.stringify({ docNum: docNum, oldAmount: _recOrigAmount,
+                           newAmount: _rec.newTotal, rowDelta: _rec.rowDelta }));
+        Logger.log("runStaxCharges reconciled " + docNum +
+          " from $" + _recOrigAmount + " to $" + _rec.newTotal);
+      }
 
       // SAFEGUARD 1: Pre-charge status check
       var invCheck = stax_apiRequest_("GET", "/invoice/" + staxInvId, null);
