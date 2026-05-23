@@ -2157,8 +2157,28 @@ export function Billing() {
     // Also hide at the useBilling layer so any other consumer reading `rows` sees the same optimistic state.
     hideUnbilled(allHiddenIds);
 
+    // Sort selected rows by display order (service date asc, svc code asc,
+    // item id asc) BEFORE grouping so the rows handed to GAS/SB land on the
+    // invoice + Consolidated_Ledger + QBO push in the same order the operator
+    // sees on the Billing report. Pre-fix, selRows came out of
+    // table.getSelectedRowModel() in selection-iteration order, which produced
+    // PDFs and QBO line items in a scrambled order vs. the report — operators
+    // had to mentally re-sort when reconciling.
+    const sortedSelRows = [...selRows].sort((a, b) => {
+      const ad = String(a.date || '');
+      const bd = String(b.date || '');
+      if (ad !== bd) return ad < bd ? -1 : 1;
+      const asc = String(a.svcCode || '');
+      const bsc = String(b.svcCode || '');
+      if (asc !== bsc) return asc < bsc ? -1 : 1;
+      const ai = String(a.itemId || '');
+      const bi = String(b.itemId || '');
+      if (ai !== bi) return ai < bi ? -1 : 1;
+      return 0;
+    });
+
     const groups: Record<string, { client: string; sourceSheetId: string; sidemark: string; rows: UnbilledReportRow[] }> = {};
-    for (const r of selRows) {
+    for (const r of sortedSelRows) {
       // Group by client + (optional) sidemark via invoiceGroupKey, which only
       // includes sidemark for clients with separate_by_sidemark=true. Clients
       // without the flag get one consolidated invoice across all sidemarks.
