@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.229.0 — 2026-05-23 PST — [BILLING] Stax IIF export + runStaxCharges always work from the FULL CB Consolidated_Ledger for each invoice number, never a partial snapshot of the rows the caller passed in. Two fixes in one ship — both close the same class of bug (Stax under-collects when billing rows are added to an invoice number after the original push). (1) handleQbExport_ + handleQbExcelExport_: pre-fix the optional `payload.ledgerRowIds` was used as a per-row filter on the lines emitted. So if Billing.tsx's Create Invoices flow passed only the newly-invoiced ledger row IDs (or an operator hand-picked a subset of Invoiced rows on Billing → Report and clicked Stax IIF or QB Excel), Stax received a line_items_json + Total covering only those rows even when the invoice number had additional Invoiced rows in CB. The Stax-side invoice was created with the partial Total via handleCreateStaxInvoices_ → /invoice, and the v38.171.0 PENDING-only refresh guard prevented later handleQbExport_ passes from updating it. Fix: treat `payload.ledgerRowIds` as a POINTER to the invoice numbers covered (first-pass scan resolves the IDs to invoice numbers, then the main loop emits ALL Invoiced rows for those invoice numbers regardless of whether each individual row's Ledger Row ID was in the original payload). Mirrors how handleQboCreateInvoice_ already groups by invoice number. (2) handleRunStaxCharges_: new safeguard right before /pay. New helper stax_reconcileInvoiceAmount_ sums every Invoiced ledger row for the charge target's QB Invoice #, compares to the Stax sheet's Total Amount, and if they differ by ≥ $0.01 issues PUT /invoice/<id> to refresh Stax (total + meta.lineItems) before charging — protects against rows added AFTER the original push that fix #1 cannot reach (status already flipped to CREATED so handleQbExport_'s re-write path is gated off). Writes the corrected amount + line_items_json back to the Stax Invoices sheet via header-resolved stax_invoiceCols_ and patches public.stax_invoices via supabasePatch_ so React reflects the new total. Logs a reconcile entry to the Run Log + stamps the chargelog. If the Stax PUT fails or the CB ledger has zero Invoiced rows for that invoice number (voided in CB after push), returns skip: caller marks CHARGE_FAILED + appends a RECONCILE_BLOCKED exception so the operator can intervene; no money moves. Companion notes: stats.apiErrors counts reconcile-blocked rows; no new field added to the response shape to keep this minimal. No schema change, no migration, no React change.
+   StrideAPI.gs — v38.230.0 — 2026-05-23 PST — [BILLING] Two coordinated billing fixes — both source-of-truth alignments away from CB Consolidated_Ledger snapshots toward public.billing live reads. (1) handleQboCreateInvoice_ now builds the per-invoice line items from public.billing (sorted by date asc, svc_code asc, item_id asc, filtered status!=Void) instead of scanning CB Consolidated_Ledger. Pre-fix the QBO push could land lines in scrambled order vs. the React Billing report and could include rows that drifted between CB and public.billing — the new path reads the same table React reads, with the same display sort, so QBO sees exactly what the operator sees. Customer/sub-job/payment-terms resolution still flows through clientInfoMap (CB Clients sheet); the consolVals load stays in place because qbo_checkDuplicatePush_ / qbo_writeQboInvoiceId_ / qbo_writeQboFailure_ still mutate CB. Companion React change: Billing.tsx sorts selRows by display order before handing the rows to handleCreateInvoices, so the Consolidated_Ledger writes carry the same order too. (2) handleQbExport_ + handleRegenerateIifForBatch_ generate Stax IIF as ONE TRNS + ONE SPL per invoice (was N SPL — one per service line) with the total computed live from `SELECT SUM(total) FROM public.billing WHERE invoice_no=X AND status!=Void`. Each invoice's stax_invoices row gets the live SUM in `amount`, and `line_items_json` carries a single summary line `[{name:"Stride Logistics Services", memo:"Invoice X", qty:1, rate:total, amount:total}]` — historical N-line rows stay untouched (no schema change, no migration). Removes the partial-snapshot class that caused Stax under-collects when billing rows were added/voided after the original push: the SPL is derived from the SUM at IIF time, so any subsequent billing change automatically reflects on the next push. Invoice number is preserved on Stax via the existing meta.reference + memo + the IIF DOCNUM column — payment matching unchanged. handleCreateStaxInvoices_ + handleRunStaxCharges_ already use stax_invoices.amount (not line_items_json) so charging behavior is unchanged. SB EF mirror: create-invoice-sb now accepts the React payload's full rows[] and returns updated rows in caller order; qbo-create-invoice-sb (skeleton) is unchanged because its caller-supplied lines path is GAS-side scoped today. NO change to v38.182 atomic invoice counter, no change to half-write detection, no change to Void/Reissue logic.
+   v38.229.0 — 2026-05-23 PST — [BILLING] Stax IIF export + runStaxCharges always work from the FULL CB Consolidated_Ledger for each invoice number, never a partial snapshot of the rows the caller passed in. Two fixes in one ship — both close the same class of bug (Stax under-collects when billing rows are added to an invoice number after the original push). (1) handleQbExport_ + handleQbExcelExport_: pre-fix the optional `payload.ledgerRowIds` was used as a per-row filter on the lines emitted. So if Billing.tsx's Create Invoices flow passed only the newly-invoiced ledger row IDs (or an operator hand-picked a subset of Invoiced rows on Billing → Report and clicked Stax IIF or QB Excel), Stax received a line_items_json + Total covering only those rows even when the invoice number had additional Invoiced rows in CB. The Stax-side invoice was created with the partial Total via handleCreateStaxInvoices_ → /invoice, and the v38.171.0 PENDING-only refresh guard prevented later handleQbExport_ passes from updating it. Fix: treat `payload.ledgerRowIds` as a POINTER to the invoice numbers covered (first-pass scan resolves the IDs to invoice numbers, then the main loop emits ALL Invoiced rows for those invoice numbers regardless of whether each individual row's Ledger Row ID was in the original payload). Mirrors how handleQboCreateInvoice_ already groups by invoice number. (2) handleRunStaxCharges_: new safeguard right before /pay. New helper stax_reconcileInvoiceAmount_ sums every Invoiced ledger row for the charge target's QB Invoice #, compares to the Stax sheet's Total Amount, and if they differ by ≥ $0.01 issues PUT /invoice/<id> to refresh Stax (total + meta.lineItems) before charging — protects against rows added AFTER the original push that fix #1 cannot reach (status already flipped to CREATED so handleQbExport_'s re-write path is gated off). Writes the corrected amount + line_items_json back to the Stax Invoices sheet via header-resolved stax_invoiceCols_ and patches public.stax_invoices via supabasePatch_ so React reflects the new total. Logs a reconcile entry to the Run Log + stamps the chargelog. If the Stax PUT fails or the CB ledger has zero Invoiced rows for that invoice number (voided in CB after push), returns skip: caller marks CHARGE_FAILED + appends a RECONCILE_BLOCKED exception so the operator can intervene; no money moves. Companion notes: stats.apiErrors counts reconcile-blocked rows; no new field added to the response shape to keep this minimal. No schema change, no migration, no React change.
    v38.228.1 — 2026-05-22 PST — [DOCS] Header-comment syntax hotfix for v38.228.0. The v38.228.0 entry contained a literal block-comment-close sequence inside its prose, which prematurely terminated this outer header block comment and caused clasp push to reject the file with "SyntaxError: Unexpected identifier 'a' line: 2". Rewords the phrase to remove the offending sequence. No code change beyond the header.
    v38.228.0 — 2026-05-22 PST — [DOCS] Removes all five `api_generateDocPdf_` call sites from completion / approval / release handlers in favor of the React DocRenderer (PR #507). The function definition is intentionally retained for reference. Sites disabled (each wrapped in a block comment with a dated marker, original block preserved): (1) handleCompleteShipment_ DOC_RECEIVING at ~line 17471 — `var pdfBlob = null` declaration kept so the downstream SHIPMENT_RECEIVED email send still compiles; api_sendTemplateEmail_'s `if (pdfBlob) mailOpts.attachments = [pdfBlob]` guard at line 18456 means a null blob sends the email with no attachment, matching the React-side flow where DocRenderer hosts the PDF in public.documents and the email CTAs deep-link there. (2) handleProcessRepairApproval_ DOC_REPAIR_WORK_ORDER at ~line 19550 (only fires on the Approve branch — Decline path unchanged). (3) handleStartRepair_ DOC_REPAIR_WORK_ORDER at ~line 20208 — this site never attached the PDF to an email (storage-only generation for the Docs tab), so removing it is a pure no-op for outbound comms. (4) handleProcessWcRelease_ DOC_WILL_CALL_RELEASE at ~line 21221. (5) handleGenerateWcDoc_ DOC_WILL_CALL_RELEASE at ~line 21698 — the dedicated reprint endpoint, now a no-op that still returns success for any straggling pre-deploy React callers; expected to be deleted entirely once the React renderer is the only caller in the wild. DOC_INVOICE path (jsPDF in React via `api_exportDocAsPdfBlob_`-adjacent flow) NOT touched per scope. No schema / RLS / React change in this PR; companion React changes for DocRenderer landed in PR #507.
    v38.227.0 — 2026-05-21 PST — [MIGRATION-P3/MIG-016] Sixth per-table reverse-writethrough writer: `__writeThroughReverseTasks_` replaces the stub for `tasks` in REVERSE_WRITETHROUGH_TABLES_. Insert + update upsert pattern by Task ID, mirrors REVERSE_TASK_FIELDS_ (task_id, type, status, item_id, vendor, description, location, sidemark, shipment_number, item_notes, task_notes, result, completed_at, cancelled_at, started_at, assigned_to, billed, due_date, priority, created). Required by the new SB-primary `batch-create-tasks-sb` Edge Function — without it the SB EF's per-task sheet-mirror fires hit the legacy stub and land in gs_sync_events. Auto-runs api_ensureTaskColumns_ on insert so Due Date + Priority columns exist on tenants whose template predates v38.214.0. Idempotent: re-running with the same payload either no-ops (already-matches) or writes the same cells (deterministic).
@@ -23893,25 +23894,114 @@ function handleQbExport_(payload) {
     });
   }
 
-  // v38.78.0 — fetch Reference for all ledger row IDs being exported, append to
-  // each line's memo as "[Ref: xxx]" when non-empty. Single batched Supabase
-  // query; silently degrades to no-op if Supabase is unreachable.
-  var allLrids = [];
-  for (var inv0 = 0; inv0 < invoiceOrder.length; inv0++) {
-    var ls = invoiceMap[invoiceOrder[inv0]].lines;
-    for (var ll = 0; ll < ls.length; ll++) { if (ls[ll].ledgerRowId) allLrids.push(ls[ll].ledgerRowId); }
-  }
-  var refByLrid = api_fetchBillingReferencesByLedgerIds_(allLrids);
-  for (var invR = 0; invR < invoiceOrder.length; invR++) {
-    var rLines = invoiceMap[invoiceOrder[invR]].lines;
-    for (var rl = 0; rl < rLines.length; rl++) {
-      var ref = refByLrid[rLines[rl].ledgerRowId] || "";
-      if (ref) rLines[rl].memo = (rLines[rl].memo ? rLines[rl].memo + " " : "") + "[Ref: " + ref + "]";
-    }
-  }
-
   if (!invoiceOrder.length) {
     return errorResponse_("No Invoiced rows found to export", "NOT_FOUND");
+  }
+
+  // 2026-05-23 — Stax IIF simplification. Pre-fix this function emitted one
+  // TRNS + N SPL per invoice (one SPL per service line), and snapshot N
+  // entries to stax_invoices.line_items_json. That coupling caused the
+  // partial-snapshot class of bugs — Stax under-collected when billing
+  // rows were added (or voided) for an invoice number after the original
+  // Stax push (the v38.171.0 PENDING-only refresh guard locks
+  // line_items_json at first push, so the snapshot never re-syncs).
+  //
+  // New shape: ONE TRNS + ONE SPL per invoice. Total = LIVE SUM of
+  // public.billing.total WHERE invoice_no=X AND status!=Void, fetched at
+  // export time. stax_invoices.amount + a SINGLE-element line_items_json
+  // both carry that same live SUM, so any subsequent billing edit shows
+  // up on the next IIF re-export. Stax customer + Stride invoice number
+  // are preserved (DOCNUM column, meta.reference, memo) so the payment
+  // → QBO reconciliation flow is unchanged.
+  //
+  // Income account / item: take the qbAccount + qbItemName from the
+  // FIRST line we collected for the invoice (it's whatever svc code
+  // came first in CB; for storage invoices that's the STOR mapping).
+  // The single SPL still maps cleanly to QBO's income account when the
+  // operator later imports the IIF on the QBO side.
+  var sbSumByInvNo = {};
+  var sbReadOk = false;
+  try {
+    if (invoiceOrder.length > 0) {
+      var sumInList = invoiceOrder
+        .map(function(no) { return '"' + String(no).replace(/"/g, '') + '"'; })
+        .join(',');
+      var sumSel = supabaseSelect_(
+        "billing",
+        "invoice_no=in.(" + sumInList + ")&status=neq.Void",
+        "invoice_no,total"
+      );
+      if (sumSel.ok) {
+        sbReadOk = true;
+        for (var ssi = 0; ssi < sumSel.rows.length; ssi++) {
+          var ssNo = String(sumSel.rows[ssi].invoice_no || "").trim();
+          if (!ssNo) continue;
+          var ssTotal = Number(sumSel.rows[ssi].total || 0);
+          sbSumByInvNo[ssNo] = (sbSumByInvNo[ssNo] || 0) + (isNaN(ssTotal) ? 0 : ssTotal);
+        }
+      } else {
+        Logger.log("handleQbExport_ Supabase SUM read returned ok=false — falling back to CB row totals for the IIF (snapshot risk).");
+      }
+    }
+  } catch (sumErr) {
+    Logger.log("handleQbExport_ Supabase SUM read threw (non-fatal): " + sumErr.message);
+  }
+
+  // Collapse invoiceMap[*].lines to a single summary line per invoice.
+  // Pull the QB account/item from the first CB line; pull the total from
+  // the live Supabase SUM. When the Supabase read succeeded but an
+  // invoice's SUM is missing OR zero, the invoice is fully voided in
+  // billing — drop it from invoiceOrder so the IIF doesn't push $0 to
+  // Stax. When the Supabase read failed entirely, fall back to the CB
+  // sum (best we can do under degraded conditions; matches the
+  // pre-2026-05-23 behavior).
+  var keptInvoiceOrder = [];
+  var skippedFullyVoided = 0;
+  for (var ciInv = 0; ciInv < invoiceOrder.length; ciInv++) {
+    var cInvNoKey = invoiceOrder[ciInv];
+    var cInvData = invoiceMap[cInvNoKey];
+    if (!cInvData.lines.length) continue;
+    var firstLine = cInvData.lines[0];
+    var cbSumForInvoice = 0;
+    for (var cli = 0; cli < cInvData.lines.length; cli++) {
+      cbSumForInvoice += Number(cInvData.lines[cli].total || 0);
+    }
+    var liveTotal;
+    if (sbReadOk) {
+      // Authoritative read: missing key = no non-Void rows = fully voided.
+      liveTotal = Object.prototype.hasOwnProperty.call(sbSumByInvNo, cInvNoKey)
+        ? sbSumByInvNo[cInvNoKey]
+        : 0;
+      if (!(liveTotal > 0)) {
+        skippedFullyVoided++;
+        delete invoiceMap[cInvNoKey];
+        continue;
+      }
+    } else {
+      liveTotal = cbSumForInvoice;
+    }
+    cInvData.lines = [{
+      svcName:     "Stride Logistics Services",
+      memo:        "Invoice " + cInvNoKey,
+      qty:         1,
+      rate:        liveTotal,
+      total:       liveTotal,
+      qbAcct:      firstLine.qbAcct,
+      qbItemName:  firstLine.qbItemName || "Stride Logistics Services",
+      sidemark:    firstLine.sidemark || "",
+      svcDate:     firstLine.svcDate || cInvData.invDate,
+      ledgerRowId: ""
+    }];
+    keptInvoiceOrder.push(cInvNoKey);
+  }
+  invoiceOrder = keptInvoiceOrder;
+
+  if (!invoiceOrder.length) {
+    return errorResponse_(
+      "No Invoiced rows found to export" +
+        (skippedFullyVoided > 0 ? " (" + skippedFullyVoided + " invoice(s) skipped because all their billing rows are Void)" : ""),
+      "NOT_FOUND"
+    );
   }
 
   // Build IIF
@@ -24300,6 +24390,12 @@ function handleQbExport_(payload) {
     staxImported: staxImported,
     staxUpdated: staxUpdated,
     staxSkipped: staxSkipped,
+    // 2026-05-23 — count of invoices the operator selected on Billing
+    // that we DIDN'T push because public.billing showed zero non-Void
+    // rows for that invoice number (fully voided post-creation). React
+    // surfaces this in the Stax export result toast so the operator can
+    // reconcile expected-vs-actual invoice counts.
+    skippedFullyVoided: typeof skippedFullyVoided === "number" ? skippedFullyVoided : 0,
     batchId: batchPersisted ? batchId : null
   });
 }
@@ -24423,11 +24519,63 @@ function handleRegenerateIifForBatch_(payload) {
       };
     }
 
-    // Build the IIF the same way handleQbExport_ does. line_items_json
-    // already carries name/memo/qty/rate/amount per line, so most of
-    // the per-line work is just re-formatting. svc_code-to-account
-    // mapping comes from QB_Service_Mapping; if a line's name doesn't
-    // resolve to a code we fall back to a generic income account.
+    // 2026-05-23 — Simplified Stax IIF (matches handleQbExport_'s
+    // collapse). Generate ONE TRNS + ONE SPL per invoice with a LIVE
+    // SUM from public.billing.total WHERE invoice_no=X AND status!=Void.
+    // Falls back to stax_invoices.amount (the most recent push's total)
+    // when Supabase is unreachable so the regenerator still produces
+    // an IIF — operators can always re-export from Billing later to get
+    // the truly-live SUM.
+    //
+    // Income account / item: the first mapping entry from QB_Service_Mapping
+    // (alphabetical by svc code) acts as the default. Stride's chart of
+    // accounts only routes Stride invoices to one or two income accounts
+    // and the IIF is for Stax-side bookkeeping only — the QBO push
+    // already mapped per-svc-code via handleQboCreateInvoice_.
+    var defaultAcctEntry = null;
+    var mappingKeys = Object.keys(mapping).sort();
+    for (var dmi = 0; dmi < mappingKeys.length; dmi++) {
+      if (mapping[mappingKeys[dmi]] && mapping[mappingKeys[dmi]].qbAccount) {
+        defaultAcctEntry = mapping[mappingKeys[dmi]];
+        break;
+      }
+    }
+    var defaultQbAcct = (defaultAcctEntry && defaultAcctEntry.qbAccount) || "Stride Logistics Income";
+    var defaultQbItem = (defaultAcctEntry && defaultAcctEntry.qbItemName) || "Stride Logistics Services";
+
+    // Pull live SUMs in one batch — invoice numbers come straight from
+    // the batch's stax_invoices rows.
+    var liveSumByInvNo = {};
+    var sbReadOk = false;
+    try {
+      var batchInvoiceNos = [];
+      for (var bni = 0; bni < invoices.length; bni++) {
+        var bn = String(invoices[bni].qb_invoice_no || "").trim();
+        if (bn) batchInvoiceNos.push(bn);
+      }
+      if (batchInvoiceNos.length > 0) {
+        var bnIn = batchInvoiceNos
+          .map(function(n) { return '"' + String(n).replace(/"/g, '') + '"'; })
+          .join(',');
+        var bnSel = supabaseSelect_(
+          "billing",
+          "invoice_no=in.(" + bnIn + ")&status=neq.Void",
+          "invoice_no,total"
+        );
+        if (bnSel.ok) {
+          sbReadOk = true;
+          for (var bnsi = 0; bnsi < bnSel.rows.length; bnsi++) {
+            var bnsNo = String(bnSel.rows[bnsi].invoice_no || "").trim();
+            if (!bnsNo) continue;
+            var bnsTotal = Number(bnSel.rows[bnsi].total || 0);
+            liveSumByInvNo[bnsNo] = (liveSumByInvNo[bnsNo] || 0) + (isNaN(bnsTotal) ? 0 : bnsTotal);
+          }
+        }
+      }
+    } catch (lsErr) {
+      Logger.log("handleRegenerateIifForBatch_ live-SUM read threw (non-fatal): " + lsErr.message);
+    }
+
     var iifLines = [];
     iifLines.push(["!TRNS","TRNSID","TRNSTYPE","DATE","ACCNT","NAME","CLASS","AMOUNT","DOCNUM","MEMO","CLEAR","TOPRINT","ADDR1","ADDR2","ADDR3","ADDR4","DUEDATE","TERMS","PAID"].join("\t"));
     iifLines.push(["!SPL","SPLID","TRNSTYPE","DATE","ACCNT","NAME","AMOUNT","DOCNUM","MEMO","QNTY","PRICE","INVITEM","TAXABLE"].join("\t"));
@@ -24435,36 +24583,40 @@ function handleRegenerateIifForBatch_(payload) {
     var lineCount = 0;
     for (var ii = 0; ii < invoices.length; ii++) {
       var inv = invoices[ii];
-      var lines;
-      try { lines = JSON.parse(inv.line_items_json || "[]"); } catch (_) { lines = []; }
-      if (!lines.length) continue;
-      var totalAmt = Number(inv.amount || 0);
+      var invNoKey = String(inv.qb_invoice_no || "").trim();
+      // Total resolution:
+      //   - Supabase read succeeded AND invoice has rows: use the live SUM.
+      //   - Supabase read succeeded AND invoice has NO rows: fully voided,
+      //     skip (don't emit a stale snapshot total).
+      //   - Supabase read failed entirely: fall back to inv.amount (the
+      //     snapshot at first push). Better than emitting nothing during
+      //     a Supabase outage when the operator just wants to regenerate
+      //     a historical batch's IIF.
+      var totalAmt;
+      if (sbReadOk) {
+        totalAmt = Object.prototype.hasOwnProperty.call(liveSumByInvNo, invNoKey)
+          ? liveSumByInvNo[invNoKey]
+          : 0;
+      } else {
+        totalAmt = Number(inv.amount || 0);
+      }
+      // Skip invoices with no billing rows — emitting a $0 IIF row would
+      // post $0 to Stax which is a silent under-collect.
+      if (!(totalAmt > 0)) continue;
       iifLines.push([
         "TRNS", "", "INVOICE", inv.invoice_date || "", "Accounts Receivable",
-        api_qbEsc_(inv.customer || ""), "", totalAmt.toFixed(2), api_qbEsc_(inv.qb_invoice_no || ""),
-        "Stride Logistics — " + (inv.qb_invoice_no || ""),
+        api_qbEsc_(inv.customer || ""), "", totalAmt.toFixed(2), api_qbEsc_(invNoKey),
+        "Stride Logistics — " + invNoKey,
         "N", "Y", "", "", "", "", inv.due_date || "", "", "N"
       ].join("\t"));
-      for (var li = 0; li < lines.length; li++) {
-        var line = lines[li];
-        var memo = String(line.memo || line.name || "");
-        var qty = Number(line.qty || 1);
-        var rate = Number(line.rate || 0);
-        var lineTotal = Number(line.amount != null ? line.amount : (qty * rate));
-        // Best-effort svc-code lookup from the line name; fall back to "Storage Charges" / first mapped account.
-        var svcUpper = String(line.name || "").toUpperCase();
-        var svcMap = mapping[svcUpper] || mapping[svcUpper.replace(/\s+.*$/, "")] || null;
-        var qbAcct = (svcMap && svcMap.qbAccount) || "Stride Logistics Income";
-        var qbItem = (svcMap && svcMap.qbItemName) || line.name || "";
-        iifLines.push([
-          "SPL", "", "INVOICE", inv.invoice_date || "",
-          api_qbEsc_(qbAcct), api_qbEsc_(inv.customer || ""),
-          (lineTotal * -1).toFixed(2), api_qbEsc_(inv.qb_invoice_no || ""),
-          api_qbEsc_(memo), qty, rate.toFixed(2),
-          api_qbEsc_(qbItem), "N"
-        ].join("\t"));
-        lineCount++;
-      }
+      iifLines.push([
+        "SPL", "", "INVOICE", inv.invoice_date || "",
+        api_qbEsc_(defaultQbAcct), api_qbEsc_(inv.customer || ""),
+        (totalAmt * -1).toFixed(2), api_qbEsc_(invNoKey),
+        api_qbEsc_("Invoice " + invNoKey), 1, totalAmt.toFixed(2),
+        api_qbEsc_(defaultQbItem), "N"
+      ].join("\t"));
+      lineCount++;
       iifLines.push("ENDTRNS");
     }
     var iifContent = iifLines.join("\r\n");
@@ -38007,78 +38159,60 @@ function handleCreateStaxInvoices_(payload) {
  */
 function stax_reconcileInvoiceAmount_(docNum, sheetAmt, staxInvId, custName) {
   try {
-    var cbId = prop_("CB_SPREADSHEET_ID");
-    if (!cbId) return { updated: false, reason: "CB_SPREADSHEET_ID not configured" };
-    var cbSS = SpreadsheetApp.openById(cbId);
-    var consolSh = cbSS.getSheetByName("Consolidated_Ledger");
-    if (!consolSh || consolSh.getLastRow() < 2) {
-      return { updated: false, reason: "Consolidated_Ledger empty or missing" };
-    }
-    var data = consolSh.getRange(1, 1, consolSh.getLastRow(), consolSh.getLastColumn()).getValues();
-    var hdr = {};
-    data[0].forEach(function(h, i) { hdr[String(h).trim().toUpperCase()] = i; });
-    var cStatus = hdr["STATUS"], cInvNo = hdr["INVOICE #"], cTotal = hdr["TOTAL"],
-        cSvcCode = hdr["SVC CODE"], cSvcName = hdr["SVC NAME"],
-        cItemId = hdr["ITEM ID"], cQty = hdr["QTY"], cRate = hdr["RATE"],
-        cNotes = hdr["ITEM NOTES"], cSidemark = hdr["SIDEMARK"];
-    if (cStatus === undefined || cInvNo === undefined || cTotal === undefined) {
-      return { updated: false, reason: "Consolidated_Ledger missing Status/Invoice #/Total columns" };
-    }
-
     var target = String(docNum || "").trim();
     if (!target) return { updated: false, reason: "Empty docNum" };
 
+    // 2026-05-23 — switched the source of truth from CB Consolidated_Ledger
+    // (which drifts behind public.billing after voids/reissues — see
+    // v38.222.0 reconcileCbFromBilling_) to public.billing directly.
+    // Pre-fix, a voided row that hadn't been propagated to CB would be
+    // re-summed here and inflate the Stax amount.
+    //
+    // Also matches the simplified-Stax shape (one summary line per
+    // invoice — line_items_json is single-element, total is the live
+    // SUM). The Stax PUT body uses one meta.lineItems entry.
     var ledgerSum = 0;
-    var sheetLines = [];   // shape matches handleQbExport_'s sLineItems writes
-    var staxApiLines = []; // shape matches stax_buildLineItems_'s output
-    for (var i = 1; i < data.length; i++) {
-      var s = String(data[i][cStatus] || "").trim().toUpperCase();
-      if (s !== "INVOICED") continue;
-      var inv = String(data[i][cInvNo] || "").trim();
-      if (inv !== target) continue;
-
-      var qty = cQty !== undefined ? (Number(data[i][cQty]) || 1) : 1;
-      var rate = cRate !== undefined ? Number(data[i][cRate] || 0) : 0;
-      var total = Number(data[i][cTotal] || 0);
-      var svcName = cSvcName !== undefined ? String(data[i][cSvcName] || "").trim() : "";
-      var svcCode = cSvcCode !== undefined ? String(data[i][cSvcCode] || "").trim().toUpperCase() : "";
-      var notes = cNotes !== undefined ? String(data[i][cNotes] || "").trim() : "";
-      var sidemark = cSidemark !== undefined ? String(data[i][cSidemark] || "").trim() : "";
-      var itemId = cItemId !== undefined ? String(data[i][cItemId] || "").trim() : "";
-
-      var memoParts = [];
-      if (svcName) memoParts.push(svcName);
-      if (sidemark) memoParts.push(sidemark);
-      if (itemId) memoParts.push(itemId);
-      if (notes) memoParts.push(notes);
-      var memo = memoParts.join(" - ");
-
-      ledgerSum += total;
-      sheetLines.push({
-        name: svcName || svcCode || "Line",
-        memo: memo,
-        qty: qty,
-        rate: rate,
-        amount: Number(total || 0)
-      });
-
-      var price = Math.abs(rate || 0);
-      if (!price && qty) price = Math.abs(total || 0) / Math.max(1, qty);
-      if (price > 0) {
-        staxApiLines.push({
-          item: svcName || svcCode || ("Line " + (sheetLines.length)),
-          details: memo,
-          quantity: qty,
-          price: price
-        });
+    var rowCount = 0;
+    var sbSel = supabaseSelect_(
+      "billing",
+      "invoice_no=eq." + encodeURIComponent(target) + "&status=neq.Void",
+      "total"
+    );
+    if (sbSel.ok) {
+      for (var sri = 0; sri < sbSel.rows.length; sri++) {
+        var srt = Number(sbSel.rows[sri].total || 0);
+        if (!isNaN(srt)) ledgerSum += srt;
+      }
+      rowCount = sbSel.rows.length;
+    } else {
+      // CB fallback ONLY when Supabase is unreachable — last-resort
+      // safety so a Supabase outage doesn't block all charge runs.
+      var cbId = prop_("CB_SPREADSHEET_ID");
+      if (!cbId) return { updated: false, reason: "Supabase unreachable + CB_SPREADSHEET_ID not configured" };
+      var cbSS = SpreadsheetApp.openById(cbId);
+      var consolSh = cbSS.getSheetByName("Consolidated_Ledger");
+      if (consolSh && consolSh.getLastRow() >= 2) {
+        var data = consolSh.getRange(1, 1, consolSh.getLastRow(), consolSh.getLastColumn()).getValues();
+        var hdr = {};
+        data[0].forEach(function(h, i) { hdr[String(h).trim().toUpperCase()] = i; });
+        var cStatus = hdr["STATUS"], cInvNo = hdr["INVOICE #"], cTotal = hdr["TOTAL"];
+        if (cStatus !== undefined && cInvNo !== undefined && cTotal !== undefined) {
+          for (var i = 1; i < data.length; i++) {
+            var s = String(data[i][cStatus] || "").trim().toUpperCase();
+            if (s !== "INVOICED") continue;
+            if (String(data[i][cInvNo] || "").trim() !== target) continue;
+            ledgerSum += Number(data[i][cTotal] || 0);
+            rowCount++;
+          }
+        }
       }
     }
 
-    if (sheetLines.length === 0) {
+    if (rowCount === 0) {
       return {
         skip: true,
-        reason: "No Invoiced ledger rows for " + target +
-                " — invoice may have been voided in CB. Charge skipped."
+        reason: "No non-Void billing rows for " + target +
+                " — invoice may have been fully voided. Charge skipped."
       };
     }
 
@@ -38088,16 +38222,21 @@ function stax_reconcileInvoiceAmount_(docNum, sheetAmt, staxInvId, custName) {
       return { updated: false };
     }
 
-    if (staxApiLines.length === 0) {
-      // All ledger rows had qty=0 and rate=0 — fall back to a single
-      // catch-all line carrying the total. Mirrors stax_buildLineItems_.
-      staxApiLines.push({
-        item: "QB Invoice #" + target,
-        details: "Invoice total",
-        quantity: 1,
-        price: ledgerAmt
-      });
-    }
+    // Single-line summary — matches the simplified Stax IIF shape.
+    var summaryLine = {
+      name: "Stride Logistics Services",
+      memo: "Invoice " + target,
+      qty: 1,
+      rate: ledgerAmt,
+      amount: ledgerAmt
+    };
+    var sheetLines = [summaryLine];
+    var staxApiLines = [{
+      item: "QB Invoice #" + target,
+      details: "Invoice " + target,
+      quantity: 1,
+      price: ledgerAmt
+    }];
 
     var custStr = String(custName || "").trim();
     var updatePayload = {
@@ -43186,39 +43325,215 @@ function handleQboCreateInvoice_(payload) {
     }
   } catch (_) { /* non-critical */ }
 
-  // Build filter
-  var filterIds = {};
-  ledgerRowIds.forEach(function(id) { filterIds[String(id).trim()] = true; });
+  // 2026-05-23 — Source the per-invoice line items from public.billing
+  // (Supabase) instead of CB Consolidated_Ledger. Supabase billing is the
+  // post-MIG-005 authority for billing rows; CB carries snapshot drift
+  // (handleCreateInvoice_'s CB-write dedupe-skips when a ledger row
+  // already exists, voids/reissues don't touch CB) which produced QBO
+  // pushes that didn't match the React Billing Report.
+  //
+  // The CB sheet (consolVals/consolHdr) is still loaded above because
+  // qbo_checkDuplicatePush_, qbo_writeQboInvoiceId_, and qbo_writeQboFailure_
+  // mutate the QBO Invoice ID/Status columns on Consolidated_Ledger and
+  // still need that scan window. clientInfoMap (CB Clients sheet) provides
+  // the QB customer name + sub-job + payment terms mapping.
+  //
+  // Order: service date asc, svc_code asc, item_id asc — matches the
+  // React Billing report's default display sort.
+  // Filter: status != 'Void' (Void rows must never land on a new QBO push).
+
+  // Step 1: resolve the caller's ledger_row_ids → invoice_no set via the
+  // same Supabase read the pre-reconcile already did. We re-query to keep
+  // the two passes independent — pre-reconcile is wrapped in try/catch
+  // that may have failed silently.
+  var resolvedInvoiceNos = {};
+  var sbResolveOk = false;
+  try {
+    var lrInList = ledgerRowIds
+      .map(function(id) { return String(id || "").trim(); })
+      .filter(function(id) { return id && /^[A-Za-z0-9_\-]+$/.test(id); })
+      .map(function(id) { return '"' + id + '"'; })
+      .join(',');
+    if (lrInList) {
+      var invNoSel = supabaseSelect_(
+        "billing",
+        "ledger_row_id=in.(" + lrInList + ")&invoice_no=not.is.null&status=neq.Void",
+        "invoice_no"
+      );
+      if (invNoSel.ok) {
+        sbResolveOk = true;
+        for (var rin = 0; rin < invNoSel.rows.length; rin++) {
+          var rinNo = String(invNoSel.rows[rin].invoice_no || "").trim();
+          if (rinNo) resolvedInvoiceNos[rinNo] = true;
+        }
+      }
+    }
+  } catch (resolveErr) {
+    Logger.log("handleQboCreateInvoice_ Supabase invoice-no resolve threw: " + resolveErr.message);
+  }
 
   // Group ledger rows by Invoice #
   var invoiceGroups = {};  // invoiceNo → { clientName, sidemark, lineItems, invoiceDate, dueDate }
 
-  for (var i = 1; i < consolVals.length; i++) {
-    var status = String(consolVals[i][consolHdr["STATUS"]] || "").trim().toUpperCase();
-    if (status !== "INVOICED") continue;
-
-    if (consolHdr["LEDGER ROW ID"] !== undefined) {
-      var lrid = String(consolVals[i][consolHdr["LEDGER ROW ID"]] || "").trim();
-      if (!lrid || !filterIds[lrid]) continue;
+  // Step 2: fetch every billing row for the resolved invoice numbers from
+  // Supabase, ordered (date, svc_code, item_id) so the QBO line items
+  // land in the same order the operator sees on the Billing report.
+  // Filter status != 'Void' so historically voided rows are excluded.
+  var sbInvoiceRows = [];
+  var sbLineFetchOk = false;
+  var resolvedInvoiceNoList = Object.keys(resolvedInvoiceNos);
+  if (sbResolveOk && resolvedInvoiceNoList.length > 0) {
+    try {
+      var invInFilter = resolvedInvoiceNoList
+        .map(function(no) { return '"' + String(no).replace(/"/g, '') + '"'; })
+        .join(',');
+      var lineSel = supabaseSelect_(
+        "billing",
+        "invoice_no=in.(" + invInFilter + ")&status=neq.Void&order=date.asc,svc_code.asc,item_id.asc",
+        "ledger_row_id,invoice_no,client_name,date,svc_code,svc_name,item_id,description,item_class,qty,rate,total,item_notes,sidemark,task_id,repair_id,shipment_number,category"
+      );
+      if (lineSel.ok) {
+        sbLineFetchOk = true;
+        sbInvoiceRows = lineSel.rows;
+      } else {
+        Logger.log("handleQboCreateInvoice_ Supabase line fetch returned ok=false — falling back to CB Consolidated_Ledger scan.");
+      }
+    } catch (fetchErr) {
+      Logger.log("handleQboCreateInvoice_ Supabase line fetch threw: " + fetchErr.message);
     }
+  } else if (!sbResolveOk) {
+    Logger.log("handleQboCreateInvoice_ Supabase invoice-no resolve failed — falling back to CB Consolidated_Ledger scan.");
+  }
 
-    var invNo = String(consolVals[i][consolHdr["INVOICE #"]] || "").trim();
-    var client = String(consolVals[i][consolHdr["CLIENT"]] || "").trim();
+  // Defense-in-depth fallback (landmine #14): if either Supabase read
+  // failed or returned zero rows when we expected lines (e.g. all rows
+  // genuinely voided in billing — let CB tell us instead of silently
+  // dropping the push), run the legacy CB-scan grouping. Pre-2026-05-23
+  // this was the ONLY path. The fallback is essentially free — consolVals
+  // is already loaded above for qbo_writeQboInvoiceId_ / duplicate-push
+  // checks. CB drift (the reason for the Supabase-first path) is rare
+  // versus a Supabase transient — the fallback errs on the side of
+  // pushing SOMETHING the operator can reconcile rather than silently
+  // returning "No matching Invoiced rows".
+  var useCbFallback = !sbLineFetchOk || sbInvoiceRows.length === 0;
+  if (useCbFallback) {
+    var filterIds = {};
+    ledgerRowIds.forEach(function(id) { filterIds[String(id).trim()] = true; });
+
+    for (var ci = 1; ci < consolVals.length; ci++) {
+      var ciStatus = String(consolVals[ci][consolHdr["STATUS"]] || "").trim().toUpperCase();
+      if (ciStatus !== "INVOICED") continue;
+
+      if (consolHdr["LEDGER ROW ID"] !== undefined) {
+        var ciLrid = String(consolVals[ci][consolHdr["LEDGER ROW ID"]] || "").trim();
+        if (!ciLrid || !filterIds[ciLrid]) continue;
+      }
+
+      var ciInvNo = String(consolVals[ci][consolHdr["INVOICE #"]] || "").trim();
+      var ciClient = String(consolVals[ci][consolHdr["CLIENT"]] || "").trim();
+      if (!ciInvNo || !ciClient) continue;
+
+      var rawSvcCi = consolHdr["SVC CODE"] !== undefined ? consolVals[ci][consolHdr["SVC CODE"]] : "";
+      var ciSvcCode = (rawSvcCi instanceof Date) ? "" : String(rawSvcCi || "").trim().toUpperCase();
+      var ciDateVal = consolHdr["DATE"] !== undefined ? consolVals[ci][consolHdr["DATE"]] : "";
+      var ciQty = consolHdr["QTY"] !== undefined ? (Number(consolVals[ci][consolHdr["QTY"]]) || 1) : 1;
+      var ciRate = consolHdr["RATE"] !== undefined ? Number(consolVals[ci][consolHdr["RATE"]] || 0) : 0;
+      var ciTotal = Number(consolVals[ci][consolHdr["TOTAL"]] || 0);
+      var ciDescription = consolHdr["DESCRIPTION"] !== undefined ? String(consolVals[ci][consolHdr["DESCRIPTION"]] || "").trim() : "";
+      var ciSidemark = consolHdr["SIDEMARK"] !== undefined ? String(consolVals[ci][consolHdr["SIDEMARK"]] || "").trim() : "";
+      var ciItemNotes = consolHdr["ITEM NOTES"] !== undefined ? String(consolVals[ci][consolHdr["ITEM NOTES"]] || "").trim() : "";
+      var ciItemId = consolHdr["ITEM ID"] !== undefined ? String(consolVals[ci][consolHdr["ITEM ID"]] || "").trim() : "";
+      var ciLedgerRowId = consolHdr["LEDGER ROW ID"] !== undefined ? String(consolVals[ci][consolHdr["LEDGER ROW ID"]] || "").trim() : "";
+
+      if (!ciSidemark && ciLedgerRowId && sidemarkFallback[ciLedgerRowId]) {
+        ciSidemark = sidemarkFallback[ciLedgerRowId];
+      }
+
+      var ciExportDesc = ciDescription;
+      if (ciSvcCode === "STOR") {
+        var ciPeriodStr = "";
+        if (ciItemNotes) {
+          var ciPm = ciItemNotes.match(/(\d{2}\/\d{2}\/\d{2,4})\s+to\s+(\d{2}\/\d{2}\/\d{2,4})/);
+          if (ciPm) ciPeriodStr = ciPm[1] + " to " + ciPm[2];
+        }
+        var ciParts = [];
+        if (ciPeriodStr) ciParts.push("Storage " + ciPeriodStr);
+        ciParts.push(ciQty + " day(s)");
+        if (ciDescription) ciParts.push(ciDescription);
+        if (ciItemId) ciParts.push("Item " + ciItemId);
+        ciExportDesc = ciParts.join(" — ");
+      } else {
+        var ciDescParts = [];
+        if (ciSidemark) ciDescParts.push(ciSidemark);
+        if (ciItemId) ciDescParts.push("Item " + ciItemId);
+        if (ciDescription) ciDescParts.push(ciDescription);
+        ciExportDesc = ciDescParts.join(" — ");
+      }
+
+      var ciClientInfo = clientInfoMap[ciClient.toUpperCase()] || {};
+      var ciQbCustName = ciClientInfo.qbCustomerName || ciClient;
+      var ciPayTerms = ciClientInfo.terms || "";
+      var ciInvDateStr = Utilities.formatDate(qboTodayDate, Session.getScriptTimeZone(), "yyyy-MM-dd");
+      var ciDueDateStr = ciInvDateStr;
+      var ciTermsMatch = String(ciPayTerms).toUpperCase().match(/NET\s*(\d+)/);
+      if (ciTermsMatch) {
+        var ciDueObj = new Date(qboTodayDate.getTime());
+        ciDueObj.setDate(ciDueObj.getDate() + parseInt(ciTermsMatch[1], 10));
+        ciDueDateStr = Utilities.formatDate(ciDueObj, Session.getScriptTimeZone(), "yyyy-MM-dd");
+      }
+
+      if (ciSvcCode !== "STOR") {
+        var ciBillingDateStr = api_qbFmtDate_(ciDateVal);
+        if (ciBillingDateStr && ciExportDesc && ciExportDesc.indexOf(ciBillingDateStr) === -1) {
+          ciExportDesc = ciExportDesc + " — Billed " + ciBillingDateStr;
+        }
+      }
+
+      if (!invoiceGroups[ciInvNo]) {
+        invoiceGroups[ciInvNo] = {
+          strideInvoiceNumber: ciInvNo,
+          clientName: ciQbCustName,
+          sidemark: ciSidemark,
+          separateBySidemark: ciClientInfo.separateBySidemark === true,
+          invoiceDate: ciInvDateStr,
+          dueDate: ciDueDateStr,
+          lineItems: [],
+          ledgerRowIds: []
+        };
+      }
+      invoiceGroups[ciInvNo].lineItems.push({
+        svcCode: ciSvcCode,
+        description: ciExportDesc,
+        qty: ciQty,
+        rate: ciRate,
+        total: ciTotal
+      });
+      if (ciLedgerRowId) invoiceGroups[ciInvNo].ledgerRowIds.push(ciLedgerRowId);
+      if (ciSidemark && !invoiceGroups[ciInvNo].sidemark) {
+        invoiceGroups[ciInvNo].sidemark = ciSidemark;
+      }
+    }
+  }
+
+  for (var sbi = 0; sbi < sbInvoiceRows.length; sbi++) {
+    var sbRow = sbInvoiceRows[sbi];
+    var invNo = String(sbRow.invoice_no || "").trim();
+    var client = String(sbRow.client_name || "").trim();
     if (!invNo || !client) continue;
 
-    var rawSvc = consolHdr["SVC CODE"] !== undefined ? consolVals[i][consolHdr["SVC CODE"]] : "";
-    var svcCode = (rawSvc instanceof Date) ? "" : String(rawSvc || "").trim().toUpperCase();
-    var dateVal = consolHdr["DATE"] !== undefined ? consolVals[i][consolHdr["DATE"]] : "";
-    var qty = consolHdr["QTY"] !== undefined ? (Number(consolVals[i][consolHdr["QTY"]]) || 1) : 1;
-    var rate = consolHdr["RATE"] !== undefined ? Number(consolVals[i][consolHdr["RATE"]] || 0) : 0;
-    var total = Number(consolVals[i][consolHdr["TOTAL"]] || 0);
-    var description = consolHdr["DESCRIPTION"] !== undefined ? String(consolVals[i][consolHdr["DESCRIPTION"]] || "").trim() : "";
-    var sidemark = consolHdr["SIDEMARK"] !== undefined ? String(consolVals[i][consolHdr["SIDEMARK"]] || "").trim() : "";
-    var itemNotes = consolHdr["ITEM NOTES"] !== undefined ? String(consolVals[i][consolHdr["ITEM NOTES"]] || "").trim() : "";
-    var itemId = consolHdr["ITEM ID"] !== undefined ? String(consolVals[i][consolHdr["ITEM ID"]] || "").trim() : "";
-    var ledgerRowId = consolHdr["LEDGER ROW ID"] !== undefined ? String(consolVals[i][consolHdr["LEDGER ROW ID"]] || "").trim() : "";
+    var svcCode = String(sbRow.svc_code || "").trim().toUpperCase();
+    var dateVal = sbRow.date; // ISO 'YYYY-MM-DD' from Postgres
+    var qty = Number(sbRow.qty != null ? sbRow.qty : 1) || 1;
+    var rate = Number(sbRow.rate || 0);
+    var total = Number(sbRow.total || 0);
+    var description = String(sbRow.description || "").trim();
+    var sidemark = String(sbRow.sidemark || "").trim();
+    var itemNotes = String(sbRow.item_notes || "").trim();
+    var itemId = String(sbRow.item_id || "").trim();
+    var ledgerRowId = String(sbRow.ledger_row_id || "").trim();
 
-    // Sidemark fallback
+    // Sidemark fallback (same as CB pass — covers per-tenant sheets where
+    // sidemark didn't propagate to billing.sidemark).
     if (!sidemark && ledgerRowId && sidemarkFallback[ledgerRowId]) {
       sidemark = sidemarkFallback[ledgerRowId];
     }
@@ -43264,7 +43579,7 @@ function handleQboCreateInvoice_(payload) {
     // v38.22.0: Non-storage services — include billing date in description
     if (svcCode !== "STOR") {
       var billingDateStr = api_qbFmtDate_(dateVal);
-      if (billingDateStr && exportDesc && !exportDesc.includes(billingDateStr)) {
+      if (billingDateStr && exportDesc && exportDesc.indexOf(billingDateStr) === -1) {
         exportDesc = exportDesc + " — Billed " + billingDateStr;
       }
     }
