@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.229.0 — 2026-05-23 PST — [BILLING] Stax IIF export + runStaxCharges always work from the FULL CB Consolidated_Ledger for each invoice number, never a partial snapshot of the rows the caller passed in. Two fixes in one ship — both close the same class of bug (Stax under-collects when billing rows are added to an invoice number after the original push). (1) handleQbExport_ + handleQbExcelExport_: pre-fix the optional `payload.ledgerRowIds` was used as a per-row filter on the lines emitted. So if Billing.tsx's Create Invoices flow passed only the newly-invoiced ledger row IDs (or an operator hand-picked a subset of Invoiced rows on Billing → Report and clicked Stax IIF or QB Excel), Stax received a line_items_json + Total covering only those rows even when the invoice number had additional Invoiced rows in CB. The Stax-side invoice was created with the partial Total via handleCreateStaxInvoices_ → /invoice, and the v38.171.0 PENDING-only refresh guard prevented later handleQbExport_ passes from updating it. Fix: treat `payload.ledgerRowIds` as a POINTER to the invoice numbers covered (first-pass scan resolves the IDs to invoice numbers, then the main loop emits ALL Invoiced rows for those invoice numbers regardless of whether each individual row's Ledger Row ID was in the original payload). Mirrors how handleQboCreateInvoice_ already groups by invoice number. (2) handleRunStaxCharges_: new safeguard right before /pay. New helper stax_reconcileInvoiceAmount_ sums every Invoiced ledger row for the charge target's QB Invoice #, compares to the Stax sheet's Total Amount, and if they differ by ≥ $0.01 issues PUT /invoice/<id> to refresh Stax (total + meta.lineItems) before charging — protects against rows added AFTER the original push that fix #1 cannot reach (status already flipped to CREATED so handleQbExport_'s re-write path is gated off). Writes the corrected amount + line_items_json back to the Stax Invoices sheet via header-resolved stax_invoiceCols_ and patches public.stax_invoices via supabasePatch_ so React reflects the new total. Logs a reconcile entry to the Run Log + stamps the chargelog. If the Stax PUT fails or the CB ledger has zero Invoiced rows for that invoice number (voided in CB after push), returns skip: caller marks CHARGE_FAILED + appends a RECONCILE_BLOCKED exception so the operator can intervene; no money moves. Companion notes: stats.apiErrors counts reconcile-blocked rows; no new field added to the response shape to keep this minimal. No schema change, no migration, no React change.
+   StrideAPI.gs — v38.230.0 — 2026-05-23 PST — [BILLING] Two coordinated billing fixes — both source-of-truth alignments away from CB Consolidated_Ledger snapshots toward public.billing live reads. (1) handleQboCreateInvoice_ now builds the per-invoice line items from public.billing (sorted by date asc, svc_code asc, item_id asc, filtered status!=Void) instead of scanning CB Consolidated_Ledger. Pre-fix the QBO push could land lines in scrambled order vs. the React Billing report and could include rows that drifted between CB and public.billing — the new path reads the same table React reads, with the same display sort, so QBO sees exactly what the operator sees. Customer/sub-job/payment-terms resolution still flows through clientInfoMap (CB Clients sheet); the consolVals load stays in place because qbo_checkDuplicatePush_ / qbo_writeQboInvoiceId_ / qbo_writeQboFailure_ still mutate CB. Companion React change: Billing.tsx sorts selRows by display order before handing the rows to handleCreateInvoices, so the Consolidated_Ledger writes carry the same order too. (2) handleQbExport_ + handleRegenerateIifForBatch_ generate Stax IIF as ONE TRNS + ONE SPL per invoice (was N SPL — one per service line) with the total computed live from `SELECT SUM(total) FROM public.billing WHERE invoice_no=X AND status!=Void`. Each invoice's stax_invoices row gets the live SUM in `amount`, and `line_items_json` carries a single summary line `[{name:"Stride Logistics Services", memo:"Invoice X", qty:1, rate:total, amount:total}]` — historical N-line rows stay untouched (no schema change, no migration). Removes the partial-snapshot class that caused Stax under-collects when billing rows were added/voided after the original push: the SPL is derived from the SUM at IIF time, so any subsequent billing change automatically reflects on the next push. Invoice number is preserved on Stax via the existing meta.reference + memo + the IIF DOCNUM column — payment matching unchanged. handleCreateStaxInvoices_ + handleRunStaxCharges_ already use stax_invoices.amount (not line_items_json) so charging behavior is unchanged. SB EF mirror: create-invoice-sb now accepts the React payload's full rows[] and returns updated rows in caller order; qbo-create-invoice-sb (skeleton) is unchanged because its caller-supplied lines path is GAS-side scoped today. NO change to v38.182 atomic invoice counter, no change to half-write detection, no change to Void/Reissue logic.
+   v38.229.0 — 2026-05-23 PST — [BILLING] Stax IIF export + runStaxCharges always work from the FULL CB Consolidated_Ledger for each invoice number, never a partial snapshot of the rows the caller passed in. Two fixes in one ship — both close the same class of bug (Stax under-collects when billing rows are added to an invoice number after the original push). (1) handleQbExport_ + handleQbExcelExport_: pre-fix the optional `payload.ledgerRowIds` was used as a per-row filter on the lines emitted. So if Billing.tsx's Create Invoices flow passed only the newly-invoiced ledger row IDs (or an operator hand-picked a subset of Invoiced rows on Billing → Report and clicked Stax IIF or QB Excel), Stax received a line_items_json + Total covering only those rows even when the invoice number had additional Invoiced rows in CB. The Stax-side invoice was created with the partial Total via handleCreateStaxInvoices_ → /invoice, and the v38.171.0 PENDING-only refresh guard prevented later handleQbExport_ passes from updating it. Fix: treat `payload.ledgerRowIds` as a POINTER to the invoice numbers covered (first-pass scan resolves the IDs to invoice numbers, then the main loop emits ALL Invoiced rows for those invoice numbers regardless of whether each individual row's Ledger Row ID was in the original payload). Mirrors how handleQboCreateInvoice_ already groups by invoice number. (2) handleRunStaxCharges_: new safeguard right before /pay. New helper stax_reconcileInvoiceAmount_ sums every Invoiced ledger row for the charge target's QB Invoice #, compares to the Stax sheet's Total Amount, and if they differ by ≥ $0.01 issues PUT /invoice/<id> to refresh Stax (total + meta.lineItems) before charging — protects against rows added AFTER the original push that fix #1 cannot reach (status already flipped to CREATED so handleQbExport_'s re-write path is gated off). Writes the corrected amount + line_items_json back to the Stax Invoices sheet via header-resolved stax_invoiceCols_ and patches public.stax_invoices via supabasePatch_ so React reflects the new total. Logs a reconcile entry to the Run Log + stamps the chargelog. If the Stax PUT fails or the CB ledger has zero Invoiced rows for that invoice number (voided in CB after push), returns skip: caller marks CHARGE_FAILED + appends a RECONCILE_BLOCKED exception so the operator can intervene; no money moves. Companion notes: stats.apiErrors counts reconcile-blocked rows; no new field added to the response shape to keep this minimal. No schema change, no migration, no React change.
    v38.228.1 — 2026-05-22 PST — [DOCS] Header-comment syntax hotfix for v38.228.0. The v38.228.0 entry contained a literal block-comment-close sequence inside its prose, which prematurely terminated this outer header block comment and caused clasp push to reject the file with "SyntaxError: Unexpected identifier 'a' line: 2". Rewords the phrase to remove the offending sequence. No code change beyond the header.
    v38.228.0 — 2026-05-22 PST — [DOCS] Removes all five `api_generateDocPdf_` call sites from completion / approval / release handlers in favor of the React DocRenderer (PR #507). The function definition is intentionally retained for reference. Sites disabled (each wrapped in a block comment with a dated marker, original block preserved): (1) handleCompleteShipment_ DOC_RECEIVING at ~line 17471 — `var pdfBlob = null` declaration kept so the downstream SHIPMENT_RECEIVED email send still compiles; api_sendTemplateEmail_'s `if (pdfBlob) mailOpts.attachments = [pdfBlob]` guard at line 18456 means a null blob sends the email with no attachment, matching the React-side flow where DocRenderer hosts the PDF in public.documents and the email CTAs deep-link there. (2) handleProcessRepairApproval_ DOC_REPAIR_WORK_ORDER at ~line 19550 (only fires on the Approve branch — Decline path unchanged). (3) handleStartRepair_ DOC_REPAIR_WORK_ORDER at ~line 20208 — this site never attached the PDF to an email (storage-only generation for the Docs tab), so removing it is a pure no-op for outbound comms. (4) handleProcessWcRelease_ DOC_WILL_CALL_RELEASE at ~line 21221. (5) handleGenerateWcDoc_ DOC_WILL_CALL_RELEASE at ~line 21698 — the dedicated reprint endpoint, now a no-op that still returns success for any straggling pre-deploy React callers; expected to be deleted entirely once the React renderer is the only caller in the wild. DOC_INVOICE path (jsPDF in React via `api_exportDocAsPdfBlob_`-adjacent flow) NOT touched per scope. No schema / RLS / React change in this PR; companion React changes for DocRenderer landed in PR #507.
    v38.227.0 — 2026-05-21 PST — [MIGRATION-P3/MIG-016] Sixth per-table reverse-writethrough writer: `__writeThroughReverseTasks_` replaces the stub for `tasks` in REVERSE_WRITETHROUGH_TABLES_. Insert + update upsert pattern by Task ID, mirrors REVERSE_TASK_FIELDS_ (task_id, type, status, item_id, vendor, description, location, sidemark, shipment_number, item_notes, task_notes, result, completed_at, cancelled_at, started_at, assigned_to, billed, due_date, priority, created). Required by the new SB-primary `batch-create-tasks-sb` Edge Function — without it the SB EF's per-task sheet-mirror fires hit the legacy stub and land in gs_sync_events. Auto-runs api_ensureTaskColumns_ on insert so Due Date + Priority columns exist on tenants whose template predates v38.214.0. Idempotent: re-running with the same payload either no-ops (already-matches) or writes the same cells (deterministic).
@@ -43186,39 +43187,99 @@ function handleQboCreateInvoice_(payload) {
     }
   } catch (_) { /* non-critical */ }
 
-  // Build filter
-  var filterIds = {};
-  ledgerRowIds.forEach(function(id) { filterIds[String(id).trim()] = true; });
+  // 2026-05-23 — Source the per-invoice line items from public.billing
+  // (Supabase) instead of CB Consolidated_Ledger. Supabase billing is the
+  // post-MIG-005 authority for billing rows; CB carries snapshot drift
+  // (handleCreateInvoice_'s CB-write dedupe-skips when a ledger row
+  // already exists, voids/reissues don't touch CB) which produced QBO
+  // pushes that didn't match the React Billing Report.
+  //
+  // The CB sheet (consolVals/consolHdr) is still loaded above because
+  // qbo_checkDuplicatePush_, qbo_writeQboInvoiceId_, and qbo_writeQboFailure_
+  // mutate the QBO Invoice ID/Status columns on Consolidated_Ledger and
+  // still need that scan window. clientInfoMap (CB Clients sheet) provides
+  // the QB customer name + sub-job + payment terms mapping.
+  //
+  // Order: service date asc, svc_code asc, item_id asc — matches the
+  // React Billing report's default display sort.
+  // Filter: status != 'Void' (Void rows must never land on a new QBO push).
+
+  // Step 1: resolve the caller's ledger_row_ids → invoice_no set via the
+  // same Supabase read the pre-reconcile already did. We re-query to keep
+  // the two passes independent — pre-reconcile is wrapped in try/catch
+  // that may have failed silently.
+  var resolvedInvoiceNos = {};
+  try {
+    var lrInList = ledgerRowIds
+      .map(function(id) { return String(id || "").trim(); })
+      .filter(function(id) { return id && /^[A-Za-z0-9_\-]+$/.test(id); })
+      .map(function(id) { return '"' + id + '"'; })
+      .join(',');
+    if (lrInList) {
+      var invNoSel = supabaseSelect_(
+        "billing",
+        "ledger_row_id=in.(" + lrInList + ")&invoice_no=not.is.null&status=neq.Void",
+        "invoice_no"
+      );
+      if (invNoSel.ok) {
+        for (var rin = 0; rin < invNoSel.rows.length; rin++) {
+          var rinNo = String(invNoSel.rows[rin].invoice_no || "").trim();
+          if (rinNo) resolvedInvoiceNos[rinNo] = true;
+        }
+      }
+    }
+  } catch (resolveErr) {
+    Logger.log("handleQboCreateInvoice_ Supabase invoice-no resolve threw: " + resolveErr.message);
+  }
 
   // Group ledger rows by Invoice #
   var invoiceGroups = {};  // invoiceNo → { clientName, sidemark, lineItems, invoiceDate, dueDate }
 
-  for (var i = 1; i < consolVals.length; i++) {
-    var status = String(consolVals[i][consolHdr["STATUS"]] || "").trim().toUpperCase();
-    if (status !== "INVOICED") continue;
-
-    if (consolHdr["LEDGER ROW ID"] !== undefined) {
-      var lrid = String(consolVals[i][consolHdr["LEDGER ROW ID"]] || "").trim();
-      if (!lrid || !filterIds[lrid]) continue;
+  // Step 2: fetch every billing row for the resolved invoice numbers from
+  // Supabase, ordered (date, svc_code, item_id) so the QBO line items
+  // land in the same order the operator sees on the Billing report.
+  // Filter status != 'Void' so historically voided rows are excluded.
+  var sbInvoiceRows = [];
+  var resolvedInvoiceNoList = Object.keys(resolvedInvoiceNos);
+  if (resolvedInvoiceNoList.length > 0) {
+    try {
+      var invInFilter = resolvedInvoiceNoList
+        .map(function(no) { return '"' + String(no).replace(/"/g, '') + '"'; })
+        .join(',');
+      var lineSel = supabaseSelect_(
+        "billing",
+        "invoice_no=in.(" + invInFilter + ")&status=neq.Void&order=date.asc,svc_code.asc,item_id.asc",
+        "ledger_row_id,invoice_no,client_name,date,svc_code,svc_name,item_id,description,item_class,qty,rate,total,item_notes,sidemark,task_id,repair_id,shipment_number,category"
+      );
+      if (lineSel.ok) {
+        sbInvoiceRows = lineSel.rows;
+      } else {
+        Logger.log("handleQboCreateInvoice_ Supabase line fetch returned ok=false — falling back to empty group set; CB consolVals stays unused for grouping (push may push nothing).");
+      }
+    } catch (fetchErr) {
+      Logger.log("handleQboCreateInvoice_ Supabase line fetch threw: " + fetchErr.message);
     }
+  }
 
-    var invNo = String(consolVals[i][consolHdr["INVOICE #"]] || "").trim();
-    var client = String(consolVals[i][consolHdr["CLIENT"]] || "").trim();
+  for (var sbi = 0; sbi < sbInvoiceRows.length; sbi++) {
+    var sbRow = sbInvoiceRows[sbi];
+    var invNo = String(sbRow.invoice_no || "").trim();
+    var client = String(sbRow.client_name || "").trim();
     if (!invNo || !client) continue;
 
-    var rawSvc = consolHdr["SVC CODE"] !== undefined ? consolVals[i][consolHdr["SVC CODE"]] : "";
-    var svcCode = (rawSvc instanceof Date) ? "" : String(rawSvc || "").trim().toUpperCase();
-    var dateVal = consolHdr["DATE"] !== undefined ? consolVals[i][consolHdr["DATE"]] : "";
-    var qty = consolHdr["QTY"] !== undefined ? (Number(consolVals[i][consolHdr["QTY"]]) || 1) : 1;
-    var rate = consolHdr["RATE"] !== undefined ? Number(consolVals[i][consolHdr["RATE"]] || 0) : 0;
-    var total = Number(consolVals[i][consolHdr["TOTAL"]] || 0);
-    var description = consolHdr["DESCRIPTION"] !== undefined ? String(consolVals[i][consolHdr["DESCRIPTION"]] || "").trim() : "";
-    var sidemark = consolHdr["SIDEMARK"] !== undefined ? String(consolVals[i][consolHdr["SIDEMARK"]] || "").trim() : "";
-    var itemNotes = consolHdr["ITEM NOTES"] !== undefined ? String(consolVals[i][consolHdr["ITEM NOTES"]] || "").trim() : "";
-    var itemId = consolHdr["ITEM ID"] !== undefined ? String(consolVals[i][consolHdr["ITEM ID"]] || "").trim() : "";
-    var ledgerRowId = consolHdr["LEDGER ROW ID"] !== undefined ? String(consolVals[i][consolHdr["LEDGER ROW ID"]] || "").trim() : "";
+    var svcCode = String(sbRow.svc_code || "").trim().toUpperCase();
+    var dateVal = sbRow.date; // ISO 'YYYY-MM-DD' from Postgres
+    var qty = Number(sbRow.qty != null ? sbRow.qty : 1) || 1;
+    var rate = Number(sbRow.rate || 0);
+    var total = Number(sbRow.total || 0);
+    var description = String(sbRow.description || "").trim();
+    var sidemark = String(sbRow.sidemark || "").trim();
+    var itemNotes = String(sbRow.item_notes || "").trim();
+    var itemId = String(sbRow.item_id || "").trim();
+    var ledgerRowId = String(sbRow.ledger_row_id || "").trim();
 
-    // Sidemark fallback
+    // Sidemark fallback (same as CB pass — covers per-tenant sheets where
+    // sidemark didn't propagate to billing.sidemark).
     if (!sidemark && ledgerRowId && sidemarkFallback[ledgerRowId]) {
       sidemark = sidemarkFallback[ledgerRowId];
     }
@@ -43264,7 +43325,7 @@ function handleQboCreateInvoice_(payload) {
     // v38.22.0: Non-storage services — include billing date in description
     if (svcCode !== "STOR") {
       var billingDateStr = api_qbFmtDate_(dateVal);
-      if (billingDateStr && exportDesc && !exportDesc.includes(billingDateStr)) {
+      if (billingDateStr && exportDesc && exportDesc.indexOf(billingDateStr) === -1) {
         exportDesc = exportDesc + " — Billed " + billingDateStr;
       }
     }
