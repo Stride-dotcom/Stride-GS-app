@@ -72,7 +72,17 @@ export interface RouteEntry {
 export const GAS_TO_SB_MAP: Record<string, RouteEntry> = {
   // P2 — simple writes
   updateInventoryItem: { ef: 'update-item-sb',         flagKey: 'updateItem' },
-  updateTask:          { ef: 'update-task-sb',         flagKey: 'updateTask' },
+  // 2026-05-24 — React fires 4 distinct task-update actions
+  // (updateTaskNotes / updateTaskPriority / updateTaskDueDate /
+  // updateTaskCustomPrice); GAS handles each separately. The legacy
+  // single `updateTask` entry below mapped a NAME no React caller
+  // ever sends, so flipping `feature_flags.updateTask` was a silent
+  // no-op. update-task-sb is a UNIFIED handler that accepts any of
+  // the 4 field shapes — map all 4 React action names to it.
+  updateTaskNotes:       { ef: 'update-task-sb',       flagKey: 'updateTask' },
+  updateTaskPriority:    { ef: 'update-task-sb',       flagKey: 'updateTask' },
+  updateTaskDueDate:     { ef: 'update-task-sb',       flagKey: 'updateTask' },
+  updateTaskCustomPrice: { ef: 'update-task-sb',       flagKey: 'updateTask' },
   updateRepairNotes:   { ef: 'update-repair-sb',       flagKey: 'updateRepair' },
 
   // P3 — operational
@@ -100,7 +110,13 @@ export const GAS_TO_SB_MAP: Record<string, RouteEntry> = {
   // P4a — billing-core
   completeTask:        { ef: 'complete-task',          flagKey: 'completeTask' },
   completeRepair:      { ef: 'complete-repair-sb',     flagKey: 'completeRepair' },
+  // 2026-05-24 — React fires BOTH `generateStorageCharges` (preview) and
+  // `commitStorageRows` (commit) — and commit-storage-charges-sb's source
+  // explicitly documents handling both. Without the commit route entry,
+  // flipping commitStorageCharges='supabase' only redirected the preview
+  // path; the actual write stayed on GAS.
   generateStorageCharges: { ef: 'commit-storage-charges-sb', flagKey: 'commitStorageCharges' },
+  commitStorageRows:      { ef: 'commit-storage-charges-sb', flagKey: 'commitStorageCharges' },
   createInvoice:       { ef: 'create-invoice-sb',      flagKey: 'createInvoice' },
   voidInvoice:         { ef: 'void-invoice-sb',        flagKey: 'voidInvoice' },
   reissueInvoice:      { ef: 'reissue-invoice-sb',     flagKey: 'reissueInvoice' },
