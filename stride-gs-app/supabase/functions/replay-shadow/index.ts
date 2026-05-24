@@ -79,49 +79,55 @@ interface ReplayCallResult {
 interface ShadowEntry {
   shadow: string;       // Edge Function name
   action: string;       // gas_call_log.action filter value
+  entity_type: string;  // entity_audit_log.entity_type filter value
 }
+// PM audit 2026-05-24: entity_type was hardcoded to 'inventory' on the audit
+// fetch, so every non-inventory function_key replayed against zero audit rows
+// and bucketed as 'no_audit_row'. Each entry now carries the right entity_type
+// (inventory / task / repair / will_call / shipment) and the audit fetch uses
+// it directly.
 const SHADOW_REGISTRY: Record<string, ShadowEntry> = {
-  updateItem: { shadow: 'update-item-shadow', action: 'updateInventoryItem' },
+  updateItem: { shadow: 'update-item-shadow', action: 'updateInventoryItem', entity_type: 'inventory' },
   // [MIGRATION-P3] cancelRepair — first of the repair P3 cluster. Shadow
   // is pure (no DB writes), mirrors the fixed-shape audit log GAS produces
   // ({status:{new:'Cancelled'}}). See cancel-repair-shadow/index.ts and
   // MIGRATION_STATUS.md "Per-function migration table".
-  cancelRepair: { shadow: 'cancel-repair-shadow', action: 'cancelRepair' },
+  cancelRepair: { shadow: 'cancel-repair-shadow', action: 'cancelRepair', entity_type: 'repair' },
   // [MIGRATION-P3] startRepair — second of the repair P3 cluster. Same
   // pure-shadow shape; GAS logs {status:{new:'In Progress'}} on every
   // start (incl. re-runs after status is already In Progress / Complete
   // for PDF regen). See start-repair-shadow/index.ts.
-  startRepair:  { shadow: 'start-repair-shadow',  action: 'startRepair'  },
+  startRepair:  { shadow: 'start-repair-shadow',  action: 'startRepair', entity_type: 'repair' },
   // [MIGRATION-P3] sendRepairQuote — third of the repair P3 cluster.
   // GAS logs {status:{old:'Pending Quote',new:'Quote Sent'}}. See
   // send-repair-quote-shadow/index.ts. (GAS action is 'sendRepairQuote'.)
-  sendRepairQuote: { shadow: 'send-repair-quote-shadow', action: 'sendRepairQuote' },
+  sendRepairQuote: { shadow: 'send-repair-quote-shadow', action: 'sendRepairQuote', entity_type: 'repair' },
   // [MIGRATION-P3] respondToRepairQuote — fourth of the cluster. Variable
   // audit-log shape based on the decision input:
   //   {decision:'Approve', status:{new:'Approved'}}  or
   //   {decision:'Decline', status:{new:'Declined'}}.
   // GAS action key is 'respondToRepairQuote' (camelCase from the React
   // payload). See respond-repair-quote-shadow/index.ts.
-  respondToRepairQuote: { shadow: 'respond-repair-quote-shadow', action: 'respondToRepairQuote' },
+  respondToRepairQuote: { shadow: 'respond-repair-quote-shadow', action: 'respondToRepairQuote', entity_type: 'repair' },
   // [MIGRATION-P3] requestRepairQuote — fifth + final repair P3 entry
   // (multi-item was net-new and doesn't go through parity). Variable
   // shape — items array stringified into a `summary` string. Note:
   // entity_id=='' for this audit row because the legacy GAS path
   // created N repairs (one per item) so the audit doesn't bind to a
   // single repair_id. See request-repair-quote-shadow/index.ts.
-  requestRepairQuote: { shadow: 'request-repair-quote-shadow', action: 'requestRepairQuote' },
+  requestRepairQuote: { shadow: 'request-repair-quote-shadow', action: 'requestRepairQuote', entity_type: 'repair' },
   // [MIGRATION-P4a] completeRepair — sixth + final repair handler.
   //   { status: { new: 'Complete' }, result: 'Pass'|'Fail' }
   // Per MIG-004 status flip + billing + addon flush + email are all
   // one logical transaction (handled by complete_repair_atomic RPC).
   // See complete-repair-shadow/index.ts.
-  completeRepair: { shadow: 'complete-repair-shadow', action: 'completeRepair' },
+  completeRepair: { shadow: 'complete-repair-shadow', action: 'completeRepair', entity_type: 'repair' },
   // [MIGRATION-P4a] completeTask — billing-core, atomic via
   // complete_task_atomic RPC (MIG-004). Audit-changes parity shape:
   //   { status: { old: 'In Progress', new: 'Completed' }, result }
   // (task carries status.old; repair logs only status.new.)
   // See complete-task-shadow/index.ts.
-  completeTask: { shadow: 'complete-task-shadow', action: 'completeTask' },
+  completeTask: { shadow: 'complete-task-shadow', action: 'completeTask', entity_type: 'task' },
 };
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -239,6 +245,7 @@ serve(async (req: Request): Promise<Response> => {
   }
   const shadowName = entry.shadow;
   const actionFilter = entry.action;
+  const entityTypeFilter = entry.entity_type;
 
   const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
   const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
@@ -285,14 +292,15 @@ serve(async (req: Request): Promise<Response> => {
     const tenantId = (row.tenant_id ?? null) as string | null;
     const input = (row.input_redacted ?? {}) as Record<string, unknown>;
 
-    // Fetch the corresponding entity_audit_log row(s). For updateInventoryItem
-    // there's exactly one (inventory entity_type) — but we LEFT JOIN logically
-    // so missing audit rows become "no_audit_row" rather than crashes.
+    // Fetch the corresponding entity_audit_log row(s). entity_type comes from
+    // the SHADOW_REGISTRY entry so each function_key matches against rows of
+    // the right entity (inventory / task / repair / will_call / shipment).
+    // Missing audit rows become "no_audit_row" rather than crashes.
     const { data: auditRows, error: auditErr } = await sb
       .from('entity_audit_log')
       .select('entity_id, action, changes')
       .eq('correlation_id', callId)
-      .eq('entity_type', 'inventory');
+      .eq('entity_type', entityTypeFilter);
 
     if (auditErr) {
       errorCount++;
