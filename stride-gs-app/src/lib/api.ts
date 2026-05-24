@@ -2725,10 +2725,15 @@ export function postResendInvoiceEmail(
   payload: ResendInvoiceEmailPayload,
   signal?: AbortSignal
 ) {
+  // [MIGRATION-P4a:routing-fix] Latent: resendInvoiceEmail isn't yet in
+  // GAS_TO_SB_MAP, so today this routes to GAS regardless. Threading
+  // clientSheetId now means a future router entry with a scoped flag
+  // will resolve correctly on day one instead of silently falling back
+  // to GAS for every tenant.
   return apiPost<ResendInvoiceEmailResponse>(
     'resendInvoiceEmail',
     payload as unknown as Record<string, unknown>,
-    {},
+    { clientSheetId: payload.clientSheetId },
     { signal }
   );
 }
