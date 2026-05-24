@@ -2476,10 +2476,14 @@ export function postCreateInvoice(
   payload: CreateInvoicePayload,
   signal?: AbortSignal
 ) {
+  // [MIGRATION-P4a] Thread sourceSheetId into extraParams so apiPost's
+  // resolveRoute() can match per-tenant feature_flags.tenant_scope for
+  // createInvoice. Without it, scoped flag rollouts silently fall back to
+  // GAS even when active_backend='supabase' for this tenant.
   return apiPost<CreateInvoiceResponse>(
     'createInvoice',
     payload as unknown as Record<string, unknown>,
-    {},
+    { clientSheetId: payload.sourceSheetId },
     { signal, timeoutMs: API_POST_TIMEOUT_LONG_MS }
   );
 }
@@ -2721,10 +2725,15 @@ export function postResendInvoiceEmail(
   payload: ResendInvoiceEmailPayload,
   signal?: AbortSignal
 ) {
+  // [MIGRATION-P4a:routing-fix] Latent: resendInvoiceEmail isn't yet in
+  // GAS_TO_SB_MAP, so today this routes to GAS regardless. Threading
+  // clientSheetId now means a future router entry with a scoped flag
+  // will resolve correctly on day one instead of silently falling back
+  // to GAS for every tenant.
   return apiPost<ResendInvoiceEmailResponse>(
     'resendInvoiceEmail',
     payload as unknown as Record<string, unknown>,
-    {},
+    { clientSheetId: payload.clientSheetId },
     { signal }
   );
 }
