@@ -67,6 +67,106 @@ import type { ApiResponse } from './api';
 export interface RouteEntry {
   ef: string;
   flagKey: string;
+  /**
+   * If true, the original GAS action name is injected into the body as
+   * `action` before forwarding to the EF. Set for GROUPED EFs that
+   * dispatch on the action field (e.g. marketing-actions-sb,
+   * stax-actions-sb). Single-action EFs leave this unset.
+   */
+  grouped?: boolean;
+}
+
+// Grouped EFs that handle multiple actions via internal dispatch. Each
+// listed action maps to the same EF; `grouped: true` makes the router
+// inject the original action name into the body so the EF can route.
+//
+// The grouped layout keeps the migration tractable — for a handler whose
+// SB-side work is identical (proxy to GAS or trivial DB CRUD), bundling
+// avoids 18 separate one-line EFs. When a future builder rewrites a
+// specific action natively, they can split it out into its own -sb EF
+// and update only the affected map entry; downstream call sites are
+// unchanged because the GAS_TO_SB_MAP key — not the EF name — is the
+// stable interface.
+const GROUPED_MARKETING_ACTIONS = [
+  'createMarketingCampaign', 'updateMarketingCampaign', 'activateCampaign',
+  'pauseCampaign', 'completeCampaign', 'runCampaignNow', 'deleteCampaign',
+  'createMarketingContact', 'importMarketingContacts', 'updateMarketingContact',
+  'suppressContact', 'unsuppressContact', 'createMarketingTemplate',
+  'updateMarketingTemplate', 'updateMarketingSettings', 'sendTestEmail',
+  'previewTemplate', 'checkMarketingInbox',
+] as const;
+
+const GROUPED_CLAIM_ACTIONS = [
+  'createClaim', 'addClaimItems', 'addClaimNote', 'requestMoreInfo',
+  'sendClaimDenial', 'generateClaimSettlement', 'uploadSignedSettlement',
+  'closeClaim', 'voidClaim', 'reopenClaim', 'firstReviewClaim', 'updateClaim',
+] as const;
+
+const GROUPED_STAX_ACTIONS = [
+  'importIIFFromDrive', 'updateStaxConfig', 'saveStaxCustomerMapping',
+  'autoMatchStaxCustomers', 'pullStaxCustomers', 'syncStaxCustomers',
+  'createTestInvoice', 'updateStaxInvoice', 'deleteStaxInvoice',
+  'staxRefreshCustomerIds', 'staxRefreshPaymentStatus', 'chargeSingleInvoice',
+  'sendStaxPayLinks', 'sendStaxPayLink', 'voidStaxInvoice',
+  'toggleAutoCharge', 'resetStaxInvoiceStatus', 'resolveStaxException',
+  'batchVoidStaxInvoices', 'batchDeleteStaxInvoices', 'regenerateIifForBatch',
+] as const;
+
+const GROUPED_QB_ACTIONS = [
+  'qbExport', 'qbExcelExport', 'qboDisconnect', 'qboSetupHeaders',
+  'qboSyncCatalogItem', 'updateQboStatus', 'backfillDocsFromDrive',
+] as const;
+
+const GROUPED_REPAIR_EXTRAS = [
+  'correctRepairResult', 'reopenRepair', 'voidRepairQuote',
+] as const;
+
+const GROUPED_WC_EXTRAS = [
+  'generateWcDoc', 'batchCancelWillCalls', 'batchScheduleWillCalls',
+] as const;
+
+const GROUPED_TASK_BATCH_OPS = [
+  'batchReassignTasks', 'batchRequestRepairQuote', 'createSplitTask',
+  'completeSplitTask', 'generateTaskWorkOrder', 'correctTaskResult',
+  'batchCancelTasks', 'batchCancelRepairs',
+] as const;
+
+const GROUPED_BILLING_EXTRAS = [
+  'markBillingActivityResolved', 'resendInvoiceEmail',
+  'previewStorageCharges', 'commitStorageRows', 'syncClientBilling',
+  'voidUnbilledRows',
+] as const;
+
+const GROUPED_LOCATION_ACTIONS = [
+  'updateLocation', 'deleteLocation',
+] as const;
+
+const GROUPED_ADMIN_USER_ACTIONS = [
+  'adminSetUserPassword', 'ensureAuthUser', 'listMissingAuthUsers',
+  'resyncUsers', 'resyncClients', 'sendWelcomeEmail', 'sendWelcomeToUsers',
+] as const;
+
+const GROUPED_EMAIL_TEMPLATE_ACTIONS = [
+  'updateEmailTemplate', 'syncTemplatesToClients',
+  'seedEmailTemplatesToSupabase',
+] as const;
+
+const GROUPED_CLIENT_SETUP_ACTIONS = [
+  'finishClientSetup', 'updateClient', 'syncSettings',
+  'setClientWebAppDeployment', 'rediscoverAllScriptIds',
+  'backfillScriptIdsViaWebApp', 'resolveOnboardUser',
+] as const;
+
+function buildGroupedEntries(
+  actions: readonly string[],
+  ef: string,
+  flagKey: string,
+): Record<string, RouteEntry> {
+  const out: Record<string, RouteEntry> = {};
+  for (const action of actions) {
+    out[action] = { ef, flagKey, grouped: true };
+  }
+  return out;
 }
 
 export const GAS_TO_SB_MAP: Record<string, RouteEntry> = {
@@ -175,6 +275,23 @@ export const GAS_TO_SB_MAP: Record<string, RouteEntry> = {
   updateBillingRow:  { ef: 'update-billing-row-sb',  flagKey: 'updateBillingRow' },
   voidUnbilledRows:  { ef: 'void-unbilled-rows-sb',  flagKey: 'voidUnbilledRows' },
 
+  // ── Grouped EFs (P7 — fleet coverage) ────────────────────────────────
+  // Each grouped action shares one EF that dispatches on the body.action
+  // field. The router injects body.action automatically when
+  // RouteEntry.grouped === true (see invokeSupabaseHandler).
+  ...buildGroupedEntries(GROUPED_MARKETING_ACTIONS,      'marketing-actions-sb',    'marketingActions'),
+  ...buildGroupedEntries(GROUPED_CLAIM_ACTIONS,          'claims-actions-sb',       'claimActions'),
+  ...buildGroupedEntries(GROUPED_STAX_ACTIONS,           'stax-actions-sb',         'staxActions'),
+  ...buildGroupedEntries(GROUPED_QB_ACTIONS,             'qb-actions-sb',           'qbActions'),
+  ...buildGroupedEntries(GROUPED_REPAIR_EXTRAS,          'repair-extras-sb',        'repairExtras'),
+  ...buildGroupedEntries(GROUPED_WC_EXTRAS,              'wc-extras-sb',            'wcExtras'),
+  ...buildGroupedEntries(GROUPED_TASK_BATCH_OPS,         'task-batch-ops-sb',       'taskBatchOps'),
+  ...buildGroupedEntries(GROUPED_BILLING_EXTRAS,         'billing-extras-sb',       'billingExtras'),
+  ...buildGroupedEntries(GROUPED_LOCATION_ACTIONS,       'location-actions-sb',     'locationActions'),
+  ...buildGroupedEntries(GROUPED_ADMIN_USER_ACTIONS,     'admin-users-sb',          'adminUsers'),
+  ...buildGroupedEntries(GROUPED_EMAIL_TEMPLATE_ACTIONS, 'email-templates-sb',      'emailTemplates'),
+  ...buildGroupedEntries(GROUPED_CLIENT_SETUP_ACTIONS,   'client-setup-sb',         'clientSetup'),
+
   // Still gas-only — no SB-primary EF in this PR:
   //   updateShipment:       updateShipment flag, no update-shipment-sb EF
 };
@@ -189,14 +306,20 @@ export const GAS_TO_SB_MAP: Record<string, RouteEntry> = {
 export function resolveRoute(
   action: string,
   callerTenantId: string | null,
-): { backend: 'gas' } | { backend: 'supabase'; ef: string; flagKey: string } {
+): { backend: 'gas' } | { backend: 'supabase'; ef: string; flagKey: string; grouped?: boolean; gasAction?: string } {
   const entry = GAS_TO_SB_MAP[action];
   if (!entry) return { backend: 'gas' };
 
   const backend = getActiveBackendForKey(entry.flagKey, callerTenantId);
   if (backend !== 'supabase') return { backend: 'gas' };
 
-  return { backend: 'supabase', ef: entry.ef, flagKey: entry.flagKey };
+  return {
+    backend: 'supabase',
+    ef: entry.ef,
+    flagKey: entry.flagKey,
+    grouped: entry.grouped,
+    gasAction: entry.grouped ? action : undefined,
+  };
 }
 
 // ── Supabase-path invoke ────────────────────────────────────────────────
@@ -231,16 +354,23 @@ export async function invokeSupabaseHandler<T>(
   body: Record<string, unknown>,
   extraParams: Record<string, string> | undefined,
   requestId: string,
+  groupedAction?: string,
 ): Promise<ApiResponse<T> & { requestId: string }> {
   // Thread callerEmail + clientSheetId into the body. GAS receives them
   // as query params; SB EFs receive them in the body for symmetry with
   // the rest of the SB-side codebase.
+  //
+  // For GROUPED EFs (marketing-actions-sb / claims-actions-sb / etc), the
+  // original GAS action name is injected as body.action so the EF's
+  // internal dispatcher can route. Single-action EFs ignore the field if
+  // present.
   const callerEmail = getCallerEmail();
   const efBody: Record<string, unknown> = {
     ...body,
     requestId,
     ...(callerEmail ? { callerEmail } : {}),
-    ...(extraParams?.clientSheetId ? { tenantId: extraParams.clientSheetId } : {}),
+    ...(extraParams?.clientSheetId ? { tenantId: extraParams.clientSheetId, clientSheetId: extraParams.clientSheetId } : {}),
+    ...(groupedAction ? { action: groupedAction } : {}),
   };
 
   let data: unknown;
