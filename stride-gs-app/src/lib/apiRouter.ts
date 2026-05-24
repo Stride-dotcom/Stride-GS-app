@@ -75,10 +75,10 @@ export const GAS_TO_SB_MAP: Record<string, RouteEntry> = {
   // 2026-05-24 — React fires 4 distinct task-update actions
   // (updateTaskNotes / updateTaskPriority / updateTaskDueDate /
   // updateTaskCustomPrice); GAS handles each separately. The legacy
-  // single `updateTask` entry below mapped a NAME no React caller
-  // ever sends, so flipping `feature_flags.updateTask` was a silent
-  // no-op. update-task-sb is a UNIFIED handler that accepts any of
-  // the 4 field shapes — map all 4 React action names to it.
+  // single `updateTask` entry mapped a NAME no React caller ever sends,
+  // so flipping `feature_flags.updateTask` was a silent no-op.
+  // update-task-sb is a UNIFIED handler that accepts any of the 4 field
+  // shapes — map all 4 React action names to it.
   updateTaskNotes:       { ef: 'update-task-sb',       flagKey: 'updateTask' },
   updateTaskPriority:    { ef: 'update-task-sb',       flagKey: 'updateTask' },
   updateTaskDueDate:     { ef: 'update-task-sb',       flagKey: 'updateTask' },
