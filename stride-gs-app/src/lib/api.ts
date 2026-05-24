@@ -1280,7 +1280,7 @@ export async function apiPost<T>(
   // See src/lib/apiRouter.ts for the action→EF map and the routing rule.
   const route = resolveRoute(action, extraParams?.clientSheetId ?? null);
   if (route.backend === 'supabase') {
-    return invokeSupabaseHandler<T>(route.ef, bodyWithId, extraParams, requestId);
+    return invokeSupabaseHandler<T>(route.ef, bodyWithId, extraParams, requestId, route.gasAction);
   }
 
   if (!url) {
