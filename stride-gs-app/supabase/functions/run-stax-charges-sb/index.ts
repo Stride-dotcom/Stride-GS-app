@@ -205,7 +205,7 @@ Deno.serve(async (req: Request) => {
     const staxId   = String(row.stax_id        ?? '').trim();
     const staxCust = String(row.stax_customer_id ?? '').trim();
     const custName = String(row.customer       ?? '').trim();
-    const amount   = Number(row.amount         ?? 0);
+    let   amount   = Number(row.amount         ?? 0);
     const dueDate  = String(row.due_date       ?? '').trim();
     const rowAutoCharge = (row as { auto_charge?: boolean | null }).auto_charge !== false;
 
@@ -223,6 +223,40 @@ Deno.serve(async (req: Request) => {
     }
 
     stats.eligible++;
+
+    // SAFEGUARD 0: Live billing reconcile against public.billing.
+    // The stax_invoices.amount column is a snapshot taken when the
+    // invoice was created (PENDING). If billing rows were voided or
+    // added after that point, the snapshot is stale and /pay would
+    // under/over-collect against the live customer balance. Mirrors GAS
+    // stax_reconcileInvoiceAmount_ (StrideAPI.gs:39057) — live SUM from
+    // public.billing (post-MIG-005 source of truth, no CB drift), PUT
+    // corrected total to Stax before charging, skip if billing sums to
+    // zero (fully voided) or Stax PUT fails.
+    const recon = await reconcileInvoiceAmount(staxApiKey, sb, docNum, amount, staxId, custName);
+    if (recon.skip) {
+      const reason = String(recon.reason ?? '').slice(0, 200);
+      await logCharge(sb, docNum, staxId, staxCust, custName, amount, 'API_ERROR', '', `RECONCILE_BLOCKED: ${reason}`);
+      await logException(sb, docNum, custName, staxCust, amount, dueDate, 'RECONCILE_BLOCKED', `${payUrlBase}${staxId}`);
+      await updateInvoiceStatus(sb, row.id as string, 'CHARGE_FAILED', `Reconcile blocked: ${reason}`);
+      stats.apiErrors++;
+      results.push({ invoiceNo: docNum, staxId, customer: custName, amount, status: 'API_ERROR', error: `Reconcile blocked: ${reason}` });
+      continue;
+    }
+    if (recon.updated && recon.newTotal !== undefined) {
+      const oldAmount = amount;
+      amount = recon.newTotal;
+      try {
+        await sb.from('stax_invoices').update({
+          amount,
+          line_items_json: recon.newLineItemsJson,
+          updated_at:      new Date().toISOString(),
+        }).eq('id', row.id);
+      } catch (e) {
+        console.warn('[run-stax-charges-sb] reconcile mirror to stax_invoices failed (non-fatal):', e);
+      }
+      console.log(`[run-stax-charges-sb] reconciled ${docNum}: $${oldAmount.toFixed(2)} -> $${amount.toFixed(2)}`);
+    }
 
     // SAFEGUARD 1: pre-charge balance check.
     let balanceDue   = amount;
@@ -372,6 +406,144 @@ Deno.serve(async (req: Request) => {
 });
 
 // ─── Helpers ────────────────────────────────────────────────────────
+
+/**
+ * Reconcile the stax_invoices.amount snapshot against the live SUM from
+ * public.billing for this invoice number. Mirrors GAS
+ * stax_reconcileInvoiceAmount_ at StrideAPI.gs:39057.
+ *
+ *   1. Sum total from billing where invoice_no=docNum AND status != 'Void'
+ *   2. If sum differs from snapshot by < $0.01 → no-op
+ *   3. If sum = 0 → skip charge entirely (invoice was fully voided)
+ *   4. PUT corrected total + meta.lineItems to Stax /invoice/<staxId>
+ *   5. If PUT fails → skip charge ("refusing to charge stale amount")
+ *   6. On success → return new total + summary lineItems JSON so the
+ *      caller can mirror to stax_invoices and proceed with /pay
+ *
+ * Returns:
+ *   { updated: true,  newTotal, newLineItemsJson, oldTotal }  — proceed
+ *   { updated: false }                                         — match
+ *   { skip: true, reason }                                     — skip /pay
+ */
+async function reconcileInvoiceAmount(
+  staxApiKey:     string,
+  sb:             ReturnType<typeof createClient>,
+  docNum:         string,
+  snapshotAmount: number,
+  staxId:         string,
+  customer:       string,
+): Promise<{
+  updated?:          boolean;
+  newTotal?:         number;
+  newLineItemsJson?: string;
+  oldTotal?:         number;
+  skip?:             boolean;
+  reason?:           string;
+}> {
+  try {
+    const target = String(docNum || '').trim();
+    if (!target) return { updated: false, reason: 'Empty docNum' };
+
+    const { data: billingRows, error: billingErr } = await sb
+      .from('billing')
+      .select('total')
+      .eq('invoice_no', target)
+      .neq('status', 'Void');
+
+    if (billingErr) {
+      return { skip: true, reason: `billing read failed: ${billingErr.message}` };
+    }
+
+    const rows = (billingRows ?? []) as Array<{ total?: number | string | null }>;
+    let ledgerSum = 0;
+    for (const r of rows) {
+      const t = Number(r.total ?? 0);
+      if (Number.isFinite(t)) ledgerSum += t;
+    }
+    if (rows.length === 0) {
+      return {
+        skip:   true,
+        reason: `No non-Void billing rows for ${target} — invoice may have been fully voided. Charge skipped.`,
+      };
+    }
+
+    const ledgerAmt   = Math.round(ledgerSum * 100) / 100;
+    const snapshotNum = Number(snapshotAmount || 0);
+    if (Math.abs(snapshotNum - ledgerAmt) < 0.01) {
+      return { updated: false };
+    }
+
+    // Single-line summary — matches the simplified Stax IIF shape used by
+    // GAS (one summary line per invoice; the per-row breakdown lives in
+    // public.billing, not on the Stax-side invoice).
+    const sheetLines = [{
+      name:   'Stride Logistics Services',
+      memo:   `Invoice ${target}`,
+      qty:    1,
+      rate:   ledgerAmt,
+      amount: ledgerAmt,
+    }];
+    const staxApiLines = [{
+      item:     `QB Invoice #${target}`,
+      details:  `Invoice ${target}`,
+      quantity: 1,
+      price:    ledgerAmt,
+    }];
+
+    const custStr = String(customer || '').trim();
+    const updatePayload = {
+      total: ledgerAmt,
+      meta: {
+        subtotal:      ledgerAmt,
+        tax:           0,
+        memo:          `QB #${target}${custStr ? ` - ${custStr}` : ''}`,
+        reference:     target,
+        invoiceNumber: target,
+        lineItems:     staxApiLines,
+      },
+    };
+
+    try {
+      const res = await fetch(`${STAX_API_BASE}/invoice/${encodeURIComponent(staxId)}`, {
+        method:  'PUT',
+        headers: {
+          'Authorization': `Bearer ${staxApiKey}`,
+          'Content-Type':  'application/json',
+          'Accept':        'application/json',
+        },
+        body: JSON.stringify(updatePayload),
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        return {
+          skip:   true,
+          reason: `Stax PUT /invoice/${staxId} failed (HTTP ${res.status}): ` +
+                  `snapshot $${snapshotNum.toFixed(2)} vs billing $${ledgerAmt.toFixed(2)}. ` +
+                  `Refusing to charge stale amount. Body: ${text.slice(0, 160)}`,
+        };
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return {
+        skip:   true,
+        reason: `Stax PUT threw: ${msg}. ` +
+                `Snapshot $${snapshotNum.toFixed(2)} vs billing $${ledgerAmt.toFixed(2)} — refusing to charge stale amount.`,
+      };
+    }
+
+    return {
+      updated:          true,
+      newTotal:         ledgerAmt,
+      newLineItemsJson: JSON.stringify(sheetLines),
+      oldTotal:         snapshotNum,
+    };
+  } catch (e) {
+    return {
+      updated: false,
+      reason:  `reconcileInvoiceAmount error: ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
+}
 
 async function getDefaultPaymentMethod(
   staxApiKey: string,
