@@ -91,13 +91,40 @@ export function fireShadow(
     // Resolve to the `.changes` field so the hashes compare apples to
     // apples. Throw on shadow rejection — runShadow records it as a
     // mismatch with the error message in mismatch_details.
+    //
+    // 2026-05-24 — supabase-js v2 wraps any non-2xx response as
+    // FunctionsHttpError with a generic "Failed to send a request" message,
+    // EVEN when the EF returned a perfectly valid JSON body. Several
+    // MCP-deployed shadows return HTTP 400 + `{ok:false, error:"…"}` for
+    // validation failures — the previous code path treated that as a
+    // transport failure and recorded "Shadow invoke threw: Failed to send
+    // a request to the Edge Function" in mismatch_details, masking the
+    // actual error string. The HTTP-error branch below reads the response
+    // body via FunctionsHttpError's `.context` so the real error message
+    // lands in parity_results.
     sbInvoke: async () => {
       const { data, error } = await supabase.functions.invoke<{
         ok?: boolean;
         changes?: Record<string, unknown>;
         error?: string;
       }>(spec.ef, { body: payload });
-      if (error) throw new Error(error.message);
+      if (error) {
+        const ctx = (error as { context?: Response }).context;
+        if (ctx && typeof ctx.json === 'function') {
+          try {
+            const errBody = await ctx.json();
+            if (errBody && typeof errBody === 'object' && 'error' in errBody) {
+              throw new Error(String((errBody as { error: unknown }).error));
+            }
+          } catch (parseErr) {
+            // Body wasn't JSON or json() failed — fall through to the
+            // generic supabase-js message, which is still better than
+            // dropping the call silently.
+            if (parseErr instanceof Error && parseErr.message !== error.message) throw parseErr;
+          }
+        }
+        throw new Error(error.message);
+      }
       const body = data ?? {};
       if (!body.ok) throw new Error(body.error ?? 'shadow returned ok=false');
       return body.changes ?? {};

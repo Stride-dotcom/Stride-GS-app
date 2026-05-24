@@ -66,7 +66,7 @@ serve(async (req: Request): Promise<Response> => {
 
   const result = runStartTaskShadow(payload);
   return new Response(JSON.stringify(result), {
-    status: result.ok ? 200 : 400,
+    status: 200,
     headers: { 'Content-Type': 'application/json' },
   });
 });
