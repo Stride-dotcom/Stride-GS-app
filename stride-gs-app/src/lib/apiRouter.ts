@@ -144,6 +144,37 @@ export const GAS_TO_SB_MAP: Record<string, RouteEntry> = {
   // Reports (read-only)
   generateUnbilledReport: { ef: 'generate-unbilled-report-sb', flagKey: 'generateUnbilledReport' },
 
+  // High-traffic batch — top untracked action in gas_call_log (52 calls/7d)
+  batchUpdateItemLocations: { ef: 'batch-update-item-locations-sb', flagKey: 'batchUpdateItemLocations' },
+
+  // Task lifecycle — cancel + reopen + bulk cancel
+  // (updateTaskNotes / updateTaskPriority / updateTaskDueDate /
+  //  updateTaskCustomPrice are already mapped above to update-task-sb under
+  //  flagKey 'updateTask' — see PR #519. The 4 per-action feature_flag rows
+  //  this PR seeded are idle (unused by the router) and harmless.)
+  cancelTask:        { ef: 'cancel-task-sb',         flagKey: 'cancelTask' },
+  reopenTask:        { ef: 'reopen-task-sb',         flagKey: 'reopenTask' },
+  batchCancelTasks:  { ef: 'batch-cancel-tasks-sb',  flagKey: 'batchCancelTasks' },
+  batchCancelRepairs:{ ef: 'batch-cancel-repairs-sb',flagKey: 'batchCancelRepairs' },
+
+  // Will Call lifecycle (single-WC)
+  updateWillCall:           { ef: 'update-will-call-sb',           flagKey: 'updateWillCall' },
+  cancelWillCall:           { ef: 'cancel-will-call-sb',           flagKey: 'cancelWillCall' },
+  addItemsToWillCall:       { ef: 'add-items-to-will-call-sb',     flagKey: 'addItemsToWillCall' },
+  removeItemsFromWillCall:  { ef: 'remove-items-from-will-call-sb',flagKey: 'removeItemsFromWillCall' },
+
+  // Locations (warehouse-global) and Clients
+  createLocation:    { ef: 'create-location-sb', flagKey: 'createLocation' },
+  updateClient:      { ef: 'update-client-sb',   flagKey: 'updateClient' },
+
+  // Billing-light handlers (no invoice manipulation — those stay on
+  // create-invoice-sb / void-invoice-sb / reissue-invoice-sb).
+  syncClientBilling: { ef: 'sync-client-billing-sb', flagKey: 'syncClientBilling' },
+  addManualCharge:   { ef: 'add-manual-charge-sb',   flagKey: 'addManualCharge' },
+  voidManualCharge:  { ef: 'void-manual-charge-sb',  flagKey: 'voidManualCharge' },
+  updateBillingRow:  { ef: 'update-billing-row-sb',  flagKey: 'updateBillingRow' },
+  voidUnbilledRows:  { ef: 'void-unbilled-rows-sb',  flagKey: 'voidUnbilledRows' },
+
   // Still gas-only — no SB-primary EF in this PR:
   //   updateShipment:       updateShipment flag, no update-shipment-sb EF
 };
