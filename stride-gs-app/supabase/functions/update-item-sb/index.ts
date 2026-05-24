@@ -71,6 +71,32 @@ const FIELD_MAP: Record<string, { column: string; syncToWork: boolean }> = {
   coverageOptionId: { column: 'coverage_option_id', syncToWork: false },
 };
 
+// 2026-05-24 — per-target column whitelists for the cascade fan-out.
+// FIELD_MAP.column uses inventory column names; tasks + repairs each
+// expose a NARROWER subset (and repairs renames vendor → repair_vendor).
+// The prior cascade passed the full FIELD_MAP-projected row to BOTH
+// tables, so any update touching e.g. `reference`, `room`, `item_class`,
+// or `vendor` (on repairs) was rejected by PostgREST with PGRST204
+// "column not found" and the cascade silently failed (errors logged +
+// swallowed). Result: tasks/repairs detail panels showed stale
+// description/sidemark after the user changed them on the item.
+//
+// Keys here are FIELD_MAP keys (the React-facing camelCase); values are
+// the column names ON THAT TABLE. Omitted keys are dropped from the
+// cascade for that table. Refer to public.tasks / public.repairs schemas
+// to confirm.
+const TASKS_CASCADE_COLUMNS: Record<string, string> = {
+  vendor:      'vendor',
+  description: 'description',
+  sidemark:    'sidemark',
+  location:    'location',
+  itemNotes:   'item_notes',
+};
+const REPAIRS_CASCADE_COLUMNS: Record<string, string> = {
+  vendor:    'repair_vendor',
+  itemNotes: 'item_notes',
+};
+
 const VALID_STATUSES = new Set(['Active', 'On Hold', 'Released', 'Transferred']);
 
 // Tasks status terminal states — same set as TASK_CLOSED in
@@ -237,19 +263,42 @@ Deno.serve(async (req: Request) => {
   // ── 3. Cascade to public.tasks + public.repairs (open rows) ─────────
   // SYNC_FIELDS subset: only the syncToWork=true keys propagate.
   // Status is NOT one of them. Open = NOT IN terminal set.
-  const cascadeRow: Record<string, unknown> = {};
+  //
+  // 2026-05-24 — per-table column whitelists (TASKS_CASCADE_COLUMNS /
+  // REPAIRS_CASCADE_COLUMNS) project the cascade payload to only the
+  // columns that actually exist on each table. The prior code passed
+  // one shared `cascadeRow` containing all syncToWork=true keys to BOTH
+  // tables, and PostgREST rejected the UPDATE with PGRST204 for the
+  // columns missing from each table (reference/room/item_class on tasks;
+  // vendor/description/reference/sidemark/room/location/item_class on
+  // repairs). Errors were swallowed (best-effort), so the cascade
+  // silently failed and detail panels showed stale data.
+  const nowIsoCascade = new Date().toISOString();
+
+  const tasksCascadeRow: Record<string, unknown> = {};
   for (const key of updateKeys) {
     const spec = FIELD_MAP[key];
     if (!spec?.syncToWork) continue;
-    cascadeRow[spec.column] = (updates as Record<string, unknown>)[key];
+    const col = TASKS_CASCADE_COLUMNS[key];
+    if (col) tasksCascadeRow[col] = (updates as Record<string, unknown>)[key];
   }
+
+  const repairsCascadeRow: Record<string, unknown> = {};
+  for (const key of updateKeys) {
+    const spec = FIELD_MAP[key];
+    if (!spec?.syncToWork) continue;
+    const col = REPAIRS_CASCADE_COLUMNS[key];
+    if (col) repairsCascadeRow[col] = (updates as Record<string, unknown>)[key];
+  }
+
   let cascadeTaskCount = 0;
   let cascadeRepairCount = 0;
-  if (Object.keys(cascadeRow).length > 0) {
-    cascadeRow.updated_at = new Date().toISOString();
+
+  if (Object.keys(tasksCascadeRow).length > 0) {
+    tasksCascadeRow.updated_at = nowIsoCascade;
     const { data: cTasks, error: tErr } = await sb
       .from('tasks')
-      .update(cascadeRow)
+      .update(tasksCascadeRow)
       .eq('tenant_id', tenantId)
       .eq('item_id', itemId)
       .not('status', 'in', TASK_TERMINAL_LIST)
@@ -261,10 +310,13 @@ Deno.serve(async (req: Request) => {
     } else {
       cascadeTaskCount = (cTasks ?? []).length;
     }
+  }
 
+  if (Object.keys(repairsCascadeRow).length > 0) {
+    repairsCascadeRow.updated_at = nowIsoCascade;
     const { data: cRepairs, error: rErr } = await sb
       .from('repairs')
-      .update(cascadeRow)
+      .update(repairsCascadeRow)
       .eq('tenant_id', tenantId)
       .eq('item_id', itemId)
       // Field cascade uses the NARROWER repair-terminal set so a

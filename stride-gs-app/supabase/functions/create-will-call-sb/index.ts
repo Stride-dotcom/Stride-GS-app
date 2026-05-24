@@ -210,20 +210,22 @@ Deno.serve(async (req: Request) => {
   const { error: wcInsErr } = await sb.from('will_calls').insert(wcInsert);
   if (wcInsErr) return json({ success: false, error: `WC insert failed: ${wcInsErr.message}` }, 500);
 
+  // 2026-05-24 — public.will_call_items only has these columns:
+  //   tenant_id, wc_number, item_id, qty, wc_fee, status, released,
+  //   created_at, updated_at.
+  // The prior shape added vendor/description/item_class/location/sidemark/
+  // room — all non-existent — and PostgREST rejected the INSERT with
+  // PGRST204 "column not found in schema cache". WC item denormalized data
+  // already lives in public.inventory (joined via item_id); the React UI
+  // reads it from there, not from will_call_items.
   const wciRows = enriched.map(e => ({
-    tenant_id:       tenantId,
-    wc_number:       wcNumber,
-    item_id:         e.itemId,
-    qty:             e.qty,
-    vendor:          e.vendor,
-    description:     e.description,
-    item_class:      e.itemClass,
-    location:        e.location,
-    sidemark:        e.sidemark,
-    room:            e.room,
-    wc_fee:          e.wcFee,
-    status:          'Pending',
-    updated_at:      nowIso,
+    tenant_id:  tenantId,
+    wc_number:  wcNumber,
+    item_id:    e.itemId,
+    qty:        e.qty,
+    wc_fee:     e.wcFee,
+    status:     'Pending',
+    updated_at: nowIso,
   }));
   const { error: wciInsErr } = await sb.from('will_call_items').insert(wciRows);
   if (wciInsErr) {

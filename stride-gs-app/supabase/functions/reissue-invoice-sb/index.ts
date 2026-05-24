@@ -10,16 +10,15 @@
  *
  * Re-issue = "unwind an Invoiced or Void invoice back to Unbilled":
  *   • Flip billing.status from 'Invoiced'/'Void' → 'Unbilled'.
- *   • Clear invoice_no, invoiced_at.
+ *   • Clear invoice_no + invoice_date.
  *   • Operator then re-runs Create Invoices for a fresh invoice # /
  *     sidemark grouping. (The handler does NOT re-create automatically.)
  *
  * Flow:
  *   1. Validate (tenantId, invoiceNo).
  *   2. Read rows for (tenant, invoice_no, status IN ('Invoiced','Void')).
- *   3. UPDATE billing SET status='Unbilled', invoice_no=NULL,
- *      invoiced_at=NULL, voided_at=NULL, void_reason=NULL
- *      WHERE invoice_no=... AND status IN ('Invoiced','Void').
+ *   3. UPDATE billing SET status='Unbilled', invoice_no='',
+ *      invoice_date='' WHERE invoice_no=... AND status IN ('Invoiced','Void').
  *   4. Audit log: entity_type='billing', action='reissue_invoice'.
  *   5. Reverse-writethrough each row to per-tenant Billing_Ledger
  *      (status → 'Unbilled', clear invoice_no). Best-effort.
@@ -104,24 +103,25 @@ Deno.serve(async (req: Request) => {
   }
 
   // ── 2. UPDATE billing → Unbilled ────────────────────────────────────
-  // Clear invoice_no, invoiced_at, voided_at, void_reason. The
-  // Item Notes append ("Re-issued via UI YYYY-MM-DD: <reason>") is done
-  // per-row below because Item Notes is per-row history, not uniform.
+  // Clear invoice_no + invoice_date. The Item Notes append ("Re-issued via
+  // UI YYYY-MM-DD: <reason>") is done per-row below because Item Notes is
+  // per-row history, not uniform.
+  // 2026-05-24 — public.billing has NO `invoiced_at`, `voided_at`, or
+  // `void_reason` columns; the prior code wrote nulls to those non-existent
+  // columns and the UPDATE failed with PostgREST PGRST204. Drop them.
   const nowIso = new Date().toISOString();
   const todayStr = nowIso.slice(0, 10);
   const noteSuffix = `Re-issued via UI ${todayStr}${reason ? `: ${reason}` : ''}`;
   const eligibleIds = eligible.map(r => r.ledger_row_id);
 
-  // First update: clear status / invoice_no / timestamps in bulk.
+  // First update: clear status / invoice_no / invoice_date in bulk.
   const { data: reissuedRaw, error: upErr } = await sb
     .from('billing')
     .update({
-      status:      'Unbilled',
-      invoice_no:  null,
-      invoiced_at: null,
-      voided_at:   null,
-      void_reason: null,
-      updated_at:  nowIso,
+      status:       'Unbilled',
+      invoice_no:   '',
+      invoice_date: '',
+      updated_at:   nowIso,
     })
     .eq('tenant_id', tenantId)
     .in('ledger_row_id', eligibleIds)

@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.230.0 — 2026-05-23 PST — [BILLING] Two coordinated billing fixes — both source-of-truth alignments away from CB Consolidated_Ledger snapshots toward public.billing live reads. (1) handleQboCreateInvoice_ now builds the per-invoice line items from public.billing (sorted by date asc, svc_code asc, item_id asc, filtered status!=Void) instead of scanning CB Consolidated_Ledger. Pre-fix the QBO push could land lines in scrambled order vs. the React Billing report and could include rows that drifted between CB and public.billing — the new path reads the same table React reads, with the same display sort, so QBO sees exactly what the operator sees. Customer/sub-job/payment-terms resolution still flows through clientInfoMap (CB Clients sheet); the consolVals load stays in place because qbo_checkDuplicatePush_ / qbo_writeQboInvoiceId_ / qbo_writeQboFailure_ still mutate CB. Companion React change: Billing.tsx sorts selRows by display order before handing the rows to handleCreateInvoices, so the Consolidated_Ledger writes carry the same order too. (2) handleQbExport_ + handleRegenerateIifForBatch_ generate Stax IIF as ONE TRNS + ONE SPL per invoice (was N SPL — one per service line) with the total computed live from `SELECT SUM(total) FROM public.billing WHERE invoice_no=X AND status!=Void`. Each invoice's stax_invoices row gets the live SUM in `amount`, and `line_items_json` carries a single summary line `[{name:"Stride Logistics Services", memo:"Invoice X", qty:1, rate:total, amount:total}]` — historical N-line rows stay untouched (no schema change, no migration). Removes the partial-snapshot class that caused Stax under-collects when billing rows were added/voided after the original push: the SPL is derived from the SUM at IIF time, so any subsequent billing change automatically reflects on the next push. Invoice number is preserved on Stax via the existing meta.reference + memo + the IIF DOCNUM column — payment matching unchanged. handleCreateStaxInvoices_ + handleRunStaxCharges_ already use stax_invoices.amount (not line_items_json) so charging behavior is unchanged. SB EF mirror: create-invoice-sb now accepts the React payload's full rows[] and returns updated rows in caller order; qbo-create-invoice-sb (skeleton) is unchanged because its caller-supplied lines path is GAS-side scoped today. NO change to v38.182 atomic invoice counter, no change to half-write detection, no change to Void/Reissue logic.
+   StrideAPI.gs — v38.231.0 — 2026-05-24 PST — [MIGRATION-P3/MIG-016] `__writeThroughReverseInventory_` gains op='insert' support. Pre-fix the writer rejected 'insert' with a hard throw and every `complete-shipment-sb` call landed its inventory row in Supabase but NEVER in the per-tenant Inventory sheet — failures stacked up in gs_sync_events ("op 'insert' not supported"). Items were invisible to legacy sheet readers (full-client-sync caught them on the next pass, ~5–30 min). New insert path: find-by-Item-ID (idempotent — re-fire on an existing row falls through to update semantics), append a fresh row at lastDataRow+1 with Status + Item ID + every column in REVERSE_INV_FIELDS_ + new REVERSE_INV_INSERT_EXTRA_FIELDS_ (carrier, tracking_number, shipment_number, receive_date, release_date, needs_inspection, needs_assembly, invoice_url, task_notes, transfer_date). Date-typed columns (receive_date / release_date / transfer_date) parsed as local-time Date objects so the sheet formats them as dates (UTC-shift dodge, mirroring v38.208.0). api_ensureColumn_ on every header — older client templates self-heal on first insert. Status side effects (ledger update + auto-cancel) intentionally bypassed on insert because (a) new items always start at Status='Active', not Released, and (b) auto-cancelling open work for an item that just came in doesn't make sense. Update-path with no matching row still errors out — that's the SB-primary "row I just wrote should exist" contract for `update-item-sb`. REVERSE_INV_FIELDS_ map (the editable subset used by update-item-sb) is UNCHANGED — the new insert-extras live in a separate REVERSE_INV_INSERT_EXTRA_FIELDS_ map so a future `update-item-sb` edit doesn't accidentally rewrite shipment_number / receive_date / etc. on a routine sidemark change. Per MIG-016: deploy this BEFORE flipping feature_flags.receiveShipment to active_backend='supabase' for any tenant — without it the SB writer's row payload throws the legacy "insert not supported" error and the canary fails-closed on every receive.
+   v38.230.0 — 2026-05-23 PST — [BILLING] Two coordinated billing fixes — both source-of-truth alignments away from CB Consolidated_Ledger snapshots toward public.billing live reads. (1) handleQboCreateInvoice_ now builds the per-invoice line items from public.billing (sorted by date asc, svc_code asc, item_id asc, filtered status!=Void) instead of scanning CB Consolidated_Ledger. Pre-fix the QBO push could land lines in scrambled order vs. the React Billing report and could include rows that drifted between CB and public.billing — the new path reads the same table React reads, with the same display sort, so QBO sees exactly what the operator sees. Customer/sub-job/payment-terms resolution still flows through clientInfoMap (CB Clients sheet); the consolVals load stays in place because qbo_checkDuplicatePush_ / qbo_writeQboInvoiceId_ / qbo_writeQboFailure_ still mutate CB. Companion React change: Billing.tsx sorts selRows by display order before handing the rows to handleCreateInvoices, so the Consolidated_Ledger writes carry the same order too. (2) handleQbExport_ + handleRegenerateIifForBatch_ generate Stax IIF as ONE TRNS + ONE SPL per invoice (was N SPL — one per service line) with the total computed live from `SELECT SUM(total) FROM public.billing WHERE invoice_no=X AND status!=Void`. Each invoice's stax_invoices row gets the live SUM in `amount`, and `line_items_json` carries a single summary line `[{name:"Stride Logistics Services", memo:"Invoice X", qty:1, rate:total, amount:total}]` — historical N-line rows stay untouched (no schema change, no migration). Removes the partial-snapshot class that caused Stax under-collects when billing rows were added/voided after the original push: the SPL is derived from the SUM at IIF time, so any subsequent billing change automatically reflects on the next push. Invoice number is preserved on Stax via the existing meta.reference + memo + the IIF DOCNUM column — payment matching unchanged. handleCreateStaxInvoices_ + handleRunStaxCharges_ already use stax_invoices.amount (not line_items_json) so charging behavior is unchanged. SB EF mirror: create-invoice-sb now accepts the React payload's full rows[] and returns updated rows in caller order; qbo-create-invoice-sb (skeleton) is unchanged because its caller-supplied lines path is GAS-side scoped today. NO change to v38.182 atomic invoice counter, no change to half-write detection, no change to Void/Reissue logic.
    v38.229.0 — 2026-05-23 PST — [BILLING] Stax IIF export + runStaxCharges always work from the FULL CB Consolidated_Ledger for each invoice number, never a partial snapshot of the rows the caller passed in. Two fixes in one ship — both close the same class of bug (Stax under-collects when billing rows are added to an invoice number after the original push). (1) handleQbExport_ + handleQbExcelExport_: pre-fix the optional `payload.ledgerRowIds` was used as a per-row filter on the lines emitted. So if Billing.tsx's Create Invoices flow passed only the newly-invoiced ledger row IDs (or an operator hand-picked a subset of Invoiced rows on Billing → Report and clicked Stax IIF or QB Excel), Stax received a line_items_json + Total covering only those rows even when the invoice number had additional Invoiced rows in CB. The Stax-side invoice was created with the partial Total via handleCreateStaxInvoices_ → /invoice, and the v38.171.0 PENDING-only refresh guard prevented later handleQbExport_ passes from updating it. Fix: treat `payload.ledgerRowIds` as a POINTER to the invoice numbers covered (first-pass scan resolves the IDs to invoice numbers, then the main loop emits ALL Invoiced rows for those invoice numbers regardless of whether each individual row's Ledger Row ID was in the original payload). Mirrors how handleQboCreateInvoice_ already groups by invoice number. (2) handleRunStaxCharges_: new safeguard right before /pay. New helper stax_reconcileInvoiceAmount_ sums every Invoiced ledger row for the charge target's QB Invoice #, compares to the Stax sheet's Total Amount, and if they differ by ≥ $0.01 issues PUT /invoice/<id> to refresh Stax (total + meta.lineItems) before charging — protects against rows added AFTER the original push that fix #1 cannot reach (status already flipped to CREATED so handleQbExport_'s re-write path is gated off). Writes the corrected amount + line_items_json back to the Stax Invoices sheet via header-resolved stax_invoiceCols_ and patches public.stax_invoices via supabasePatch_ so React reflects the new total. Logs a reconcile entry to the Run Log + stamps the chargelog. If the Stax PUT fails or the CB ledger has zero Invoiced rows for that invoice number (voided in CB after push), returns skip: caller marks CHARGE_FAILED + appends a RECONCILE_BLOCKED exception so the operator can intervene; no money moves. Companion notes: stats.apiErrors counts reconcile-blocked rows; no new field added to the response shape to keep this minimal. No schema change, no migration, no React change.
    v38.228.1 — 2026-05-22 PST — [DOCS] Header-comment syntax hotfix for v38.228.0. The v38.228.0 entry contained a literal block-comment-close sequence inside its prose, which prematurely terminated this outer header block comment and caused clasp push to reject the file with "SyntaxError: Unexpected identifier 'a' line: 2". Rewords the phrase to remove the offending sequence. No code change beyond the header.
    v38.228.0 — 2026-05-22 PST — [DOCS] Removes all five `api_generateDocPdf_` call sites from completion / approval / release handlers in favor of the React DocRenderer (PR #507). The function definition is intentionally retained for reference. Sites disabled (each wrapped in a block comment with a dated marker, original block preserved): (1) handleCompleteShipment_ DOC_RECEIVING at ~line 17471 — `var pdfBlob = null` declaration kept so the downstream SHIPMENT_RECEIVED email send still compiles; api_sendTemplateEmail_'s `if (pdfBlob) mailOpts.attachments = [pdfBlob]` guard at line 18456 means a null blob sends the email with no attachment, matching the React-side flow where DocRenderer hosts the PDF in public.documents and the email CTAs deep-link there. (2) handleProcessRepairApproval_ DOC_REPAIR_WORK_ORDER at ~line 19550 (only fires on the Approve branch — Decline path unchanged). (3) handleStartRepair_ DOC_REPAIR_WORK_ORDER at ~line 20208 — this site never attached the PDF to an email (storage-only generation for the Docs tab), so removing it is a pure no-op for outbound comms. (4) handleProcessWcRelease_ DOC_WILL_CALL_RELEASE at ~line 21221. (5) handleGenerateWcDoc_ DOC_WILL_CALL_RELEASE at ~line 21698 — the dedicated reprint endpoint, now a no-op that still returns success for any straggling pre-deploy React callers; expected to be deleted entirely once the React renderer is the only caller in the wild. DOC_INVOICE path (jsPDF in React via `api_exportDocAsPdfBlob_`-adjacent flow) NOT touched per scope. No schema / RLS / React change in this PR; companion React changes for DocRenderer landed in PR #507.
@@ -2551,15 +2552,35 @@ var REVERSE_INV_FIELDS_ = {
   coverage_option_id: "Coverage Option"
 };
 
+// v38.231.0 — Insert-mode column set. The update-mode REVERSE_INV_FIELDS_
+// above is the *editable* subset (fields mutated by `update-item-sb`). On
+// insert we want the FULL shipment-creation column set so the per-tenant
+// Inventory sheet picks up carrier / tracking / shipment# / receive date /
+// needs_inspection / etc. when `complete-shipment-sb` mirrors a new row
+// out. Keep in sync with the inventory INSERT payload built in
+// `supabase/functions/complete-shipment-sb/index.ts` (the `row` field).
+var REVERSE_INV_INSERT_EXTRA_FIELDS_ = {
+  carrier:           "Carrier",
+  tracking_number:   "Tracking #",
+  shipment_number:   "Shipment #",
+  receive_date:      "Receive Date",
+  release_date:      "Release Date",
+  needs_inspection:  "Needs Inspection",
+  needs_assembly:    "Needs Assembly",
+  invoice_url:       "Invoice URL",
+  task_notes:        "Task Notes",
+  transfer_date:     "Transfer Date"
+};
+
 function __writeThroughReverseInventory_(ss, payload) {
   var rowId = payload && payload.rowId ? String(payload.rowId).trim() : "";
   var row   = (payload && payload.row) || {};
   var op    = payload && payload.op ? String(payload.op) : "";
 
-  if (op !== "update") {
+  if (op !== "update" && op !== "insert") {
     throw new Error(
       "__writeThroughReverseInventory_: op '" + op + "' not supported " +
-      "(only 'update' is implemented; inserts/deletes are not part of any active migration path)."
+      "(supported: 'insert' | 'update'; deletes are not part of any active migration path)."
     );
   }
   if (!rowId) throw new Error("__writeThroughReverseInventory_: rowId (Item ID) required");
@@ -2576,18 +2597,94 @@ function __writeThroughReverseInventory_(ss, payload) {
   // api_getLastDataRow_ guards against trailing-blank-row pollution
   // that getLastRow() picks up. Skip work when the sheet is empty.
   var lastRow = api_getLastDataRow_(inv);
-  if (lastRow < 2) throw new Error("__writeThroughReverseInventory_: Inventory sheet has no data rows");
 
-  // Scan the Item ID column once to find the target row.
-  var itemIdValues = inv.getRange(2, itemIdCol, lastRow - 1, 1).getValues();
+  // Scan the Item ID column once to find the target row (skipped when
+  // the sheet has no data rows yet — insert path will append at row 2).
   var foundRow = -1;
-  for (var i = 0; i < itemIdValues.length; i++) {
-    if (String(itemIdValues[i][0] || "").trim() === rowId) {
-      foundRow = i + 2;
-      break;
+  if (lastRow >= 2) {
+    var itemIdValues = inv.getRange(2, itemIdCol, lastRow - 1, 1).getValues();
+    for (var i = 0; i < itemIdValues.length; i++) {
+      if (String(itemIdValues[i][0] || "").trim() === rowId) {
+        foundRow = i + 2;
+        break;
+      }
     }
   }
+
+  // ── INSERT path ───────────────────────────────────────────────────
+  // Fires from complete-shipment-sb after the SB-side inventory INSERT
+  // commits. Builds a fresh row from update + insert-extra field maps
+  // PLUS the Status column directly (insert needs initial status, but
+  // we bypass the release-mode side effects below — ledger + auto-cancel
+  // only fire on a true Released-transition of an EXISTING row).
+  // Idempotency: if the Item ID already exists, fall through to UPDATE
+  // semantics rather than appending a duplicate — matches the find-or-
+  // create contract of the billing + tasks writers.
+  if (op === "insert" && foundRow < 0) {
+    // api_ensureColumn_ appends any missing columns case-insensitively
+    // so older client templates self-heal on first insert. Status +
+    // Item ID columns must exist; the rest are best-effort.
+    var statusColIns = api_ensureColumn_(inv, "Status");
+
+    var insertRowNum = (lastRow < 1 ? 2 : lastRow + 1);
+    var maxCol = inv.getLastColumn();
+
+    var rowValues = new Array(maxCol);
+    for (var c = 0; c < maxCol; c++) rowValues[c] = "";
+    rowValues[itemIdCol - 1] = rowId;
+    if (row.status != null && String(row.status) !== "") {
+      rowValues[statusColIns - 1] = String(row.status);
+    } else {
+      rowValues[statusColIns - 1] = "Active";
+    }
+
+    // Copy editable fields (vendor / description / sidemark / ...).
+    for (var fk in REVERSE_INV_FIELDS_) {
+      if (!Object.prototype.hasOwnProperty.call(row, fk)) continue;
+      if (row[fk] === undefined) continue;
+      var hdr = REVERSE_INV_FIELDS_[fk];
+      var colN = api_ensureColumn_(inv, hdr);
+      if (colN > maxCol) {
+        rowValues.length = colN;
+        for (var cc = maxCol; cc < colN; cc++) rowValues[cc] = "";
+        maxCol = colN;
+      }
+      rowValues[colN - 1] = row[fk];
+    }
+    // Copy shipment-creation extras.
+    for (var fkE in REVERSE_INV_INSERT_EXTRA_FIELDS_) {
+      if (!Object.prototype.hasOwnProperty.call(row, fkE)) continue;
+      if (row[fkE] === undefined) continue;
+      var hdrE = REVERSE_INV_INSERT_EXTRA_FIELDS_[fkE];
+      var colE = api_ensureColumn_(inv, hdrE);
+      if (colE > maxCol) {
+        rowValues.length = colE;
+        for (var ce = maxCol; ce < colE; ce++) rowValues[ce] = "";
+        maxCol = colE;
+      }
+      var rawVal = row[fkE];
+      // Parse YYYY-MM-DD date strings into Date objects so the sheet
+      // formats them as dates (UTC-shift dodge, same as v38.208.0).
+      if ((fkE === "receive_date" || fkE === "release_date" || fkE === "transfer_date")
+          && typeof rawVal === "string" && rawVal.length >= 10) {
+        var dParts = rawVal.slice(0, 10).split("-");
+        if (dParts.length === 3) {
+          var dObj = new Date(parseInt(dParts[0], 10), parseInt(dParts[1], 10) - 1, parseInt(dParts[2], 10));
+          if (!isNaN(dObj.getTime())) rawVal = dObj;
+        }
+      }
+      rowValues[colE - 1] = rawVal;
+    }
+    inv.getRange(insertRowNum, 1, 1, rowValues.length).setValues([rowValues]);
+    SpreadsheetApp.flush();
+    return { rowNumber: insertRowNum, inserted: true };
+  }
+
   if (foundRow < 0) {
+    // UPDATE-path with no existing row is an error (the SB primary
+    // expected to find the row it just wrote). INSERT-path falls into
+    // this branch only when foundRow >= 0 (idempotent re-fire) and is
+    // handled by the existing update logic below.
     throw new Error("__writeThroughReverseInventory_: Item ID '" + rowId + "' not found in Inventory sheet");
   }
 

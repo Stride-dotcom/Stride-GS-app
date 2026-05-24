@@ -13,8 +13,10 @@
  * Flow:
  *   1. Validate (tenantId, invoiceNo).
  *   2. Read all billing rows for (tenant, invoice_no, status='Invoiced').
- *   3. UPDATE billing SET status='Void', voided_at=now(),
- *      void_reason=<reason> WHERE invoice_no=... AND status='Invoiced'.
+ *   3. UPDATE billing SET status='Void', item_notes='<existing> | Voided: <reason>'
+ *      WHERE invoice_no=... AND status='Invoiced'. (Per-row, since the
+ *      item_notes append is row-specific — matches GAS handleVoidInvoice_
+ *      pattern; public.billing has no voided_at/void_reason columns.)
  *   4. Audit log: entity_type='billing', action='void_invoice'.
  *   5. Reverse-writethrough each row to per-tenant Billing_Ledger
  *      (status → 'Void'). Best-effort.
@@ -80,9 +82,13 @@ Deno.serve(async (req: Request) => {
   const warnings: string[] = [];
 
   // ── 1. Read rows for this invoice ───────────────────────────────────
+  // 2026-05-24 — Also pull item_notes so we can append the void note (the
+  // GAS handler appends "Voided: <reason>" to Item Notes; public.billing
+  // has NO `voided_at` or `void_reason` columns — the prior code wrote
+  // to those non-existent columns and the UPDATE failed with 500).
   const { data: rowsRaw, error: readErr } = await sb
     .from('billing')
-    .select('ledger_row_id, status')
+    .select('ledger_row_id, status, item_notes')
     .eq('tenant_id', tenantId)
     .eq('invoice_no', invoiceNo);
 
@@ -90,7 +96,7 @@ Deno.serve(async (req: Request) => {
     console.error('[void-invoice-sb] read failed:', readErr.message);
     return json({ error: `Read failed: ${readErr.message}`, code: 'READ_FAILED' }, 500);
   }
-  const rows = (rowsRaw ?? []) as Array<{ ledger_row_id: string; status: string }>;
+  const rows = (rowsRaw ?? []) as Array<{ ledger_row_id: string; status: string; item_notes: string | null }>;
   if (rows.length === 0) {
     return json({ error: `No billing rows found for invoice ${invoiceNo}`, code: 'NOT_FOUND' }, 404);
   }
@@ -105,33 +111,35 @@ Deno.serve(async (req: Request) => {
     }, 400);
   }
 
-  // ── 2. UPDATE billing SET status='Void' ─────────────────────────────
+  // ── 2. UPDATE billing SET status='Void', append voidNote to item_notes ─
+  // Per-row update because each row's existing item_notes is different;
+  // a bulk update would clobber. Matches GAS handleVoidInvoice_'s
+  // setValue(existing + " | " + suffix) pattern (StrideAPI.gs:14371).
   const nowIso = new Date().toISOString();
-  const idsToVoid = invoicedRows.map(r => r.ledger_row_id);
-  // Append-or-set void note. GAS's handler appends "Voided: <reason>"
-  // to Item Notes; we mirror that in void_reason here. The per-tenant
-  // sheet mirror below carries Status='Void' only — the reason lives
-  // in public.billing.void_reason where the React UI reads it.
   const voidNote = reason ? `Voided: ${reason}` : `Voided ${nowIso.slice(0, 10)}`;
 
-  const { data: voidedRaw, error: upErr } = await sb
-    .from('billing')
-    .update({
-      status:      'Void',
-      voided_at:   nowIso,
-      void_reason: voidNote,
-      updated_at:  nowIso,
-    })
-    .eq('tenant_id', tenantId)
-    .in('ledger_row_id', idsToVoid)
-    .eq('status', 'Invoiced')
-    .select('ledger_row_id');
-
-  if (upErr) {
-    console.error('[void-invoice-sb] update failed:', upErr.message);
-    return json({ error: `Update failed: ${upErr.message}`, code: 'UPDATE_FAILED' }, 500);
+  const voided: Array<{ ledger_row_id: string }> = [];
+  for (const r of invoicedRows) {
+    const existing = String(r.item_notes ?? '').trim();
+    const newNotes = existing ? `${existing} | ${voidNote}` : voidNote;
+    const { data: upRow, error: upErr } = await sb
+      .from('billing')
+      .update({
+        status:     'Void',
+        item_notes: newNotes,
+        updated_at: nowIso,
+      })
+      .eq('tenant_id', tenantId)
+      .eq('ledger_row_id', r.ledger_row_id)
+      .eq('status', 'Invoiced')
+      .select('ledger_row_id')
+      .maybeSingle();
+    if (upErr) {
+      console.error('[void-invoice-sb] update failed for', r.ledger_row_id, upErr.message);
+      return json({ error: `Update failed for ${r.ledger_row_id}: ${upErr.message}`, code: 'UPDATE_FAILED' }, 500);
+    }
+    if (upRow) voided.push(upRow as { ledger_row_id: string });
   }
-  const voided = (voidedRaw ?? []) as Array<{ ledger_row_id: string }>;
 
   // ── 3. Audit log (best-effort) ─────────────────────────────────────
   await sb.from('entity_audit_log').insert({
