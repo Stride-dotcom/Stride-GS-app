@@ -2476,10 +2476,14 @@ export function postCreateInvoice(
   payload: CreateInvoicePayload,
   signal?: AbortSignal
 ) {
+  // [MIGRATION-P4a] Thread sourceSheetId into extraParams so apiPost's
+  // resolveRoute() can match per-tenant feature_flags.tenant_scope for
+  // createInvoice. Without it, scoped flag rollouts silently fall back to
+  // GAS even when active_backend='supabase' for this tenant.
   return apiPost<CreateInvoiceResponse>(
     'createInvoice',
     payload as unknown as Record<string, unknown>,
-    {},
+    { clientSheetId: payload.sourceSheetId },
     { signal, timeoutMs: API_POST_TIMEOUT_LONG_MS }
   );
 }
