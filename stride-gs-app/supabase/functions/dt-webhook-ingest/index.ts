@@ -341,25 +341,31 @@ Deno.serve(async (req: Request) => {
     }
   }
 
-  // Pass 2: fuzzy ILIKE against inventory.client_name (fallback).
+  // Pass 2: fuzzy ILIKE against clients.name (fallback).
   // Only accept a match when there's exactly one distinct tenant — multiple
   // hits mean the account name is ambiguous and we'd risk binding the event
   // to the wrong tenant. Quarantine instead.
+  //
+  // Previously this queried inventory.client_name which does not exist on the
+  // inventory table (tenant scoping is by tenant_id only). The ilike on a
+  // non-existent column silently returned an empty result so the fuzzy pass
+  // never fired; the lookup now resolves through clients.name which is the
+  // actual source of truth for the per-tenant business name.
   let fuzzyAmbiguous = false;
   if (!tenantId && accountName) {
-    const { data: invMatches } = await supabase
-      .from('inventory')
-      .select('tenant_id, client_name')
-      .ilike('client_name', `%${escapeLike(accountName)}%`)
+    const { data: clientMatches } = await supabase
+      .from('clients')
+      .select('tenant_id, name')
+      .ilike('name', `%${escapeLike(accountName)}%`)
       .limit(2);
     const distinctTenants = new Set(
-      (invMatches ?? [])
+      (clientMatches ?? [])
         .map((r: { tenant_id: string | null }) => r.tenant_id)
         .filter((t): t is string => !!t)
     );
     if (distinctTenants.size === 1) {
       tenantId = [...distinctTenants][0];
-      console.log(`[dt-webhook-ingest] Fuzzy-matched account="${accountName}" → tenant_id=${tenantId} via inventory`);
+      console.log(`[dt-webhook-ingest] Fuzzy-matched account="${accountName}" → tenant_id=${tenantId} via clients.name`);
     } else if (distinctTenants.size > 1) {
       fuzzyAmbiguous = true;
       console.warn(`[dt-webhook-ingest] Fuzzy match for account="${accountName}" was ambiguous (${distinctTenants.size} distinct tenants) — quarantining`);
