@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.232.0 — 2026-05-24 PST — [MIGRATION round 2] Closes the remaining reverse-writethrough stubs. Three changes: (1) `__writeThroughReverseShipments_` replaces the stub for the `shipments` table — find-or-create by Shipment #, idempotent, supports insert+update, mirrors the canonical Shipments sheet column set (Shipment # / Receive Date / Item Count / Carrier / Tracking # / Shipment Notes / Folder URL). Parses receive_date YYYY-MM-DD strings as local-time Date objects so the cell formats correctly. The 2-stage dock columns (inbound_status / dock_piece_count / dock_completed_at / dock_completed_by) are INTENTIONALLY SKIPPED — Supabase-only by design. (2) `__writeThroughReverseWillCallItems_` replaces the stub for `will_call_items`. Per-tenant Will_Calls sheet stores items as a JSON array in the parent WC row Item IDs column (no separate Will_Call_Items sheet), so this writer treats incoming SB rows as DELTAS to that array — op=insert adds the item, op=delete removes, op=update is a no-op (status flips have no sheet representation; legacy readers compute released from inventory Release Date). Idempotent. Updates the Item Count cell alongside. (3) New `__writeThroughReverseSupabaseOnly_` success-stub for tables with no sheet representation BY DESIGN — addons / invoice_tracking / entity_notes / item_photos. Replaces the throw-stub for those 4 + (deferred) stax_invoices / stax_charges, which target the fleet-wide Stax Auto Pay master spreadsheet and need a separate writer family. Net effect: of the 14 entries in REVERSE_WRITETHROUGH_TABLES_, 8 are real writers, 4 are documented Supabase-only, 2 (stax_*) are deferred-to-future-PR. Zero remaining throw-stubs. Per MIG-016: deploy BEFORE flipping any feature_flag for completeShipment / createWillCall / processWcRelease.
+   StrideAPI.gs — v38.233.0 — 2026-05-24 PST — [MIGRATION-P3] `__writeThroughReverseWillCalls_` gains op='insert' support — same bug class as the inventory writer fixed in v38.231.0. Surfaced by a round-2 smoke test: create-will-call-sb fired `op:'insert'` against a writer that only knew `update`, every new WC's sheet row was silently missing until the next full-client-sync. Idempotent insert: re-fire on an existing WC Number falls through to update semantics. Builds a full Will_Calls row from the canonical SB column set (WC Number / Status / Carrier / Pickup Party / Pickup Phone / Requested By / Created Date / Estimated Pickup Date / Notes / Items Count / COD / COD Amount / Item IDs). Date columns (Created Date, Estimated Pickup Date) parsed local-time so cells format as dates (UTC-shift dodge). item_ids serialized as JSON-array text (round-trips with the legacy reader which accepts both JSON and comma/newline-delimited). api_ensureColumn_ on every column — older templates self-heal. Update path is unchanged (COD-only). Per MIG-016: deploy BEFORE flipping feature_flags.createWillCall to active_backend='supabase'.
+   v38.232.0 — 2026-05-24 PST — [MIGRATION round 2] Closes the remaining reverse-writethrough stubs. Three changes: (1) `__writeThroughReverseShipments_` replaces the stub for the `shipments` table — find-or-create by Shipment #, idempotent, supports insert+update, mirrors the canonical Shipments sheet column set (Shipment # / Receive Date / Item Count / Carrier / Tracking # / Shipment Notes / Folder URL). Parses receive_date YYYY-MM-DD strings as local-time Date objects so the cell formats correctly. The 2-stage dock columns (inbound_status / dock_piece_count / dock_completed_at / dock_completed_by) are INTENTIONALLY SKIPPED — Supabase-only by design. (2) `__writeThroughReverseWillCallItems_` replaces the stub for `will_call_items`. Per-tenant Will_Calls sheet stores items as a JSON array in the parent WC row Item IDs column (no separate Will_Call_Items sheet), so this writer treats incoming SB rows as DELTAS to that array — op=insert adds the item, op=delete removes, op=update is a no-op (status flips have no sheet representation; legacy readers compute released from inventory Release Date). Idempotent. Updates the Item Count cell alongside. (3) New `__writeThroughReverseSupabaseOnly_` success-stub for tables with no sheet representation BY DESIGN — addons / invoice_tracking / entity_notes / item_photos. Replaces the throw-stub for those 4 + (deferred) stax_invoices / stax_charges, which target the fleet-wide Stax Auto Pay master spreadsheet and need a separate writer family. Net effect: of the 14 entries in REVERSE_WRITETHROUGH_TABLES_, 8 are real writers, 4 are documented Supabase-only, 2 (stax_*) are deferred-to-future-PR. Zero remaining throw-stubs. Per MIG-016: deploy BEFORE flipping any feature_flag for completeShipment / createWillCall / processWcRelease.
    v38.231.0 — 2026-05-24 PST — [MIGRATION-P3/MIG-016] `__writeThroughReverseInventory_` gains op='insert' support. Pre-fix the writer rejected 'insert' with a hard throw and every `complete-shipment-sb` call landed its inventory row in Supabase but NEVER in the per-tenant Inventory sheet — failures stacked up in gs_sync_events ("op 'insert' not supported"). Items were invisible to legacy sheet readers (full-client-sync caught them on the next pass, ~5–30 min). New insert path: find-by-Item-ID (idempotent — re-fire on an existing row falls through to update semantics), append a fresh row at lastDataRow+1 with Status + Item ID + every column in REVERSE_INV_FIELDS_ + new REVERSE_INV_INSERT_EXTRA_FIELDS_ (carrier, tracking_number, shipment_number, receive_date, release_date, needs_inspection, needs_assembly, invoice_url, task_notes, transfer_date). Date-typed columns (receive_date / release_date / transfer_date) parsed as local-time Date objects so the sheet formats them as dates (UTC-shift dodge, mirroring v38.208.0). api_ensureColumn_ on every header — older client templates self-heal on first insert. Status side effects (ledger update + auto-cancel) intentionally bypassed on insert because (a) new items always start at Status='Active', not Released, and (b) auto-cancelling open work for an item that just came in doesn't make sense. Update-path with no matching row still errors out — that's the SB-primary "row I just wrote should exist" contract for `update-item-sb`. REVERSE_INV_FIELDS_ map (the editable subset used by update-item-sb) is UNCHANGED — the new insert-extras live in a separate REVERSE_INV_INSERT_EXTRA_FIELDS_ map so a future `update-item-sb` edit doesn't accidentally rewrite shipment_number / receive_date / etc. on a routine sidemark change. Per MIG-016: deploy this BEFORE flipping feature_flags.receiveShipment to active_backend='supabase' for any tenant — without it the SB writer's row payload throws the legacy "insert not supported" error and the canary fails-closed on every receive.
    v38.230.0 — 2026-05-23 PST — [BILLING] Two coordinated billing fixes — both source-of-truth alignments away from CB Consolidated_Ledger snapshots toward public.billing live reads. (1) handleQboCreateInvoice_ now builds the per-invoice line items from public.billing (sorted by date asc, svc_code asc, item_id asc, filtered status!=Void) instead of scanning CB Consolidated_Ledger. Pre-fix the QBO push could land lines in scrambled order vs. the React Billing report and could include rows that drifted between CB and public.billing — the new path reads the same table React reads, with the same display sort, so QBO sees exactly what the operator sees. Customer/sub-job/payment-terms resolution still flows through clientInfoMap (CB Clients sheet); the consolVals load stays in place because qbo_checkDuplicatePush_ / qbo_writeQboInvoiceId_ / qbo_writeQboFailure_ still mutate CB. Companion React change: Billing.tsx sorts selRows by display order before handing the rows to handleCreateInvoices, so the Consolidated_Ledger writes carry the same order too. (2) handleQbExport_ + handleRegenerateIifForBatch_ generate Stax IIF as ONE TRNS + ONE SPL per invoice (was N SPL — one per service line) with the total computed live from `SELECT SUM(total) FROM public.billing WHERE invoice_no=X AND status!=Void`. Each invoice's stax_invoices row gets the live SUM in `amount`, and `line_items_json` carries a single summary line `[{name:"Stride Logistics Services", memo:"Invoice X", qty:1, rate:total, amount:total}]` — historical N-line rows stay untouched (no schema change, no migration). Removes the partial-snapshot class that caused Stax under-collects when billing rows were added/voided after the original push: the SPL is derived from the SUM at IIF time, so any subsequent billing change automatically reflects on the next push. Invoice number is preserved on Stax via the existing meta.reference + memo + the IIF DOCNUM column — payment matching unchanged. handleCreateStaxInvoices_ + handleRunStaxCharges_ already use stax_invoices.amount (not line_items_json) so charging behavior is unchanged. SB EF mirror: create-invoice-sb now accepts the React payload's full rows[] and returns updated rows in caller order; qbo-create-invoice-sb (skeleton) is unchanged because its caller-supplied lines path is GAS-side scoped today. NO change to v38.182 atomic invoice counter, no change to half-write detection, no change to Void/Reissue logic.
    v38.229.0 — 2026-05-23 PST — [BILLING] Stax IIF export + runStaxCharges always work from the FULL CB Consolidated_Ledger for each invoice number, never a partial snapshot of the rows the caller passed in. Two fixes in one ship — both close the same class of bug (Stax under-collects when billing rows are added to an invoice number after the original push). (1) handleQbExport_ + handleQbExcelExport_: pre-fix the optional `payload.ledgerRowIds` was used as a per-row filter on the lines emitted. So if Billing.tsx's Create Invoices flow passed only the newly-invoiced ledger row IDs (or an operator hand-picked a subset of Invoiced rows on Billing → Report and clicked Stax IIF or QB Excel), Stax received a line_items_json + Total covering only those rows even when the invoice number had additional Invoiced rows in CB. The Stax-side invoice was created with the partial Total via handleCreateStaxInvoices_ → /invoice, and the v38.171.0 PENDING-only refresh guard prevented later handleQbExport_ passes from updating it. Fix: treat `payload.ledgerRowIds` as a POINTER to the invoice numbers covered (first-pass scan resolves the IDs to invoice numbers, then the main loop emits ALL Invoiced rows for those invoice numbers regardless of whether each individual row's Ledger Row ID was in the original payload). Mirrors how handleQboCreateInvoice_ already groups by invoice number. (2) handleRunStaxCharges_: new safeguard right before /pay. New helper stax_reconcileInvoiceAmount_ sums every Invoiced ledger row for the charge target's QB Invoice #, compares to the Stax sheet's Total Amount, and if they differ by ≥ $0.01 issues PUT /invoice/<id> to refresh Stax (total + meta.lineItems) before charging — protects against rows added AFTER the original push that fix #1 cannot reach (status already flipped to CREATED so handleQbExport_'s re-write path is gated off). Writes the corrected amount + line_items_json back to the Stax Invoices sheet via header-resolved stax_invoiceCols_ and patches public.stax_invoices via supabasePatch_ so React reflects the new total. Logs a reconcile entry to the Run Log + stamps the chargelog. If the Stax PUT fails or the CB ledger has zero Invoiced rows for that invoice number (voided in CB after push), returns skip: caller marks CHARGE_FAILED + appends a RECONCILE_BLOCKED exception so the operator can intervene; no money moves. Companion notes: stats.apiErrors counts reconcile-blocked rows; no new field added to the response shape to keep this minimal. No schema change, no migration, no React change.
@@ -3300,20 +3301,27 @@ function __writeThroughReverseWillCallItems_(ss, payload) {
  * unrecoverable error so handleWriteThroughReverse_ catches it and
  * writes gs_sync_events for the FailedOperationsDrawer.
  *
- * Op support: only 'update' for now. Will_Calls inserts and deletes
- * are not yet on the SB-primary path (creation still flows through
- * the GAS-side StrideCreateWillCallCallback dialog; cancellation
- * flows through handleCancelWillCall_).
+ * Op support:
+ *   - 'update' (v38.213.0) — COD + COD Amount fields only.
+ *   - 'insert' (v38.233.0) — full-row append for `create-will-call-sb`.
+ *     Idempotent: existing WC Number falls through to update semantics.
+ *     Mirrors the canonical WC sheet columns (WC Number / Status /
+ *     Carrier / Pickup Party / Pickup Phone / Requested By / Created
+ *     Date / Estimated Pickup Date / Notes / Items Count / COD / COD
+ *     Amount / Item IDs). Date columns parsed local-time so cells
+ *     format as dates; Item IDs serialized as JSON array.
+ *   - 'delete' still on the GAS-authoritative path (cancellation flows
+ *     through handleCancelWillCall_).
  */
 function __writeThroughReverseWillCalls_(ss, payload) {
   var rowId = payload && payload.rowId ? String(payload.rowId).trim() : "";
   var row   = (payload && payload.row) || {};
   var op    = payload && payload.op ? String(payload.op) : "";
 
-  if (op !== "update") {
+  if (op !== "update" && op !== "insert") {
     throw new Error(
       "__writeThroughReverseWillCalls_: op '" + op + "' not supported " +
-      "(only 'update' is implemented; insert/delete still on GAS-authoritative path)."
+      "(supported: 'insert' | 'update'; delete still on GAS-authoritative path)."
     );
   }
   if (!rowId) throw new Error("__writeThroughReverseWillCalls_: rowId (WC Number) required");
@@ -3323,25 +3331,98 @@ function __writeThroughReverseWillCalls_(ss, payload) {
 
   var wcMap = api_getHeaderMap_(wcSheet);
   var wcNumCol  = wcMap["WC Number"];
-  var codCol    = wcMap["COD"];
-  var amtCol    = wcMap["COD Amount"];
   if (!wcNumCol) throw new Error("__writeThroughReverseWillCalls_: 'WC Number' column not found");
-  if (!codCol)   throw new Error("__writeThroughReverseWillCalls_: 'COD' column not found");
-  if (!amtCol)   throw new Error("__writeThroughReverseWillCalls_: 'COD Amount' column not found");
 
   // api_getLastDataRow_ guards against trailing-blank-row pollution.
   var lastRow = api_getLastDataRow_(wcSheet);
-  if (lastRow < 2) throw new Error("__writeThroughReverseWillCalls_: Will_Calls sheet has no data rows");
 
-  // Scan WC Number column once.
-  var wcNumValues = wcSheet.getRange(2, wcNumCol, lastRow - 1, 1).getValues();
+  // Scan WC Number column once (skipped when sheet is empty; insert
+  // path appends at row 2 in that case).
   var foundRow = -1;
-  for (var i = 0; i < wcNumValues.length; i++) {
-    if (String(wcNumValues[i][0] || "").trim() === rowId) {
-      foundRow = i + 2;
-      break;
+  if (lastRow >= 2) {
+    var wcNumValues = wcSheet.getRange(2, wcNumCol, lastRow - 1, 1).getValues();
+    for (var i = 0; i < wcNumValues.length; i++) {
+      if (String(wcNumValues[i][0] || "").trim() === rowId) {
+        foundRow = i + 2;
+        break;
+      }
     }
   }
+
+  // ── INSERT path (v38.233.0) ──────────────────────────────────────
+  // Fires from `create-will-call-sb` after the SB-side INSERT into
+  // public.will_calls commits. Builds a fresh Will_Calls row from the
+  // canonical SB column set. Idempotent: if WC Number already exists,
+  // fall through to UPDATE semantics rather than appending a duplicate.
+  if (op === "insert" && foundRow < 0) {
+    // SB column → sheet header. Mirrors public.will_calls + sheet
+    // headers verified in handleGetWillCalls_ (StrideAPI.gs:7900) +
+    // sbWillCallRow_ (the GAS→SB direction).
+    var WC_INSERT_FIELDS = {
+      "wc_number":             "WC Number",
+      "status":                "Status",
+      "carrier":               "Carrier",
+      "pickup_party":          "Pickup Party",
+      "pickup_phone":          "Pickup Phone",
+      "requested_by":          "Requested By",
+      "created_date":          "Created Date",
+      "estimated_pickup_date": "Estimated Pickup Date",
+      "notes":                 "Notes",
+      "item_count":            "Items Count",
+      "cod":                   "COD",
+      "cod_amount":            "COD Amount",
+      "item_ids":              "Item IDs"
+    };
+
+    var insertRowNum = (lastRow < 1 ? 2 : lastRow + 1);
+    var maxCol = wcSheet.getLastColumn();
+
+    // Resolve target columns (api_ensureColumn_ appends missing ones so
+    // older templates self-heal).
+    var insertTargets = [{ col: wcNumCol, value: rowId }];
+    for (var sbKey in WC_INSERT_FIELDS) {
+      if (!row.hasOwnProperty(sbKey) || row[sbKey] === undefined) continue;
+      if (sbKey === "wc_number") continue; // already in targets
+      var col = api_ensureColumn_(wcSheet, WC_INSERT_FIELDS[sbKey]);
+      if (col > maxCol) maxCol = col;
+      var raw = row[sbKey];
+      // Date columns: parse YYYY-MM-DD as local-time Date (UTC-shift
+      // dodge). created_date is full ISO timestamp; the slice handles
+      // both shapes.
+      if ((sbKey === "created_date" || sbKey === "estimated_pickup_date")
+          && typeof raw === "string" && raw.length >= 10) {
+        var dParts = raw.slice(0, 10).split("-");
+        if (dParts.length === 3) {
+          var d = new Date(parseInt(dParts[0], 10), parseInt(dParts[1], 10) - 1, parseInt(dParts[2], 10));
+          if (!isNaN(d.getTime())) raw = d;
+        }
+      }
+      // item_ids is a JSON array; serialize for the sheet cell so it
+      // round-trips with the legacy reader (api_getWillCalls_ parses
+      // both JSON array text and comma/newline-delimited).
+      if (sbKey === "item_ids" && Array.isArray(raw)) {
+        raw = JSON.stringify(raw);
+      }
+      insertTargets.push({ col: col, value: raw });
+    }
+
+    var rowValues = new Array(maxCol);
+    for (var c = 0; c < maxCol; c++) rowValues[c] = "";
+    for (var t = 0; t < insertTargets.length; t++) {
+      rowValues[insertTargets[t].col - 1] = insertTargets[t].value;
+    }
+    wcSheet.getRange(insertRowNum, 1, 1, rowValues.length).setValues([rowValues]);
+    SpreadsheetApp.flush();
+    return { rowNumber: insertRowNum, inserted: true, wcNumber: rowId };
+  }
+
+  // UPDATE path requires the COD column set.
+  var codCol    = wcMap["COD"];
+  var amtCol    = wcMap["COD Amount"];
+  if (!codCol)   throw new Error("__writeThroughReverseWillCalls_: 'COD' column not found");
+  if (!amtCol)   throw new Error("__writeThroughReverseWillCalls_: 'COD Amount' column not found");
+  if (lastRow < 2) throw new Error("__writeThroughReverseWillCalls_: Will_Calls sheet has no data rows");
+
   if (foundRow < 0) {
     throw new Error("__writeThroughReverseWillCalls_: WC Number '" + rowId + "' not found in Will_Calls sheet");
   }
