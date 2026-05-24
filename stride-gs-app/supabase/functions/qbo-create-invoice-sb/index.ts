@@ -32,12 +32,16 @@
  *     customerId?:    string                     // optional QBO customer id; if
  *                                                // omitted we look up via
  *                                                // public.clients.qb_customer_name
- *     lines:          [{description, amount, qty?}]  // required, ≥1
  *     dueDate?:       string  "YYYY-MM-DD"       // optional; today if missing
  *     callerEmail?:   string                     // for audit log
  *     requestId?:     string
  *     autoAssignDocNumber?: boolean              // default true (GAS v38.121.0)
  *   }
+ *
+ * NOTE: line items are NOT accepted from the caller — they are read live
+ * from public.billing (status != 'Void') keyed by invoiceNo. This matches
+ * GAS handleQboCreateInvoice_ behavior (StrideAPI.gs:44225) and prevents
+ * a stale caller payload from over/under-billing on a real-money path.
  *
  * Required Edge Function secrets:
  *   QBO_CLIENT_ID, QBO_CLIENT_SECRET, QBO_REFRESH_TOKEN, QBO_REALM_ID
@@ -64,22 +68,24 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-interface QboLine {
-  description?: string;
-  amount?: number | string;
-  qty?: number | string;
-  itemRef?: string;       // optional QBO ItemRef.value
-}
-
 interface Body {
   tenantId?: string;
   invoiceNo?: string;
   customerId?: string;
-  lines?: QboLine[];
   dueDate?: string;
   callerEmail?: string;
   requestId?: string;
   autoAssignDocNumber?: boolean;
+}
+
+// Per-line shape after we build from public.billing. Description is
+// the formatted QBO line description (STOR vs non-STOR), `amount` is
+// the live billing row total, qty + rate come straight from billing.
+interface QboLine {
+  description: string;
+  amount:      number;
+  qty:         number;
+  rate:        number;
 }
 
 Deno.serve(async (req: Request) => {
@@ -123,14 +129,10 @@ Deno.serve(async (req: Request) => {
   const invoiceNo   = String(body.invoiceNo   ?? '').trim();
   const callerEmail = String(body.callerEmail ?? '').trim();
   const requestId   = String(body.requestId   ?? '').trim() || crypto.randomUUID();
-  const lines       = Array.isArray(body.lines) ? body.lines : [];
   const autoAssign  = body.autoAssignDocNumber !== false;
 
   if (!tenantId)  return jsonResponse({ error: 'tenantId is required',  code: 'INVALID_PARAMS' }, 400);
   if (!invoiceNo) return jsonResponse({ error: 'invoiceNo is required', code: 'INVALID_PARAMS' }, 400);
-  if (lines.length === 0) {
-    return jsonResponse({ error: 'lines[] required (≥1 line item)', code: 'INVALID_PARAMS' }, 400);
-  }
 
   const sb = createClient(supabaseUrl, serviceKey);
 
@@ -172,6 +174,77 @@ Deno.serve(async (req: Request) => {
     }, 400);
   }
 
+  // ── Load live line items from public.billing ────────────────────────
+  // Source of truth is public.billing (post-MIG-005 authority). The
+  // GAS path at StrideAPI.gs:44225-44515 reads from Supabase billing
+  // (filter status != 'Void', order by date/svc_code/item_id) and falls
+  // back to CB Consolidated_Ledger only if Supabase is unreachable. SB
+  // path has direct DB access so we go straight to billing — never
+  // trust caller-supplied line totals on a real-money path.
+  const { data: billingRows, error: billingErr } = await sb
+    .from('billing')
+    .select('ledger_row_id,invoice_no,client_name,date,svc_code,svc_name,item_id,description,qty,rate,total,item_notes,sidemark')
+    .eq('invoice_no', invoiceNo)
+    .neq('status', 'Void')
+    .order('date',     { ascending: true })
+    .order('svc_code', { ascending: true })
+    .order('item_id',  { ascending: true });
+  if (billingErr) {
+    return jsonResponse({
+      success: false,
+      error:   `billing read failed: ${billingErr.message}`,
+      code:    'BILLING_READ_FAILED',
+    }, 500);
+  }
+  const liveLines: QboLine[] = (billingRows ?? []).map((r) => {
+    const row        = r as Record<string, unknown>;
+    const svcCode    = String(row.svc_code    ?? '').trim().toUpperCase();
+    const dateVal    = String(row.date        ?? '').trim();
+    const qty        = Number(row.qty         ?? 1) || 1;
+    const rate       = Number(row.rate        ?? 0);
+    const total      = Number(row.total       ?? 0);
+    const descRaw    = String(row.description ?? '').trim();
+    const itemNotes  = String(row.item_notes  ?? '').trim();
+    const itemId     = String(row.item_id     ?? '').trim();
+    const sidemark   = String(row.sidemark    ?? '').trim();
+
+    // Build description — mirrors GAS at StrideAPI.gs:44438-44482.
+    // STOR (storage) lines: "Storage <period> — N day(s) — <description> — Item <id>"
+    // Other lines: "<sidemark> — Item <id> — <description> — Billed <date>"
+    let exportDesc = descRaw;
+    if (svcCode === 'STOR') {
+      let periodStr = '';
+      if (itemNotes) {
+        const m = itemNotes.match(/(\d{2}\/\d{2}\/\d{2,4})\s+to\s+(\d{2}\/\d{2}\/\d{2,4})/);
+        if (m) periodStr = `${m[1]} to ${m[2]}`;
+      }
+      const parts: string[] = [];
+      if (periodStr) parts.push(`Storage ${periodStr}`);
+      parts.push(`${qty} day(s)`);
+      if (descRaw) parts.push(descRaw);
+      if (itemId)  parts.push(`Item ${itemId}`);
+      exportDesc = parts.join(' — ');
+    } else {
+      const parts: string[] = [];
+      if (sidemark) parts.push(sidemark);
+      if (itemId)   parts.push(`Item ${itemId}`);
+      if (descRaw)  parts.push(descRaw);
+      exportDesc = parts.join(' — ');
+      if (dateVal && exportDesc && exportDesc.indexOf(dateVal) === -1) {
+        exportDesc = `${exportDesc} — Billed ${dateVal}`;
+      }
+    }
+    return { description: exportDesc || `Invoice ${invoiceNo}`, amount: total, qty, rate };
+  });
+  if (liveLines.length === 0) {
+    return jsonResponse({
+      success: false,
+      error:   `No non-Void billing rows for invoice ${invoiceNo} — refusing to push empty invoice to QBO.`,
+      code:    'NO_BILLING_ROWS',
+    }, 400);
+  }
+  const liveTotal = Math.round(liveLines.reduce((acc, ln) => acc + ln.amount, 0) * 100) / 100;
+
   // ── Refresh access token via OAuth ──────────────────────────────────
   let accessToken: string;
   try {
@@ -187,31 +260,23 @@ Deno.serve(async (req: Request) => {
 
   // ── Build QBO Invoice payload ───────────────────────────────────────
   // QBO requires Line[].DetailType='SalesItemLineDetail' with ItemRef.
-  // If the caller passes itemRef on a line, use it; otherwise fall through
-  // to a generic Service item lookup (STUB — we just use Id=1 which most
-  // QBO companies have as "Services". Operators should set per-line
-  // itemRef from the React side, where item-map resolution is already
-  // implemented for the GAS path.)
+  // ItemRef is STUB '1' (generic Services Id) — per-svc_code mapping via
+  // qbo_loadItemMap_ is GAS-only today (CB Items lookup). Operators can
+  // remap on the QBO side after push; the line description + amount are
+  // what matter for billing parity.
   const todayIso = new Date().toISOString().slice(0, 10);
   const dueDate  = String(body.dueDate ?? '').trim() || todayIso;
 
-  const qboLines = lines.map((ln, i) => {
-    const qty       = Number(ln.qty ?? 1) || 1;
-    const unitPrice = Number(ln.amount ?? 0);
-    const amount    = qty * unitPrice;
-    const itemRef   = String(ln.itemRef ?? '1').trim() || '1';  // STUB fallback
-    const desc      = String(ln.description ?? `Line ${i + 1}`);
-    return {
-      Amount:     Math.round(amount * 100) / 100,
-      DetailType: 'SalesItemLineDetail',
-      Description: desc,
-      SalesItemLineDetail: {
-        ItemRef:  { value: itemRef },
-        Qty:      qty,
-        UnitPrice: Math.round(unitPrice * 100) / 100,
-      },
-    };
-  });
+  const qboLines = liveLines.map((ln) => ({
+    Amount:      Math.round(ln.amount * 100) / 100,
+    DetailType:  'SalesItemLineDetail',
+    Description: ln.description,
+    SalesItemLineDetail: {
+      ItemRef:   { value: '1' },
+      Qty:       ln.qty,
+      UnitPrice: Math.round(ln.rate * 100) / 100,
+    },
+  }));
 
   const invoicePayload: Record<string, unknown> = {
     CustomerRef: { value: customerId },
@@ -303,7 +368,7 @@ Deno.serve(async (req: Request) => {
   // here as the durable cross-reference instead. Schema: entity_type=
   // 'billing', entity_id=invoiceNo, action='qbo_push'.
   await writeAudit(sb, tenantId, invoiceNo, callerEmail, 'qbo_push',
-    { qboInvoiceId, qboDocNumber, qboInvoiceUrl, lines: lines.length });
+    { qboInvoiceId, qboDocNumber, qboInvoiceUrl, lines: liveLines.length, total: liveTotal });
 
   return jsonResponse({
     success:      true,
