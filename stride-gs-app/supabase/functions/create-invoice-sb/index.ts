@@ -258,17 +258,23 @@ async function handle(req: Request): Promise<Response> {
     return json({ error: 'next_invoice_no returned empty', code: 'RPC_ERROR' }, 500);
   }
 
-  // ── 3. UPDATE billing SET invoice_no, status='Invoiced', invoiced_at
+  // ── 3. UPDATE billing SET invoice_no, status='Invoiced', invoice_date
   // Filter on status='Unbilled' so concurrent commits can't double-flip.
+  // 2026-05-24 — `invoice_date` (text, MM/dd/yyyy) is the actual column on
+  // public.billing; the prior code wrote `invoiced_at` which DOES NOT
+  // EXIST on the table, causing every SB-path createInvoice to return
+  // 500 UPDATE_FAILED. Format mirrors GAS sbBillingRow_ / sheet
+  // "Invoice Date" column (PST MM/dd/yyyy).
   const nowIso = new Date().toISOString();
+  const invoiceDateStr = formatPstMMDDYYYY(new Date());
   const eligibleIds = eligible.map(r => r.ledger_row_id);
   const { data: updatedRaw, error: upErr } = await sb
     .from('billing')
     .update({
-      invoice_no:  invoiceNo,
-      status:      'Invoiced',
-      invoiced_at: nowIso,
-      updated_at:  nowIso,
+      invoice_no:   invoiceNo,
+      status:       'Invoiced',
+      invoice_date: invoiceDateStr,
+      updated_at:   nowIso,
     })
     .eq('tenant_id', tenantId)
     .in('ledger_row_id', eligibleIds)
@@ -407,4 +413,21 @@ function json(body: unknown, status = 200): Response {
     status,
     headers: { ...corsHeaders, 'Content-Type': 'application/json' },
   });
+}
+
+// Format date as MM/dd/yyyy in America/Los_Angeles. Mirrors GAS
+// Utilities.formatDate(date, "America/Los_Angeles", "MM/dd/yyyy") so the
+// billing.invoice_date column carries the same string GAS would have
+// written from the sheet's "Invoice Date" cell.
+function formatPstMMDDYYYY(d: Date): string {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Los_Angeles',
+    year:  'numeric',
+    month: '2-digit',
+    day:   '2-digit',
+  }).formatToParts(d);
+  const m = parts.find(p => p.type === 'month')?.value ?? '01';
+  const day = parts.find(p => p.type === 'day')?.value ?? '01';
+  const y = parts.find(p => p.type === 'year')?.value ?? '1970';
+  return `${m}/${day}/${y}`;
 }
