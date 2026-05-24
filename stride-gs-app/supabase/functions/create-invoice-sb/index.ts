@@ -120,11 +120,37 @@ Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
   if (req.method !== 'POST') return json({ error: 'POST required', code: 'METHOD_NOT_ALLOWED' }, 405);
 
+  // 2026-05-23 — outer try/catch so any unhandled throw becomes a logged,
+  // structured 500 instead of a bare Deno-runtime 500 with no log. Without
+  // this, the canary's 2026-05-23 incident was unactionable: the EF
+  // returned 500 but no `[create-invoice-sb]` line appeared in
+  // function_logs because the runtime swallowed the trace.
+  try {
+    return await handle(req);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    const stack = e instanceof Error ? e.stack : undefined;
+    console.error('[create-invoice-sb] UNHANDLED:', msg, stack);
+    return json({ error: `Unhandled: ${msg}`, code: 'UNHANDLED' }, 500);
+  }
+});
+
+async function handle(req: Request): Promise<Response> {
   let body: CreateInvoiceBody;
   try { body = await req.json(); }
   catch (e) {
     return json({ error: `Invalid JSON: ${e instanceof Error ? e.message : String(e)}`, code: 'INVALID_JSON' }, 400);
   }
+
+  // 2026-05-23 — one-line entry log so a 500 with no other log line still
+  // tells us *which* request fired. Keep payload small.
+  console.log('[create-invoice-sb] req',
+    'tenantId=', String(body.tenantId ?? '').slice(0, 60),
+    'client=',   String(body.client   ?? '').slice(0, 60),
+    'sidemark=', String(body.sidemark ?? '').slice(0, 40),
+    'rowsCount=', Array.isArray(body.rows) ? body.rows.length : 0,
+    'idsCount=',  Array.isArray(body.ledgerRowIds) ? body.ledgerRowIds.length : 0,
+  );
 
   const tenantId    = String(body.tenantId    ?? '').trim();
   const callerEmail = String(body.callerEmail ?? '').trim();
@@ -277,25 +303,35 @@ Deno.serve(async (req: Request) => {
   const total = updated.reduce((acc, r) => acc + Number(r.total ?? 0), 0);
 
   // ── 4. Audit log (best-effort) ─────────────────────────────────────
-  await sb.from('entity_audit_log').insert({
-    entity_type:   'billing',
-    entity_id:     invoiceNo,
-    tenant_id:     tenantId,
-    action:        'create_invoice',
-    changes:       {
-      invoiceNo,
-      client,
-      sidemark: sidemark || null,
-      rowsInvoiced: updated.length,
-      total,
-      ledgerRowIds: updated.map(r => r.ledger_row_id),
-    },
-    performed_by:  callerEmail || 'create-invoice-sb',
-    source:        'supabase',
-  }).then(() => {}, (e: unknown) => {
-    console.error('[create-invoice-sb] audit-log insert failed:', e);
-    warnings.push(`Audit log insert failed: ${e instanceof Error ? e.message : String(e)}`);
-  });
+  // PostgrestBuilder resolves to {data, error} instead of rejecting on
+  // schema/permission failures — the prior `.then(ok, err)` form let
+  // every audit_log error slip past silently. Destructure + log + warn.
+  try {
+    const { error: auditErr } = await sb.from('entity_audit_log').insert({
+      entity_type:   'billing',
+      entity_id:     invoiceNo,
+      tenant_id:     tenantId,
+      action:        'create_invoice',
+      changes:       {
+        invoiceNo,
+        client,
+        sidemark: sidemark || null,
+        rowsInvoiced: updated.length,
+        total,
+        ledgerRowIds: updated.map(r => r.ledger_row_id),
+      },
+      performed_by:  callerEmail || 'create-invoice-sb',
+      source:        'supabase',
+    });
+    if (auditErr) {
+      console.error('[create-invoice-sb] audit-log insert failed:', auditErr.message);
+      warnings.push(`Audit log insert failed: ${auditErr.message}`);
+    }
+  } catch (auditEx) {
+    const msg = auditEx instanceof Error ? auditEx.message : String(auditEx);
+    console.error('[create-invoice-sb] audit-log insert threw:', msg);
+    warnings.push(`Audit log insert threw: ${msg}`);
+  }
 
   // ── 5. Reverse-writethrough each row to per-tenant Billing_Ledger ──
   // GAS handleWriteThroughReverse_ only supports insert/update/delete
@@ -334,7 +370,7 @@ Deno.serve(async (req: Request) => {
         if (!res.ok || !parsed.success) {
           const errMsg = parsed.error ?? `HTTP ${res.status}`;
           warnings.push(`Sheet mirror failed for ${row.ledger_row_id}: ${errMsg}`);
-          await sb.from('gs_sync_events').insert({
+          const { error: syncErr } = await sb.from('gs_sync_events').insert({
             tenant_id:     tenantId,
             entity_type:   'billing',
             entity_id:     row.ledger_row_id,
@@ -344,7 +380,8 @@ Deno.serve(async (req: Request) => {
             request_id:    `${requestId}:${row.ledger_row_id}`,
             payload,
             error_message: String(errMsg).slice(0, 1000),
-          }).then(() => {}, () => {});
+          });
+          if (syncErr) console.error('[create-invoice-sb] gs_sync_events insert failed:', syncErr.message);
         } else {
           mirroredCount++;
         }
@@ -363,7 +400,7 @@ Deno.serve(async (req: Request) => {
     rows:         updated,
     warnings:     warnings.length > 0 ? warnings : undefined,
   });
-});
+}
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
