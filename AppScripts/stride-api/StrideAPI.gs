@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.235.0 — 2026-05-24 PST — [AUDIT-REDEPLOY] PM audit on 2026-05-24 found gs_sync_events failures still showing the pre-v38.231.0 stubs for inventory insert + will_calls insert + shipments + tasks. Code verification confirms: REVERSE_WRITETHROUGH_TABLES_ registry already routes inventory to __writeThroughReverseInventory_ (insert path added v38.231.0), will_calls to __writeThroughReverseWillCalls_ (insert path added v38.233.0), tasks to __writeThroughReverseTasks_ (insert+update since v38.227.0), shipments to __writeThroughReverseShipments_ (insert+update since v38.232.0), billing to __writeThroughReverseBilling_ (since v38.217.0). Every entry in the registry points at a real writer (no stub references). Root cause of the audit findings is therefore deploy lag — the canonical source branch was ahead of what clasp had pushed to the live script. NO CODE CHANGE in this version bump — header advance only, to force a clean clasp push that picks up v38.231.0 through v38.234.0 in one commit. Companion PR also ships supabase/functions/replay-shadow/index.ts entity_type fix (was hardcoded to inventory).
+   StrideAPI.gs — v38.236.0 — 2026-05-25 PST — [MIGRATION-P1.2] Completion-side logging for public.gas_call_log. New helper api_logCallComplete_(correlationId, status, durationMs, errorMessage) PATCHes the existing started row with status (success or error), completed_at=now(), gas_duration_ms, and (on error) a 2KB-truncated error_message. doPost captures Date.now() at the top, retains the correlation_id returned by api_logCallInput_, wraps the switch in an IIFE so the dispatched case's return value can be inspected, then logs completion best-effort. Success/error classification reads the response JSON: presence of an `error` key or `success:false` flips status to error and captures the message; everything else is success. The outer catch path logs completion too, guarded by a __logged flag so a single request never PATCHes twice. Best-effort throughout: missing credentials, JSON-parse failures, network errors, and PATCH 4xx responses all Logger.log and continue without blocking the GAS response. No schema change required — status, completed_at, gas_duration_ms, and error_message columns already exist on public.gas_call_log from the P1.1 substrate migration (20260509000001_migration_parity_substrate.sql). Closes the long-standing observability gap where every gas_call_log row had completed_at NULL, unblocking duration-percentile dashboards and error-rate alerts on the replay-harness corpus.
+   v38.235.0 — 2026-05-24 PST — [AUDIT-REDEPLOY] PM audit on 2026-05-24 found gs_sync_events failures still showing the pre-v38.231.0 stubs for inventory insert + will_calls insert + shipments + tasks. Code verification confirms: REVERSE_WRITETHROUGH_TABLES_ registry already routes inventory to __writeThroughReverseInventory_ (insert path added v38.231.0), will_calls to __writeThroughReverseWillCalls_ (insert path added v38.233.0), tasks to __writeThroughReverseTasks_ (insert+update since v38.227.0), shipments to __writeThroughReverseShipments_ (insert+update since v38.232.0), billing to __writeThroughReverseBilling_ (since v38.217.0). Every entry in the registry points at a real writer (no stub references). Root cause of the audit findings is therefore deploy lag — the canonical source branch was ahead of what clasp had pushed to the live script. NO CODE CHANGE in this version bump — header advance only, to force a clean clasp push that picks up v38.231.0 through v38.234.0 in one commit. Companion PR also ships supabase/functions/replay-shadow/index.ts entity_type fix (was hardcoded to inventory).
    v38.234.0 — 2026-05-24 PST — [MIGRATION-P2] Real per-table reverse-writethrough writers for the 6 tables that v38.232.0 routed to `__writeThroughReverseSupabaseOnly_` success-stubs. Six new writers (`__writeThroughReverseAddons_`, `__writeThroughReverseInvoiceTracking_`, `__writeThroughReverseEntityNotes_`, `__writeThroughReverseItemPhotos_`, `__writeThroughReverseStaxInvoices_`, `__writeThroughReverseStaxCharges_`) replace the no-op stubs in REVERSE_WRITETHROUGH_TABLES_. Tables with no per-tenant sheet representation by design (addons / invoice_tracking / entity_notes / item_photos) still return documented no-op success with `skipped:true + reason` fields for SB-side observability (the writer body documents why the sheet has no column, instead of the generic stub). Stax_invoices writes to the fleet-wide Stax Auto Pay workbook's Invoices tab keyed on QB Invoice #; payment_method_status is a derived field with no sheet column so it returns in skippedFields. Stax_charges appends new rows to the Charge Log tab on insert (composite-key idempotency on timestamp + QB Invoice # + Stax Transaction ID), no-ops on update (Charge Log is append-only by design). Net effect: every entry in REVERSE_WRITETHROUGH_TABLES_ now routes to a purpose-built writer; no entry hits the generic SupabaseOnly stub. The two helpers from v38.215.0 (api_rwParseLocalDate_ / api_rwParseDateTime_ / api_rwApplyRowUpdates_) remain the shared substrate.
    v38.233.0 — 2026-05-24 PST — [MIGRATION-P3] `__writeThroughReverseWillCalls_` gains op='insert' support — same bug class as the inventory writer fixed in v38.231.0. Surfaced by a round-2 smoke test: create-will-call-sb fired `op:'insert'` against a writer that only knew `update`, every new WC's sheet row was silently missing until the next full-client-sync. Idempotent insert: re-fire on an existing WC Number falls through to update semantics. Builds a full Will_Calls row from the canonical SB column set (WC Number / Status / Carrier / Pickup Party / Pickup Phone / Requested By / Created Date / Estimated Pickup Date / Notes / Items Count / COD / COD Amount / Item IDs). Date columns (Created Date, Estimated Pickup Date) parsed local-time so cells format as dates (UTC-shift dodge). item_ids serialized as JSON-array text (round-trips with the legacy reader which accepts both JSON and comma/newline-delimited). api_ensureColumn_ on every column — older templates self-heal. Update path is unchanged (COD-only). Per MIG-016: deploy BEFORE flipping feature_flags.createWillCall to active_backend='supabase'.
    v38.232.0 — 2026-05-24 PST — [MIGRATION round 2] Closes the remaining reverse-writethrough stubs. Three changes: (1) `__writeThroughReverseShipments_` replaces the stub for the `shipments` table — find-or-create by Shipment #, idempotent, supports insert+update, mirrors the canonical Shipments sheet column set (Shipment # / Receive Date / Item Count / Carrier / Tracking # / Shipment Notes / Folder URL). Parses receive_date YYYY-MM-DD strings as local-time Date objects so the cell formats correctly. The 2-stage dock columns (inbound_status / dock_piece_count / dock_completed_at / dock_completed_by) are INTENTIONALLY SKIPPED — Supabase-only by design. (2) `__writeThroughReverseWillCallItems_` replaces the stub for `will_call_items`. Per-tenant Will_Calls sheet stores items as a JSON array in the parent WC row Item IDs column (no separate Will_Call_Items sheet), so this writer treats incoming SB rows as DELTAS to that array — op=insert adds the item, op=delete removes, op=update is a no-op (status flips have no sheet representation; legacy readers compute released from inventory Release Date). Idempotent. Updates the Item Count cell alongside. (3) New `__writeThroughReverseSupabaseOnly_` success-stub for tables with no sheet representation BY DESIGN — addons / invoice_tracking / entity_notes / item_photos. Replaces the throw-stub for those 4 + (deferred) stax_invoices / stax_charges, which target the fleet-wide Stax Auto Pay master spreadsheet and need a separate writer family. Net effect: of the 14 entries in REVERSE_WRITETHROUGH_TABLES_, 8 are real writers, 4 are documented Supabase-only, 2 (stax_*) are deferred-to-future-PR. Zero remaining throw-stubs. Per MIG-016: deploy BEFORE flipping any feature_flag for completeShipment / createWillCall / processWcRelease.
@@ -5660,6 +5661,52 @@ function api_logCallInput_(action, payload, tenantId, performedBy) {
 }
 
 /**
+ * v38.236.0 — [MIGRATION-P1.2] Completion-side companion to
+ * api_logCallInput_. PATCHes the gas_call_log row for `correlationId`
+ * with status (success|error), completed_at = now(), gas_duration_ms,
+ * and (on error) a truncated error_message. Best-effort: missing
+ * credentials, network failures, PATCH 4xx all log and continue;
+ * never blocks the GAS response.
+ *
+ * Called from doPost after the dispatched case returns AND from the
+ * outer catch on uncaught error. The doPost __logged guard prevents
+ * a double-PATCH if both fire in the same request.
+ *
+ * Closes the long-standing "every gas_call_log row has completed_at
+ * = NULL" gap that blocked duration/error-rate dashboards for the
+ * replay corpus. Uses the schema's existing gas_duration_ms column
+ * (added by 20260509000001_migration_parity_substrate.sql) — no
+ * migration required.
+ */
+function api_logCallComplete_(correlationId, status, durationMs, errorMessage) {
+  try {
+    if (!correlationId) return;
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) return;
+    var body = {
+      status: (status === "error") ? "error" : "success",
+      completed_at: new Date().toISOString(),
+      gas_duration_ms: (typeof durationMs === "number" && isFinite(durationMs)) ? Math.max(0, Math.floor(durationMs)) : null
+    };
+    if (errorMessage) body.error_message = String(errorMessage).slice(0, 2000);
+    UrlFetchApp.fetch(url + "/rest/v1/gas_call_log?correlation_id=eq." + encodeURIComponent(correlationId), {
+      method: "PATCH",
+      headers: {
+        "Authorization": "Bearer " + key,
+        "apikey": key,
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal"
+      },
+      payload: JSON.stringify(body),
+      muteHttpExceptions: true
+    });
+  } catch (e) {
+    Logger.log("api_logCallComplete_ error (non-fatal): " + e);
+  }
+}
+
+/**
  * v38.199.0 — [MIGRATION-P1.2] PII-conscious redaction of doPost
  * payloads for the gas_call_log corpus. Whitelists the field names that
  * are structurally relevant for replay; drops anything else. Caps output
@@ -9390,6 +9437,15 @@ function doGet(e) {
 // ─── POST Entry Point (Write Operations) ────────────────────────────────────
 
 function doPost(e) {
+  // v38.236.0 — [MIGRATION-P1.2] Completion-side logging for gas_call_log.
+  // __startTime / __correlationId / __logged are read by the success path
+  // and the outer catch to PATCH the gas_call_log row with status +
+  // gas_duration_ms + error_message. The __logged guard prevents a
+  // double-PATCH if the dispatch returns then the response-shape inspector
+  // throws.
+  var __startTime = Date.now();
+  var __correlationId = null;
+  var __logged = false;
   try {
     var params = (e && e.parameter) ? e.parameter : {};
     var action = String(params.action || "").trim();
@@ -9416,9 +9472,11 @@ function doPost(e) {
     // [MIGRATION-P1.2] Capture the input payload for the replay corpus.
     // Sets __MIG_CORRELATION_ID__ which api_auditLog_ reads to stamp every
     // entity_audit_log row produced during this request. Best-effort —
-    // never blocks the handler.
-    api_logCallInput_(action, payload, clientSheetId, callerEmail);
+    // never blocks the handler. Returns the correlation_id so
+    // api_logCallComplete_ can PATCH the same row when this request ends.
+    __correlationId = api_logCallInput_(action, payload, clientSheetId, callerEmail);
 
+    var __result = (function() {
     switch (action) {
       case "completeShipment":
         return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
@@ -10749,8 +10807,41 @@ function doPost(e) {
       default:
         return errorResponse_("Unknown POST action: " + action, "INVALID_ACTION");
     }
+    })();
+
+    // v38.236.0 — Completion log on the success path. Inspects the response
+    // JSON to classify success vs error: an `error` key or `success:false`
+    // flips the row's status to 'error' and captures the message; anything
+    // else (data payload, success:true, raw array) is 'success'. Best-effort
+    // — JSON-parse failure or PATCH 4xx logs and continues.
+    try {
+      var __status = "success";
+      var __errMsg = null;
+      try {
+        var __json = JSON.parse(__result.getContent());
+        if (__json && (__json.error || __json.success === false)) {
+          __status = "error";
+          __errMsg = String(__json.error || __json.code || "unknown");
+        }
+      } catch (_) { /* non-JSON body — treat as success */ }
+      api_logCallComplete_(__correlationId, __status, Date.now() - __startTime, __errMsg);
+      __logged = true;
+    } catch (_) { /* logging failure must never break the response */ }
+
+    return __result;
 
   } catch (err) {
+    // v38.236.0 — Completion log on the uncaught-error path. __logged guards
+    // against a double-PATCH when the dispatch returned but the success-path
+    // inspector throws (rare, but it'd otherwise PATCH twice with conflicting
+    // statuses). __correlationId is null for pre-input errors (bad token,
+    // bad JSON, missing config) — those calls never had a started row to
+    // begin with, so there's nothing to complete.
+    if (!__logged && __correlationId) {
+      try {
+        api_logCallComplete_(__correlationId, "error", Date.now() - __startTime, String(err));
+      } catch (_) {}
+    }
     return errorResponse_(String(err), "SERVER_ERROR");
   }
 }
