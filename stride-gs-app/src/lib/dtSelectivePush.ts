@@ -168,5 +168,29 @@ export function summarizeDtChanges(
     });
   }
 
+  // Always-include safety net (2026-05-26): if any DT-relevant change was
+  // detected, also force-include the `contact` and `custom` groups. The
+  // contact block carries phone1/phone2/email; custom carries po_number
+  // (additional_field_1) and service_time. These are the four fields most
+  // prone to "blank in DT" drift: an order created with phone/email/PO/
+  // service_time empty (e.g. quick public-form submit) gets initial-pushed
+  // with blanks, the operator fills them in later, and selective re-pushes
+  // since then have ONLY carried whatever the operator touched in each
+  // edit session — never the contact/custom block — so DT stays blank
+  // forever. By re-syncing those two groups on every selective push, we
+  // make sure DT's view of phone/email/PO/service_time always matches
+  // Stride after any edit-save. Trade-off: a tiny extra payload size and
+  // DT receives a no-op overwrite of those four fields, but it cannot
+  // clobber dispatcher edits because DT doesn't allow dispatchers to
+  // edit phone/email/PO/service_time anyway (those come from the source
+  // system on add_order). The change-list in the confirm dialog is
+  // NOT padded with synthetic contact/custom entries — the dialog still
+  // shows the operator only what they actually changed, the safety net
+  // is invisible.
+  if (groups.size > 0) {
+    groups.add('contact');
+    groups.add('custom');
+  }
+
   return { groups: [...groups], changes };
 }
