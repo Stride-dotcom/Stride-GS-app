@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.236.0 — 2026-05-25 PST — [MIGRATION-P1.2] Completion-side logging for public.gas_call_log. New helper api_logCallComplete_(correlationId, status, durationMs, errorMessage) PATCHes the existing started row with status (success or error), completed_at=now(), gas_duration_ms, and (on error) a 2KB-truncated error_message. doPost captures Date.now() at the top, retains the correlation_id returned by api_logCallInput_, wraps the switch in an IIFE so the dispatched case's return value can be inspected, then logs completion best-effort. Success/error classification reads the response JSON: presence of an `error` key or `success:false` flips status to error and captures the message; everything else is success. The outer catch path logs completion too, guarded by a __logged flag so a single request never PATCHes twice. Best-effort throughout: missing credentials, JSON-parse failures, network errors, and PATCH 4xx responses all Logger.log and continue without blocking the GAS response. No schema change required — status, completed_at, gas_duration_ms, and error_message columns already exist on public.gas_call_log from the P1.1 substrate migration (20260509000001_migration_parity_substrate.sql). Closes the long-standing observability gap where every gas_call_log row had completed_at NULL, unblocking duration-percentile dashboards and error-rate alerts on the replay-harness corpus.
+   StrideAPI.gs — v38.237.0 — 2026-05-25 PST — [DATA-FIX] Storage-billing audit on 2026-05-25 uncovered 18 inventory rows where Status='Released' but release_date IS NULL in public.inventory, plus 17 rows with the wrong receive_date (cross-dock items where the sheet receive cell was typo'd a year ahead). Three changes ship in one bump. (1) Defensive direct supabasePatch_ on the inventory row inside handleReleaseItems_ (bulk release), handleProcessWcRelease_ (will-call release), and the disposal branch inside handleCompleteTask_ (DT auto-release). The router's existing api_writeThrough_ / api_fullClientSync_ already includes release_date in its payload via sbInventoryRow_, but rare races (sheet-write batched in memory when fullClientSync re-reads, transient PostgREST 4xx swallowed by api_writeThrough_'s outer try/catch) have left rows status-only on SB. The new inline PATCH guarantees both fields land atomically for every release path — belt-and-suspenders, idempotent re-runs OK. Also adds the missing SpreadsheetApp.flush() to handleProcessWcRelease_ before the api_fullClientSync_ re-read (handleReleaseItems_ already had this since v38.42.0). (2) New one-shot operator function oneshot_2026_05_25_FixStorageBillingAuditCorrections_ that applies all 35 data corrections from the audit: 17 receive_date adjustments (Allison Lind 61863 / Couch Seattle 57395 / Roche Bobois 60215 / 15 Vida Design Waymark cross-docks 62975-62983+62994-62998+63028), 18 release_date backfills from audit/sheet (K&M 62021/62228/62235, Modern Design Sofa 62315/62316/62317/62319-62325/62332, MR Studio 62210/62211/62213, Nip Tuck 61936), and 2 item_class corrections (MR Studio 46506->M, 47693->L). For each correction the function opens the per-tenant sheet, finds the row by Item ID, writes the cell value(s), flushes, then calls resyncEntityToSupabase_ to push to public.inventory. For Modern Design Sofa / MR Studio / Nip Tuck items with 'audit not found' the function reads the existing Release Date cell from the sheet (which IS populated — sheet has the truth) and uses that. Idempotent: a re-run on rows already at the target state no-ops cleanly. Returns a per-item summary list for paste-into-BUILD_STATUS. Run once from the GAS Apps Script editor after deploy; future receive/release-with-wrong-year typos are independent and would need their own targeted invocation. (3) No schema change. No React change. Companion docs land in BUILD_STATUS.md.
+   v38.236.0 — 2026-05-25 PST — [MIGRATION-P1.2] Completion-side logging for public.gas_call_log. New helper api_logCallComplete_(correlationId, status, durationMs, errorMessage) PATCHes the existing started row with status (success or error), completed_at=now(), gas_duration_ms, and (on error) a 2KB-truncated error_message. doPost captures Date.now() at the top, retains the correlation_id returned by api_logCallInput_, wraps the switch in an IIFE so the dispatched case's return value can be inspected, then logs completion best-effort. Success/error classification reads the response JSON: presence of an `error` key or `success:false` flips status to error and captures the message; everything else is success. The outer catch path logs completion too, guarded by a __logged flag so a single request never PATCHes twice. Best-effort throughout: missing credentials, JSON-parse failures, network errors, and PATCH 4xx responses all Logger.log and continue without blocking the GAS response. No schema change required — status, completed_at, gas_duration_ms, and error_message columns already exist on public.gas_call_log from the P1.1 substrate migration (20260509000001_migration_parity_substrate.sql). Closes the long-standing observability gap where every gas_call_log row had completed_at NULL, unblocking duration-percentile dashboards and error-rate alerts on the replay-harness corpus.
    v38.235.0 — 2026-05-24 PST — [AUDIT-REDEPLOY] PM audit on 2026-05-24 found gs_sync_events failures still showing the pre-v38.231.0 stubs for inventory insert + will_calls insert + shipments + tasks. Code verification confirms: REVERSE_WRITETHROUGH_TABLES_ registry already routes inventory to __writeThroughReverseInventory_ (insert path added v38.231.0), will_calls to __writeThroughReverseWillCalls_ (insert path added v38.233.0), tasks to __writeThroughReverseTasks_ (insert+update since v38.227.0), shipments to __writeThroughReverseShipments_ (insert+update since v38.232.0), billing to __writeThroughReverseBilling_ (since v38.217.0). Every entry in the registry points at a real writer (no stub references). Root cause of the audit findings is therefore deploy lag — the canonical source branch was ahead of what clasp had pushed to the live script. NO CODE CHANGE in this version bump — header advance only, to force a clean clasp push that picks up v38.231.0 through v38.234.0 in one commit. Companion PR also ships supabase/functions/replay-shadow/index.ts entity_type fix (was hardcoded to inventory).
    v38.234.0 — 2026-05-24 PST — [MIGRATION-P2] Real per-table reverse-writethrough writers for the 6 tables that v38.232.0 routed to `__writeThroughReverseSupabaseOnly_` success-stubs. Six new writers (`__writeThroughReverseAddons_`, `__writeThroughReverseInvoiceTracking_`, `__writeThroughReverseEntityNotes_`, `__writeThroughReverseItemPhotos_`, `__writeThroughReverseStaxInvoices_`, `__writeThroughReverseStaxCharges_`) replace the no-op stubs in REVERSE_WRITETHROUGH_TABLES_. Tables with no per-tenant sheet representation by design (addons / invoice_tracking / entity_notes / item_photos) still return documented no-op success with `skipped:true + reason` fields for SB-side observability (the writer body documents why the sheet has no column, instead of the generic stub). Stax_invoices writes to the fleet-wide Stax Auto Pay workbook's Invoices tab keyed on QB Invoice #; payment_method_status is a derived field with no sheet column so it returns in skippedFields. Stax_charges appends new rows to the Charge Log tab on insert (composite-key idempotency on timestamp + QB Invoice # + Stax Transaction ID), no-ops on update (Charge Log is append-only by design). Net effect: every entry in REVERSE_WRITETHROUGH_TABLES_ now routes to a purpose-built writer; no entry hits the generic SupabaseOnly stub. The two helpers from v38.215.0 (api_rwParseLocalDate_ / api_rwParseDateTime_ / api_rwApplyRowUpdates_) remain the shared substrate.
    v38.233.0 — 2026-05-24 PST — [MIGRATION-P3] `__writeThroughReverseWillCalls_` gains op='insert' support — same bug class as the inventory writer fixed in v38.231.0. Surfaced by a round-2 smoke test: create-will-call-sb fired `op:'insert'` against a writer that only knew `update`, every new WC's sheet row was silently missing until the next full-client-sync. Idempotent insert: re-fire on an existing WC Number falls through to update semantics. Builds a full Will_Calls row from the canonical SB column set (WC Number / Status / Carrier / Pickup Party / Pickup Phone / Requested By / Created Date / Estimated Pickup Date / Notes / Items Count / COD / COD Amount / Item IDs). Date columns (Created Date, Estimated Pickup Date) parsed local-time so cells format as dates (UTC-shift dodge). item_ids serialized as JSON-array text (round-trips with the legacy reader which accepts both JSON and comma/newline-delimited). api_ensureColumn_ on every column — older templates self-heal. Update path is unchanged (COD-only). Per MIG-016: deploy BEFORE flipping feature_flags.createWillCall to active_backend='supabase'.
@@ -10804,6 +10805,18 @@ function doPost(e) {
       case "mirrorInventoryReleaseBulk":
         return handleMirrorInventoryReleaseBulk_(payload, callerEmail);
 
+      // v38.237.0 — One-shot trigger for the 2026-05-25 storage-billing
+      // audit data corrections (35 inventory rows across Allison Lind /
+      // Couch Seattle / Roche Bobois / Vida Design / K&M / Modern Design
+      // Sofa / MR. Studio / Nip Tuck Remodeling). Admin-only — the
+      // function body is hardcoded in `oneshot_2026_05_25_...` below so
+      // there's no per-call payload risk. Returns a per-item summary.
+      case "oneshotFixStorageAuditCorrections":
+        return withAdminGuard_(callerEmail, function() {
+          var r = oneshot_2026_05_25_FixStorageBillingAuditCorrections_();
+          return jsonResponse_({ success: true, action: "oneshotFixStorageAuditCorrections", result: r });
+        });
+
       default:
         return errorResponse_("Unknown POST action: " + action, "INVALID_ACTION");
     }
@@ -18926,6 +18939,18 @@ function handleCompleteTask_(clientSheetId, payload) {
           } catch (dispErr) {
             warnings.push("Disposal auto-release failed (non-fatal): " + dispErr.message);
           }
+          // v38.237.0 — Belt-and-suspenders direct SB PATCH of status +
+          // release_date so the disposal-driven auto-release lands on
+          // public.inventory atomically. Mirrors the handleReleaseItems_ +
+          // handleProcessWcRelease_ defensive patches added in this version.
+          try {
+            var dispIso = Utilities.formatDate(now, Session.getScriptTimeZone(), "yyyy-MM-dd");
+            supabasePatch_("inventory",
+              "tenant_id=eq." + encodeURIComponent(clientSheetId) + "&item_id=eq." + encodeURIComponent(itemId),
+              { status: "Released", release_date: dispIso, updated_at: new Date().toISOString() });
+          } catch (dispSbErr) {
+            warnings.push("Disposal SB release patch (non-fatal): " + dispSbErr.message);
+          }
         }
       }
     }
@@ -22103,6 +22128,32 @@ function handleProcessWcRelease_(clientSheetId, payload) {
 
   try { lock.releaseLock(); } catch (_) {}
 
+  // v38.237.0 — Flush pending sheet writes so the router's downstream
+  // api_fullClientSync_ re-read sees committed values. handleReleaseItems_
+  // already had this since v38.42.0; the will-call release path was missing
+  // it. Without flush() the bulk fullClientSync can read a stale Release
+  // Date cell and mirror status-only to public.inventory.
+  try { SpreadsheetApp.flush(); } catch (_) {}
+
+  // v38.237.0 — Belt-and-suspenders direct SB PATCH of status + release_date
+  // for every released will-call item. Mirrors the handleReleaseItems_ fix —
+  // guarantees both fields land on public.inventory atomically regardless of
+  // whether the downstream fullClientSync races or errors.
+  if (releasingItems && releasingItems.length > 0) {
+    try {
+      var wcSbIds = releasingItems.map(function(it) { return String(it.itemId || "").trim(); }).filter(Boolean);
+      if (wcSbIds.length > 0) {
+        var wcRelIso = Utilities.formatDate(now, tz, "yyyy-MM-dd");
+        var wcInFilter = "(" + wcSbIds.map(function(id) { return encodeURIComponent(id); }).join(",") + ")";
+        supabasePatch_("inventory",
+          "tenant_id=eq." + encodeURIComponent(clientSheetId) + "&item_id=in." + wcInFilter,
+          { status: "Released", release_date: wcRelIso, updated_at: new Date().toISOString() });
+      }
+    } catch (wcSbPatchErr) {
+      warnings.push("WC release SB patch (non-fatal): " + wcSbPatchErr.message);
+    }
+  }
+
   // ─── 7. Email WILL_CALL_RELEASE (non-critical — outside lock) ─────────────
   var emailSent = false;
   if (notifOn) {
@@ -22398,6 +22449,27 @@ function handleReleaseItems_(clientSheetId, payload, callerEmail) {
   // sheet, causing released items to sync with blank release_date.
   // Matches the pattern used by handleStartTask / handleCompleteTask.
   SpreadsheetApp.flush();
+
+  // v38.237.0 — Belt-and-suspenders direct SB PATCH of status + release_date
+  // for every released item. The router's api_writeThrough_ also runs and
+  // re-reads the sheet, but the storage-billing audit on 2026-05-25 found
+  // 18 rows status-only on SB (release_date NULL). This inline PATCH lands
+  // both fields atomically regardless of whether the downstream resync
+  // races, errors, or reads a stale snapshot.
+  if (changes.length > 0) {
+    try {
+      var sbPatchIds = changes.map(function(c) { return c.itemId; }).filter(Boolean);
+      if (sbPatchIds.length > 0) {
+        var relIsoStr = Utilities.formatDate(releaseDate, tz, "yyyy-MM-dd");
+        var inFilterIds = "(" + sbPatchIds.map(function(id) { return encodeURIComponent(String(id).trim()); }).join(",") + ")";
+        supabasePatch_("inventory",
+          "tenant_id=eq." + encodeURIComponent(clientSheetId) + "&item_id=in." + inFilterIds,
+          { status: "Released", release_date: relIsoStr, updated_at: new Date().toISOString() });
+      }
+    } catch (sbPatchErr) {
+      Logger.log("handleReleaseItems_ defensive SB patch (non-fatal): " + sbPatchErr);
+    }
+  }
 
   // v38.211.0 — Auto-cancel open Tasks / Repairs for the items we just
   // released. Items aren't physically here anymore; the queued work
@@ -48092,4 +48164,291 @@ function runBackfillQboPushedAtFromCb() {
     }
   }
   Logger.log("Done. Patched " + patched + " row(s). Elapsed: " + (new Date() - startTime) + "ms.");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ONE-SHOT — Storage Billing Audit Corrections (2026-05-25)
+// Run once from the GAS Apps Script editor (Functions menu → select →
+// Run). Idempotent: re-runs on already-corrected rows no-op cleanly. Each
+// correction updates the per-tenant Inventory sheet AND mirrors to
+// public.inventory via resyncEntityToSupabase_ + a defensive PATCH so
+// release_date / receive_date / item_class all land on both sides.
+//
+// Source: storage-billing audit on 2026-05-25 found 17 wrong receive_dates
+// (cross-dock typos a year ahead) + 18 status=Released rows with NULL
+// release_date in Supabase + 2 MR. Studio items missing item_class.
+// Underlying bug for the missing release_dates is fixed in this same
+// version bump (defensive supabasePatch_ calls in release handlers).
+// ═══════════════════════════════════════════════════════════════════════════════
+function oneshot_2026_05_25_FixStorageBillingAuditCorrections_() {
+  var corrections = [
+    // ── Task 1: wrong receive_date (year typo, set to correct year) ──────
+    { tenantId: "1DjKavk3BRXW5Hf9qVm3SCtcmgJpYv1FEoCaHfkIh4k8", client: "Allison Lind Design", itemId: "61863", receiveDate: "2025-03-24" },
+    { tenantId: "194CtmDZTWaGnfAEgrsxgNKDCPH_mazxr7BnrRljukbE", client: "Couch Seattle",       itemId: "57395", receiveDate: "2025-10-09" },
+    { tenantId: "10TAHPoJCPtoyWjUkrqXtnliiNTYLQhs_dvf5_PbB0hY", client: "Roche Bobois",         itemId: "60215", receiveDate: "2026-01-16" },
+
+    // ── Task 1 (cont): 15 Vida Design Waymark cross-docks — release_date
+    // typo'd as 04/28; items were received 04/29 and released same day.
+    // Set release_date = receive_date for each. The receive_date is what
+    // the sheet has (correct); we mirror it into release_date.
+    { tenantId: "1L7PGWwLUCsMAYCpiLwGVqK50Mg-bCyoWTohIK_FvL7E", client: "Vida Design", itemId: "62975", releaseDateMatchesReceive: true },
+    { tenantId: "1L7PGWwLUCsMAYCpiLwGVqK50Mg-bCyoWTohIK_FvL7E", client: "Vida Design", itemId: "62976", releaseDateMatchesReceive: true },
+    { tenantId: "1L7PGWwLUCsMAYCpiLwGVqK50Mg-bCyoWTohIK_FvL7E", client: "Vida Design", itemId: "62977", releaseDateMatchesReceive: true },
+    { tenantId: "1L7PGWwLUCsMAYCpiLwGVqK50Mg-bCyoWTohIK_FvL7E", client: "Vida Design", itemId: "62978", releaseDateMatchesReceive: true },
+    { tenantId: "1L7PGWwLUCsMAYCpiLwGVqK50Mg-bCyoWTohIK_FvL7E", client: "Vida Design", itemId: "62979", releaseDateMatchesReceive: true },
+    { tenantId: "1L7PGWwLUCsMAYCpiLwGVqK50Mg-bCyoWTohIK_FvL7E", client: "Vida Design", itemId: "62980", releaseDateMatchesReceive: true },
+    { tenantId: "1L7PGWwLUCsMAYCpiLwGVqK50Mg-bCyoWTohIK_FvL7E", client: "Vida Design", itemId: "62981", releaseDateMatchesReceive: true },
+    { tenantId: "1L7PGWwLUCsMAYCpiLwGVqK50Mg-bCyoWTohIK_FvL7E", client: "Vida Design", itemId: "62982", releaseDateMatchesReceive: true },
+    { tenantId: "1L7PGWwLUCsMAYCpiLwGVqK50Mg-bCyoWTohIK_FvL7E", client: "Vida Design", itemId: "62983", releaseDateMatchesReceive: true },
+    { tenantId: "1L7PGWwLUCsMAYCpiLwGVqK50Mg-bCyoWTohIK_FvL7E", client: "Vida Design", itemId: "62994", releaseDateMatchesReceive: true },
+    { tenantId: "1L7PGWwLUCsMAYCpiLwGVqK50Mg-bCyoWTohIK_FvL7E", client: "Vida Design", itemId: "62995", releaseDateMatchesReceive: true },
+    { tenantId: "1L7PGWwLUCsMAYCpiLwGVqK50Mg-bCyoWTohIK_FvL7E", client: "Vida Design", itemId: "62996", releaseDateMatchesReceive: true },
+    { tenantId: "1L7PGWwLUCsMAYCpiLwGVqK50Mg-bCyoWTohIK_FvL7E", client: "Vida Design", itemId: "62997", releaseDateMatchesReceive: true },
+    { tenantId: "1L7PGWwLUCsMAYCpiLwGVqK50Mg-bCyoWTohIK_FvL7E", client: "Vida Design", itemId: "62998", releaseDateMatchesReceive: true },
+    { tenantId: "1L7PGWwLUCsMAYCpiLwGVqK50Mg-bCyoWTohIK_FvL7E", client: "Vida Design", itemId: "63028", releaseDateMatchesReceive: true },
+
+    // ── Task 2: 18 released items missing release_date in SB. K&M and
+    // Modern Design Sofa (3 of 11) have audit-log dates. Remaining items
+    // need release_date pulled from the sheet's existing Release Date cell
+    // (the sheet has the truth — SB just never received it).
+    { tenantId: "1Wmx9SfQ6O0zZ41pmKBUvH2rQCqcuWln0yE6uzRTaAo0", client: "K&M Interiors", itemId: "62021", releaseDate: "2026-04-25" },
+    { tenantId: "1Wmx9SfQ6O0zZ41pmKBUvH2rQCqcuWln0yE6uzRTaAo0", client: "K&M Interiors", itemId: "62228", releaseDate: "2026-04-25" },
+    { tenantId: "1Wmx9SfQ6O0zZ41pmKBUvH2rQCqcuWln0yE6uzRTaAo0", client: "K&M Interiors", itemId: "62235", releaseDate: "2026-04-25" },
+    { tenantId: "1NQkbtHn730pKrFupC9HSN4q-FhPhhWF3kAnpm2p9Om8", client: "Modern Design Sofa", itemId: "62319", releaseDate: "2026-05-16" },
+    { tenantId: "1NQkbtHn730pKrFupC9HSN4q-FhPhhWF3kAnpm2p9Om8", client: "Modern Design Sofa", itemId: "62320", releaseDate: "2026-05-16" },
+    { tenantId: "1NQkbtHn730pKrFupC9HSN4q-FhPhhWF3kAnpm2p9Om8", client: "Modern Design Sofa", itemId: "62321", releaseDate: "2026-05-16" },
+    // releaseFromSheet: read existing Release Date cell from the sheet
+    { tenantId: "1NQkbtHn730pKrFupC9HSN4q-FhPhhWF3kAnpm2p9Om8", client: "Modern Design Sofa", itemId: "62315", releaseFromSheet: true },
+    { tenantId: "1NQkbtHn730pKrFupC9HSN4q-FhPhhWF3kAnpm2p9Om8", client: "Modern Design Sofa", itemId: "62316", releaseFromSheet: true },
+    { tenantId: "1NQkbtHn730pKrFupC9HSN4q-FhPhhWF3kAnpm2p9Om8", client: "Modern Design Sofa", itemId: "62317", releaseFromSheet: true },
+    { tenantId: "1NQkbtHn730pKrFupC9HSN4q-FhPhhWF3kAnpm2p9Om8", client: "Modern Design Sofa", itemId: "62322", releaseFromSheet: true },
+    { tenantId: "1NQkbtHn730pKrFupC9HSN4q-FhPhhWF3kAnpm2p9Om8", client: "Modern Design Sofa", itemId: "62323", releaseFromSheet: true },
+    { tenantId: "1NQkbtHn730pKrFupC9HSN4q-FhPhhWF3kAnpm2p9Om8", client: "Modern Design Sofa", itemId: "62324", releaseFromSheet: true },
+    { tenantId: "1NQkbtHn730pKrFupC9HSN4q-FhPhhWF3kAnpm2p9Om8", client: "Modern Design Sofa", itemId: "62325", releaseFromSheet: true },
+    { tenantId: "1NQkbtHn730pKrFupC9HSN4q-FhPhhWF3kAnpm2p9Om8", client: "Modern Design Sofa", itemId: "62332", releaseFromSheet: true },
+    { tenantId: "1CUPSkPEXYzhWKcoWdmCWasBfiESVWRHg1ihIVJVfya0", client: "MR. Studio",         itemId: "62210", releaseFromSheet: true },
+    { tenantId: "1CUPSkPEXYzhWKcoWdmCWasBfiESVWRHg1ihIVJVfya0", client: "MR. Studio",         itemId: "62211", releaseFromSheet: true },
+    { tenantId: "1CUPSkPEXYzhWKcoWdmCWasBfiESVWRHg1ihIVJVfya0", client: "MR. Studio",         itemId: "62213", releaseFromSheet: true },
+    { tenantId: "1_CINtvpNLs1pSD7kkh5-dbccM-jF7s1B4vQBkjA5eUc", client: "Nip Tuck Remodeling", itemId: "61936", releaseFromSheet: true },
+
+    // ── Task 4: MR. Studio item_class corrections (table base / top only)
+    { tenantId: "1CUPSkPEXYzhWKcoWdmCWasBfiESVWRHg1ihIVJVfya0", client: "MR. Studio", itemId: "46506", itemClass: "M" },
+    { tenantId: "1CUPSkPEXYzhWKcoWdmCWasBfiESVWRHg1ihIVJVfya0", client: "MR. Studio", itemId: "47693", itemClass: "L" }
+  ];
+
+  var summary = { applied: 0, noop: 0, notFound: 0, sbPatched: 0, errors: [] };
+  var perItemLog = [];
+
+  for (var ci = 0; ci < corrections.length; ci++) {
+    var c = corrections[ci];
+    var label = c.client + " / " + c.itemId;
+    try {
+      var ss = SpreadsheetApp.openById(c.tenantId);
+      var sheet = ss.getSheetByName("Inventory");
+      if (!sheet) {
+        summary.errors.push(label + ": Inventory sheet not found");
+        perItemLog.push(label + " — ERROR: Inventory sheet missing");
+        continue;
+      }
+      var hmap = api_getHeaderMap_(sheet);
+      var idCol = hmap["Item ID"];
+      if (!idCol) {
+        summary.errors.push(label + ": Item ID column not found");
+        perItemLog.push(label + " — ERROR: Item ID column missing");
+        continue;
+      }
+      var lastRow = api_getLastDataRow_(sheet);
+      if (lastRow < 2) {
+        summary.notFound++;
+        perItemLog.push(label + " — NOT FOUND (sheet empty)");
+        continue;
+      }
+      var idVals = sheet.getRange(2, idCol, lastRow - 1, 1).getValues();
+      var foundRow = -1;
+      for (var rr = 0; rr < idVals.length; rr++) {
+        if (String(idVals[rr][0] || "").trim() === String(c.itemId).trim()) {
+          foundRow = rr + 2;
+          break;
+        }
+      }
+      if (foundRow < 0) {
+        summary.notFound++;
+        perItemLog.push(label + " — NOT FOUND in sheet");
+        continue;
+      }
+
+      // Build the set of edits for this row + the SB PATCH payload.
+      var sheetEdits = []; // {col, val}
+      var sbPatch = {};
+      var changeDescParts = [];
+
+      // receive_date correction
+      if (c.receiveDate) {
+        var recCol = hmap["Receive Date"];
+        if (!recCol) {
+          summary.errors.push(label + ": Receive Date column missing");
+        } else {
+          var recParts = c.receiveDate.split("-");
+          var recDate = new Date(parseInt(recParts[0], 10), parseInt(recParts[1], 10) - 1, parseInt(recParts[2], 10));
+          var curRec = sheet.getRange(foundRow, recCol).getValue();
+          if (!(curRec instanceof Date)
+            || curRec.getFullYear() !== recDate.getFullYear()
+            || curRec.getMonth() !== recDate.getMonth()
+            || curRec.getDate() !== recDate.getDate()) {
+            sheetEdits.push({ col: recCol, val: recDate });
+            sbPatch.receive_date = c.receiveDate;
+            changeDescParts.push("receive_date->" + c.receiveDate);
+          }
+        }
+      }
+
+      // release_date correction (explicit value)
+      if (c.releaseDate) {
+        var relCol = hmap["Release Date"];
+        if (!relCol) {
+          summary.errors.push(label + ": Release Date column missing");
+        } else {
+          var relParts = c.releaseDate.split("-");
+          var relDate = new Date(parseInt(relParts[0], 10), parseInt(relParts[1], 10) - 1, parseInt(relParts[2], 10));
+          var curRel = sheet.getRange(foundRow, relCol).getValue();
+          if (!(curRel instanceof Date)
+            || curRel.getFullYear() !== relDate.getFullYear()
+            || curRel.getMonth() !== relDate.getMonth()
+            || curRel.getDate() !== relDate.getDate()) {
+            sheetEdits.push({ col: relCol, val: relDate });
+            changeDescParts.push("release_date->" + c.releaseDate);
+          }
+          sbPatch.release_date = c.releaseDate;
+        }
+      }
+
+      // release_date from sheet (read existing cell, mirror to SB)
+      if (c.releaseFromSheet) {
+        var rfsCol = hmap["Release Date"];
+        if (!rfsCol) {
+          summary.errors.push(label + ": Release Date column missing");
+        } else {
+          var sheetRelCell = sheet.getRange(foundRow, rfsCol).getValue();
+          if (sheetRelCell instanceof Date && !isNaN(sheetRelCell.getTime())) {
+            var rfsIso = Utilities.formatDate(sheetRelCell,
+              ss.getSpreadsheetTimeZone() || "America/Los_Angeles", "yyyy-MM-dd");
+            sbPatch.release_date = rfsIso;
+            changeDescParts.push("release_date (from sheet) ->" + rfsIso);
+          } else {
+            summary.errors.push(label + ": releaseFromSheet but sheet cell is blank/invalid");
+            perItemLog.push(label + " — ERROR: releaseFromSheet but sheet cell is blank");
+            continue;
+          }
+        }
+      }
+
+      // release_date = receive_date (Vida cross-docks)
+      if (c.releaseDateMatchesReceive) {
+        var rcvCol = hmap["Receive Date"];
+        var relCol2 = hmap["Release Date"];
+        if (!rcvCol || !relCol2) {
+          summary.errors.push(label + ": Receive Date / Release Date columns missing");
+        } else {
+          var sheetRcvCell = sheet.getRange(foundRow, rcvCol).getValue();
+          if (sheetRcvCell instanceof Date && !isNaN(sheetRcvCell.getTime())) {
+            var curRel2 = sheet.getRange(foundRow, relCol2).getValue();
+            var alreadyMatches = (curRel2 instanceof Date
+              && curRel2.getFullYear() === sheetRcvCell.getFullYear()
+              && curRel2.getMonth() === sheetRcvCell.getMonth()
+              && curRel2.getDate() === sheetRcvCell.getDate());
+            if (!alreadyMatches) {
+              sheetEdits.push({ col: relCol2, val: sheetRcvCell });
+              changeDescParts.push("release_date <- receive_date");
+            }
+            var rdmrIso = Utilities.formatDate(sheetRcvCell,
+              ss.getSpreadsheetTimeZone() || "America/Los_Angeles", "yyyy-MM-dd");
+            sbPatch.release_date = rdmrIso;
+          } else {
+            summary.errors.push(label + ": releaseDateMatchesReceive but Receive Date is blank");
+            perItemLog.push(label + " — ERROR: receive cell blank, cannot mirror");
+            continue;
+          }
+        }
+      }
+
+      // item_class correction
+      if (c.itemClass) {
+        var classCol = hmap["Class"];
+        if (!classCol) {
+          summary.errors.push(label + ": Class column missing");
+        } else {
+          var curClass = String(sheet.getRange(foundRow, classCol).getValue() || "").trim();
+          if (curClass !== c.itemClass) {
+            sheetEdits.push({ col: classCol, val: c.itemClass });
+            changeDescParts.push("class->" + c.itemClass + " (was '" + curClass + "')");
+          }
+          sbPatch.item_class = c.itemClass;
+        }
+      }
+
+      // Apply sheet edits (idempotent: empty array = no-op)
+      if (sheetEdits.length > 0) {
+        for (var se = 0; se < sheetEdits.length; se++) {
+          sheet.getRange(foundRow, sheetEdits[se].col).setValue(sheetEdits[se].val);
+        }
+        SpreadsheetApp.flush();
+        summary.applied++;
+      } else {
+        summary.noop++;
+      }
+
+      // Mirror to SB via direct PATCH (covers fields the writeThrough
+      // wouldn't see because the sheet was already at the target value).
+      var hasSbFields = false;
+      for (var sk in sbPatch) { if (sbPatch.hasOwnProperty(sk)) { hasSbFields = true; break; } }
+      if (hasSbFields) {
+        sbPatch.updated_at = new Date().toISOString();
+        var patchResult = supabasePatch_("inventory",
+          "tenant_id=eq." + encodeURIComponent(c.tenantId) + "&item_id=eq." + encodeURIComponent(c.itemId),
+          sbPatch);
+        if (patchResult && patchResult.ok) {
+          summary.sbPatched++;
+        } else {
+          summary.errors.push(label + ": SB PATCH failed — " + (patchResult && patchResult.error));
+        }
+      }
+
+      // Also run the standard resync so other dependent columns
+      // (computed status flags etc.) stay in sync.
+      try {
+        resyncEntityToSupabase_("inventory", c.tenantId, c.itemId);
+      } catch (resyncErr) {
+        summary.errors.push(label + ": resync warning — " + String(resyncErr));
+      }
+
+      perItemLog.push(label + " — " + (changeDescParts.length ? changeDescParts.join(", ") : "no-op (already correct)"));
+    } catch (e) {
+      summary.errors.push(label + ": EXCEPTION " + String(e));
+      perItemLog.push(label + " — EXCEPTION " + String(e));
+    }
+  }
+
+  Logger.log("=== oneshot_2026_05_25_FixStorageBillingAuditCorrections_ ===");
+  Logger.log("Total corrections attempted: " + corrections.length);
+  Logger.log("Sheet edits applied: " + summary.applied);
+  Logger.log("Sheet no-ops (already correct): " + summary.noop);
+  Logger.log("Items not found: " + summary.notFound);
+  Logger.log("Supabase PATCHes succeeded: " + summary.sbPatched);
+  Logger.log("Errors: " + summary.errors.length);
+  if (summary.errors.length > 0) {
+    Logger.log("Error details:");
+    for (var ei = 0; ei < summary.errors.length; ei++) Logger.log("  - " + summary.errors[ei]);
+  }
+  Logger.log("Per-item log:");
+  for (var pi = 0; pi < perItemLog.length; pi++) Logger.log("  " + perItemLog[pi]);
+  return {
+    totalAttempted: corrections.length,
+    sheetEditsApplied: summary.applied,
+    sheetNoops: summary.noop,
+    itemsNotFound: summary.notFound,
+    sbPatchesSucceeded: summary.sbPatched,
+    errorCount: summary.errors.length,
+    errors: summary.errors,
+    perItemLog: perItemLog
+  };
 }
