@@ -1882,6 +1882,11 @@ export interface SupabaseDtOrderRow {
   created_by_user: string | null;
   created_by_role: string | null;
   pushed_to_dt_at: string | null;
+  // v41 (2026-05-26) — TRUE when the last DT push used the STRIDE LOGISTICS
+  // fallback instead of the tenant's mapped account (because the tenant
+  // isn't in dt_credentials.verified_account_tenants yet). Drives the
+  // OrderPage warning banner. Default false.
+  pushed_account_was_fallback: boolean | null;
   // Billing
   billing_method: string | null;
   payment_collected: boolean | null;
@@ -2016,6 +2021,12 @@ export interface DtOrderForUI {
   createdByName: string;
   createdByEmail: string;
   pushedToDtAt: string | null;
+  /** v41 — TRUE when the last DT push used the STRIDE LOGISTICS fallback
+   *  instead of the tenant's mapped account. OrderPage banner reads this
+   *  and warns the operator that the order didn't land under the right
+   *  account, with instructions to verify the DT-side account name and
+   *  re-push. */
+  pushedAccountWasFallback: boolean;
   /** Last DB-update timestamp. Used by the Order page to detect "edited
    *  since last DT push" and surface the Republish-to-DT affordance. */
   updatedAt: string | null;
@@ -2299,6 +2310,7 @@ export async function fetchDtOrdersFromSupabase(
         createdByName: (row.created_by_user ? profileMap.get(row.created_by_user)?.displayName : '') ?? '',
         createdByEmail: (row.created_by_user ? profileMap.get(row.created_by_user)?.email : '') ?? '',
         pushedToDtAt: row.pushed_to_dt_at,
+        pushedAccountWasFallback: !!(row as { pushed_account_was_fallback?: boolean | null }).pushed_account_was_fallback,
         updatedAt: row.updated_at,
         // Billing
         billingMethod: (row.billing_method as DtOrderForUI['billingMethod']) ?? 'bill_to_client',
@@ -2462,6 +2474,7 @@ export async function fetchDtOrderByIdFromSupabase(
       createdByName: '',
       createdByEmail: '',
       pushedToDtAt: row.pushed_to_dt_at,
+        pushedAccountWasFallback: !!(row as { pushed_account_was_fallback?: boolean | null }).pushed_account_was_fallback,
       updatedAt: row.updated_at,
       billingMethod: (row.billing_method as DtOrderForUI['billingMethod']) ?? 'bill_to_client',
       paymentCollected: row.payment_collected ?? false,
