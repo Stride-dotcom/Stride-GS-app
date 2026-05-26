@@ -48190,21 +48190,21 @@ function oneshot_2026_05_25_FixStorageBillingAuditCorrections_() {
     // typo'd as 04/28; items were received 04/29 and released same day.
     // Set release_date = receive_date for each. The receive_date is what
     // the sheet has (correct); we mirror it into release_date.
-    { tenantId: "1L7PGWwLUCsMAYCpiLwGVqK50Mg-bCyoWTohIK_FvL7E", client: "Vida Design", itemId: "62975", releaseDateMatchesReceive: true },
-    { tenantId: "1L7PGWwLUCsMAYCpiLwGVqK50Mg-bCyoWTohIK_FvL7E", client: "Vida Design", itemId: "62976", releaseDateMatchesReceive: true },
-    { tenantId: "1L7PGWwLUCsMAYCpiLwGVqK50Mg-bCyoWTohIK_FvL7E", client: "Vida Design", itemId: "62977", releaseDateMatchesReceive: true },
-    { tenantId: "1L7PGWwLUCsMAYCpiLwGVqK50Mg-bCyoWTohIK_FvL7E", client: "Vida Design", itemId: "62978", releaseDateMatchesReceive: true },
-    { tenantId: "1L7PGWwLUCsMAYCpiLwGVqK50Mg-bCyoWTohIK_FvL7E", client: "Vida Design", itemId: "62979", releaseDateMatchesReceive: true },
-    { tenantId: "1L7PGWwLUCsMAYCpiLwGVqK50Mg-bCyoWTohIK_FvL7E", client: "Vida Design", itemId: "62980", releaseDateMatchesReceive: true },
-    { tenantId: "1L7PGWwLUCsMAYCpiLwGVqK50Mg-bCyoWTohIK_FvL7E", client: "Vida Design", itemId: "62981", releaseDateMatchesReceive: true },
-    { tenantId: "1L7PGWwLUCsMAYCpiLwGVqK50Mg-bCyoWTohIK_FvL7E", client: "Vida Design", itemId: "62982", releaseDateMatchesReceive: true },
-    { tenantId: "1L7PGWwLUCsMAYCpiLwGVqK50Mg-bCyoWTohIK_FvL7E", client: "Vida Design", itemId: "62983", releaseDateMatchesReceive: true },
-    { tenantId: "1L7PGWwLUCsMAYCpiLwGVqK50Mg-bCyoWTohIK_FvL7E", client: "Vida Design", itemId: "62994", releaseDateMatchesReceive: true },
-    { tenantId: "1L7PGWwLUCsMAYCpiLwGVqK50Mg-bCyoWTohIK_FvL7E", client: "Vida Design", itemId: "62995", releaseDateMatchesReceive: true },
-    { tenantId: "1L7PGWwLUCsMAYCpiLwGVqK50Mg-bCyoWTohIK_FvL7E", client: "Vida Design", itemId: "62996", releaseDateMatchesReceive: true },
-    { tenantId: "1L7PGWwLUCsMAYCpiLwGVqK50Mg-bCyoWTohIK_FvL7E", client: "Vida Design", itemId: "62997", releaseDateMatchesReceive: true },
-    { tenantId: "1L7PGWwLUCsMAYCpiLwGVqK50Mg-bCyoWTohIK_FvL7E", client: "Vida Design", itemId: "62998", releaseDateMatchesReceive: true },
-    { tenantId: "1L7PGWwLUCsMAYCpiLwGVqK50Mg-bCyoWTohIK_FvL7E", client: "Vida Design", itemId: "63028", releaseDateMatchesReceive: true },
+    { tenantId: "1aFFjJwygoQuAglZ9fqYtmEvAE54d-FjVTTssik7pN_k", client: "Vida Design - Waymark", itemId: "62975", releaseDateMatchesReceive: true },
+    { tenantId: "1aFFjJwygoQuAglZ9fqYtmEvAE54d-FjVTTssik7pN_k", client: "Vida Design - Waymark", itemId: "62976", releaseDateMatchesReceive: true },
+    { tenantId: "1aFFjJwygoQuAglZ9fqYtmEvAE54d-FjVTTssik7pN_k", client: "Vida Design - Waymark", itemId: "62977", releaseDateMatchesReceive: true },
+    { tenantId: "1aFFjJwygoQuAglZ9fqYtmEvAE54d-FjVTTssik7pN_k", client: "Vida Design - Waymark", itemId: "62978", releaseDateMatchesReceive: true },
+    { tenantId: "1aFFjJwygoQuAglZ9fqYtmEvAE54d-FjVTTssik7pN_k", client: "Vida Design - Waymark", itemId: "62979", releaseDateMatchesReceive: true },
+    { tenantId: "1aFFjJwygoQuAglZ9fqYtmEvAE54d-FjVTTssik7pN_k", client: "Vida Design - Waymark", itemId: "62980", releaseDateMatchesReceive: true },
+    { tenantId: "1aFFjJwygoQuAglZ9fqYtmEvAE54d-FjVTTssik7pN_k", client: "Vida Design - Waymark", itemId: "62981", releaseDateMatchesReceive: true },
+    { tenantId: "1aFFjJwygoQuAglZ9fqYtmEvAE54d-FjVTTssik7pN_k", client: "Vida Design - Waymark", itemId: "62982", releaseDateMatchesReceive: true },
+    { tenantId: "1aFFjJwygoQuAglZ9fqYtmEvAE54d-FjVTTssik7pN_k", client: "Vida Design - Waymark", itemId: "62983", releaseDateMatchesReceive: true },
+    { tenantId: "1aFFjJwygoQuAglZ9fqYtmEvAE54d-FjVTTssik7pN_k", client: "Vida Design - Waymark", itemId: "62994", releaseDateMatchesReceive: true },
+    { tenantId: "1aFFjJwygoQuAglZ9fqYtmEvAE54d-FjVTTssik7pN_k", client: "Vida Design - Waymark", itemId: "62995", releaseDateMatchesReceive: true },
+    { tenantId: "1aFFjJwygoQuAglZ9fqYtmEvAE54d-FjVTTssik7pN_k", client: "Vida Design - Waymark", itemId: "62996", releaseDateMatchesReceive: true },
+    { tenantId: "1aFFjJwygoQuAglZ9fqYtmEvAE54d-FjVTTssik7pN_k", client: "Vida Design - Waymark", itemId: "62997", releaseDateMatchesReceive: true },
+    { tenantId: "1aFFjJwygoQuAglZ9fqYtmEvAE54d-FjVTTssik7pN_k", client: "Vida Design - Waymark", itemId: "62998", releaseDateMatchesReceive: true },
+    { tenantId: "1aFFjJwygoQuAglZ9fqYtmEvAE54d-FjVTTssik7pN_k", client: "Vida Design - Waymark", itemId: "63028", releaseDateMatchesReceive: true },
 
     // ── Task 2: 18 released items missing release_date in SB. K&M and
     // Modern Design Sofa (3 of 11) have audit-log dates. Remaining items
