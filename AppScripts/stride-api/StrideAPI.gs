@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.237.0 — 2026-05-25 PST — [DATA-FIX] Storage-billing audit on 2026-05-25 uncovered 18 inventory rows where Status='Released' but release_date IS NULL in public.inventory, plus 17 rows with the wrong receive_date (cross-dock items where the sheet receive cell was typo'd a year ahead). Three changes ship in one bump. (1) Defensive direct supabasePatch_ on the inventory row inside handleReleaseItems_ (bulk release), handleProcessWcRelease_ (will-call release), and the disposal branch inside handleCompleteTask_ (DT auto-release). The router's existing api_writeThrough_ / api_fullClientSync_ already includes release_date in its payload via sbInventoryRow_, but rare races (sheet-write batched in memory when fullClientSync re-reads, transient PostgREST 4xx swallowed by api_writeThrough_'s outer try/catch) have left rows status-only on SB. The new inline PATCH guarantees both fields land atomically for every release path — belt-and-suspenders, idempotent re-runs OK. Also adds the missing SpreadsheetApp.flush() to handleProcessWcRelease_ before the api_fullClientSync_ re-read (handleReleaseItems_ already had this since v38.42.0). (2) New one-shot operator function oneshot_2026_05_25_FixStorageBillingAuditCorrections_ that applies all 35 data corrections from the audit: 17 receive_date adjustments (Allison Lind 61863 / Couch Seattle 57395 / Roche Bobois 60215 / 15 Vida Design Waymark cross-docks 62975-62983+62994-62998+63028), 18 release_date backfills from audit/sheet (K&M 62021/62228/62235, Modern Design Sofa 62315/62316/62317/62319-62325/62332, MR Studio 62210/62211/62213, Nip Tuck 61936), and 2 item_class corrections (MR Studio 46506->M, 47693->L). For each correction the function opens the per-tenant sheet, finds the row by Item ID, writes the cell value(s), flushes, then calls resyncEntityToSupabase_ to push to public.inventory. For Modern Design Sofa / MR Studio / Nip Tuck items with 'audit not found' the function reads the existing Release Date cell from the sheet (which IS populated — sheet has the truth) and uses that. Idempotent: a re-run on rows already at the target state no-ops cleanly. Returns a per-item summary list for paste-into-BUILD_STATUS. Run once from the GAS Apps Script editor after deploy; future receive/release-with-wrong-year typos are independent and would need their own targeted invocation. (3) No schema change. No React change. Companion docs land in BUILD_STATUS.md.
+   StrideAPI.gs — v38.238.0 — 2026-05-26 PST — [DATA-FIX] Class column data validation on every per-tenant Inventory sheet allowed only XS/S/M/L/XL/XXL — saving NC (No Charge, added to public.item_classes in PR #529) failed with "data you entered violates the data validation rules set on this cell" on item 63623 (MR. Studio). Three changes in one bump. (1) New one-shot operator function fixClassValidation_20260526_ iterates every active CB client, opens the per-tenant Inventory sheet, locates the Class column via header map (defensive against R-column drift), and replaces the cell-range data validation across rows 2..maxRows with SpreadsheetApp.newDataValidation().requireValueInList(["XS","S","M","L","XL","XXL","NC"], true).setAllowInvalid(false).build(). Also applies the same validation to the CLIENT_INVENTORY_TEMPLATE_ID sheet so future onboarded clients get NC from day one. Idempotent — re-running on already-fixed sheets writes the same rule and is a no-op. Returns a per-client summary (sheetsFixed / sheetsSkipped / sheetsMissing / templateFixed / errors). (2) New doPost case "fixClassValidation20260526" wired to the one-shot, gated only by the API_TOKEN bearer (same pattern as oneshotFixStorageAuditCorrections in v38.237.0) — no payload, hardcoded body, zero per-call risk. (3) No schema change, no React change. Run once via HTTP POST after deploy; safe to re-run.
+   v38.237.0 — 2026-05-25 PST — [DATA-FIX] Storage-billing audit on 2026-05-25 uncovered 18 inventory rows where Status='Released' but release_date IS NULL in public.inventory, plus 17 rows with the wrong receive_date (cross-dock items where the sheet receive cell was typo'd a year ahead). Three changes ship in one bump. (1) Defensive direct supabasePatch_ on the inventory row inside handleReleaseItems_ (bulk release), handleProcessWcRelease_ (will-call release), and the disposal branch inside handleCompleteTask_ (DT auto-release). The router's existing api_writeThrough_ / api_fullClientSync_ already includes release_date in its payload via sbInventoryRow_, but rare races (sheet-write batched in memory when fullClientSync re-reads, transient PostgREST 4xx swallowed by api_writeThrough_'s outer try/catch) have left rows status-only on SB. The new inline PATCH guarantees both fields land atomically for every release path — belt-and-suspenders, idempotent re-runs OK. Also adds the missing SpreadsheetApp.flush() to handleProcessWcRelease_ before the api_fullClientSync_ re-read (handleReleaseItems_ already had this since v38.42.0). (2) New one-shot operator function oneshot_2026_05_25_FixStorageBillingAuditCorrections_ that applies all 35 data corrections from the audit: 17 receive_date adjustments (Allison Lind 61863 / Couch Seattle 57395 / Roche Bobois 60215 / 15 Vida Design Waymark cross-docks 62975-62983+62994-62998+63028), 18 release_date backfills from audit/sheet (K&M 62021/62228/62235, Modern Design Sofa 62315/62316/62317/62319-62325/62332, MR Studio 62210/62211/62213, Nip Tuck 61936), and 2 item_class corrections (MR Studio 46506->M, 47693->L). For each correction the function opens the per-tenant sheet, finds the row by Item ID, writes the cell value(s), flushes, then calls resyncEntityToSupabase_ to push to public.inventory. For Modern Design Sofa / MR Studio / Nip Tuck items with 'audit not found' the function reads the existing Release Date cell from the sheet (which IS populated — sheet has the truth) and uses that. Idempotent: a re-run on rows already at the target state no-ops cleanly. Returns a per-item summary list for paste-into-BUILD_STATUS. Run once from the GAS Apps Script editor after deploy; future receive/release-with-wrong-year typos are independent and would need their own targeted invocation. (3) No schema change. No React change. Companion docs land in BUILD_STATUS.md.
    v38.236.0 — 2026-05-25 PST — [MIGRATION-P1.2] Completion-side logging for public.gas_call_log. New helper api_logCallComplete_(correlationId, status, durationMs, errorMessage) PATCHes the existing started row with status (success or error), completed_at=now(), gas_duration_ms, and (on error) a 2KB-truncated error_message. doPost captures Date.now() at the top, retains the correlation_id returned by api_logCallInput_, wraps the switch in an IIFE so the dispatched case's return value can be inspected, then logs completion best-effort. Success/error classification reads the response JSON: presence of an `error` key or `success:false` flips status to error and captures the message; everything else is success. The outer catch path logs completion too, guarded by a __logged flag so a single request never PATCHes twice. Best-effort throughout: missing credentials, JSON-parse failures, network errors, and PATCH 4xx responses all Logger.log and continue without blocking the GAS response. No schema change required — status, completed_at, gas_duration_ms, and error_message columns already exist on public.gas_call_log from the P1.1 substrate migration (20260509000001_migration_parity_substrate.sql). Closes the long-standing observability gap where every gas_call_log row had completed_at NULL, unblocking duration-percentile dashboards and error-rate alerts on the replay-harness corpus.
    v38.235.0 — 2026-05-24 PST — [AUDIT-REDEPLOY] PM audit on 2026-05-24 found gs_sync_events failures still showing the pre-v38.231.0 stubs for inventory insert + will_calls insert + shipments + tasks. Code verification confirms: REVERSE_WRITETHROUGH_TABLES_ registry already routes inventory to __writeThroughReverseInventory_ (insert path added v38.231.0), will_calls to __writeThroughReverseWillCalls_ (insert path added v38.233.0), tasks to __writeThroughReverseTasks_ (insert+update since v38.227.0), shipments to __writeThroughReverseShipments_ (insert+update since v38.232.0), billing to __writeThroughReverseBilling_ (since v38.217.0). Every entry in the registry points at a real writer (no stub references). Root cause of the audit findings is therefore deploy lag — the canonical source branch was ahead of what clasp had pushed to the live script. NO CODE CHANGE in this version bump — header advance only, to force a clean clasp push that picks up v38.231.0 through v38.234.0 in one commit. Companion PR also ships supabase/functions/replay-shadow/index.ts entity_type fix (was hardcoded to inventory).
    v38.234.0 — 2026-05-24 PST — [MIGRATION-P2] Real per-table reverse-writethrough writers for the 6 tables that v38.232.0 routed to `__writeThroughReverseSupabaseOnly_` success-stubs. Six new writers (`__writeThroughReverseAddons_`, `__writeThroughReverseInvoiceTracking_`, `__writeThroughReverseEntityNotes_`, `__writeThroughReverseItemPhotos_`, `__writeThroughReverseStaxInvoices_`, `__writeThroughReverseStaxCharges_`) replace the no-op stubs in REVERSE_WRITETHROUGH_TABLES_. Tables with no per-tenant sheet representation by design (addons / invoice_tracking / entity_notes / item_photos) still return documented no-op success with `skipped:true + reason` fields for SB-side observability (the writer body documents why the sheet has no column, instead of the generic stub). Stax_invoices writes to the fleet-wide Stax Auto Pay workbook's Invoices tab keyed on QB Invoice #; payment_method_status is a derived field with no sheet column so it returns in skippedFields. Stax_charges appends new rows to the Charge Log tab on insert (composite-key idempotency on timestamp + QB Invoice # + Stax Transaction ID), no-ops on update (Charge Log is append-only by design). Net effect: every entry in REVERSE_WRITETHROUGH_TABLES_ now routes to a purpose-built writer; no entry hits the generic SupabaseOnly stub. The two helpers from v38.215.0 (api_rwParseLocalDate_ / api_rwParseDateTime_ / api_rwApplyRowUpdates_) remain the shared substrate.
@@ -10815,6 +10816,14 @@ function doPost(e) {
       case "oneshotFixStorageAuditCorrections":
         var oneshotResult = oneshot_2026_05_25_FixStorageBillingAuditCorrections_();
         return jsonResponse_({ success: true, action: "oneshotFixStorageAuditCorrections", result: oneshotResult });
+
+      // v38.238.0 — One-shot to extend the Class-column dropdown allowlist on
+      // every per-tenant Inventory sheet (and the onboarding template) to
+      // include "NC" (No Charge), added to public.item_classes in PR #529.
+      // API_TOKEN-gated, hardcoded body, idempotent.
+      case "fixClassValidation20260526":
+        var fixClassResult = fixClassValidation_20260526_();
+        return jsonResponse_({ success: true, action: "fixClassValidation20260526", result: fixClassResult });
 
       default:
         return errorResponse_("Unknown POST action: " + action, "INVALID_ACTION");
@@ -48449,5 +48458,192 @@ function oneshot_2026_05_25_FixStorageBillingAuditCorrections_() {
     errorCount: summary.errors.length,
     errors: summary.errors,
     perItemLog: perItemLog
+  };
+}
+
+/**
+ * v38.238.0 — One-shot: extend Class-column data validation to include "NC".
+ *
+ * PR #529 added NC to public.item_classes + the React dropdown reads from
+ * Supabase, but the per-tenant Inventory sheets still have a cell-range
+ * data validation locked to XS/S/M/L/XL/XXL — saving an NC class via the
+ * React UI fails server-side when the sheet writer hits that cell ("the
+ * data you entered violates the data validation rules"). This function
+ * rewrites the validation across every active client + the onboarding
+ * template so NC is an allowed value.
+ *
+ * Hardcoded body, no payload, idempotent. Safe to re-run.
+ */
+function fixClassValidation_20260526_() {
+  var startedAt = new Date();
+  Logger.log("fixClassValidation_20260526_ starting at " + startedAt.toISOString());
+
+  var ALLOWED = ["XS", "S", "M", "L", "XL", "XXL", "NC"];
+
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) {
+    var msg = "CB_SPREADSHEET_ID not set";
+    Logger.log(msg);
+    return { ok: false, error: msg };
+  }
+  var cbSS = SpreadsheetApp.openById(cbId);
+
+  // Pull template ID from CB Settings so future onboarded clients also
+  // get NC on day one.
+  var templateId = "";
+  try {
+    var cbSettingsSh = cbSS.getSheetByName("Settings");
+    if (cbSettingsSh) {
+      var settingsData = cbSettingsSh.getDataRange().getValues();
+      for (var si = 0; si < settingsData.length; si++) {
+        var k = String(settingsData[si][0] || "").trim();
+        if (k === "CLIENT_INVENTORY_TEMPLATE_ID") {
+          templateId = String(settingsData[si][1] || "").trim();
+          break;
+        }
+      }
+    }
+  } catch (e) {
+    Logger.log("fixClassValidation: could not read CB Settings — " + e);
+  }
+
+  var clientsSh = cbSS.getSheetByName("Clients");
+  if (!clientsSh) {
+    var msg2 = "CB Clients tab not found";
+    Logger.log(msg2);
+    return { ok: false, error: msg2 };
+  }
+
+  var rows = clientsSh.getDataRange().getValues();
+  var hdr = rows[0].map(function(h) { return String(h).trim().toUpperCase(); });
+  var idCol = hdr.indexOf("CLIENT SPREADSHEET ID");
+  var nameCol = hdr.indexOf("CLIENT NAME");
+  var activeCol = hdr.indexOf("ACTIVE");
+  if (idCol < 0) {
+    var msg3 = "CLIENT SPREADSHEET ID column not found";
+    Logger.log(msg3);
+    return { ok: false, error: msg3 };
+  }
+
+  var targets = [];
+  if (templateId) targets.push({ sid: templateId, name: "[TEMPLATE]", isTemplate: true });
+  for (var i = 1; i < rows.length; i++) {
+    var sid = String(rows[i][idCol] || "").trim();
+    if (!sid) continue;
+    var active = activeCol >= 0 ? toBool_(rows[i][activeCol]) : true;
+    if (!active) continue;
+    if (sid === templateId) continue; // template handled above
+    var cName = nameCol >= 0 ? String(rows[i][nameCol] || "").trim() : sid;
+    targets.push({ sid: sid, name: cName || sid, isTemplate: false });
+  }
+
+  var totals = {
+    clientsProcessed: 0,
+    sheetsFixed: 0,
+    sheetsSkipped: 0,
+    sheetsMissing: 0,
+    templateFixed: false,
+    errors: []
+  };
+  var perSheetLog = [];
+
+  for (var t = 0; t < targets.length; t++) {
+    var target = targets[t];
+    var label = (target.isTemplate ? "[TEMPLATE] " : "") + target.name + " (" + target.sid + ")";
+    if (!target.isTemplate) totals.clientsProcessed++;
+
+    try {
+      var ss = SpreadsheetApp.openById(target.sid);
+      var invSheet = ss.getSheetByName("Inventory");
+      if (!invSheet) {
+        totals.sheetsMissing++;
+        perSheetLog.push(label + " — no Inventory sheet, skipped");
+        continue;
+      }
+
+      // Header-based column lookup. api_getHeaderMap_ returns 1-based column
+      // indexes keyed by header name (case-preserving). The CLAUDE.md rule
+      // is "header-based, never positional" — column R is just where the
+      // template ships today.
+      var hMap;
+      try { hMap = api_getHeaderMap_(invSheet); }
+      catch (_) { hMap = null; }
+
+      var classCol = null;
+      if (hMap) {
+        // Try common variants — header map preserves case.
+        classCol = hMap["Class"] || hMap["class"] || hMap["CLASS"] || null;
+      }
+      if (!classCol) {
+        // Fallback: scan row 1 for any header matching /^class$/i.
+        var lastCol = invSheet.getLastColumn();
+        if (lastCol > 0) {
+          var headerVals = invSheet.getRange(1, 1, 1, lastCol).getValues()[0];
+          for (var hc = 0; hc < headerVals.length; hc++) {
+            if (String(headerVals[hc] || "").trim().toLowerCase() === "class") {
+              classCol = hc + 1;
+              break;
+            }
+          }
+        }
+      }
+      if (!classCol) {
+        totals.sheetsSkipped++;
+        perSheetLog.push(label + " — no 'Class' column on Inventory, skipped");
+        continue;
+      }
+
+      var maxRows = invSheet.getMaxRows();
+      if (maxRows < 2) {
+        totals.sheetsSkipped++;
+        perSheetLog.push(label + " — Inventory has <2 rows, skipped");
+        continue;
+      }
+
+      var rule = SpreadsheetApp.newDataValidation()
+        .requireValueInList(ALLOWED, true)
+        .setAllowInvalid(false)
+        .build();
+
+      invSheet.getRange(2, classCol, maxRows - 1, 1).setDataValidation(rule);
+
+      if (target.isTemplate) {
+        totals.templateFixed = true;
+      } else {
+        totals.sheetsFixed++;
+      }
+      perSheetLog.push(label + " — Class col=" + classCol + ", rows 2-" + maxRows + " updated");
+    } catch (e) {
+      var errMsg = label + " — EXCEPTION " + String(e);
+      totals.errors.push(errMsg);
+      perSheetLog.push(errMsg);
+      Logger.log(errMsg);
+    }
+  }
+
+  var finishedAt = new Date();
+  var elapsedSec = ((finishedAt.getTime() - startedAt.getTime()) / 1000).toFixed(1);
+  Logger.log("=== fixClassValidation_20260526_ ===");
+  Logger.log("Finished in " + elapsedSec + "s");
+  Logger.log("Clients processed: " + totals.clientsProcessed);
+  Logger.log("Sheets fixed:      " + totals.sheetsFixed);
+  Logger.log("Sheets skipped:    " + totals.sheetsSkipped);
+  Logger.log("Sheets missing:    " + totals.sheetsMissing);
+  Logger.log("Template fixed:    " + totals.templateFixed);
+  Logger.log("Errors:            " + totals.errors.length);
+  for (var psi = 0; psi < perSheetLog.length; psi++) Logger.log("  " + perSheetLog[psi]);
+
+  return {
+    ok: true,
+    allowedValues: ALLOWED,
+    clientsProcessed: totals.clientsProcessed,
+    sheetsFixed: totals.sheetsFixed,
+    sheetsSkipped: totals.sheetsSkipped,
+    sheetsMissing: totals.sheetsMissing,
+    templateFixed: totals.templateFixed,
+    errorCount: totals.errors.length,
+    errors: totals.errors,
+    perSheetLog: perSheetLog,
+    elapsedSec: elapsedSec
   };
 }
