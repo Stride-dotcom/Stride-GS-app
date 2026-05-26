@@ -2287,8 +2287,26 @@ export function OrderPage() {
       performedBy: user?.email ?? null,
     });
     try {
-      let to = (order.contactEmail || '').trim();
-      if (!to) to = (order.createdByEmail || '').trim();
+      // Approval email goes to the SUBMITTER — the person who created
+      // the order in the Stride app — NOT the delivery's contact_email.
+      // The contact is the end customer who will receive the goods;
+      // the submitter (e.g. office staff at the client company) is the
+      // one who placed the order and needs to know it was received
+      // plus hear about scheduling coordination. Pre-2026-05-21 the
+      // priority was reversed: contactEmail won, so end customers got
+      // "your order is approved" emails when they had no Stride
+      // relationship and couldn't actually act on the scheduling
+      // follow-up.
+      //
+      // Resolution order:
+      //   1. order.createdByEmail (already joined from profiles by the
+      //      list fetch — fastest path for the common case)
+      //   2. profiles.email lookup via order.createdByUser (covers
+      //      direct deep-link opens where the list join didn't happen,
+      //      AND legacy rows whose email cache is empty)
+      //   3. order.contactEmail — true last resort for legacy rows
+      //      with no submitter info at all. Better than not sending.
+      let to = (order.createdByEmail || '').trim();
       if (!to && order.createdByUser) {
         const { data: prof } = await supabase
           .from('profiles')
@@ -2297,6 +2315,7 @@ export function OrderPage() {
           .maybeSingle();
         to = String(prof?.email || '').trim();
       }
+      if (!to) to = (order.contactEmail || '').trim();
       if (to) {
         const hasPricedExtras = Array.isArray(order.accessorials)
           && (order.accessorials as Array<{ subtotal?: number; quotePending?: boolean }>)
