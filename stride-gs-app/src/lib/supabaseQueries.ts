@@ -2474,7 +2474,7 @@ export async function fetchDtOrderByIdFromSupabase(
       createdByName: '',
       createdByEmail: '',
       pushedToDtAt: row.pushed_to_dt_at,
-        pushedAccountWasFallback: !!(row as { pushed_account_was_fallback?: boolean | null }).pushed_account_was_fallback,
+      pushedAccountWasFallback: !!(row as { pushed_account_was_fallback?: boolean | null }).pushed_account_was_fallback,
       updatedAt: row.updated_at,
       billingMethod: (row.billing_method as DtOrderForUI['billingMethod']) ?? 'bill_to_client',
       paymentCollected: row.payment_collected ?? false,
