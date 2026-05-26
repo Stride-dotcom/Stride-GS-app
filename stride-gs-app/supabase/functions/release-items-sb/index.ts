@@ -97,20 +97,46 @@ Deno.serve(async (req: Request) => {
   const stamp = `Released ${formatMdy(releaseDateIso)} by ${releasedBy} on ${formatMdy(new Date().toISOString().slice(0,10))}`;
   const entrySuffix = notes ? `${stamp} — ${notes}` : stamp;
 
-  const toRelease: Array<{ itemId: string; newNotes: string }> = [];
-  const skipped: string[] = [];
+  // Active-only guard. Pre-fix the loop silently skipped already-
+  // Released/Transferred rows; an upstream picker race could ship a non-
+  // Active itemId and the operator would see "released N items" with the
+  // stale row missing without explanation. Reject with a per-item status
+  // report so the operator can correct the selection. notFound is also
+  // surfaced explicitly instead of being rolled into warnings.
+  const invalid: Array<{ itemId: string; status: string }> = [];
   const notFound: string[] = [];
-
   for (const itemId of itemIds) {
     const row = byId.get(itemId);
     if (!row) {
       notFound.push(itemId);
       continue;
     }
-    if (row.status === 'Released' || row.status === 'Transferred') {
-      skipped.push(`${itemId}: already ${row.status}`);
-      continue;
+    if (row.status !== 'Active') {
+      invalid.push({ itemId, status: row.status || '(blank)' });
     }
+  }
+  if (notFound.length > 0) {
+    return json({
+      success: false,
+      error: `Item(s) not found in Inventory: ${notFound.slice(0, 10).join(', ')}`,
+      errorCode: 'ITEM_NOT_FOUND',
+      notFound,
+    }, 400);
+  }
+  if (invalid.length > 0) {
+    const preview = invalid.slice(0, 5).map(x => `${x.itemId} (${x.status})`).join(', ');
+    const more = invalid.length > 5 ? ` +${invalid.length - 5} more` : '';
+    return json({
+      success: false,
+      error: `Only Active items can be released. Non-Active item(s): ${preview}${more}`,
+      errorCode: 'ITEMS_NOT_ACTIVE',
+      invalidItems: invalid,
+    }, 400);
+  }
+
+  const toRelease: Array<{ itemId: string; newNotes: string }> = [];
+  for (const itemId of itemIds) {
+    const row = byId.get(itemId)!;
     const existingNotes = row.item_notes.trim();
     const newNotes = existingNotes ? `${existingNotes} | ${entrySuffix}` : entrySuffix;
     toRelease.push({ itemId, newNotes });
@@ -166,7 +192,6 @@ Deno.serve(async (req: Request) => {
   return json({
     success:        true,
     releasedCount:  updated,
-    skipped:        skipped.length > 0 ? skipped : undefined,
     totalRequested: itemIds.length,
     warnings:       warnings.length > 0 ? warnings : undefined,
   });

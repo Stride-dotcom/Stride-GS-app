@@ -99,6 +99,50 @@ Deno.serve(async (req: Request) => {
     }
     const supabase = createClient(supabaseUrl, serviceKey);
 
+    // Active-only guard. Repair quotes are only valid for items still in
+    // storage — a Released/Transferred item can't be repaired and the
+    // resulting repair would be orphaned. Picker filters to Active; this
+    // catches direct API callers and picker→submit races.
+    {
+      const { data: statusRows, error: statusErr } = await supabase
+        .from('inventory')
+        .select('item_id, status')
+        .eq('tenant_id', tenantId)
+        .in('item_id', itemIds);
+      if (statusErr) return json({ ok: false, error: `Inventory status lookup failed: ${statusErr.message}` }, 500);
+      const statusByItem = new Map<string, string>();
+      for (const r of (statusRows ?? []) as Array<{ item_id: string; status: string | null }>) {
+        statusByItem.set(r.item_id, String(r.status ?? '').trim());
+      }
+      const invalid: Array<{ itemId: string; status: string }> = [];
+      const notFound: string[] = [];
+      for (const id of itemIds) {
+        if (!statusByItem.has(id)) {
+          notFound.push(id);
+        } else if (statusByItem.get(id) !== 'Active') {
+          invalid.push({ itemId: id, status: statusByItem.get(id) || '(blank)' });
+        }
+      }
+      if (notFound.length > 0) {
+        return json({
+          ok: false,
+          error: `Item(s) not found in Inventory: ${notFound.slice(0, 10).join(', ')}`,
+          errorCode: 'ITEM_NOT_FOUND',
+          notFound,
+        }, 400);
+      }
+      if (invalid.length > 0) {
+        const preview = invalid.slice(0, 5).map(x => `${x.itemId} (${x.status})`).join(', ');
+        const more = invalid.length > 5 ? ` +${invalid.length - 5} more` : '';
+        return json({
+          ok: false,
+          error: `Only Active items can have repair quotes requested. Non-Active item(s): ${preview}${more}`,
+          errorCode: 'ITEMS_NOT_ACTIVE',
+          invalidItems: invalid,
+        }, 400);
+      }
+    }
+
     // ── 1. Atomic create via RPC ───────────────────────────────────────
     const { data: rpcRows, error: rpcErr } = await supabase
       .rpc('create_repair_quote_request', {

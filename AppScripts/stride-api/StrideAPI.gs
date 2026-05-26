@@ -18669,6 +18669,87 @@ function api_findInventoryItem_(ss, itemId) {
   }
 }
 
+/**
+ * Validate that every itemId in the provided list resolves to an inventory
+ * row with Status="Active". Single bulk read; O(N) scan in memory.
+ *
+ * Returns either { ok: true } or { ok: false, errorResponse }, where the
+ * caller can `return errorResponse` directly. The error message lists the
+ * offending item IDs and their actual statuses so the React side can
+ * surface a clear "Item X is no longer Active (status: Released)" message.
+ *
+ * Used as a server-side defence behind the UI's Active-only picker
+ * filtering. Catches race conditions (item released between picker render
+ * and form submit) and direct API callers that bypass the React picker.
+ */
+function api_validateItemsActive_(ss, itemIds) {
+  if (!Array.isArray(itemIds) || itemIds.length === 0) {
+    return { ok: false, errorResponse: jsonResponse_({ success: false, error: "No item IDs provided" }) };
+  }
+  var inv = ss.getSheetByName("Inventory");
+  if (!inv) {
+    return { ok: false, errorResponse: jsonResponse_({ success: false, error: "Inventory sheet not found" }) };
+  }
+  var map = api_getHeaderMap_(inv);
+  var idCol = map["Item ID"];
+  var stCol = map["Status"];
+  if (!idCol || !stCol) {
+    return { ok: false, errorResponse: jsonResponse_({ success: false, error: "Inventory missing Item ID / Status column" }) };
+  }
+  var lastRow = api_getLastDataRow_(inv);
+  if (lastRow < 2) {
+    return { ok: false, errorResponse: jsonResponse_({ success: false, error: "Inventory is empty" }) };
+  }
+  var idSet = {};
+  for (var k = 0; k < itemIds.length; k++) {
+    var id = String(itemIds[k] || "").trim();
+    if (id) idSet[id] = true;
+  }
+  var statusByItem = {};
+  var data = inv.getRange(2, 1, lastRow - 1, inv.getLastColumn()).getValues();
+  for (var i = 0; i < data.length; i++) {
+    var rowId = String(data[i][idCol - 1] || "").trim();
+    if (!rowId || !idSet[rowId]) continue;
+    statusByItem[rowId] = String(data[i][stCol - 1] || "").trim();
+  }
+  var invalid = [];
+  var notFound = [];
+  for (var j = 0; j < itemIds.length; j++) {
+    var iid = String(itemIds[j] || "").trim();
+    if (!iid) continue;
+    if (!(iid in statusByItem)) {
+      notFound.push(iid);
+    } else if (statusByItem[iid] !== "Active") {
+      invalid.push({ itemId: iid, status: statusByItem[iid] || "(blank)" });
+    }
+  }
+  if (notFound.length > 0) {
+    return {
+      ok: false,
+      errorResponse: jsonResponse_({
+        success: false,
+        error: "Item(s) not found in Inventory: " + notFound.slice(0, 10).join(", "),
+        errorCode: "ITEM_NOT_FOUND",
+        notFound: notFound
+      })
+    };
+  }
+  if (invalid.length > 0) {
+    var preview = invalid.slice(0, 5).map(function(x) { return x.itemId + " (" + x.status + ")"; }).join(", ");
+    var more = invalid.length > 5 ? " +" + (invalid.length - 5) + " more" : "";
+    return {
+      ok: false,
+      errorResponse: jsonResponse_({
+        success: false,
+        error: "Only Active items can be used here. Non-Active item(s): " + preview + more,
+        errorCode: "ITEMS_NOT_ACTIVE",
+        invalidItems: invalid
+      })
+    };
+  }
+  return { ok: true };
+}
+
 // ─── Complete Task Handler ─────────────────────────────────────────────────────
 
 function handleCompleteTask_(clientSheetId, payload) {
@@ -19815,6 +19896,14 @@ function handleRequestRepairQuote_(clientSheetId, payload, callerEmail) {
 
   try {
     var ss = SpreadsheetApp.openById(clientSheetId);
+
+    // Active-only guard — repair quotes are only valid on items still in
+    // storage. The single-item callsite hits this via the Task detail
+    // panel's "Request Repair Quote" button; if the item has been released
+    // or transferred since the panel loaded, reject so the caller can
+    // refresh and retry rather than landing a repair on a non-Active item.
+    var rqActiveCheck = api_validateItemsActive_(ss, [itemId]);
+    if (!rqActiveCheck.ok) return rqActiveCheck.errorResponse;
 
     // Look up inventory item
     var invItem = api_findInventoryItem_(ss, itemId);
@@ -21391,6 +21480,13 @@ function handleCreateWillCall_(clientSheetId, payload) {
   var notifEmails  = String(settings["NOTIFICATION_EMAILS"] || "").trim();
   var notifOn      = (String(settings["ENABLE_NOTIFICATIONS"] || "true").trim().toLowerCase() !== "false");
 
+  // Active-only guard: reject the entire batch if any item is non-Active.
+  // Mirrors the picker-side filter so a stale React selection (e.g. an item
+  // released by another operator between picker render and submit) fails
+  // fast with a clear per-item error instead of partially creating the WC.
+  var activeCheck = api_validateItemsActive_(ss, itemIds);
+  if (!activeCheck.ok) return activeCheck.errorResponse;
+
   // ─── 3. Look up each item + compute WC fees ────────────────────────────────
   var enrichedItems = [];
   var totalFee = 0;
@@ -21402,9 +21498,6 @@ function handleCreateWillCall_(clientSheetId, payload) {
     var invItem = api_findInventoryItem_(ss, itemId);
     if (!invItem) {
       return jsonResponse_({ success: false, error: "Item not found in Inventory: " + itemId });
-    }
-    if (invItem.status === "Released") {
-      return jsonResponse_({ success: false, error: "Item " + itemId + " is already Released" });
     }
 
     var rateData = api_lookupRate_(ss, "WC", invItem.itemClass);
@@ -22356,6 +22449,15 @@ function handleReleaseItems_(clientSheetId, payload, callerEmail) {
     return jsonResponse_({ success: false, error: "Missing required columns (Release Date, Status, Item ID)" });
   }
 
+  // Active-only guard. Pre-fix the loop below silently skipped already-
+  // Released/Transferred rows; an upstream picker race could ship a non-
+  // Active itemId and the operator would see "released N items" while
+  // their stale selection vanished without explanation. Reject up front
+  // so the user gets a per-item status report and can correct the
+  // selection.
+  var activeCheck = api_validateItemsActive_(ss, itemIds);
+  if (!activeCheck.ok) return activeCheck.errorResponse;
+
   var lastRow = api_getLastDataRow_(inv);
   if (lastRow < 2) return jsonResponse_({ success: false, error: "No inventory data" });
 
@@ -22957,6 +23059,10 @@ function handleAddItemsToWillCall_(clientSheetId, payload) {
 
   var settings = api_readSettings_(ss);
 
+  // Active-only guard — see api_validateItemsActive_ for rationale.
+  var activeCheck = api_validateItemsActive_(ss, itemIds);
+  if (!activeCheck.ok) return activeCheck.errorResponse;
+
   // ─── 2. Look up each item + compute WC fees ──────────────────────────────
   var enrichedItems = [];
   var addedFee = 0;
@@ -22968,9 +23074,6 @@ function handleAddItemsToWillCall_(clientSheetId, payload) {
     var invItem = api_findInventoryItem_(ss, itemId);
     if (!invItem) {
       return jsonResponse_({ success: false, error: "Item not found in Inventory: " + itemId });
-    }
-    if (invItem.status === "Released") {
-      return jsonResponse_({ success: false, error: "Item " + itemId + " is already Released" });
     }
 
     var rateData = api_lookupRate_(ss, "WC", invItem.itemClass);
@@ -23307,6 +23410,13 @@ function handleTransferItems_(sourceClientSheetId, payload) {
   var srcSS, destSS;
   try { srcSS  = SpreadsheetApp.openById(sourceClientSheetId); } catch (e) { return jsonResponse_({ success: false, error: "Cannot open source spreadsheet: " + e }); }
   try { destSS = SpreadsheetApp.openById(destId); }             catch (e) { return jsonResponse_({ success: false, error: "Cannot open destination spreadsheet: " + e }); }
+
+  // Active-only guard on the source sheet — only Active items can be
+  // transferred. Released/Transferred/On Hold rows would have been
+  // intentionally selected only by direct API callers; the React picker
+  // already filters to Active.
+  var activeCheck = api_validateItemsActive_(srcSS, itemIds);
+  if (!activeCheck.ok) return activeCheck.errorResponse;
 
   var srcSettings  = api_readSettings_(srcSS);
   var destSettings = api_readSettings_(destSS);
@@ -30598,6 +30708,17 @@ function handleBatchCreateTasks_(clientSheetId, payload) {
 
   var taskSheet = ss.getSheetByName("Tasks");
   if (!taskSheet) return errorResponse_("Tasks sheet not found in client spreadsheet", "NOT_FOUND");
+
+  // Active-only guard. Tasks should only be opened against items still in
+  // storage — a Released/Transferred/On Hold item would create work that
+  // can't be done and would generate orphan billing rows. Catches the race
+  // where the picker rendered while the item was Active but the user
+  // submitted after a parallel release.
+  var batchItemIds = items.map(function(it) { return String((it && it.itemId) || "").trim(); }).filter(Boolean);
+  if (batchItemIds.length > 0) {
+    var activeCheck = api_validateItemsActive_(ss, batchItemIds);
+    if (!activeCheck.ok) return activeCheck.errorResponse;
+  }
 
   // Ensure Due Date + Priority columns exist (idempotent — adds headers if missing)
   api_ensureTaskColumns_(taskSheet);

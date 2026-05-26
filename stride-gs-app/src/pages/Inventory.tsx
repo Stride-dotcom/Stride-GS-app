@@ -51,7 +51,7 @@ import { CreateTaskModal } from '../components/shared/CreateTaskModal';
 import { AddToWillCallModal } from '../components/shared/AddToWillCallModal';
 import type { InventoryItem, InventoryStatus } from '../lib/types';
 import { WriteButton } from '../components/shared/WriteButton';
-import { BatchGuard, checkBatchClientGuard } from '../components/shared/BatchGuard';
+import { BatchGuard, checkBatchClientGuard, checkBatchActiveGuard, formatNonActiveItems } from '../components/shared/BatchGuard';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { isApiConfigured, postRequestRepairQuoteSb, type BatchMutationResult } from '../lib/api';
 import { useInventory } from '../hooks/useInventory';
@@ -1487,7 +1487,7 @@ export function Inventory() {
         }}>
           {[
             { Icon: Eye, label: 'View detail', action: () => navigate(`/inventory/${row.original.itemId}`) },
-            { Icon: ClipboardList, label: 'Create task', action: () => { setRowSelection({ [row.id]: true }); setShowCreateTaskModal(true); } },
+            { Icon: ClipboardList, label: 'Create task', action: () => { if ((row.original.status || '') !== 'Active') { showToast(`Cannot create task — item ${row.original.itemId} is ${row.original.status || '(blank)'}, not Active.`); return; } setRowSelection({ [row.id]: true }); setShowCreateTaskModal(true); } },
             { Icon: Truck, label: 'Add to will call', action: async () => { /* Phase 7B: wire to API */ } },
           ].map(({ Icon, label, action }) => (
             <button
@@ -2460,22 +2460,22 @@ export function Inventory() {
               released item). Transfer / Print Labels / Export Selected
               still make sense and stay visible. */}
           {!allSelectedReleased && (
-            <WriteButton label="Will Call" variant="ghost" size="sm" onClick={async () => { const guard = checkBatchClientGuard(selectedRows.map(r => r.original)); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Create Will Call'); return; } setShowWCModal(true); }} />
+            <WriteButton label="Will Call" variant="ghost" size="sm" onClick={async () => { const items = selectedRows.map(r => r.original); const nonActive = checkBatchActiveGuard(items); if (nonActive) { showToast(`Only Active items can be added to a will call. Skipped: ${formatNonActiveItems(nonActive)}`); return; } const guard = checkBatchClientGuard(items); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Create Will Call'); return; } setShowWCModal(true); }} />
           )}
           {!allSelectedReleased && (
-            <WriteButton label="Add to WC" variant="ghost" size="sm" onClick={async () => { const guard = checkBatchClientGuard(selectedRows.map(r => r.original)); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Add to Will Call'); return; } setShowAddToWCModal(true); }} />
+            <WriteButton label="Add to WC" variant="ghost" size="sm" onClick={async () => { const items = selectedRows.map(r => r.original); const nonActive = checkBatchActiveGuard(items); if (nonActive) { showToast(`Only Active items can be added to a will call. Skipped: ${formatNonActiveItems(nonActive)}`); return; } const guard = checkBatchClientGuard(items); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Add to Will Call'); return; } setShowAddToWCModal(true); }} />
           )}
           {!allSelectedReleased && user?.role !== 'staff' && (
-            <WriteButton label="Delivery" variant="ghost" size="sm" onClick={async () => { const guard = checkBatchClientGuard(selectedRows.map(r => r.original)); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Create Delivery'); return; } setShowDeliveryModal(true); }} />
+            <WriteButton label="Delivery" variant="ghost" size="sm" onClick={async () => { const items = selectedRows.map(r => r.original); const nonActive = checkBatchActiveGuard(items); if (nonActive) { showToast(`Only Active items can be on a delivery order. Skipped: ${formatNonActiveItems(nonActive)}`); return; } const guard = checkBatchClientGuard(items); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Create Delivery'); return; } setShowDeliveryModal(true); }} />
           )}
           {!allSelectedReleased && (
-            <WriteButton label="Task" variant="ghost" size="sm" onClick={async () => { const guard = checkBatchClientGuard(selectedRows.map(r => r.original)); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Create Task'); return; } setShowCreateTaskModal(true); }} />
+            <WriteButton label="Task" variant="ghost" size="sm" onClick={async () => { const items = selectedRows.map(r => r.original); const nonActive = checkBatchActiveGuard(items); if (nonActive) { showToast(`Only Active items can have tasks created. Skipped: ${formatNonActiveItems(nonActive)}`); return; } const guard = checkBatchClientGuard(items); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Create Task'); return; } setShowCreateTaskModal(true); }} />
           )}
           {(user?.role === 'staff' || user?.role === 'admin' || user?.isParent) && (
-            <WriteButton label="Transfer" variant="ghost" size="sm" onClick={async () => { const guard = checkBatchClientGuard(selectedRows.map(r => r.original)); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Transfer'); return; } setShowTransferModal(true); }} />
+            <WriteButton label="Transfer" variant="ghost" size="sm" onClick={async () => { const items = selectedRows.map(r => r.original); const nonActive = checkBatchActiveGuard(items); if (nonActive) { showToast(`Only Active items can be transferred. Skipped: ${formatNonActiveItems(nonActive)}`); return; } const guard = checkBatchClientGuard(items); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Transfer'); return; } setShowTransferModal(true); }} />
           )}
           {!allSelectedReleased && (
-            <WriteButton label="Repair" variant="ghost" size="sm" onClick={async () => { const items = selectedRows.map(r => r.original); const guard = checkBatchClientGuard(items); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Request Repair Quote'); return; } await handleBulkRequestRepairQuote(items.map(i => ({ itemId: i.itemId, clientId: i.clientId }))); setRowSelection({}); }} />
+            <WriteButton label="Repair" variant="ghost" size="sm" onClick={async () => { const items = selectedRows.map(r => r.original); const nonActive = checkBatchActiveGuard(items); if (nonActive) { showToast(`Only Active items can have repair quotes requested. Skipped: ${formatNonActiveItems(nonActive)}`); return; } const guard = checkBatchClientGuard(items); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Request Repair Quote'); return; } await handleBulkRequestRepairQuote(items.map(i => ({ itemId: i.itemId, clientId: i.clientId }))); setRowSelection({}); }} />
           )}
           {!allSelectedReleased && (user?.role === 'staff' || user?.role === 'admin') && (
             <WriteButton label="Release" variant="ghost" size="sm" onClick={async () => { const items = selectedRows.map(r => r.original); const activeItems = items.filter(i => i.status === 'Active'); if (!activeItems.length) { showToast('No active items selected — only Active items can be released'); return; } const guard = checkBatchClientGuard(activeItems); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Release Items'); return; } setShowReleaseModal(true); }} />

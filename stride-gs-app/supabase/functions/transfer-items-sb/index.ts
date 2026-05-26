@@ -139,28 +139,51 @@ Deno.serve(async (req: Request) => {
     });
   }
 
-  const skipped: string[] = [];
+  // Active-only guard. Pre-fix this only skipped 'Transferred' rows and
+  // returned a `skipped` field instead of failing; an upstream picker race
+  // would silently drop the stale row from the operator's report. Reject
+  // any non-Active status so the caller gets a per-item status report.
+  const invalid: Array<{ itemId: string; status: string }> = [];
   const notFound: string[] = [];
-  const toTransfer: Array<{ itemId: string; newNotes: string }> = [];
-  const transferNote = `Transferred from ${tenantId} to ${destId} on ${transferDate}`;
-
   for (const itemId of itemIds) {
     const row = byId.get(itemId);
     if (!row) {
       notFound.push(itemId);
       continue;
     }
-    if (row.status === 'Transferred') {
-      skipped.push(`${itemId}: already Transferred`);
-      continue;
+    if (row.status !== 'Active') {
+      invalid.push({ itemId, status: row.status || '(blank)' });
     }
+  }
+  if (notFound.length > 0) {
+    return json({
+      success: false,
+      error: `Item(s) not found in source inventory: ${notFound.slice(0, 10).join(', ')}`,
+      errorCode: 'ITEM_NOT_FOUND',
+      notFound,
+    }, 400);
+  }
+  if (invalid.length > 0) {
+    const preview = invalid.slice(0, 5).map(x => `${x.itemId} (${x.status})`).join(', ');
+    const more = invalid.length > 5 ? ` +${invalid.length - 5} more` : '';
+    return json({
+      success: false,
+      error: `Only Active items can be transferred. Non-Active item(s): ${preview}${more}`,
+      errorCode: 'ITEMS_NOT_ACTIVE',
+      invalidItems: invalid,
+    }, 400);
+  }
+
+  const toTransfer: Array<{ itemId: string; newNotes: string }> = [];
+  const transferNote = `Transferred from ${tenantId} to ${destId} on ${transferDate}`;
+  for (const itemId of itemIds) {
+    const row = byId.get(itemId)!;
     const existing = row.item_notes.trim();
     const newNotes = existing ? `${existing} | ${transferNote}` : transferNote;
     toTransfer.push({ itemId, newNotes });
   }
 
   const warnings: string[] = [];
-  if (notFound.length > 0) warnings.push(`Not in public.inventory: ${notFound.join(', ')}`);
 
   // 2. Per-row: flip status='Transferred', stamp transferred_at, append note,
   //    move the row to the destination tenant_id. Item ID is preserved
@@ -258,7 +281,6 @@ Deno.serve(async (req: Request) => {
   return json({
     success:        true,
     transferred:    updated,
-    skipped:        skipped.length > 0 ? skipped : undefined,
     totalRequested: itemIds.length,
     warnings:       warnings.length > 0 ? warnings : undefined,
   }, 200);

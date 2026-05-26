@@ -30,8 +30,23 @@ interface WcConflictInfo {
   wcStatus: string;
 }
 
-export function CreateWillCallModal({ onClose, onSubmit, preSelectedItemIds = [], liveItems, addOptimisticWc, removeOptimisticWc, existingWillCalls }: Props) {
+export function CreateWillCallModal({ onClose, onSubmit, preSelectedItemIds: rawPreSelectedItemIds = [], liveItems, addOptimisticWc, removeOptimisticWc, existingWillCalls }: Props) {
   const { user } = useAuth();
+  // Defensive Active-only filter on the pre-selected ids. The caller
+  // (Inventory bulk action, ShipmentDetailPanel, ItemPage) may pass an
+  // id whose row is no longer Active (e.g. a Released shipment item, or
+  // a stale selection). The picker's `activeItems` filter only governs
+  // the display list — without filtering preSelectedItemIds too, the
+  // initial selectedIds set would still carry the non-Active id through
+  // to submit and the server would reject the whole batch.
+  const preSelectedItemIds = useMemo(() => {
+    if (!liveItems || liveItems.length === 0) return rawPreSelectedItemIds;
+    const statusMap = new Map(liveItems.map(i => [i.itemId, i.status]));
+    return rawPreSelectedItemIds.filter(id => {
+      const st = statusMap.get(id);
+      return st === undefined /* unknown — let server decide */ || st === 'Active';
+    });
+  }, [rawPreSelectedItemIds, liveItems]);
   const hasPreSelected = preSelectedItemIds.length > 0;
   const [step, setStep] = useState<'details' | 'items' | 'review'>('details');
   const [pickupParty, setPickupParty] = useState('');
