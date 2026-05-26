@@ -21,6 +21,15 @@
 
 import { serve } from 'https://deno.land/std@0.224.0/http/server.ts';
 
+// CORS — required so the browser-side `supabase.functions.invoke()` preflight
+// passes. Without this, supabase-js v2 surfaces "Failed to send a request to
+// the Edge Function" because the OPTIONS preflight is rejected before the
+// POST ever fires. Mirrors update-item-sb.
+const corsHeaders = {
+  'Access-Control-Allow-Origin':  '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+};
+
 interface CompleteTaskPayload {
   taskId?: string;
   result?: string;       // 'Pass' | 'Fail'  (router calls it resultValue
@@ -66,10 +75,11 @@ export function runCompleteTaskShadow(payload: CompleteTaskPayload): CompleteTas
 }
 
 serve(async (req: Request): Promise<Response> => {
+  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
   if (req.method !== 'POST') {
     return new Response(JSON.stringify({ ok: false, error: 'POST required' }), {
       status: 405,
-      headers: { 'Content-Type': 'application/json' },
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   }
   let payload: CompleteTaskPayload;
@@ -77,12 +87,12 @@ serve(async (req: Request): Promise<Response> => {
   catch (e) {
     return new Response(
       JSON.stringify({ ok: false, error: `Invalid JSON body: ${e instanceof Error ? e.message : String(e)}` }),
-      { status: 400, headers: { 'Content-Type': 'application/json' } },
+      { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
     );
   }
   const result = runCompleteTaskShadow(payload);
   return new Response(JSON.stringify(result), {
     status: 200,
-    headers: { 'Content-Type': 'application/json' },
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
   });
 });

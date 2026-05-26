@@ -49,6 +49,19 @@
 
 import { serve } from 'https://deno.land/std@0.224.0/http/server.ts';
 
+// fireShadow on the React client calls this EF via supabase.functions.invoke(),
+// which always attaches `apikey` + `authorization` + `x-client-info` — all
+// non-simple headers that force a CORS preflight (OPTIONS) before the POST.
+// Without the OPTIONS branch + ACAH below the preflight 405s, the browser
+// blocks the POST, and supabase-js v2 surfaces the result as the generic
+// "Failed to send a request to the Edge Function" error — masking that the
+// request never left the browser. Mirror the canonical SB-primary pattern
+// (update-item-sb.corsHeaders) so the preflight succeeds.
+const corsHeaders = {
+  'Access-Control-Allow-Origin':  '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+};
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 interface UpdateItemPayload {
@@ -161,10 +174,11 @@ export function validateUpdateItemPayload(
 // ─── HTTP wrapper ───────────────────────────────────────────────────────────
 
 serve(async (req: Request): Promise<Response> => {
+  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
   if (req.method !== 'POST') {
     return new Response(JSON.stringify({ ok: false, error: 'POST required' }), {
       status: 405,
-      headers: { 'Content-Type': 'application/json' },
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   }
 
@@ -174,13 +188,13 @@ serve(async (req: Request): Promise<Response> => {
   } catch (e) {
     return new Response(
       JSON.stringify({ ok: false, error: `Invalid JSON body: ${e instanceof Error ? e.message : String(e)}` }),
-      { status: 400, headers: { 'Content-Type': 'application/json' } },
+      { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
     );
   }
 
   const result = runUpdateItemShadow(payload);
   return new Response(JSON.stringify(result), {
     status: 200,
-    headers: { 'Content-Type': 'application/json' },
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
   });
 });
