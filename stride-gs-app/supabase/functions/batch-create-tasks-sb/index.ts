@@ -99,6 +99,51 @@ Deno.serve(async (req: Request) => {
   // Build an index of existing open tasks for THIS tenant to dedupe
   // intra-batch and against existing rows (mirrors api_buildOpenTaskMap_).
   const itemIds = Array.from(new Set(items.map(i => String(i.itemId).trim()).filter(Boolean)));
+
+  // Active-only guard. Tasks should only ever open against Active items —
+  // a task on a Released/Transferred row would create orphan billing and
+  // confuse the warehouse queue. Picker filters to Active, but a stale
+  // selection or direct API caller can submit non-Active itemIds.
+  if (itemIds.length > 0) {
+    const { data: statusRows, error: statusErr } = await sb
+      .from('inventory')
+      .select('item_id, status')
+      .eq('tenant_id', tenantId)
+      .in('item_id', itemIds);
+    if (statusErr) return json({ error: `Inventory status lookup failed: ${statusErr.message}` }, 500);
+    const statusByItem = new Map<string, string>();
+    for (const r of (statusRows ?? []) as Array<{ item_id: string; status: string | null }>) {
+      statusByItem.set(r.item_id, String(r.status ?? '').trim());
+    }
+    const invalid: Array<{ itemId: string; status: string }> = [];
+    const notFound: string[] = [];
+    for (const id of itemIds) {
+      if (!statusByItem.has(id)) {
+        notFound.push(id);
+      } else if (statusByItem.get(id) !== 'Active') {
+        invalid.push({ itemId: id, status: statusByItem.get(id) || '(blank)' });
+      }
+    }
+    if (notFound.length > 0) {
+      return json({
+        success: false,
+        error: `Item(s) not found in Inventory: ${notFound.slice(0, 10).join(', ')}`,
+        errorCode: 'ITEM_NOT_FOUND',
+        notFound,
+      }, 400);
+    }
+    if (invalid.length > 0) {
+      const preview = invalid.slice(0, 5).map(x => `${x.itemId} (${x.status})`).join(', ');
+      const more = invalid.length > 5 ? ` +${invalid.length - 5} more` : '';
+      return json({
+        success: false,
+        error: `Only Active items can have tasks created. Non-Active item(s): ${preview}${more}`,
+        errorCode: 'ITEMS_NOT_ACTIVE',
+        invalidItems: invalid,
+      }, 400);
+    }
+  }
+
   const openMap = await buildOpenTaskMap(sb, tenantId, itemIds);
 
   // Per-item-per-svc counter cache. Filled lazily by maxExistingCounter().

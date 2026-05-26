@@ -44,7 +44,11 @@ export function ReQuoteRepairModal({ tenantId, repairId, currentItems, onClose, 
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
 
-  // Load all active inventory for this tenant once on mount.
+  // Load all active inventory for this tenant once on mount. Filter to
+  // Active-only — Released/Transferred items shouldn't appear in the
+  // candidates list (server-side `re-quote-repair` also rejects non-
+  // Active items, so leaving them in would only expose a confusing
+  // failure mode at submit time).
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -52,6 +56,7 @@ export function ReQuoteRepairModal({ tenantId, repairId, currentItems, onClose, 
         .from('inventory')
         .select('item_id, description, vendor, sidemark, location, status')
         .eq('tenant_id', tenantId)
+        .eq('status', 'Active')
         .order('item_id');
       if (cancelled) return;
       if (err) {

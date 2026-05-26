@@ -73,3 +73,31 @@ export function checkBatchClientGuard(items: { clientName?: string; client?: str
   if (clients.length <= 1) return null;
   return clients;
 }
+
+/**
+ * Active-only guard. Returns a list of non-Active items if any are present
+ * in the selection (so the caller can refuse the action and surface a
+ * clear message), or null when every selected row is Active and the action
+ * may proceed.
+ *
+ * Used by bulk-action buttons on Inventory (Will Call, Add to WC, Task,
+ * Transfer, Repair, Delivery) so that a multi-row selection containing a
+ * Released/Transferred row can't open a downstream modal that would fail
+ * the server-side Active-only validation at submit time.
+ */
+export function checkBatchActiveGuard<T extends { itemId?: string; status?: string }>(items: T[]): { itemId: string; status: string }[] | null {
+  const invalid = items
+    .filter(i => (i.status || '') !== 'Active')
+    .map(i => ({ itemId: String(i.itemId || ''), status: String(i.status || '(blank)') }));
+  return invalid.length > 0 ? invalid : null;
+}
+
+/**
+ * Format a non-Active items list for a toast/error message —
+ * `62544 (Released), 62711 (Transferred) +3 more`.
+ */
+export function formatNonActiveItems(invalid: { itemId: string; status: string }[]): string {
+  const preview = invalid.slice(0, 3).map(x => `${x.itemId} (${x.status})`).join(', ');
+  const more = invalid.length > 3 ? ` +${invalid.length - 3} more` : '';
+  return preview + more;
+}

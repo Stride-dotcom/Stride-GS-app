@@ -82,10 +82,24 @@ Deno.serve(async (req: Request) => {
     .in('item_id', itemIds);
   if (invErr) return json({ success: false, error: `Inventory lookup failed: ${invErr.message}` }, 500);
   const invByItem = new Map<string, InventoryRow>(((invRowsRaw ?? []) as InventoryRow[]).map(r => [r.item_id, r]));
+  // Active-only guard — picker filters to Active, so a non-Active status
+  // here means a race or a direct API caller. Reject the whole batch with
+  // a per-item status report instead of the previous Released-only check.
+  const invalid: Array<{ itemId: string; status: string }> = [];
   for (const id of itemIds) {
     const row = invByItem.get(id);
     if (!row) return json({ success: false, error: `Item not found in Inventory: ${id}` }, 400);
-    if (row.status === 'Released') return json({ success: false, error: `Item ${id} is already Released` }, 400);
+    if (row.status !== 'Active') invalid.push({ itemId: id, status: row.status || '(blank)' });
+  }
+  if (invalid.length > 0) {
+    const preview = invalid.slice(0, 5).map(x => `${x.itemId} (${x.status})`).join(', ');
+    const more = invalid.length > 5 ? ` +${invalid.length - 5} more` : '';
+    return json({
+      success: false,
+      error: `Only Active items can be added to a will call. Non-Active item(s): ${preview}${more}`,
+      errorCode: 'ITEMS_NOT_ACTIVE',
+      invalidItems: invalid,
+    }, 400);
   }
 
   // Dedup vs other active WCs (Pending/Scheduled/Partial), including THIS WC.

@@ -109,10 +109,27 @@ Deno.serve(async (req: Request) => {
   const invRows = (invRowsRaw ?? []) as InventoryRow[];
   const invByItemId = new Map<string, InventoryRow>(invRows.map(r => [r.item_id, r]));
 
+  // Active-only guard. Pre-fix this only rejected 'Released' — but the
+  // picker filters to status='Active', and any non-Active status that
+  // leaks through (Transferred / On Hold / a future enum value) should
+  // also be rejected. The Inventory page's bulk-action button can still
+  // pass a Released row to this handler if the user multi-selected with
+  // the status filter set to "All".
+  const invalid: Array<{ itemId: string; status: string }> = [];
   for (const id of itemIds) {
     const row = invByItemId.get(id);
     if (!row) return json({ success: false, error: `Item not found in Inventory: ${id}` }, 400);
-    if (row.status === 'Released') return json({ success: false, error: `Item ${id} is already Released` }, 400);
+    if (row.status !== 'Active') invalid.push({ itemId: id, status: row.status || '(blank)' });
+  }
+  if (invalid.length > 0) {
+    const preview = invalid.slice(0, 5).map(x => `${x.itemId} (${x.status})`).join(', ');
+    const more = invalid.length > 5 ? ` +${invalid.length - 5} more` : '';
+    return json({
+      success: false,
+      error: `Only Active items can be added to a will call. Non-Active item(s): ${preview}${more}`,
+      errorCode: 'ITEMS_NOT_ACTIVE',
+      invalidItems: invalid,
+    }, 400);
   }
 
   // 2. Look up client discount

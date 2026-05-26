@@ -42,7 +42,18 @@ const CORE_TYPES = [
 // auto-create from this modal's grouped-item detection below).
 const EXCLUDE_CODES = new Set(['STOR', 'RCVG', 'REPAIR', 'RPR', 'WC', 'WCPU', 'SPLIT']);
 
-export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addOptimisticTask, removeOptimisticTask, clientName, existingTasks }: Props) {
+export function CreateTaskModal({ items: rawItems, clientSheetId, onClose, onSuccess, addOptimisticTask, removeOptimisticTask, clientName, existingTasks }: Props) {
+  // Defensive Active-only filter on the items prop. Tasks should only ever
+  // open against items still in storage — the server-side validation
+  // already rejects non-Active itemIds, but filtering here surfaces the
+  // skip in the modal preview (Items list) rather than waiting for the
+  // submit-time error. Callers that filter upstream (Inventory bulk
+  // action, ItemPage) pass clean inputs; this catches paths that don't
+  // (ShipmentDetailPanel Quick Actions, future callers).
+  const { items, filteredOutCount } = useMemo(() => {
+    const active = rawItems.filter(i => (i.status || '') === 'Active');
+    return { items: active, filteredOutCount: rawItems.length - active.length };
+  }, [rawItems]);
   const { priceList } = usePricing(true);
   // Service catalog provides default_sla_hours per svcCode — used to
   // pre-stamp Due Date on the new task rows so they show up correctly
@@ -314,6 +325,19 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
                 ))}
               </div>
 
+              {filteredOutCount > 0 && (
+                <div style={{ padding: '10px 12px', borderRadius: 8, background: '#FEF3C7', border: '1px solid #FCD34D', marginBottom: 12 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                    <AlertTriangle size={14} color="#B45309" />
+                    <span style={{ fontSize: 12, fontWeight: 700, color: '#92400E' }}>
+                      {filteredOutCount} non-Active item{filteredOutCount === 1 ? '' : 's'} skipped
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 11, color: '#92400E', lineHeight: 1.5 }}>
+                    Only Active items can have tasks created. Released, Transferred, and On Hold items in your selection were excluded.
+                  </div>
+                </div>
+              )}
               {groupedItems.length > 0 && (
                 <div style={{ padding: '10px 12px', borderRadius: 8, background: '#FFF7ED', border: '1px solid #FDBA74', marginBottom: 12 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
@@ -388,7 +412,7 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
               </button>
               <button
                 onClick={handleSubmit}
-                disabled={loading || !selectedCodes.size}
+                disabled={loading || !selectedCodes.size || items.length === 0}
                 style={{
                   padding: '12px 28px', border: 'none', borderRadius: 100,
                   background: selectedCodes.size && !loading ? theme.colors.orange : theme.colors.border,
