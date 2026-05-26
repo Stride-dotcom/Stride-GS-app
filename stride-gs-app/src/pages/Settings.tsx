@@ -1427,7 +1427,16 @@ export function Settings() {
                   setImpersonatingEmail(u.email);
                   const { error: impErr } = await impersonateUser(u.email);
                   setImpersonatingEmail(null);
-                  if (!impErr) navigate('/');
+                  if (impErr) {
+                    // Pre-fix, this error was swallowed silently — the button
+                    // reset and the admin had no signal that impersonation
+                    // had bounced. That hid the 2026-05-26 verifyOtp regression
+                    // for days. Always surface the failure so the next regression
+                    // gets reported within seconds of the first attempt.
+                    alert(`Could not impersonate ${u.email}:\n\n${impErr}`);
+                    return;
+                  }
+                  navigate('/');
                 }}
                 style={{
                   display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 10px', fontSize: 11, fontWeight: 600,
