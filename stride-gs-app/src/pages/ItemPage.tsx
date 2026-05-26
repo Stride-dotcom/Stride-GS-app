@@ -23,7 +23,7 @@ import { useWillCalls } from '../hooks/useWillCalls';
 import { useBilling } from '../hooks/useBilling';
 import { useShipments } from '../hooks/useShipments';
 import { useLocations } from '../hooks/useLocations';
-import { usePricing } from '../hooks/usePricing';
+import { useItemClasses } from '../hooks/useItemClasses';
 import { useClients } from '../hooks/useClients';
 import { ItemDetailPanel, type LinkedRecord } from '../components/shared/ItemDetailPanel';
 import { CreateWillCallModal } from '../components/shared/CreateWillCallModal';
@@ -111,7 +111,11 @@ function ItemPageInner({ item, onRefetch }: { item: ApiInventoryItem; onRefetch:
   const { apiShipments } = useShipments(true, clientSheetId);
   const { apiItems: allInventoryItems, applyItemPatch, mergeItemPatch, clearItemPatch } = useInventory(true, clientSheetId);
   const { locationNames } = useLocations(true);
-  const { classNames } = usePricing(true);
+  const { classes: itemClasses } = useItemClasses();
+  const classNames = useMemo(
+    () => itemClasses.filter(c => c.active).map(c => c.id),
+    [itemClasses]
+  );
   const { apiClients } = useClients();
 
   // Filter related entities down to this item.
