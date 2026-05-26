@@ -1,5 +1,20 @@
 /**
- * dt-push-order — Supabase Edge Function (Phase 2c) — v39 2026-05-22 PST
+ * dt-push-order — Supabase Edge Function (Phase 2c) — v40 2026-05-26 PST
+ * v40: Items are now sorted by `dt_item_code` natural-numeric order
+ *      before being emitted to DT (natural = "9" < "10" < "100", not
+ *      lexicographic which would order them "10","100","11","9"). Fixes
+ *      the historical "91-row order shows up on DT in random order"
+ *      complaint — DT was receiving items in whatever order Postgres
+ *      returned them (effectively insertion order, but not guaranteed).
+ *      Ad-hoc rows (no dt_item_code) sort to the end by description so
+ *      they cluster but don't interleave with inventory rows. Sort is
+ *      applied client-side in TS because Supabase-JS `.order()` can't
+ *      express `LENGTH(col), col` natural sort directly. Applied to BOTH
+ *      legs of a P+D pair so pickup + delivery items are consistently
+ *      ordered. Companion v40 in dt-sync-statuses NOT needed — this is
+ *      push-only; DT's display order is what changes.
+ *
+ * v39 2026-05-22 PST:
  * v39: <delivery_date> prefers dt_orders.dt_scheduled_date over
  *      local_service_date when the former is set. Pairs with the
  *      dt-sync-statuses v19 change that mirrors DT's scheduled date
@@ -1038,6 +1053,55 @@ async function pruneDuplicateOrderItems(supabase: any, dtOrderId: string): Promi
   }
 }
 
+/**
+ * Sort items into the canonical order DT should receive them in (v40 2026-05-26).
+ *
+ * Natural-numeric sort by `dt_item_code` so numeric inventory IDs land in the
+ * order an operator expects on the manifest:
+ *
+ *   "9" < "10" < "100" < "1000"   (NOT lexicographic "10","100","1000","9")
+ *
+ * The trick is sorting by code length first, then lexicographic — equivalent
+ * to numeric sort for pure-digit strings, and degrades gracefully for codes
+ * with letters (still groups by length, then alphabetic within a length).
+ *
+ * Ad-hoc rows (no dt_item_code AND no inventory_id) sort to the end, grouped
+ * by description so identical free-text lines cluster together. They follow
+ * the inventory rows so a multi-vendor 91-row order doesn't interleave a
+ * stray "RESCHEDULED — see notes" placeholder between vendor pieces.
+ *
+ * Sort is stable for ties (same code OR same ad-hoc description) by falling
+ * through to the row UUID — the order will be deterministic across re-pushes
+ * even if two rows somehow share a code.
+ *
+ * Called immediately after fetching items, in both the primary and the
+ * linked-leg push paths, so DT's display order matches Stride's intent on
+ * every push.
+ */
+function sortItemsForPush(items: DtOrderItemRow[]): DtOrderItemRow[] {
+  return [...items].sort((a, b) => {
+    const aCode = (a.dt_item_code ?? '').trim();
+    const bCode = (b.dt_item_code ?? '').trim();
+    // Coded rows (inventory-sourced) come before ad-hoc rows.
+    if (aCode && !bCode) return -1;
+    if (!aCode && bCode) return 1;
+    if (aCode && bCode) {
+      // Natural sort: short codes before long; within a length, lex.
+      if (aCode.length !== bCode.length) return aCode.length - bCode.length;
+      if (aCode !== bCode) return aCode < bCode ? -1 : 1;
+      // Same code → fall through to UUID tiebreaker (deterministic).
+    } else {
+      // Both ad-hoc: order by lowercased description, then UUID.
+      const aDesc = (a.description ?? '').toLowerCase();
+      const bDesc = (b.description ?? '').toLowerCase();
+      if (aDesc !== bDesc) return aDesc < bDesc ? -1 : 1;
+    }
+    // Final tiebreaker: row UUID. Lex order is stable across re-pushes
+    // because dt_order_items.id never changes.
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  });
+}
+
 // Parse the DT dispatch id from an add_order response body. DT
 // historically returned only <success>Imported given orders!</success>
 // (see v8 docstring in dt-sync-statuses), but newer responses can
@@ -1215,7 +1279,10 @@ Deno.serve(async (req: Request) => {
     return new Response(JSON.stringify({ ok: false, error: `Items fetch failed: ${itemsErr.message}` }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
   }
 
-  const itemsTyped = (items || []) as DtOrderItemRow[];
+  // v40 — natural-numeric sort by dt_item_code so DT receives items in the
+  // order operators expect on the manifest (9, 10, 11 — not 10, 11, 9).
+  // Ad-hoc rows (no code) cluster at the end. See sortItemsForPush header.
+  const itemsTyped = sortItemsForPush((items || []) as DtOrderItemRow[]);
   // service_only is allowed to have no items. All other types require at least one.
   if (itemsTyped.length === 0 && orderType !== 'service_only') {
     return new Response(JSON.stringify({ ok: false, error: 'Order has no items — cannot push to DT' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
@@ -1321,7 +1388,9 @@ Deno.serve(async (req: Request) => {
         .select('id, inventory_id, dt_item_code, description, quantity, vendor, class_name, cubic_feet, room, extras, picked_up_at')
         .eq('dt_order_id', linkedTyped.id)
         .is('removed_at', null);
-      const linkedItemsTyped = (linkedItems || []) as DtOrderItemRow[];
+      // v40 — same natural-numeric sort as the primary leg so a P+D pair
+      // shows pickup and delivery items in matching order on DT.
+      const linkedItemsTyped = sortItemsForPush((linkedItems || []) as DtOrderItemRow[]);
 
       // The linked push needs the OTHER leg's info as cross-ref. For
       // pickup-as-linked the description points "to delivery" (the
