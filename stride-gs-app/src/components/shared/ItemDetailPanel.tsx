@@ -1477,6 +1477,11 @@ export function ItemDetailPanel({
           clientName={item.clientName}
           statusBadge={headerStatusBadge}
           headerActions={headerActions}
+          // Direct-link fallback when there's no SPA history to pop — without
+          // this, useGoBack falls back to '/' and dumps the user on the
+          // dashboard. `useGoBack` still prefers navigate(-1) when history
+          // exists, so this only changes the cold-open behavior.
+          backTo="/inventory"
           statusStrip={statusStrip}
           tabs={customTabs as unknown as Parameters<typeof EntityPage>[0]['tabs']}
           initialTabId="details"

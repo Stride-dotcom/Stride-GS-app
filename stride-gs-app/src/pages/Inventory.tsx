@@ -61,6 +61,11 @@ import { useAutocomplete } from '../hooks/useAutocomplete';
 import { InlineEditableCell } from '../components/shared/InlineEditableCell';
 import { useClientFilterUrlSync } from '../hooks/useClientFilterUrlSync';
 import { useClientFilterPersisted } from '../hooks/useClientFilterPersisted';
+import {
+  readInventoryFiltersFromUrl,
+  urlHadStatusOnMount,
+  useInventoryUrlFiltersWriter,
+} from '../hooks/useInventoryUrlFilters';
 import { useTasks } from '../hooks/useTasks';
 import { useRepairs } from '../hooks/useRepairs';
 import { useWillCalls } from '../hooks/useWillCalls';
@@ -927,8 +932,14 @@ export function Inventory() {
 
   // Table state — column order persisted per user via useTablePreferences
   const { colVis: columnVisibility, setColVis: setColumnVisibility, sorting, setSorting, columnOrder, setColumnOrder, statusFilter: persistedStatusFilter, toggleStatus: togglePersistedStatus, clearStatusFilter: clearPersistedStatus } = useTablePreferences('inventory', [], {}, DEFAULT_COL_ORDER);
-  const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
-  const [globalFilter, setGlobalFilter] = useState('');
+  // Lazy-init from URL so back-nav from /inventory/:id restores the same filter
+  // scope (and shareable links open already-filtered). See useInventoryUrlFilters.
+  const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>(
+    () => readInventoryFiltersFromUrl().columnFilters
+  );
+  const [globalFilter, setGlobalFilter] = useState<string>(
+    () => readInventoryFiltersFromUrl().globalFilter
+  );
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
   const [columnSizing, setColumnSizing] = useState<ColumnSizingState>({});
 
@@ -1560,8 +1571,14 @@ export function Inventory() {
     globalFilterFn: tanstackGlobalFilter as FilterFn<InventoryItem>,
   });
 
-  // Restore persisted status filter on mount
-  const statusFilterRestored = useRef(false);
+  // Mirror columnFilters + globalFilter back into the URL hash so back-nav
+  // from /inventory/:id (or a refresh) lands on the same filtered view.
+  useInventoryUrlFiltersWriter(columnFilters, globalFilter);
+
+  // Restore persisted status filter on mount. URL beats localStorage — if the
+  // URL had `?status=` on mount, the lazy useState above already seeded the
+  // filter, and we mark the localStorage restore as done so it doesn't clobber.
+  const statusFilterRestored = useRef(urlHadStatusOnMount());
   useEffect(() => {
     if (!statusFilterRestored.current && persistedStatusFilter.length > 0 && table.getColumn('status')) {
       table.getColumn('status')!.setFilterValue(persistedStatusFilter);
