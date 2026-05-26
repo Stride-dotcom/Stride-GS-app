@@ -69,7 +69,7 @@ import { entityEvents } from '../lib/entityEvents';
 import { useShipments } from '../hooks/useShipments';
 import { useBilling } from '../hooks/useBilling';
 import { useLocations } from '../hooks/useLocations';
-import { usePricing } from '../hooks/usePricing';
+import { useItemClasses } from '../hooks/useItemClasses';
 import { useAuth } from '../contexts/AuthContext';
 import { useBatchData } from '../contexts/BatchDataContext';
 import { MultiSelectFilter } from '../components/shared/MultiSelectFilter';
@@ -687,7 +687,11 @@ export function Inventory() {
   const billingSheetId = Array.isArray(selectedSheetId) ? (selectedSheetId.length === 1 ? selectedSheetId[0] : undefined) : selectedSheetId;
   const { rows: billingRows } = useBilling(apiConfigured && clientFilter.length > 0, billingSheetId);
   const { locationNames } = useLocations(apiConfigured);
-  const { classNames } = usePricing(apiConfigured);
+  const { classes: itemClasses } = useItemClasses();
+  const classNames = useMemo(
+    () => itemClasses.filter(c => c.active).map(c => c.id),
+    [itemClasses]
+  );
   const { user } = useAuth();
   const navigate = useNavigate();
   // v38.72.0 Phase 3 — inline cell editing is admin/staff only (client-role
