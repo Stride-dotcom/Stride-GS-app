@@ -473,12 +473,18 @@ export function Labels() {
       setItemResults([]);
       return;
     }
-    const foundSet = new Set(resolved.map(r => r.itemId));
+    // Transfer leaves a Transferred row in the source tenant alongside the new
+    // Active row in the destination tenant (same item_id, different tenant_id).
+    // fetchItemsByIdsFromSupabase filters by item_id only, so both come back —
+    // which printed two labels (the old client's + the new client's). Drop the
+    // Transferred rows so we only render one label for the current owner.
+    const usable = resolved.filter(r => r.status !== 'Transferred');
+    const foundSet = new Set(usable.map(r => r.itemId));
     const notFound = ids.filter(id => !foundSet.has(id));
     const orderMap: Record<string, number> = {};
     ids.forEach((id, i) => { orderMap[id] = i; });
-    resolved.sort((a, b) => (orderMap[a.itemId] ?? 0) - (orderMap[b.itemId] ?? 0));
-    setItemResults(resolved);
+    usable.sort((a, b) => (orderMap[a.itemId] ?? 0) - (orderMap[b.itemId] ?? 0));
+    setItemResults(usable);
     setItemNotFound(notFound);
   }, [rawItems, clientNameMap]);
 
