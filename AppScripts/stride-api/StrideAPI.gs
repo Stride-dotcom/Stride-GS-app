@@ -10808,14 +10808,13 @@ function doPost(e) {
       // v38.237.0 — One-shot trigger for the 2026-05-25 storage-billing
       // audit data corrections (35 inventory rows across Allison Lind /
       // Couch Seattle / Roche Bobois / Vida Design / K&M / Modern Design
-      // Sofa / MR. Studio / Nip Tuck Remodeling). Admin-only — the
-      // function body is hardcoded in `oneshot_2026_05_25_...` below so
-      // there's no per-call payload risk. Returns a per-item summary.
+      // Sofa / MR. Studio / Nip Tuck Remodeling). API_TOKEN-gated (no
+      // admin-email guard) — same pattern as mirrorInventoryReleaseBulk
+      // above, because the function body is hardcoded and accepts no
+      // payload so the per-call risk is zero. Returns a per-item summary.
       case "oneshotFixStorageAuditCorrections":
-        return withAdminGuard_(callerEmail, function() {
-          var r = oneshot_2026_05_25_FixStorageBillingAuditCorrections_();
-          return jsonResponse_({ success: true, action: "oneshotFixStorageAuditCorrections", result: r });
-        });
+        var oneshotResult = oneshot_2026_05_25_FixStorageBillingAuditCorrections_();
+        return jsonResponse_({ success: true, action: "oneshotFixStorageAuditCorrections", result: oneshotResult });
 
       default:
         return errorResponse_("Unknown POST action: " + action, "INVALID_ACTION");
