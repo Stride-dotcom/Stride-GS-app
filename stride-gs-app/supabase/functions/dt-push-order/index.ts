@@ -1,5 +1,36 @@
 /**
- * dt-push-order — Supabase Edge Function (Phase 2c) — v40 2026-05-26 PST
+ * dt-push-order — Supabase Edge Function (Phase 2c) — v41 2026-05-26 PST
+ * v41: DT account verification fallback. Symptom: NIP-00127 (2026-05-26)
+ *      was the first push to a brand-new tenant. The Stride map had the
+ *      tenant correctly mapped to "NIP TUCK REMODELING" but DT's actual
+ *      account was misspelled "NIP TUCK REMODLING" (missing the second
+ *      E). DT's add_order silently dropped the unrecognized account
+ *      name and the order landed orphaned.
+ *
+ *      Fix: resolveAccountName now consults a per-tenant verification
+ *      allowlist (`dt_credentials.verified_account_tenants` jsonb array).
+ *      Tenants NOT in the list get pushed under STRIDE LOGISTICS as a
+ *      safety fallback — the order at least lands somewhere visible.
+ *      The push update stamps `dt_orders.pushed_account_was_fallback`
+ *      to TRUE so the OrderPage UI can warn the operator: "we pushed
+ *      under STRIDE LOGISTICS because [tenant]'s DT account hasn't
+ *      been verified."
+ *
+ *      Backfill in migration 20260526200000 auto-verified every tenant
+ *      with ≥2 prior successful pushes (proxy for "this account is
+ *      working") so existing relationships didn't regress. New tenants
+ *      need an explicit verification SQL after the operator confirms
+ *      the DT-side account exists EXACTLY as mapped:
+ *        UPDATE dt_credentials SET verified_account_tenants =
+ *          COALESCE(verified_account_tenants, '[]'::jsonb)
+ *          || to_jsonb('<TENANT_ID>'::text);
+ *      (A UI button to do this lives in the DT Account Mapping page —
+ *      to be added in a follow-up PR; for now operators run the SQL.)
+ *
+ *      pushed_account_was_fallback is stamped on BOTH legs of a P+D
+ *      pair because both share the tenant + verification state.
+ *
+ * v40 2026-05-26 PST:
  * v40: Items are now sorted by `dt_item_code` natural-numeric order
  *      before being emitted to DT (natural = "9" < "10" < "100", not
  *      lexicographic which would order them "10","100","11","9"). Fixes
@@ -956,15 +987,41 @@ function buildOrderXml(
 // Resolve DT account name from tenant_id (direct lookup in
 // account_name_map: {sheetId → accountName}).
 //
-// Falls back to the house account `STRIDE LOGISTICS` when the
-// tenant isn't mapped — previously this returned '' and the caller
-// 400'd, which blocked every push for newly-onboarded clients that
-// hadn't been added to dt_credentials.account_name_map yet. The
-// fallback was originally added in session 80 and accidentally
-// dropped during the v15 rewrite; v16 restores it.
-function resolveAccountName(tenantId: string | null, acctMap: Record<string, string>): string {
-  if (!tenantId) return 'STRIDE LOGISTICS';
-  return acctMap[tenantId] || 'STRIDE LOGISTICS';
+// Returns { name, wasFallback }:
+//   • name        — the account name to emit in <account>
+//   • wasFallback — true when STRIDE LOGISTICS was substituted because
+//                   either (a) the tenant isn't mapped at all, OR
+//                   (b) v41 — the tenant IS mapped but not yet listed
+//                   in `verified_account_tenants`. Stamped onto the
+//                   dt_orders row so the OrderPage banner can warn
+//                   the operator: "we pushed under STRIDE LOGISTICS
+//                   because the DT account hasn't been verified."
+//
+// Why (b) exists: NIP-00127 (2026-05-26) was the first push to a
+// tenant whose mapped account name was correct on our side
+// ("NIP TUCK REMODELING") but misspelled on DT's side
+// ("NIP TUCK REMODLING" — missing the second E). DT silently dropped
+// the unrecognized account and the order landed orphaned. The
+// original v16 fallback only covered "tenant unmapped" — it had no
+// way to detect "tenant mapped but name doesn't match DT". v41 adds
+// the verification list as a Stride-side allowlist: tenants only
+// get pushed under their real DT account once the operator has
+// confirmed (via SQL — UI later) that the name matches DT exactly.
+// Existing tenants with ≥2 prior successful pushes were auto-verified
+// by the migration backfill so nothing regresses.
+function resolveAccountName(
+  tenantId: string | null,
+  acctMap: Record<string, string>,
+  verifiedTenants: ReadonlySet<string>,
+): { name: string; wasFallback: boolean } {
+  if (!tenantId) return { name: 'STRIDE LOGISTICS', wasFallback: true };
+  const mapped = acctMap[tenantId];
+  if (!mapped) return { name: 'STRIDE LOGISTICS', wasFallback: true };
+  if (!verifiedTenants.has(tenantId)) {
+    console.warn(`[dt-push-order] tenant ${tenantId} mapped to "${mapped}" but NOT in verified_account_tenants — falling back to STRIDE LOGISTICS. Run UPDATE dt_credentials SET verified_account_tenants = COALESCE(verified_account_tenants, '[]'::jsonb) || to_jsonb('${tenantId}'::text); after confirming the DT account exists.`);
+    return { name: 'STRIDE LOGISTICS', wasFallback: true };
+  }
+  return { name: mapped, wasFallback: false };
 }
 
 /**
@@ -1289,9 +1346,12 @@ Deno.serve(async (req: Request) => {
   }
 
   // ── 3. Fetch DT credentials + resolve account name ────────────────────
+  // v41 — read verified_account_tenants alongside the map so the resolver
+  // can fall back to STRIDE LOGISTICS when the tenant is mapped but not
+  // yet verified (the NIP-00127 case — see resolveAccountName docstring).
   const { data: creds, error: credsErr } = await supabase
     .from('dt_credentials')
-    .select('api_base_url, auth_token_encrypted, account_name_map')
+    .select('api_base_url, auth_token_encrypted, account_name_map, verified_account_tenants')
     .maybeSingle();
 
   if (credsErr || !creds) {
@@ -1301,7 +1361,16 @@ Deno.serve(async (req: Request) => {
   const apiKey = creds.auth_token_encrypted as string;
   const baseUrl = (creds.api_base_url as string || 'https://expressinstallation.dispatchtrack.com').replace(/\/$/, '');
   const acctMap = (creds.account_name_map || {}) as Record<string, string>;
-  const accountName = resolveAccountName(orderTyped.tenant_id, acctMap);
+  // v41 — verified_account_tenants is a JSONB array of tenant_id strings.
+  // Parse defensively: null / non-array / empty all collapse to an empty
+  // Set so resolveAccountName falls back to STRIDE LOGISTICS for every
+  // mapped tenant until at least one is explicitly verified.
+  const verifiedRaw = creds.verified_account_tenants;
+  const verifiedTenants = new Set<string>(
+    Array.isArray(verifiedRaw) ? verifiedRaw.filter((t): t is string => typeof t === 'string') : []
+  );
+  const { name: accountName, wasFallback: accountWasFallback } =
+    resolveAccountName(orderTyped.tenant_id, acctMap, verifiedTenants);
 
   if (!accountName) {
     return new Response(JSON.stringify({ ok: false, error: `No DT account mapped for tenant_id "${orderTyped.tenant_id}". Add an entry to dt_credentials.account_name_map.` }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
@@ -1430,6 +1499,12 @@ Deno.serve(async (req: Request) => {
         pushed_to_dt_at: new Date().toISOString(),
         source: 'app',
         last_synced_at: new Date().toISOString(),
+        // v41 — stamp the fallback flag so the OrderPage banner can warn
+        // the operator that this leg was pushed under STRIDE LOGISTICS
+        // instead of the tenant's real DT account. Same flag value as
+        // the primary leg; both legs of a P+D pair share the tenant +
+        // verification state.
+        pushed_account_was_fallback: accountWasFallback,
       };
       if (linkedPush.dispatchId != null) {
         linkedUpdate.dt_dispatch_id = linkedPush.dispatchId;
@@ -1488,6 +1563,10 @@ Deno.serve(async (req: Request) => {
     pushed_to_dt_at: new Date().toISOString(),
     source: 'app',
     last_synced_at: new Date().toISOString(),
+    // v41 — see linkedUpdate above. Stamps TRUE when this push used
+    // STRIDE LOGISTICS instead of the tenant's mapped DT account
+    // (either because the tenant is unmapped OR not yet verified).
+    pushed_account_was_fallback: accountWasFallback,
   };
   if (primaryPush.dispatchId != null) {
     primaryUpdate.dt_dispatch_id = primaryPush.dispatchId;

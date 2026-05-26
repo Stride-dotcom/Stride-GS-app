@@ -511,6 +511,44 @@ function DetailsTab({
           acknowledges. Self-hides when there's nothing to show. */}
       <ResubmitBanner order={order} />
 
+      {/* v41 (2026-05-26) — DT account fallback warning. Renders when
+          the last push used STRIDE LOGISTICS instead of the tenant's
+          mapped DT account (because the tenant isn't in
+          dt_credentials.verified_account_tenants yet — see the v41
+          fallback in dt-push-order). The order is visible in DT but
+          attached to the wrong account; operator needs to verify the
+          DT-side account name matches the Stride map exactly, mark
+          the tenant verified via SQL (or a future admin UI), then
+          Republish. Self-hides once pushed_account_was_fallback flips
+          back to false on a clean re-push. */}
+      {order.pushedAccountWasFallback && (
+        <div style={{
+          background: '#FEF3C7',
+          border: '1px solid #FCD34D',
+          borderRadius: 8,
+          padding: '12px 16px',
+          fontSize: 13,
+          lineHeight: 1.55,
+          color: '#92400E',
+        }}>
+          <div style={{ fontWeight: 700, marginBottom: 4 }}>
+            ⚠ Pushed under STRIDE LOGISTICS fallback
+          </div>
+          <div>
+            This order's last push went to DT under <strong>STRIDE LOGISTICS</strong> because
+            this client's DT account hasn't been verified yet. The order is in DT
+            but attached to the wrong account.
+          </div>
+          <div style={{ marginTop: 6 }}>
+            <strong>To fix:</strong> verify the DT-side account name exactly matches what's in Stride's
+            Account Mapping (Settings → Integrations → DispatchTrack Account Mapping).
+            Once the names match, an admin marks the tenant verified via SQL
+            (<code style={{ background: 'rgba(0,0,0,0.06)', padding: '1px 4px', borderRadius: 3 }}>verified_account_tenants</code>)
+            and you click Republish to DT — the order will land under the correct account.
+          </div>
+        </div>
+      )}
+
       {/* v2026-05-13 — linked-pickup completion banner. Renders only on
           the DELIVERY leg of a P+D pair when the linked pickup has
           completed. Driven by dt_orders.linked_pickup_finished_at +
