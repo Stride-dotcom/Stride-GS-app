@@ -752,9 +752,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Block handleSession from running on the SIGNED_IN that verifyOtp
       // will fire — we manage the state transition manually below.
       impersonationSwapRef.current = true;
+      // The edge function returns linkData.properties.hashed_token from
+      // supabase.auth.admin.generateLink. That's a hashed token (long
+      // hex string), NOT a 6-digit email OTP code — so it must be
+      // passed via `token_hash`, not `token`. The `token` field expects
+      // the short numeric OTP and rejects long hashed tokens with
+      // "token has expired or is invalid" (403 /verify). Caught
+      // 2026-05-26 in the Supabase auth logs after every impersonation
+      // attempt was silently bouncing back. No email field belongs in
+      // the token_hash variant — the hash already encodes the user.
       const { error: otpErr } = await supabase.auth.verifyOtp({
-        email: targetEmail,
-        token: mintResult.token,
+        token_hash: mintResult.token,
         type: 'magiclink',
       });
       if (otpErr) {
