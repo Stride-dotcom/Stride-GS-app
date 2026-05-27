@@ -54,13 +54,27 @@ FROM affected
 WHERE doi.id = affected.id;
 
 -- ── Ad-hoc rows: divide cubic_feet by quantity ──
--- class_name IS NULL identifies ad-hoc lines; all four React modal ad-hoc
--- write sites + the public-form path stored TOTAL = cuftPerUnit × qty.
--- For qty=1 the division is a no-op so we filter to qty > 1 to avoid
--- meaningless writes.
+-- inventory_id IS NULL AND class_name IS NULL identifies ad-hoc lines.
+-- (class_name alone isn't sufficient — the single-leg CREATE-NEW
+-- inventory path writes `class_name: i.itemClass || null`, which is
+-- null when the inventory row has no class assigned. Those rows are
+-- still inventory, not ad-hoc, and would be covered by the inventory
+-- CTE above when they had a class, OR fall through to no backfill at
+-- all when they didn't — which is the right outcome since we can't
+-- prove the cube identity without storage_size.)
+--
+-- All four React modal ad-hoc write sites + the public-form path stored
+-- TOTAL = cuftPerUnit × qty pre-fix. For qty=1 the division is a no-op
+-- so we filter to qty > 1 to avoid meaningless writes. Re-running this
+-- migration is safe: after the first run, ad-hoc rows store per-unit,
+-- and re-dividing per-unit by qty would corrupt — BUT only if some
+-- other path increased qty between runs, which doesn't happen for the
+-- ad-hoc write sites (they delete-and-reinsert on edit). Operators
+-- should still treat this as run-once.
 UPDATE public.dt_order_items
 SET cubic_feet = cubic_feet / quantity
 WHERE class_name IS NULL
+  AND inventory_id IS NULL
   AND quantity > 1
   AND cubic_feet IS NOT NULL
   AND cubic_feet > 0
