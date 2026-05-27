@@ -943,7 +943,10 @@ export function PublicServiceRequest() {
           itemPayload.push({
             description: item.description.trim(),
             quantity: qty,
-            cubic_feet: cuFt != null ? cuFt * qty : null,
+            // dt_order_items.cubic_feet = per-unit (DT multiplies by quantity
+            // for the load total). See CreateDeliveryOrderModal buildPDItemRows
+            // comment block for the convention rationale (2026-05-27 fix).
+            cubic_feet: cuFt,
             extras: {
               source: 'public_form_adhoc',
               weight,

@@ -1672,17 +1672,21 @@ export function CreateDeliveryOrderModal({
       const cuftPerUnit = Number.isFinite(Number(i.cubicFeet)) && Number(i.cubicFeet) > 0
         ? Number(i.cubicFeet)
         : null;
-      // Match the convention used by the delivery-only / pickup-only
-      // adhoc-save paths (see ~line 2492 and friends):
-      //   - dt_order_items.cubic_feet = per-unit × qty (total for the
-      //     line, used downstream by pricing rollups)
-      //   - extras.cuft = per-unit (what the editor stores + reads
-      //     back; renaming would break round-trip with edit-load)
-      //   - extras.weight = per-unit lbs
-      // Pre-fix this stored extras.cubicFeet (wrong key) and
-      // cubic_feet=per-unit (no qty multiplier), which silently lost
-      // cuft on reopen AND undercounted weight/cube rollups on the
-      // delivery leg of P+D orders.
+      // dt_order_items.cubic_feet convention (2026-05-27):
+      //   PER-UNIT cubic feet. DT's add_order treats <cube> as per-piece
+      //   and multiplies by <quantity> for load. Storing per-unit × qty
+      //   here (the prior convention) caused DT to double-multiply —
+      //   load was qty × (qty × per-unit) instead of qty × per-unit.
+      //   Symptom: NIP-00127 reported ~12,000 ft³ in DT vs the ~1,200
+      //   real volume.
+      //
+      //   • dt_order_items.cubic_feet = per-unit (single piece's cu ft).
+      //     The dt-push-order EF emits this as <cube> as-is; DT
+      //     multiplies by <quantity> for the order's load.
+      //   • extras.cuft also stores per-unit — they match now. Earlier
+      //     code stored extras.cubicFeet (wrong key) and lost cuft on
+      //     reopen; that bug was orthogonal and still fixed.
+      //   • extras.weight = per-unit lbs (unchanged).
       rows.push({
         id: crypto.randomUUID(),
         dt_order_id: deliveryId,
@@ -1690,7 +1694,7 @@ export function CreateDeliveryOrderModal({
         description: desc,
         quantity: qty,
         original_quantity: qty,
-        cubic_feet: cuftPerUnit != null ? cuftPerUnit * qty : null,
+        cubic_feet: cuftPerUnit,
         extras: {
           source: 'delivery_free_text',
           weight: Number.isFinite(wRaw) && wRaw && wRaw > 0 ? wRaw : null,
@@ -2879,7 +2883,9 @@ export function CreateDeliveryOrderModal({
               dt_item_code: null,
               description: i.description.trim(),
               quantity: qty,
-              cubic_feet: cuFtPerUnit != null ? cuFtPerUnit * qty : null,
+              // cubic_feet = per-unit (see buildPDItemRows comment block) —
+              // DT multiplies by <quantity> for the order's load.
+              cubic_feet: cuFtPerUnit,
               extras: { source: 'delivery_free_text', weight, cuft: cuFtPerUnit },
             };
           });
@@ -3810,7 +3816,9 @@ export function CreateDeliveryOrderModal({
                 dt_item_code: null,
                 description: i.description.trim(),
                 quantity: qty,
-                cubic_feet: cuFtPerUnit != null ? cuFtPerUnit * qty : null,
+                // cubic_feet = per-unit (see buildPDItemRows comment block) —
+                // DT multiplies by <quantity> for the order's load.
+                cubic_feet: cuFtPerUnit,
                 extras: { source: 'delivery_free_text', weight, cuft: cuFtPerUnit },
               };
             });
@@ -4215,7 +4223,9 @@ export function CreateDeliveryOrderModal({
               }),
               quantity: qty,
               original_quantity: qty,
-              cubic_feet: cuFt != null ? cuFt * qty : null,
+              // cubic_feet = per-unit. DT multiplies by <quantity> for load —
+              // see buildPDItemRows comment block for the full rationale.
+              cubic_feet: cuFt,
               class_name: i.itemClass || null,
               vendor: i.vendor || null,
               room: room || null,
@@ -4241,7 +4251,8 @@ export function CreateDeliveryOrderModal({
                 description: i.description.trim(),
                 quantity: qty,
                 original_quantity: qty,
-                cubic_feet: cuFtPerUnit != null ? cuFtPerUnit * qty : null,
+                // cubic_feet = per-unit (see buildPDItemRows comment block).
+                cubic_feet: cuFtPerUnit,
                 extras: {
                   source: 'delivery_free_text',
                   weight,
