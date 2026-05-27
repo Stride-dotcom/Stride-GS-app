@@ -763,12 +763,18 @@ export function CreateDeliveryOrderModal({
   );
   const includedItems = extraPieceService?.includedQuantity ?? 3;
   const extraItemRate = extraPieceService?.flatRate ?? 25;
+  // 2026-05-27: switched from storageSize to cubicFeet. storageSize is
+  // the storage-billing multiplier (XS=5, S=15, M=45 …) and was 3–10×
+  // realistic per-piece volume — DT loads were inflated by that factor
+  // (NIP-00127 reported ~12,000 ft³ instead of ~1,200). cubicFeet is
+  // a separate column (migration 20260527000000) with realistic
+  // defaults the admin can tune in Price List → Classes.
   const cuFtByCode = useMemo(() => {
     const map = new Map<string, number>();
     for (const c of itemClasses) {
       if (!c.active) continue;
       const code = deriveClassCode(c.name);
-      if (code && c.storageSize > 0) map.set(code, c.storageSize);
+      if (code && c.cubicFeet > 0) map.set(code, c.cubicFeet);
     }
     return map;
   }, [itemClasses]);

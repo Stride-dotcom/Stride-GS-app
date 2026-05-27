@@ -1,19 +1,29 @@
 /**
  * ClassesTable — renders inside PriceList when the "Classes" category is
  * selected. Shows every row in public.item_classes with inline-edit for
- * name / storage size / delivery minutes / active flag. Admin only.
+ * name / storage size / cubic feet / delivery minutes / active flag.
+ * Admin only.
+ *
+ * v3 2026-05-27 PST — added Cubic Feet (cu ft) column. This is the
+ *   per-piece volume sent to DispatchTrack as the <cube> tag — distinct
+ *   from Storage Size (the storage-billing multiplier). Defaults seeded
+ *   in migration 20260527000000 (XS=1, S=3, M=10, L=20, XL=35, XXL=50,
+ *   NC=0); admins can tune them here without a code deploy.
  *
  * v2 2026-04-25 PST — added Delivery Time (min) column. The default per-
  *   class minutes (XS=3, S=5, M=10, L=20, XL=30, XXL=45) feed dispatch
  *   routing in CreateDeliveryOrderModal via fetchItemClassMinutes().
  *
- * Storage size is the authoritative cubic-foot value used by storage
- * billing (`STOR` rate × class.storage_size × item qty). Editing it here
- * is live — rate lookups on the next storage-charge run will use the new
- * number. There's no separate "Sync to Sheet" step for classes today
- * because the Master Price List Class_Map is treated as the legacy
- * fallback; GAS's api_loadClassVolumes_ reads Supabase primary via the
- * Phase 5 shadow-mode path.
+ * Storage size is the storage-billing multiplier (`STOR` rate ×
+ * class.storage_size × item qty). Editing it here is live — rate lookups
+ * on the next storage-charge run will use the new number. There's no
+ * separate "Sync to Sheet" step for classes today because the Master
+ * Price List Class_Map is treated as the legacy fallback; GAS's
+ * api_loadClassVolumes_ reads Supabase primary via the Phase 5 shadow-
+ * mode path.
+ *
+ * Cubic Feet is independent: it only affects DT's <cube> payload and
+ * does not feed storage billing or quote calculations.
  */
 import { useMemo, useState } from 'react';
 import { Save, X, AlertTriangle } from 'lucide-react';
@@ -27,6 +37,7 @@ interface Props {
 type Draft = {
   name: string;
   storageSize: string;
+  cubicFeet: string;
   deliveryMinutes: string;
   active: boolean;
 };
@@ -35,6 +46,7 @@ function classToDraft(c: ItemClass): Draft {
   return {
     name: c.name,
     storageSize: c.storageSize > 0 ? String(c.storageSize) : '',
+    cubicFeet: c.cubicFeet > 0 ? String(c.cubicFeet) : '',
     deliveryMinutes: c.deliveryMinutes > 0 ? String(c.deliveryMinutes) : '',
     active: c.active,
   };
@@ -68,6 +80,7 @@ export function ClassesTable({ search }: Props) {
     const ok = await update(editingId, {
       name: draft.name.trim(),
       storageSize: draft.storageSize ? Number(draft.storageSize) : 0,
+      cubicFeet: draft.cubicFeet ? Number(draft.cubicFeet) : 0,
       deliveryMinutes: draft.deliveryMinutes ? Number(draft.deliveryMinutes) : 0,
       active: draft.active,
     });
@@ -86,8 +99,10 @@ export function ClassesTable({ search }: Props) {
       }}>
         Item classes feed storage billing: <strong>STOR × storage size × qty</strong>.
         <span style={{ marginLeft: 6 }}>
-          Delivery Time (min) is the per-class dispatch minutes used to estimate
-          route durations on new delivery orders.
+          Cubic Feet is the realistic per-piece volume sent to DispatchTrack for
+          load planning (separate from Storage Size). Delivery Time (min) is the
+          per-class dispatch minutes used to estimate route durations on new
+          delivery orders.
         </span>
       </div>
 
@@ -114,7 +129,7 @@ export function ClassesTable({ search }: Props) {
           {/* Header row */}
           <div style={{
             display: 'grid',
-            gridTemplateColumns: '70px 1.3fr 110px 130px 90px 130px',
+            gridTemplateColumns: '60px 1.2fr 100px 100px 120px 80px 110px',
             gap: 12,
             padding: '12px 18px',
             background: v2.colors.bgCard,
@@ -125,6 +140,7 @@ export function ClassesTable({ search }: Props) {
             <div>Class</div>
             <div>Name</div>
             <div style={{ textAlign: 'right' }}>Storage Size</div>
+            <div style={{ textAlign: 'right' }}>Cubic Feet (DT)</div>
             <div style={{ textAlign: 'right' }}>Delivery Time (min)</div>
             <div style={{ textAlign: 'center' }}>Status</div>
             <div style={{ textAlign: 'right' }}>Actions</div>
@@ -172,7 +188,7 @@ function ReadOnlyRow({ cls, onEdit }: { cls: ItemClass; onEdit: () => void }) {
       onClick={onEdit}
       style={{
         display: 'grid',
-        gridTemplateColumns: '70px 1.3fr 110px 130px 90px 130px',
+        gridTemplateColumns: '60px 1.2fr 100px 100px 120px 80px 110px',
         gap: 12,
         padding: '10px 18px',
         borderBottom: `1px solid ${v2.colors.border}`,
@@ -189,6 +205,9 @@ function ReadOnlyRow({ cls, onEdit }: { cls: ItemClass; onEdit: () => void }) {
       <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cls.name}</div>
       <div style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>
         {cls.storageSize > 0 ? `${cls.storageSize} cu ft` : '—'}
+      </div>
+      <div style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>
+        {cls.cubicFeet > 0 ? `${cls.cubicFeet} cu ft` : '—'}
       </div>
       <div style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>
         {cls.deliveryMinutes > 0 ? `${cls.deliveryMinutes} min` : '—'}
@@ -219,12 +238,19 @@ function EditableRow({ cls, draft, onDraftChange, onSave, onCancel, saving }: {
       borderBottom: `1px solid ${v2.colors.border}`,
       background: 'rgba(232,105,42,0.04)',
     }}>
-      <div style={{ display: 'grid', gridTemplateColumns: '70px 1.3fr 110px 130px auto', gap: 12, alignItems: 'center' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '60px 1.2fr 100px 100px 120px auto', gap: 12, alignItems: 'center' }}>
         <div style={{ fontWeight: 700, letterSpacing: '0.5px', color: v2.colors.text }}>{cls.id}</div>
         <input value={draft.name} onChange={e => set('name', e.target.value)} style={inputStyle(v2)} placeholder="Class name" />
         <input
           value={draft.storageSize}
           onChange={e => set('storageSize', e.target.value.replace(/[^\d.]/g, ''))}
+          style={{ ...inputStyle(v2), textAlign: 'right' }}
+          placeholder="cu ft"
+          inputMode="decimal"
+        />
+        <input
+          value={draft.cubicFeet}
+          onChange={e => set('cubicFeet', e.target.value.replace(/[^\d.]/g, ''))}
           style={{ ...inputStyle(v2), textAlign: 'right' }}
           placeholder="cu ft"
           inputMode="decimal"
