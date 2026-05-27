@@ -166,11 +166,10 @@ export function downloadPriceListExcel(
     const classRows = [...itemClasses]
       .sort((a, b) => a.displayOrder - b.displayOrder)
       .map(c => ({
-        Class:             c.id,
-        Name:              c.name,
-        'Storage Size':    c.storageSize > 0 ? Number(c.storageSize.toFixed(2)) : '',
-        'Cubic Feet (DT)': c.cubicFeet > 0 ? Number(c.cubicFeet.toFixed(2)) : '',
-        Active:            c.active ? 'Yes' : 'No',
+        Class:          c.id,
+        Name:           c.name,
+        'Storage Size': c.storageSize > 0 ? Number(c.storageSize.toFixed(2)) : '',
+        Active:         c.active ? 'Yes' : 'No',
       }));
     const wsClasses = XLSX.utils.json_to_sheet(classRows);
     wsClasses['!cols'] = autoSize(classRows);

@@ -1,13 +1,6 @@
 /**
  * useItemClasses — CRUD for `public.item_classes` + realtime refresh.
  *
- * v3 2026-05-27 PST — exposes `cubicFeet`, a per-piece realistic
- *                     cubic-foot value sent to DispatchTrack's <cube>
- *                     tag. Distinct from storageSize (the storage-
- *                     billing multiplier) so DT load planning gets
- *                     truthful volume while billing stays unchanged.
- *                     Defaults seeded in migration 20260527000000.
- *
  * v2 2026-04-25 PST — exposes `deliveryMinutes` so the Price List Classes
  *                     section can edit dispatch routing time alongside
  *                     storage size. Seeded values (XS=3, S=5, M=10, L=20,
@@ -16,8 +9,8 @@
  *
  * The Quote Tool reads this table via useQuoteCatalog (which only exposes
  * id/name/order/active — the columns the tool needs). This hook exposes
- * the full row shape including `storage_size` and `cubic_feet` so the
- * Price List "Classes" section can edit them inline.
+ * the full row shape including `storage_size` so the Price List "Classes"
+ * section can edit it inline.
  *
  * RLS: authenticated read; admin write. The write path surfaces the RLS
  * error verbatim if a non-admin tries to edit (the UI gates the button
@@ -35,8 +28,6 @@ export interface ItemClass {
   id: string;
   name: string;
   storageSize: number;
-  /** Realistic per-piece cubic feet — sent to DT as <cube>. Independent of storageSize (billing multiplier). */
-  cubicFeet: number;
   /** Default dispatch minutes per item of this class — feeds delivery routing. */
   deliveryMinutes: number;
   displayOrder: number;
@@ -48,7 +39,6 @@ interface DbRow {
   id: string;
   name: string | null;
   storage_size: string | number | null;
-  cubic_feet: string | number | null;
   delivery_minutes: number | null;
   display_order: number | null;
   active: boolean | null;
@@ -66,7 +56,6 @@ function rowToClass(r: DbRow): ItemClass {
     id: r.id,
     name: r.name ?? '',
     storageSize: num(r.storage_size),
-    cubicFeet: num(r.cubic_feet),
     deliveryMinutes: r.delivery_minutes ?? 0,
     displayOrder: r.display_order ?? 0,
     active: r.active !== false,
@@ -79,7 +68,7 @@ export interface UseItemClassesResult {
   loading: boolean;
   error: string | null;
   refetch: () => Promise<void>;
-  update: (id: string, patch: Partial<Pick<ItemClass, 'name' | 'storageSize' | 'cubicFeet' | 'deliveryMinutes' | 'displayOrder' | 'active'>>) => Promise<boolean>;
+  update: (id: string, patch: Partial<Pick<ItemClass, 'name' | 'storageSize' | 'deliveryMinutes' | 'displayOrder' | 'active'>>) => Promise<boolean>;
 }
 
 export function useItemClasses(): UseItemClassesResult {
@@ -114,11 +103,10 @@ export function useItemClasses(): UseItemClassesResult {
     });
   }, [refetch]);
 
-  const update = useCallback(async (id: string, patch: Partial<Pick<ItemClass, 'name' | 'storageSize' | 'cubicFeet' | 'deliveryMinutes' | 'displayOrder' | 'active'>>): Promise<boolean> => {
+  const update = useCallback(async (id: string, patch: Partial<Pick<ItemClass, 'name' | 'storageSize' | 'deliveryMinutes' | 'displayOrder' | 'active'>>): Promise<boolean> => {
     const row: Record<string, unknown> = {};
     if (patch.name !== undefined)             row.name             = patch.name;
     if (patch.storageSize !== undefined)      row.storage_size     = patch.storageSize;
-    if (patch.cubicFeet !== undefined)        row.cubic_feet       = patch.cubicFeet;
     if (patch.deliveryMinutes !== undefined)  row.delivery_minutes = patch.deliveryMinutes;
     if (patch.displayOrder !== undefined)     row.display_order    = patch.displayOrder;
     if (patch.active !== undefined)           row.active           = patch.active;
