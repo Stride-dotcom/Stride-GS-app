@@ -85,11 +85,30 @@ export async function isSupabaseCacheAvailable(): Promise<boolean> {
         .from('inventory')
         .select('id', { count: 'exact', head: true })
         .limit(1);
-      _cacheAvailable = !error && (count ?? 0) > 0;
-    } catch {
-      _cacheAvailable = false;
+      if (error) {
+        // Transient: don't cache false — a one-time network/auth blip would
+        // otherwise permanently disable Supabase for the session and force
+        // every consumer to the slow GAS fallback. Surface the actual error
+        // so devtools immediately reveals RLS/auth/network failures.
+        console.warn('[supabaseQueries] isSupabaseCacheAvailable: error from inventory probe — leaving availability uncached so we retry on next call', error);
+        _cacheAvailable = null;
+        return false;
+      }
+      if ((count ?? 0) === 0) {
+        // Likely RLS hiding rows from the current user, or a brand-new
+        // tenant. We still want SB-first for OTHER tables (e.g. billing),
+        // but the current probe couldn't confirm. Leave uncached and warn.
+        console.warn('[supabaseQueries] isSupabaseCacheAvailable: inventory probe returned 0 rows (RLS scope or empty tenant?) — leaving availability uncached');
+        _cacheAvailable = null;
+        return false;
+      }
+      _cacheAvailable = true;
+      return true;
+    } catch (e) {
+      console.warn('[supabaseQueries] isSupabaseCacheAvailable: probe threw — leaving availability uncached', e);
+      _cacheAvailable = null;
+      return false;
     }
-    return _cacheAvailable;
   })();
   try {
     return await _availabilityInflight;
@@ -145,17 +164,26 @@ const PAGE_SIZE = 1000;
 const MAX_PAGES = 60; // Safety cap: 60k rows total. Raise if a table ever exceeds.
 
 async function paginateAll<T>(
-  buildQuery: () => { range: (from: number, to: number) => Promise<{ data: T[] | null; error: unknown }> }
+  buildQuery: () => { range: (from: number, to: number) => Promise<{ data: T[] | null; error: unknown }> },
+  label?: string,
 ): Promise<T[] | null> {
   const all: T[] = [];
   for (let page = 0; page < MAX_PAGES; page++) {
     const from = page * PAGE_SIZE;
     const to = from + PAGE_SIZE - 1;
     const { data, error } = await buildQuery().range(from, to);
-    if (error) return null;
+    if (error) {
+      // Surface the actual Supabase error — callers historically swallowed
+      // this and silently fell back to GAS, masking RLS/network/auth bugs.
+      console.warn(`[supabaseQueries] paginateAll${label ? `(${label})` : ''}: page ${page} (range ${from}-${to}) errored — aborting and returning null`, error);
+      return null;
+    }
     if (!data || data.length === 0) break;
     for (let i = 0; i < data.length; i++) all.push(data[i]);
     if (data.length < PAGE_SIZE) break;
+  }
+  if (all.length >= PAGE_SIZE * MAX_PAGES) {
+    console.warn(`[supabaseQueries] paginateAll${label ? `(${label})` : ''}: hit MAX_PAGES safety cap at ${all.length} rows — table may have more rows than expected`);
   }
   return all;
 }
@@ -1000,8 +1028,12 @@ export async function fetchBillingFromSupabase(
         query = query.eq('tenant_id', clientSheetId);
       }
       return query as unknown as { range: (from: number, to: number) => Promise<{ data: SupabaseBillingRow[] | null; error: unknown }> };
-    });
-    if (!data) return null;
+    }, 'billing');
+    if (!data) {
+      console.warn('[supabaseQueries] fetchBillingFromSupabase: paginateAll returned null — caller will fall back to GAS');
+      return null;
+    }
+    console.info(`[supabaseQueries] fetchBillingFromSupabase: returned ${data.length} rows (scope=${clientSheetId ?? 'all-tenants'})`);
 
     const summary: BillingSummary = { unbilled: 0, invoiced: 0, billed: 0, void_count: 0, totalUnbilled: 0 };
 
@@ -1047,7 +1079,8 @@ export async function fetchBillingFromSupabase(
       clientsQueried: clientSheetId ? 1 : Object.keys(clientNameMap).length,
       summary,
     };
-  } catch {
+  } catch (e) {
+    console.warn('[supabaseQueries] fetchBillingFromSupabase: threw — caller will fall back to GAS', e);
     return null;
   }
 }
@@ -1114,8 +1147,12 @@ export async function fetchBillingFromSupabaseFiltered(
         query = query.lte('date', filters.endDate);
       }
       return query as unknown as { range: (from: number, to: number) => Promise<{ data: SupabaseBillingRow[] | null; error: unknown }> };
-    });
-    if (!data) return null;
+    }, 'billing-filtered');
+    if (!data) {
+      console.warn('[supabaseQueries] fetchBillingFromSupabaseFiltered: paginateAll returned null — caller will fall back to GAS', { filters });
+      return null;
+    }
+    console.info(`[supabaseQueries] fetchBillingFromSupabaseFiltered: returned ${data.length} rows`, { filters });
 
     const summary: BillingSummary = { unbilled: 0, invoiced: 0, billed: 0, void_count: 0, totalUnbilled: 0 };
 
@@ -1161,7 +1198,8 @@ export async function fetchBillingFromSupabaseFiltered(
       clientsQueried: filters.clientFilter?.length ?? Object.keys(clientNameMap).length,
       summary,
     };
-  } catch {
+  } catch (e) {
+    console.warn('[supabaseQueries] fetchBillingFromSupabaseFiltered: threw — caller will fall back to GAS', e);
     return null;
   }
 }

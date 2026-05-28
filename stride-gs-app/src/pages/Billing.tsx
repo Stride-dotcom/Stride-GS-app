@@ -744,22 +744,37 @@ export function Billing() {
       if (rptClientFilter.length > 0) filters.clientFilter = rptClientFilter;
 
       let billingResponse: BillingResponse | null = null;
+      // Diagnostic: log which data path the report ran on. Owner reported
+      // ~900 of ~3,493 rows showing — pre-PR-#544 that was the Supabase
+      // 1000-row range cap; post-fix, we need to confirm the SB path is
+      // actually being used and not silently falling back to GAS.
+      let pathTaken: 'sb-hit' | 'sb-unavailable-gas' | 'sb-returned-null-gas' | 'force-gas' = 'sb-hit';
 
       // Supabase-first (fast ~50ms). Skipped when caller requests a live GAS verification.
-      if (!forceGas && await isSupabaseCacheAvailable()) {
+      if (forceGas) {
+        pathTaken = 'force-gas';
+      } else if (await isSupabaseCacheAvailable()) {
         billingResponse = await fetchBillingFromSupabaseFiltered(filters, clientNameMap);
+        if (!billingResponse) pathTaken = 'sb-returned-null-gas';
+      } else {
+        pathTaken = 'sb-unavailable-gas';
       }
 
       // GAS fallback (authoritative, 3–30s)
       if (!billingResponse) {
+        console.warn(`[Billing.loadReport] using GAS fallback — reason: ${pathTaken}`, { filters });
         const res = await fetchBilling(undefined, undefined, filters);
         if (res.ok && res.data) {
           billingResponse = res.data;
+          console.info(`[Billing.loadReport] GAS returned ${res.data.rows?.length ?? 0} rows`);
         } else {
+          console.warn('[Billing.loadReport] GAS fetchBilling failed', res.error);
           setReportError(res.error || 'Failed to load billing data');
           setReportLoading(false);
           return;
         }
+      } else {
+        console.info(`[Billing.loadReport] using Supabase path — returned ${billingResponse.rows?.length ?? 0} rows`);
       }
 
       const rows = mapBillingRows(billingResponse.rows);
