@@ -1111,13 +1111,22 @@ export function CreateDeliveryOrderModal({
     let list = activeItems;
     if (itemSearch) {
       const q = itemSearch.toLowerCase();
+      // Cover every column the picker displays (ID, Vendor, Description,
+      // Sidemark, Reference) plus the non-displayed Location / Item Class
+      // / Room metadata the operator often searches by ("anything in B-02",
+      // "all S-class items in the dining room"). Qty is numeric and not
+      // useful as a text-match. Reference was missing pre-2026-05-28 —
+      // operators couldn't filter the picker by the PO/reference column
+      // they could see in the table.
       list = list.filter(
         i => i.itemId.toLowerCase().includes(q)
           || (i.description || '').toLowerCase().includes(q)
           || (i.vendor || '').toLowerCase().includes(q)
           || (i.sidemark || '').toLowerCase().includes(q)
+          || (i.reference || '').toLowerCase().includes(q)
           || (i.location || '').toLowerCase().includes(q)
           || (i.itemClass || '').toLowerCase().includes(q)
+          || (i.room || '').toLowerCase().includes(q)
       );
     }
     const sorted = [...list].sort((a, b) => {
