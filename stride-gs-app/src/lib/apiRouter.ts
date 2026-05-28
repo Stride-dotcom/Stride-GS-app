@@ -151,8 +151,20 @@ const GROUPED_EMAIL_TEMPLATE_ACTIONS = [
   'seedEmailTemplatesToSupabase',
 ] as const;
 
+// `updateClient` was previously in this list but the grouped EF proxies
+// every action straight back to GAS via gas-proxy.ts — for updateClient
+// that means SB never gets the canonical write, the GAS handler writes
+// only the CB Clients sheet, and the React app's Supabase read cache for
+// `public.clients` stays stale (the bug Hyrel/Justin reported when
+// stax_customer_id never propagated). The direct entry below
+// (`updateClient: { ef: 'update-client-sb', flagKey: 'updateClient' }`)
+// is the SB-primary path that writes public.clients and fires
+// `__writeThroughReverseClients_` (StrideAPI.gs v38.224.0) to mirror the
+// row back to both the per-tenant Settings tab and the CB Clients tab.
+// Removing it here lets that direct entry stick instead of being
+// silently overwritten by the later spread of grouped entries.
 const GROUPED_CLIENT_SETUP_ACTIONS = [
-  'finishClientSetup', 'updateClient', 'syncSettings',
+  'finishClientSetup', 'syncSettings',
   'setClientWebAppDeployment', 'rediscoverAllScriptIds',
   'backfillScriptIdsViaWebApp', 'resolveOnboardUser',
 ] as const;
