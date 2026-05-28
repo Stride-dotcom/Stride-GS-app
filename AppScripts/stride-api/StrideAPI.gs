@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.241.0 — 2026-05-28 PST — [BILLING] QBO push confirms success before recording, stores invoice ID as proof. INV-001132 surfaced a silent-success bug: the post-push invoice_tracking stamp wrote qbo_pushed_at for every result the loop flagged success=true, but didn't validate that QBO actually returned a non-empty Id — so a malformed response or any path that flipped success without a real ID (or a future Supabase write that fired before the QBO confirmation, etc.) could mark a push "done" without the invoice ever landing in QBO. Two coordinated changes. (1) handleQboCreateInvoice_ post-loop invoice_tracking stamp at ~line 44963 — pre-fix: ONE batched PATCH on invoice_no=in.(...) writing only qbo_pushed_at=now(); post-fix: per-invoice PATCH writing qbo_pushed_at, qbo_invoice_id, AND qbo_doc_number from each result's confirmed QBO response. Gate tightened to require BOTH res.success===true AND a non-empty res.qboInvoiceId — a success flag with empty Id no longer triggers the stamp. Per-invoice PATCH costs N round-trips instead of 1, but N is bounded by the batch size (typical 1–30, max ~50) and PostgREST handles these fast. Failures still log via the dispatch-level api_logBillingActivity_ call (action='qbo_push', status='failure') and additionally get an explicit action='qbo_push_failed' entry inside the handler so the Billing Activity tab can filter on the specific failure action. (2) qbo-create-invoice-sb Edge Function (supabase/functions/qbo-create-invoice-sb/index.ts) — its invoice_tracking UPDATE now writes the same three columns (qbo_pushed_at, qbo_invoice_id, qbo_doc_number) instead of just qbo_pushed_at. The EF already had the correct ordering (POST to QBO → parse Id → stamp), but was dropping the captured ID on the floor. Companion migration 20260528150000_invoice_tracking_qbo_id_columns.sql adds the two nullable text columns + a partial index. Companion React change in Billing.tsx renders a warning state ("?" badge) for the diagnostic case qbo_pushed_at SET + qbo_invoice_id NULL — covers historical pre-fix rows like INV-001132 so operators can audit and re-push if QBO has no record. No change to billing dollar totals, no change to v38.182 atomic invoice counter, no change to Void/Reissue logic.
+   StrideAPI.gs — v38.242.0 — 2026-05-28 PST — [BILLING] QBO reconciliation pass: pull payment status back from QBO. Companion to v38.241.0's push-confirmation fix — that PR captured proof QBO created the invoice at push time, this one closes the second visibility gap: did the customer actually pay it? New handler `handleQboReconcileInvoices_` queries QBO for every pushed invoice in scope, captures (Id, DocNumber, TotalAmt, Balance), writes back qbo_invoice_id / qbo_doc_number / qbo_balance / qbo_paid / qbo_last_verified_at on public.invoice_tracking, and flags any pushed invoice QBO has no record of as "push failed" (action='qbo_push_failed' in billing_activity_log). Two match strategies: (a) per-id GET /invoice/{id} for rows that already have qbo_invoice_id stamped (the post-v38.240 happy path — cheap, one round-trip per invoice), (b) bulk Query API `SELECT Id, DocNumber, TotalAmt, Balance, PrivateNote FROM Invoice WHERE TxnDate >= '<sinceDate>' MAXRESULTS 1000 STARTPOSITION ...` paginated for rows without qbo_invoice_id (historical / pre-fix backfill). Bulk match key resolution: DocNumber → invoice_no first, then parse PrivateNote for "Stride INV# X" — covers both the pre-v38.121.0 (DocNumber = our INV#) and post-v38.121.0 (QBO auto-assigns DocNumber, our INV# in PrivateNote) push paths. Payload supports three scoping modes: explicit `invoiceNos: [...]`, `sinceDate: "YYYY-MM-DD"` for date-bounded backfills, or default = all pushed-but-unverified rows in invoice_tracking. Response is a per-invoice result list + counts (verified / paid / unpaid / missing). New doPost case `qboReconcileInvoices` wired through `withAdminGuard_` because the operation reads + writes payment status. Companion migration 20260528160000_invoice_tracking_qbo_payment_status.sql adds qbo_balance numeric / qbo_paid boolean / qbo_last_verified_at timestamptz + a partial index on the (unpaid, verified) combo. Companion React change: Billing.tsx renders a Paid/Unpaid badge alongside the existing QBO push status when qbo_last_verified_at is set, and adds a "Reconcile with QBO" button on the Invoiced section header that fires the handler against the visible invoice list. No change to billing dollar totals, no change to v38.182 atomic invoice counter, no change to the push path itself.
+   v38.241.0 — 2026-05-28 PST — [BILLING] QBO push confirms success before recording, stores invoice ID as proof. INV-001132 surfaced a silent-success bug: the post-push invoice_tracking stamp wrote qbo_pushed_at for every result the loop flagged success=true, but didn't validate that QBO actually returned a non-empty Id — so a malformed response or any path that flipped success without a real ID (or a future Supabase write that fired before the QBO confirmation, etc.) could mark a push "done" without the invoice ever landing in QBO. Two coordinated changes. (1) handleQboCreateInvoice_ post-loop invoice_tracking stamp at ~line 44963 — pre-fix: ONE batched PATCH on invoice_no=in.(...) writing only qbo_pushed_at=now(); post-fix: per-invoice PATCH writing qbo_pushed_at, qbo_invoice_id, AND qbo_doc_number from each result's confirmed QBO response. Gate tightened to require BOTH res.success===true AND a non-empty res.qboInvoiceId — a success flag with empty Id no longer triggers the stamp. Per-invoice PATCH costs N round-trips instead of 1, but N is bounded by the batch size (typical 1–30, max ~50) and PostgREST handles these fast. Failures still log via the dispatch-level api_logBillingActivity_ call (action='qbo_push', status='failure') and additionally get an explicit action='qbo_push_failed' entry inside the handler so the Billing Activity tab can filter on the specific failure action. (2) qbo-create-invoice-sb Edge Function (supabase/functions/qbo-create-invoice-sb/index.ts) — its invoice_tracking UPDATE now writes the same three columns (qbo_pushed_at, qbo_invoice_id, qbo_doc_number) instead of just qbo_pushed_at. The EF already had the correct ordering (POST to QBO → parse Id → stamp), but was dropping the captured ID on the floor. Companion migration 20260528150000_invoice_tracking_qbo_id_columns.sql adds the two nullable text columns + a partial index. Companion React change in Billing.tsx renders a warning state ("?" badge) for the diagnostic case qbo_pushed_at SET + qbo_invoice_id NULL — covers historical pre-fix rows like INV-001132 so operators can audit and re-push if QBO has no record. No change to billing dollar totals, no change to v38.182 atomic invoice counter, no change to Void/Reissue logic.
    v38.240.0 — 2026-05-28 PST — [TASKS] RUSH tasks auto-stamped High priority + Due Date = today (PT) at create. New block in handleBatchCreateTasks_ runs after the existing dueDate/priority resolution and before the row build: when `svcCode === "RUSH"`, taskDueDate is rewritten to `new Date(<todayPT>T00:00:00)` (mirrors the `payload.dueDate` parse path's local-midnight construction) and taskPriority is forced to "High", regardless of caller-supplied payload.priority / payload.dueDate or any slaHoursBySvcCode["RUSH"] entry. RUSH semantically means "needs done today" — the catalog SLA might be 24h or 4h or anything else, but operators expect a RUSH task to render in the Dashboard's "due today" bucket the moment it's written, not after a manual priority chip click. Pairs with the companion React change (Tasks.tsx + TaskDetailPanel.tsx) that fires postUpdateTaskDueDate(today) on the High transition so the same rule applies after-the-fact to any priority toggle, not just create-time. No schema change, no React API change required for the GAS side (the existing batchCreateTasks contract is preserved — payload.priority + payload.dueDate are still honored for every non-RUSH svcCode). Time-zone: Utilities.formatDate(now, "America/Los_Angeles", "yyyy-MM-dd") matches the React TODAY_DASH constant which uses Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles' }) — the two compute the same YYYY-MM-DD value, so a React refetch after a RUSH create sees the same date string the optimistic-patch path would have written.
    v38.239.1 — 2026-05-28 PST — [BILLING followup] Verification fixes for v38.239.0's storage-summary commit, NONE of which change a dollar total. Two coordinated changes. (1) handleQboCreateInvoice_ description build (both SB-primary path at ~line 44669 and CB-fallback path at ~line 44579) now detects summary rows by the combination of empty item_id + "(N items)" in item_notes, and emits "<period> — <N> items — <description>" instead of "<period> — <qty> day(s) — <description>". Pre-fix the qty=1 on a monthly summary row would render to QBO (and therefore the customer-facing QBO invoice line) as "Storage 04/01/26 to 04/30/26 — 1 day(s) — Monthly Storage", which a customer could read as "you charged me one day of storage for $X" and call to complain even though the total is correct. The total itself was correct in both paths — this is presentation only. (2) The migration that PR #547 added (20260528120000_storage_charges_summary_commit.sql) is edited in place — has NOT been applied to the prod project yet — to drop the third "OR b.date BETWEEN window" condition from the delete-pass. public.billing.date is a text column (inserted via p.out_billable_end::text by _compute_storage_charges), so a row carrying a malformed date string would have thrown on the ::date cast and aborted the whole commit. The two surviving conditions (parseable task_id range OR parseable STOR-SUMMARY period) cover every row this function should be touching; rows with neither are by definition externally produced and stay as-is. _parse_stor_task_range and _parse_stor_summary_period both tolerate malformed input by returning no rows. No schema change; no React change; no EF change. Hand-verified vs handleQboCreateInvoice_ (SB+CB paths), handleQbExport_ (Stax IIF + Stax invoices + stax_reconcileInvoiceAmount_), handleCreateInvoice_ (CB write + sheet-markable filter + api_buildInvoiceLineItems_), handleVoidInvoice_ / handleReissueInvoice_ (by-Invoice# operations, summary-blind), reconcileCbFromBilling_ (per-ledger_row_id update/append), log_billing_parity trigger (parses NULL rate as 0, no abort), summarizeStorageRowsForInvoice (passes through unchanged when storRows.length<2 — the new normal). All five downstream paths produce the same dollar totals before and after.
    v38.239.0 — 2026-05-28 PST — [BILLING] Summarize storage charges at commit. Pre-fix handleCommitStorageRows_ wrote one Billing_Ledger row per item per period — Roche Bobois alone produced 372 rows for a single monthly cycle, the fleet shipped 2,340 STOR rows after one cycle. The per-item detail was already being collapsed into a single line at invoice time by Billing.tsx summarizeStorageRowsForInvoice, but by then the bloat had already landed in the sheet + public.billing. New behavior: handleCommitStorageRows_ groups incoming per-item rows by tenant and appends ONE summary STOR row per tenant per commit. ledger_row_id / task_id = STOR-SUMMARY-<tenantId>-<YYYYMMDD>-<YYYYMMDD> (deterministic, sheet-resident, distinct from the legacy invoice-time synthetic STOR-SUMMARY-<uuid> form). Description = "Monthly Storage" per operator preference. Qty=1, Rate blank, Total=sum of per-item totals (integer-cents to dodge float drift). Date = max billable end across the input rows. Item Notes carries human-readable "Storage MM/DD/YY to MM/DD/YY (N items)". Two safety gates: (a) when any finalized (Invoiced/Billed/Void) STOR-SUMMARY row already covers the requested window for the tenant, the commit is skipped for that tenant — prevents double billing on accidental re-runs since _compute_storage_charges's per-item dedup keys on item_id (blank on summary rows) and would not catch this case; (b) the existing delete-pass widens to remove any Unbilled STOR row in the window (per-item leftovers from older builds + prior summaries) so re-running cleanly replaces the working state. New helper api_parseStorSummaryPeriod_(ledgerRowId) parses the YYYYMMDD-YYYYMMDD suffix for the gate. Companion handleCreateInvoice_ filter at the sheet-markable-subset step distinguishes the new deterministic form (suffix /-\d{8}-\d{8}$/, IS on sheet, must be marked Invoiced) from the legacy invoice-time synthetic form (UUID suffix, NOT on sheet, must be excluded from the partial-flip check) — without this the new STOR-SUMMARY rows would be filtered out of the sheet flip and the v38.157.0 half-write detector would fire HALF_WRITE_DETECTED on every storage invoice. _compute_storage_charges + handlePreviewStorageCharges_ + handleGenerateStorageCharges_ (the preview path) are intentionally unchanged — the per-item table operators review before committing still shows per-item detail. Companion supabase migration 20260528120000_storage_charges_summary_commit.sql replaces public.generate_storage_charges with the aggregating variant for the SB-primary flag flip; companion EF commit-storage-charges-sb (no logic change — already calls the RPC) automatically picks up the new behavior once the migration deploys.
@@ -10774,6 +10775,13 @@ function doPost(e) {
         return withAdminGuard_(callerEmail, function() { return jsonResponse_(handleQboDisconnect_()); });
       case "qboSetupHeaders":
         return withAdminGuard_(callerEmail, function() { return jsonResponse_(handleQboSetupHeaders_()); });
+      // v38.242.0 — Reconcile invoice_tracking against QBO: pulls back
+      // payment status (Balance / paid) + flags any pushed-but-missing
+      // invoices. Admin-only because it can mark invoices as push_failed.
+      case "qboReconcileInvoices":
+        return withAdminGuard_(callerEmail, function() {
+          return jsonResponse_(handleQboReconcileInvoices_(payload, callerEmail));
+        });
 
       // v38.142.0: backfill historical Drive PDFs into Supabase / Docs tab.
       // Resumable; admin polls until done===true. See
@@ -45095,6 +45103,330 @@ function handleQboDisconnect_() {
   props.deleteProperty("QBO_REALM_ID");
   props.deleteProperty("QBO_STATE_NONCE");
   return { success: true };
+}
+
+/**
+ * v38.242.0 — POST qboReconcileInvoices
+ *
+ * Pulls payment status back from QBO for every pushed invoice in scope.
+ * Closes the second visibility gap that v38.241.0 opened — that PR
+ * captured proof QBO created the invoice at push time, this one tells
+ * us whether the customer actually paid.
+ *
+ * Two QBO-side match strategies (used in order):
+ *   1. Per-id GET /invoice/{id}  — for rows that already have
+ *      qbo_invoice_id stamped (the post-v38.240 happy path). Cheap,
+ *      one round-trip per invoice, returns the full Invoice object so
+ *      we always get Balance + TotalAmt.
+ *   2. Bulk Query API  — for rows without qbo_invoice_id (historical /
+ *      pre-fix backfill). Paginated SELECT with MAXRESULTS 1000;
+ *      match key resolution is DocNumber → invoice_no first, then
+ *      parse PrivateNote for "Stride INV# X". Covers both the
+ *      pre-v38.121.0 (DocNumber=our INV#) and post-v38.121.0
+ *      (QBO auto-assigns DocNumber, our INV# in PrivateNote) push
+ *      paths.
+ *
+ * Payload (all optional — defaults to "every pushed-but-unverified row"):
+ *   {
+ *     invoiceNos?:  string[]            // explicit subset
+ *     sinceDate?:   "YYYY-MM-DD"        // date-bounded backfill
+ *     includeUnpushed?: boolean         // include qbo_pushed_at IS NULL
+ *                                       // rows. Default false (those are
+ *                                       // by definition not in QBO).
+ *     limit?:       number              // safety cap on rows processed
+ *                                       // per call. Default 500.
+ *   }
+ *
+ * Response:
+ *   {
+ *     success:  true,
+ *     scanned:  number,     // rows pulled from invoice_tracking
+ *     verified: number,     // rows we matched to a QBO invoice
+ *     paid:     number,     // matched + Balance = 0
+ *     unpaid:   number,     // matched + Balance > 0
+ *     missing:  number,     // pushed-per-Stride but no QBO match
+ *     errors:   number,     // QBO-side failures (token / network)
+ *     results:  [{ invoiceNo, status, qboInvoiceId, qboDocNumber,
+ *                  qboBalance, qboPaid, totalAmt, errorMessage }, ...]
+ *   }
+ *
+ * Status values: 'verified' (matched + state pulled) | 'missing'
+ * (pushed but QBO has no record — flagged as push_failed) | 'error'
+ * (QBO API failure for that specific row — leaves state unchanged).
+ */
+function handleQboReconcileInvoices_(payload, callerEmail) {
+  payload = payload || {};
+
+  // QBO credentials
+  var token = qbo_getValidToken_();
+  var realmId = prop_("QBO_REALM_ID");
+  if (!realmId) return { success: false, error: "QBO_REALM_ID missing — please re-authorize" };
+
+  // ── Resolve the set of invoice_tracking rows to reconcile ─────────
+  var explicitInvoiceNos = Array.isArray(payload.invoiceNos)
+    ? payload.invoiceNos.map(function(n) { return String(n || "").trim(); }).filter(Boolean)
+    : null;
+  var sinceDate = String(payload.sinceDate || "").trim();
+  var includeUnpushed = payload.includeUnpushed === true;
+  var limit = Math.max(1, Math.min(2000, Number(payload.limit) || 500));
+
+  var itFilter;
+  if (explicitInvoiceNos && explicitInvoiceNos.length > 0) {
+    var inFilter = explicitInvoiceNos
+      .map(function(n) { return '"' + n.replace(/"/g, '\\"') + '"'; })
+      .join(",");
+    itFilter = "invoice_no=in.(" + inFilter + ")";
+  } else if (sinceDate) {
+    itFilter = "invoice_date=gte." + encodeURIComponent(sinceDate);
+    if (!includeUnpushed) itFilter += "&qbo_pushed_at=not.is.null";
+  } else {
+    // Default: every pushed row, oldest-unverified first.
+    itFilter = "qbo_pushed_at=not.is.null&order=qbo_last_verified_at.asc.nullsfirst&limit=" + limit;
+  }
+
+  var itSel = supabaseSelect_(
+    "invoice_tracking",
+    itFilter,
+    "invoice_no,tenant_id,client_name,total,qbo_invoice_id,qbo_doc_number,qbo_pushed_at,qbo_last_verified_at"
+  );
+  if (!itSel.ok) return { success: false, error: "invoice_tracking read failed" };
+  var rows = itSel.rows.slice(0, limit);
+  if (rows.length === 0) {
+    return { success: true, scanned: 0, verified: 0, paid: 0, unpaid: 0, missing: 0, errors: 0, results: [] };
+  }
+
+  // Index by invoice_no for fast updates.
+  var rowByInvoiceNo = {};
+  for (var i = 0; i < rows.length; i++) {
+    rowByInvoiceNo[String(rows[i].invoice_no)] = rows[i];
+  }
+
+  // ── Phase 1: per-id GET for rows with qbo_invoice_id stamped ──────
+  // Most post-v38.240.0 pushes land here. One QBO call per invoice,
+  // bounded by `limit` so a worst-case run is `limit` calls.
+  var results = {};   // invoice_no → result entry
+  var withId = rows.filter(function(r) { return String(r.qbo_invoice_id || "").trim() !== ""; });
+  var withoutId = rows.filter(function(r) { return String(r.qbo_invoice_id || "").trim() === ""; });
+
+  var QBO_OPTS = { maxRetries: 2, backoffMs: [400] };
+  var nowIso = new Date().toISOString();
+
+  for (var wi = 0; wi < withId.length; wi++) {
+    var row = withId[wi];
+    var invNo = String(row.invoice_no);
+    var qboId = String(row.qbo_invoice_id);
+    try {
+      var resp = qbo_apiRequest_("GET", "invoice/" + encodeURIComponent(qboId), null, token, realmId, QBO_OPTS);
+      if (resp.success && resp.data && resp.data.Invoice) {
+        var inv = resp.data.Invoice;
+        results[invNo] = qbo_reconcileBuildResult_(invNo, inv);
+      } else if (resp.error && /not\s*found|ResourceNotFoundException|400|404/i.test(String(resp.error))) {
+        results[invNo] = {
+          invoiceNo: invNo, status: "missing", qboInvoiceId: qboId,
+          qboDocNumber: row.qbo_doc_number || null, qboBalance: null, qboPaid: false,
+          totalAmt: null, errorMessage: "QBO reports no invoice with Id " + qboId
+        };
+      } else {
+        results[invNo] = {
+          invoiceNo: invNo, status: "error", qboInvoiceId: qboId,
+          qboDocNumber: row.qbo_doc_number || null, qboBalance: null, qboPaid: false,
+          totalAmt: null, errorMessage: String(resp.error || "QBO GET failed")
+        };
+      }
+    } catch (e) {
+      results[invNo] = {
+        invoiceNo: invNo, status: "error", qboInvoiceId: qboId,
+        qboDocNumber: row.qbo_doc_number || null, qboBalance: null, qboPaid: false,
+        totalAmt: null, errorMessage: e.message || String(e)
+      };
+    }
+    // Light rate-limit nudge for big batches. QBO production allows
+    // ~500 req/min so 50ms between calls is well under cap.
+    if (wi < withId.length - 1) Utilities.sleep(50);
+  }
+
+  // ── Phase 2: bulk Query API for rows without qbo_invoice_id ───────
+  // Match key: try DocNumber = our invoice_no first (covers pre-v38.121.0
+  // pushes that sent DocNumber explicitly), then parse PrivateNote for
+  // "Stride INV# X" (covers QBO-auto-assigned DocNumber pushes — the
+  // current default).
+  if (withoutId.length > 0) {
+    // Compute a sensible `WHERE TxnDate >= ...` floor. If the caller
+    // gave us a sinceDate we use it; otherwise infer from the
+    // earliest qbo_pushed_at in the slice (push and TxnDate are within
+    // a day of each other) minus 7 days for safety.
+    var floorDate = sinceDate;
+    if (!floorDate) {
+      var minPushedAt = null;
+      for (var f = 0; f < withoutId.length; f++) {
+        var ts = withoutId[f].qbo_pushed_at;
+        if (ts && (!minPushedAt || ts < minPushedAt)) minPushedAt = ts;
+      }
+      if (minPushedAt) {
+        var dObj = new Date(minPushedAt);
+        dObj.setDate(dObj.getDate() - 7);
+        floorDate = Utilities.formatDate(dObj, Session.getScriptTimeZone(), "yyyy-MM-dd");
+      } else {
+        // Fallback: 90 days back from today.
+        var fall = new Date();
+        fall.setDate(fall.getDate() - 90);
+        floorDate = Utilities.formatDate(fall, Session.getScriptTimeZone(), "yyyy-MM-dd");
+      }
+    }
+
+    // Index withoutId rows by their candidate match keys.
+    var byInvoiceNo = {};
+    for (var bk = 0; bk < withoutId.length; bk++) {
+      byInvoiceNo[String(withoutId[bk].invoice_no)] = withoutId[bk];
+    }
+
+    // Paginated bulk fetch.
+    var pageSize = 1000;
+    var pageStart = 1;
+    var fetched = 0;
+    var maxPages = 10; // 10,000 invoices ceiling — Stride is far below this
+    var sql = "select Id, DocNumber, TotalAmt, Balance, PrivateNote, TxnDate from Invoice " +
+              "where TxnDate >= '" + floorDate + "' " +
+              "MAXRESULTS " + pageSize + " STARTPOSITION ";
+    for (var pg = 0; pg < maxPages; pg++) {
+      var q = sql + pageStart;
+      var pageResp;
+      try {
+        pageResp = qbo_apiRequest_("GET", "query?query=" + encodeURIComponent(q), null, token, realmId, QBO_OPTS);
+      } catch (qe) {
+        Logger.log("qboReconcileInvoices bulk page " + pg + " threw: " + qe.message);
+        break;
+      }
+      if (!pageResp.success || !pageResp.data || !pageResp.data.QueryResponse) {
+        Logger.log("qboReconcileInvoices bulk page " + pg + " no QueryResponse: " + (pageResp.error || ""));
+        break;
+      }
+      var pageInvoices = pageResp.data.QueryResponse.Invoice || [];
+      if (pageInvoices.length === 0) break;
+      fetched += pageInvoices.length;
+
+      for (var pi = 0; pi < pageInvoices.length; pi++) {
+        var qInv = pageInvoices[pi];
+        var qDoc = String(qInv.DocNumber || "").trim();
+        var qNote = String(qInv.PrivateNote || "");
+
+        // Match key 1: DocNumber == invoice_no
+        var matchedInvNo = null;
+        if (qDoc && byInvoiceNo[qDoc]) matchedInvNo = qDoc;
+
+        // Match key 2: parse PrivateNote for "Stride INV# X"
+        if (!matchedInvNo && qNote) {
+          var m = qNote.match(/Stride\s+(?:Ref|INV#?)\s*:?\s*(INV-\d+)/i);
+          if (m && byInvoiceNo[m[1]]) matchedInvNo = m[1];
+        }
+
+        if (matchedInvNo && !results[matchedInvNo]) {
+          results[matchedInvNo] = qbo_reconcileBuildResult_(matchedInvNo, qInv);
+        }
+      }
+
+      if (pageInvoices.length < pageSize) break;
+      pageStart += pageSize;
+    }
+
+    // Any withoutId row that didn't get matched is "missing".
+    for (var u = 0; u < withoutId.length; u++) {
+      var uRow = withoutId[u];
+      var uInvNo = String(uRow.invoice_no);
+      if (!results[uInvNo]) {
+        results[uInvNo] = {
+          invoiceNo:    uInvNo,
+          status:       "missing",
+          qboInvoiceId: null,
+          qboDocNumber: uRow.qbo_doc_number || null,
+          qboBalance:   null,
+          qboPaid:      false,
+          totalAmt:     null,
+          errorMessage: "Pushed per Stride but no matching QBO invoice (searched DocNumber + PrivateNote since " + floorDate + ", " + fetched + " invoices scanned)"
+        };
+      }
+    }
+  }
+
+  // ── Persist results to invoice_tracking + billing_activity_log ────
+  var verified = 0, paid = 0, unpaid = 0, missing = 0, errors = 0;
+  var resultList = [];
+
+  for (var iv in results) {
+    if (!Object.prototype.hasOwnProperty.call(results, iv)) continue;
+    var r = results[iv];
+    resultList.push(r);
+    var srcRow = rowByInvoiceNo[iv] || {};
+
+    if (r.status === "verified") {
+      verified++;
+      if (r.qboPaid) paid++; else unpaid++;
+      supabasePatch_("invoice_tracking", "invoice_no=eq." + encodeURIComponent(iv), {
+        qbo_invoice_id:       r.qboInvoiceId || srcRow.qbo_invoice_id || null,
+        qbo_doc_number:       r.qboDocNumber || srcRow.qbo_doc_number || null,
+        qbo_balance:          r.qboBalance,
+        qbo_paid:             !!r.qboPaid,
+        qbo_last_verified_at: nowIso
+      });
+    } else if (r.status === "missing") {
+      missing++;
+      // Don't clear qbo_pushed_at — that's how the operator knows the
+      // system thought it was pushed. But stamp qbo_last_verified_at so
+      // the row drops out of the next reconcile pass's "never verified"
+      // bucket. Log the discrepancy.
+      supabasePatch_("invoice_tracking", "invoice_no=eq." + encodeURIComponent(iv), {
+        qbo_last_verified_at: nowIso
+      });
+      try {
+        api_logBillingActivity_({
+          tenantId:     String(srcRow.tenant_id || ""),
+          clientName:   srcRow.client_name || null,
+          action:       "qbo_push_failed",
+          status:       "failure",
+          invoiceNo:    iv,
+          qboInvoiceId: r.qboInvoiceId || null,
+          qboDocNumber: r.qboDocNumber || null,
+          summary:      "QBO reconcile: invoice " + iv + " marked pushed in Stride but QBO has no record",
+          errorMessage: r.errorMessage || "QBO has no matching invoice",
+          details:      { source: "qboReconcileInvoices", verifiedAt: nowIso },
+          performedBy:  callerEmail || "system"
+        });
+      } catch (_) {}
+    } else {
+      errors++;
+    }
+  }
+
+  return {
+    success:  true,
+    scanned:  rows.length,
+    verified: verified,
+    paid:     paid,
+    unpaid:   unpaid,
+    missing:  missing,
+    errors:   errors,
+    results:  resultList
+  };
+}
+
+/**
+ * v38.242.0 — Build a normalized reconcile-result entry from a raw QBO
+ * Invoice object. Extracted so both the per-id GET path and the bulk
+ * query path produce identical shapes.
+ */
+function qbo_reconcileBuildResult_(invoiceNo, qboInvoice) {
+  var balance = Number(qboInvoice.Balance != null ? qboInvoice.Balance : 0);
+  var totalAmt = Number(qboInvoice.TotalAmt != null ? qboInvoice.TotalAmt : 0);
+  return {
+    invoiceNo:    invoiceNo,
+    status:       "verified",
+    qboInvoiceId: String(qboInvoice.Id || ""),
+    qboDocNumber: String(qboInvoice.DocNumber || "") || null,
+    qboBalance:   balance,
+    qboPaid:      balance === 0,
+    totalAmt:     totalAmt,
+    errorMessage: null
+  };
 }
 
 /**
