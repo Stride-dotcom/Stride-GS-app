@@ -159,7 +159,9 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
       }).format(new Date());
       setDueDate(todayDash);
       mergeTaskPatch?.(task.taskId, { dueDate: todayDash });
-      void postUpdateTaskDueDate({ taskId: task.taskId, dueDate: todayDash }, clientSheetId).catch(() => { /* refetch will reconcile */ });
+      void postUpdateTaskDueDate({ taskId: task.taskId, dueDate: todayDash }, clientSheetId)
+        .then(r => { if (!r.ok || !r.data?.success) console.warn('[taskdetail] High auto-due-date failed:', r.error); })
+        .catch(err => console.warn('[taskdetail] High auto-due-date failed:', err));
     }
     const resp = await postUpdateTaskPriority({ taskId: task.taskId, priority: newPriority }, clientSheetId);
     if (!resp.ok) { setPriority(priority); clearTaskPatch?.(task.taskId); }
