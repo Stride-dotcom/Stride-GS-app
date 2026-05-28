@@ -5472,6 +5472,55 @@ export function postQboDisconnect(signal?: AbortSignal) {
   );
 }
 
+/**
+ * v38.242.0 — Reconcile invoice_tracking against QBO. Pulls back payment
+ * status (Balance / paid flag) and flags any pushed invoice QBO has no
+ * record of. Admin-only on the GAS side.
+ *
+ * Three scoping modes:
+ *   - { invoiceNos: [...] } — explicit subset (typically the visible
+ *     Billing report's invoice list)
+ *   - { sinceDate: 'YYYY-MM-DD' } — date-bounded backfill (one-off
+ *     historical reconcile)
+ *   - {} — every pushed-but-unverified row (scheduled-pass shape)
+ *
+ * Long-running so we use the LONG timeout — a bulk QBO scan + write
+ * back can take ~30–60s depending on how many rows fell into the
+ * Phase 2 (per-doc-number) bucket.
+ */
+export interface QboReconcileResult {
+  invoiceNo: string;
+  status: 'verified' | 'missing' | 'error';
+  qboInvoiceId: string | null;
+  qboDocNumber: string | null;
+  qboBalance: number | null;
+  qboPaid: boolean;
+  totalAmt: number | null;
+  errorMessage: string | null;
+}
+export interface QboReconcileResponse {
+  success: boolean;
+  scanned: number;
+  verified: number;
+  paid: number;
+  unpaid: number;
+  missing: number;
+  errors: number;
+  results: QboReconcileResult[];
+  error?: string;
+}
+export function postQboReconcileInvoices(
+  scope?: { invoiceNos?: string[]; sinceDate?: string; includeUnpushed?: boolean; limit?: number },
+  signal?: AbortSignal,
+) {
+  return apiPost<QboReconcileResponse>(
+    'qboReconcileInvoices',
+    (scope || {}) as unknown as Record<string, unknown>,
+    {},
+    { signal, timeoutMs: API_POST_TIMEOUT_LONG_MS },
+  );
+}
+
 export function postUpdateQboStatus(
   ledgerRowIds: string[],
   qboStatus: string,
