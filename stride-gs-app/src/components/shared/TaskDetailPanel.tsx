@@ -148,9 +148,22 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
     const newPriority = priority === 'High' ? 'Normal' : 'High';
     setPriority(newPriority);
     applyTaskPatch?.(task.taskId, { priority: newPriority });
+    // High transition → auto-set due_date = today (PT). Mirrors the
+    // Dashboard (PR #399) + Tasks-page rule so the same semantics apply
+    // wherever the priority chip is clicked. Today in PT computed via
+    // en-CA locale so 5–11pm PT doesn't roll into tomorrow via UTC.
+    // OVERWRITES any existing due_date (intended — High = today).
+    if (newPriority === 'High') {
+      const todayDash = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit',
+      }).format(new Date());
+      setDueDate(todayDash);
+      mergeTaskPatch?.(task.taskId, { dueDate: todayDash });
+      void postUpdateTaskDueDate({ taskId: task.taskId, dueDate: todayDash }, clientSheetId).catch(() => { /* refetch will reconcile */ });
+    }
     const resp = await postUpdateTaskPriority({ taskId: task.taskId, priority: newPriority }, clientSheetId);
     if (!resp.ok) { setPriority(priority); clearTaskPatch?.(task.taskId); }
-  }, [apiConfigured, clientSheetId, canEditPriority, priority, task.taskId, applyTaskPatch, clearTaskPatch]);
+  }, [apiConfigured, clientSheetId, canEditPriority, priority, task.taskId, applyTaskPatch, clearTaskPatch, mergeTaskPatch]);
 
   const handleDueDateChange = useCallback(async (newDate: string) => {
     if (!apiConfigured || !clientSheetId) return;
