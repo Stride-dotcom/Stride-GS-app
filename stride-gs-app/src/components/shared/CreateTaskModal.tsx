@@ -101,12 +101,20 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
   const taskTypes = useMemo(() => {
     const catalogLoaded = serviceCatalog.length > 0;
     const taskEnabledCodes = new Set<string>();
+    // Fabric Protection services are used rarely but the operator wants
+    // them ALL flagged showAsTask=true (it'd be tedious to maintain a
+    // per-service toggle on a category that's "all-on by policy"). The
+    // category has ~11 codes today (FAB_RUG, FAB_BED, FAB_CARPET, …) so
+    // they'd push the everyday INSP/ASM/etc. picks below the fold. Push
+    // every Fabric Protection code to the END of the list so the
+    // common picks stay at the top.
+    const fabricCodes = new Set<string>();
     if (catalogLoaded) {
       for (const s of serviceCatalog) {
-        if (s.active && s.showAsTask) {
-          const c = String(s.code || '').trim().toUpperCase();
-          if (c) taskEnabledCodes.add(c);
-        }
+        const c = String(s.code || '').trim().toUpperCase();
+        if (!c) continue;
+        if (s.active && s.showAsTask) taskEnabledCodes.add(c);
+        if (s.category === 'Fabric Protection') fabricCodes.add(c);
       }
     }
     const seen = new Set<string>(CORE_TYPES.map(t => t.code));
@@ -119,7 +127,12 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
       types.push({ code, name });
       seen.add(code);
     });
-    return types;
+    // Partition: keep non-fabric in their existing order (CORE first,
+    // then priceList order), then append fabric codes at the end.
+    if (fabricCodes.size === 0) return types;
+    const nonFabric = types.filter(t => !fabricCodes.has(t.code));
+    const fabric    = types.filter(t =>  fabricCodes.has(t.code));
+    return [...nonFabric, ...fabric];
   }, [priceList, serviceCatalog]);
 
   // Check for existing open tasks that conflict with selected items + task types (exclude optimistic TEMP entries)
