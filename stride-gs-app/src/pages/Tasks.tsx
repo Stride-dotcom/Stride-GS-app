@@ -32,7 +32,7 @@ import { ConfirmDialog } from '../components/shared/ConfirmDialog';
 import { BulkResultSummary } from '../components/shared/BulkResultSummary';
 import { BulkReassignModal } from '../components/shared/BulkReassignModal';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { isApiConfigured, postRequestRepairQuote, postRequestRepairQuoteSb, postBatchCancelTasks, postBatchReassignTasks, postUpdateTaskPriority, type BatchMutationResult } from '../lib/api';
+import { isApiConfigured, postRequestRepairQuote, postRequestRepairQuoteSb, postBatchCancelTasks, postBatchReassignTasks, postUpdateTaskPriority, postUpdateTaskDueDate, type BatchMutationResult } from '../lib/api';
 import { useFeatureFlag } from '../contexts/FeatureFlagContext';
 import { mergePreflightSkips } from '../lib/batchLoop';
 import { applyBulkPatch, revertBulkPatchForFailures } from '../lib/optimisticBulk';
@@ -329,7 +329,29 @@ export function Tasks() {
   (window as any).__toggleTaskPriority = async (taskId: string, clientSheetId: string, currentPriority: string) => {
     if (!apiConfigured || !clientSheetId || user?.role === 'client') return;
     const newPriority = currentPriority === 'High' ? 'Normal' : 'High';
-    applyTaskPatch(taskId, { priority: newPriority as 'High' | 'Normal' });
+    // High transition auto-sets due_date = today (PT) so the row floats to
+    // the top of the dashboard sort immediately. Mirrors the Dashboard's
+    // togglePriority (PR #399) — same semantics regardless of which page
+    // the chip is clicked from. Today-in-PT computed via en-CA locale so
+    // 5–11pm PT doesn't roll into tomorrow via UTC. OVERWRITES any
+    // existing due_date (SLA-stamped, manually set, etc.) — intended.
+    //
+    // applyTaskPatch is a REPLACE (not a merge) per useTasks.ts:159 — both
+    // fields must land in a single call or one will clobber the other.
+    let todayDash: string | undefined;
+    if (newPriority === 'High') {
+      todayDash = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit',
+      }).format(new Date());
+    }
+    applyTaskPatch(taskId, todayDash
+      ? { priority: newPriority as 'High' | 'Normal', dueDate: todayDash }
+      : { priority: newPriority as 'High' | 'Normal' });
+    if (todayDash) {
+      void postUpdateTaskDueDate({ taskId, dueDate: todayDash }, clientSheetId)
+        .then(r => { if (!r.ok || !r.data?.success) console.warn('[tasks] High auto-due-date failed:', r.error); })
+        .catch(err => console.warn('[tasks] High auto-due-date failed:', err));
+    }
     const resp = await postUpdateTaskPriority({ taskId, priority: newPriority }, clientSheetId);
     if (!resp.ok) clearTaskPatch(taskId);
   };
