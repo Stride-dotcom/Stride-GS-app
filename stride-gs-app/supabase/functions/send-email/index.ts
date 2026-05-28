@@ -205,11 +205,17 @@ Deno.serve(async (req: Request) => {
   // `recipients` column and expand its tokens. See resolveRecipients()
   // for the supported token vocabulary (matches the legacy GAS expansion
   // so admin-edited template recipient strings keep working unchanged).
+  //
+  // tenantId threads into resolveRecipients so the {{CLIENT_EMAIL}} token
+  // can look up the client's email list. Without it, {{CLIENT_EMAIL}}
+  // silently drops to [] and the customer never receives the email —
+  // the failure mode that hid repair_quote / repair_complete customer
+  // recipients for ~2 weeks before this fix (2026-05-14 → 2026-05-28).
   let toList: string[];
   if (body.to) {
     toList = Array.isArray(body.to) ? body.to : [body.to];
   } else if (template.recipients && template.recipients.trim().length > 0) {
-    toList = await resolveRecipients(supabase, template.recipients);
+    toList = await resolveRecipients(supabase, template.recipients, body.tenantId);
   } else {
     toList = [];
   }
@@ -339,13 +345,20 @@ function escapeRegex(s: string): string {
 //   NOTIFICATION_EMAILS  → process env (Edge Function secret of same name),
 //                          comma-split. Same source used by notify-new-order.
 //   PUBLIC_FORM_SETTINGS → public.public_form_settings.alert_emails (singleton row)
+//   CLIENT_EMAIL         → public.clients.notification_contacts (jsonb array of
+//                          {name,email}) for the tenant identified by body.tenantId,
+//                          falling back to public.clients.email when notification_contacts
+//                          is empty or missing. Both fields may contain comma-joined
+//                          email lists in a single string — those are split here.
+//                          Requires tenantId to be passed by the caller; without it
+//                          the token expands to [] with a warning.
 //
 // Unrecognized strings that don't look like emails are dropped silently
 // (logged at warn) — better to miss one recipient than to bounce the
 // whole send on a typo'd token.
 type SBClient = ReturnType<typeof createClient>;
 
-async function resolveRecipients(supabase: SBClient, raw: string): Promise<string[]> {
+async function resolveRecipients(supabase: SBClient, raw: string, tenantId?: string): Promise<string[]> {
   const out: string[] = [];
   for (const rawChunk of raw.split(',')) {
     const chunk = rawChunk.trim();
@@ -359,7 +372,7 @@ async function resolveRecipients(supabase: SBClient, raw: string): Promise<strin
 
     if (token) {
       try {
-        const expanded = await expandToken(supabase, token);
+        const expanded = await expandToken(supabase, token, tenantId);
         for (const e of expanded) out.push(e);
       } catch (err) {
         console.warn(`[send-email] token '${token}' failed to expand:`, err);
@@ -373,7 +386,7 @@ async function resolveRecipients(supabase: SBClient, raw: string): Promise<strin
   return out;
 }
 
-async function expandToken(supabase: SBClient, token: string): Promise<string[]> {
+async function expandToken(supabase: SBClient, token: string, tenantId?: string): Promise<string[]> {
   switch (token) {
     case 'STAFF_EMAILS': {
       const { data } = await supabase
@@ -405,6 +418,62 @@ async function expandToken(supabase: SBClient, token: string): Promise<string[]>
         .maybeSingle();
       const arr = (data as { alert_emails: string[] | null } | null)?.alert_emails;
       return Array.isArray(arr) ? arr.filter(Boolean) : [];
+    }
+    case 'CLIENT_EMAIL': {
+      // Caller MUST pass tenantId for this token to resolve. Without it
+      // the token silently expanded to [] for ~2 weeks (2026-05-14 →
+      // 2026-05-28) before this case was added, so customers never
+      // received REPAIR_QUOTE / REPAIR_COMPLETE emails even though the
+      // recipients column listed {{CLIENT_EMAIL}}. Log loudly so any
+      // future caller missing tenantId is obvious in the function logs.
+      if (!tenantId) {
+        console.warn('[send-email] CLIENT_EMAIL token requires tenantId in request body — no client emails added');
+        return [];
+      }
+      const { data: clientRow } = await supabase
+        .from('clients')
+        .select('notification_contacts, email')
+        .eq('spreadsheet_id', tenantId)
+        .maybeSingle();
+      if (!clientRow) {
+        console.warn(`[send-email] CLIENT_EMAIL token: no clients row for tenant ${tenantId}`);
+        return [];
+      }
+      const out: string[] = [];
+      // Primary source: notification_contacts JSONB array of {name, email}.
+      // Each contact's email field MAY itself contain comma-joined addresses
+      // (per the 2026-05-04 split logic — at least one row in prod stores
+      // multiple emails inside a single contact's email field). Splitting
+      // here and again post-resolve in the main path is intentionally
+      // belt-and-suspenders: dedupe handles the overlap.
+      const contacts = (clientRow as { notification_contacts?: unknown }).notification_contacts;
+      if (Array.isArray(contacts)) {
+        for (const c of contacts) {
+          const email = (c && typeof c === 'object' && 'email' in c) ? String((c as { email?: unknown }).email ?? '') : '';
+          if (email) {
+            for (const part of email.split(/[,;]/)) {
+              const trimmed = part.trim();
+              if (trimmed.includes('@')) out.push(trimmed);
+            }
+          }
+        }
+      }
+      // Fallback: clients.email (also comma-joined string in prod). Only
+      // used when notification_contacts produced zero usable emails, to
+      // avoid double-billing the customer with overlapping address lists.
+      if (out.length === 0) {
+        const fallback = String((clientRow as { email?: string }).email ?? '');
+        if (fallback) {
+          for (const part of fallback.split(/[,;]/)) {
+            const trimmed = part.trim();
+            if (trimmed.includes('@')) out.push(trimmed);
+          }
+        }
+      }
+      if (out.length === 0) {
+        console.warn(`[send-email] CLIENT_EMAIL token: tenant ${tenantId} has no usable emails in notification_contacts or email`);
+      }
+      return out;
     }
     default:
       console.warn(`[send-email] unknown recipient token: ${token}`);
