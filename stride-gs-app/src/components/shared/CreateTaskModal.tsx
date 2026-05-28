@@ -75,19 +75,52 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
   const [dismissedConflicts, setDismissedConflicts] = useState(false);
 
   // Build deduplicated task type list: core first, then pricing extras
+  // gated on the service-catalog `showAsTask` flag.
+  //
+  // Pre-2026-05-28 this added every priceList row that wasn't on the
+  // EXCLUDE_CODES denylist, which surfaced shipping/billing-only services
+  // (Blanket Wrap Delivery, Custom Crating, Photo Documentation, After-
+  // Hours Access, Long Carry Fee, Insurance Surcharge, etc.) in the
+  // operator's task-type picker even though those services aren't tasks
+  // at all — they're delivery accessorials or billing line items.
+  //
+  // New gate: a non-CORE service code only appears here if the matching
+  // service_catalog row has BOTH `active=true` AND `showAsTask=true`. The
+  // catalog admin (Settings → Price List → service edit) is where the
+  // operator opts a service in to the task picker, so this puts the
+  // picker in sync with the toggle they already control.
+  //
+  // CORE_TYPES (INSP, ASM) bypass the gate — they're the primary task
+  // types and must always be available even on a fresh tenant whose
+  // catalog hasn't been customized yet.
+  //
+  // Safety fallback: if `serviceCatalog` is empty (still loading or
+  // unreachable), the gate is skipped and the legacy denylist-only
+  // behavior applies so the modal stays usable. Once the catalog
+  // arrives the React re-render flips to the filtered list.
   const taskTypes = useMemo(() => {
+    const catalogLoaded = serviceCatalog.length > 0;
+    const taskEnabledCodes = new Set<string>();
+    if (catalogLoaded) {
+      for (const s of serviceCatalog) {
+        if (s.active && s.showAsTask) {
+          const c = String(s.code || '').trim().toUpperCase();
+          if (c) taskEnabledCodes.add(c);
+        }
+      }
+    }
     const seen = new Set<string>(CORE_TYPES.map(t => t.code));
     const types = [...CORE_TYPES];
     priceList.forEach(p => {
       const code = String(p['Service Code'] || '').trim().toUpperCase();
       const name = String(p['Service Name'] || code).trim();
-      if (code && !seen.has(code) && !EXCLUDE_CODES.has(code)) {
-        types.push({ code, name });
-        seen.add(code);
-      }
+      if (!code || seen.has(code) || EXCLUDE_CODES.has(code)) return;
+      if (catalogLoaded && !taskEnabledCodes.has(code)) return;
+      types.push({ code, name });
+      seen.add(code);
     });
     return types;
-  }, [priceList]);
+  }, [priceList, serviceCatalog]);
 
   // Check for existing open tasks that conflict with selected items + task types (exclude optimistic TEMP entries)
   const conflicts = useMemo<ConflictInfo[]>(() => {
