@@ -160,65 +160,75 @@ Deno.serve(async (req: Request) => {
     warnings.push(`Audit log insert failed: ${e instanceof Error ? e.message : String(e)}`);
   });
 
-  // ── 4. Reverse-writethrough per-row to Billing_Ledger ──────────────
-  // Status → 'Void' on each row. Per-row fan-out (GAS supports
-  // insert/update/delete only — no bulk variant). Also: the GAS
-  // handler historically deletes CB Consolidated_Ledger rows by
-  // invoice #. Per MIG-005 the CB layer stays GAS-authoritative
-  // through 4a — we don't fire CB deletes from here. The full-sync
-  // cron + the (eventual) CB-delete writer will close that gap;
-  // until then operators see a transient mismatch warning on
-  // runBillingAnomalySweep, which is the documented acceptable
-  // state for the canary rollout.
+  // ── 4. Reverse-writethrough per-row to Billing_Ledger (BACKGROUND) ──
+  // 2026-05-28 (v38.242.0) — the per-row writeThroughReverse fan-out used
+  // to be awaited inline before the response, which made a 4-row invoice
+  // void block the UI for ~30s while each GAS call serialized. Move the
+  // mirror loop into a background promise wrapped with EdgeRuntime.waitUntil
+  // so the EF returns success as soon as the SB writes + audit log land
+  // (~100ms total); the sheet mirror finishes after the response is sent.
+  // Same per-row semantics, same gs_sync_events failure capture — only the
+  // await point moves. Status → 'Void' on each row. Per-row fan-out (GAS
+  // supports insert/update/delete only — no bulk variant). The GAS handler
+  // historically deletes CB Consolidated_Ledger rows by invoice #. Per
+  // MIG-005 the CB layer stays GAS-authoritative through 4a — we don't fire
+  // CB deletes from here. The full-sync cron + the (eventual) CB-delete
+  // writer close that gap.
   const gasUrl   = Deno.env.get('GAS_API_URL');
   const gasToken = Deno.env.get('GAS_API_TOKEN');
-  let mirroredCount = 0;
   if (!gasUrl || !gasToken) {
     warnings.push('GAS_API_URL / GAS_API_TOKEN not configured — Billing_Ledger sheet mirror skipped');
   } else {
-    for (const row of voided) {
-      try {
-        const payload = {
-          tenantId,
-          table:  'billing',
-          op:     'update',
-          rowId:  row.ledger_row_id,
-          row:    {
-            ledger_row_id: row.ledger_row_id,
-            status:        'Void',
-            item_notes:    voidNote,
-          },
-          requestId: `${requestId}:${row.ledger_row_id}`,
-        };
-        const res = await fetch(`${gasUrl}?action=writeThroughReverse&token=${encodeURIComponent(gasToken)}`, {
-          method:  'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body:    JSON.stringify(payload),
-        });
-        const text = await res.text();
-        let parsed: { success?: boolean; error?: string } = {};
-        try { parsed = JSON.parse(text); } catch { parsed = { error: `non-JSON: ${text.slice(0, 200)}` }; }
-        if (!res.ok || !parsed.success) {
-          const errMsg = parsed.error ?? `HTTP ${res.status}`;
-          warnings.push(`Sheet mirror failed for ${row.ledger_row_id}: ${errMsg}`);
-          await sb.from('gs_sync_events').insert({
-            tenant_id:     tenantId,
-            entity_type:   'billing',
-            entity_id:     row.ledger_row_id,
-            action_type:   'writethrough_reverse',
-            sync_status:   'sync_failed',
-            requested_by:  callerEmail || 'void-invoice-sb',
-            request_id:    `${requestId}:${row.ledger_row_id}`,
-            payload,
-            error_message: String(errMsg).slice(0, 1000),
-          }).then(() => {}, () => {});
-        } else {
-          mirroredCount++;
+    const mirrorPromise = (async () => {
+      for (const row of voided) {
+        try {
+          const payload = {
+            tenantId,
+            table:  'billing',
+            op:     'update',
+            rowId:  row.ledger_row_id,
+            row:    {
+              ledger_row_id: row.ledger_row_id,
+              status:        'Void',
+              item_notes:    voidNote,
+            },
+            requestId: `${requestId}:${row.ledger_row_id}`,
+          };
+          const res = await fetch(`${gasUrl}?action=writeThroughReverse&token=${encodeURIComponent(gasToken)}`, {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify(payload),
+          });
+          const text = await res.text();
+          let parsed: { success?: boolean; error?: string } = {};
+          try { parsed = JSON.parse(text); } catch { parsed = { error: `non-JSON: ${text.slice(0, 200)}` }; }
+          if (!res.ok || !parsed.success) {
+            const errMsg = parsed.error ?? `HTTP ${res.status}`;
+            console.error(`[void-invoice-sb] sheet mirror failed for ${row.ledger_row_id}:`, errMsg);
+            await sb.from('gs_sync_events').insert({
+              tenant_id:     tenantId,
+              entity_type:   'billing',
+              entity_id:     row.ledger_row_id,
+              action_type:   'writethrough_reverse',
+              sync_status:   'sync_failed',
+              requested_by:  callerEmail || 'void-invoice-sb',
+              request_id:    `${requestId}:${row.ledger_row_id}`,
+              payload,
+              error_message: String(errMsg).slice(0, 1000),
+            }).then(() => {}, () => {});
+          }
+        } catch (mirrorEx) {
+          console.error(`[void-invoice-sb] sheet mirror threw for ${row.ledger_row_id}:`,
+            mirrorEx instanceof Error ? mirrorEx.message : String(mirrorEx));
         }
-      } catch (mirrorEx) {
-        warnings.push(`Sheet mirror threw for ${row.ledger_row_id}: ${mirrorEx instanceof Error ? mirrorEx.message : String(mirrorEx)}`);
       }
+    })();
+    const edgeRuntime = (globalThis as unknown as { EdgeRuntime?: { waitUntil(p: Promise<unknown>): void } }).EdgeRuntime;
+    if (edgeRuntime && typeof edgeRuntime.waitUntil === 'function') {
+      edgeRuntime.waitUntil(mirrorPromise);
     }
+    // If EdgeRuntime is unavailable (local dev), the promise still runs —
+    // we just won't be told when it finishes. Don't await it.
   }
 
   return json({
@@ -226,7 +236,7 @@ Deno.serve(async (req: Request) => {
     invoiceNo,
     rowsVoided:   voided.length,
     alreadyVoid,
-    mirroredCount,
+    mirrorQueued: voided.length,
     warnings:     warnings.length > 0 ? warnings : undefined,
   });
 });

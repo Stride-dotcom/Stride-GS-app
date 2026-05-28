@@ -2546,6 +2546,13 @@ export interface VoidInvoiceResponse {
   // compatibility with any caller that ignores them.
   cbRowsDeleted?: number;
   cbCleanupError?: string | null;
+  // v38.242.0 — SB-first PATCH on public.billing landed before sheet writes
+  // (GAS path) so the React Billing report reflects the void without waiting
+  // on full-client-sync. void-invoice-sb returns mirrorQueued instead (the
+  // EF queues sheet mirror via EdgeRuntime.waitUntil).
+  sbVoided?: boolean;
+  sbError?: string | null;
+  mirrorQueued?: number;
   error?: string;
 }
 

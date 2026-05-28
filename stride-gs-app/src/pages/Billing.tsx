@@ -1855,13 +1855,30 @@ export function Billing() {
         const handleVoid = async () => {
           const reason = window.prompt(`Void invoice ${inv.invoiceNo}? Optional reason:`, '');
           if (reason === null) return;
+          const sheetId = inv.clientSheetId || inv.sourceSheetId;
+          if (!sheetId) { window.alert('Void failed: Missing client sheet ID'); return; }
+          // v38.242.0 — optimistic flip to Void so the row updates instantly
+          // while the backend (SB-first via void-invoice-sb or the GAS handler)
+          // runs. Snapshot the per-row status of every ledger row tied to this
+          // invoice so we can revert cleanly on backend failure.
+          const targetInvoiceNo = inv.invoiceNo;
+          const snapshot = new Map<string, string>();
+          setReportData(prev => prev.map(r => {
+            if (r.invoiceNo === targetInvoiceNo) {
+              snapshot.set(r.ledgerRowId, r.status);
+              return { ...r, status: 'Void' };
+            }
+            return r;
+          }));
           try {
-            const sheetId = inv.clientSheetId || inv.sourceSheetId;
-            if (!sheetId) throw new Error('Missing client sheet ID');
-            const res = await postVoidInvoice({ invoiceNo: inv.invoiceNo, reason }, sheetId);
+            const res = await postVoidInvoice({ invoiceNo: targetInvoiceNo, reason }, sheetId);
             if (!res.ok || !res.data?.success) throw new Error(res.error || res.data?.error || 'Void failed');
-            loadReport();
+            await loadReport();
           } catch (err) {
+            // Revert optimistic flip on failure
+            setReportData(prev => prev.map(r =>
+              snapshot.has(r.ledgerRowId) ? { ...r, status: snapshot.get(r.ledgerRowId) as string } : r
+            ));
             window.alert(`Void failed: ${(err as Error).message}`);
           }
         };

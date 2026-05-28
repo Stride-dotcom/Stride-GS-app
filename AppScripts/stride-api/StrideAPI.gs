@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.242.0 — 2026-05-28 PST — [BILLING] QBO reconciliation pass: pull payment status back from QBO. Companion to v38.241.0's push-confirmation fix — that PR captured proof QBO created the invoice at push time, this one closes the second visibility gap: did the customer actually pay it? New handler `handleQboReconcileInvoices_` queries QBO for every pushed invoice in scope, captures (Id, DocNumber, TotalAmt, Balance), writes back qbo_invoice_id / qbo_doc_number / qbo_balance / qbo_paid / qbo_last_verified_at on public.invoice_tracking, and flags any pushed invoice QBO has no record of as "push failed" (action='qbo_push_failed' in billing_activity_log). Two match strategies: (a) per-id GET /invoice/{id} for rows that already have qbo_invoice_id stamped (the post-v38.240 happy path — cheap, one round-trip per invoice), (b) bulk Query API `SELECT Id, DocNumber, TotalAmt, Balance, PrivateNote FROM Invoice WHERE TxnDate >= '<sinceDate>' MAXRESULTS 1000 STARTPOSITION ...` paginated for rows without qbo_invoice_id (historical / pre-fix backfill). Bulk match key resolution: DocNumber → invoice_no first, then parse PrivateNote for "Stride INV# X" — covers both the pre-v38.121.0 (DocNumber = our INV#) and post-v38.121.0 (QBO auto-assigns DocNumber, our INV# in PrivateNote) push paths. Payload supports three scoping modes: explicit `invoiceNos: [...]`, `sinceDate: "YYYY-MM-DD"` for date-bounded backfills, or default = all pushed-but-unverified rows in invoice_tracking. Response is a per-invoice result list + counts (verified / paid / unpaid / missing). New doPost case `qboReconcileInvoices` wired through `withAdminGuard_` because the operation reads + writes payment status. Companion migration 20260528160000_invoice_tracking_qbo_payment_status.sql adds qbo_balance numeric / qbo_paid boolean / qbo_last_verified_at timestamptz + a partial index on the (unpaid, verified) combo. Companion React change: Billing.tsx renders a Paid/Unpaid badge alongside the existing QBO push status when qbo_last_verified_at is set, and adds a "Reconcile with QBO" button on the Invoiced section header that fires the handler against the visible invoice list. No change to billing dollar totals, no change to v38.182 atomic invoice counter, no change to the push path itself.
+   StrideAPI.gs — v38.243.0 — 2026-05-28 PST — [BILLING] Void invoice writes Supabase first + INV-001127 one-shot orphan repair. Two coordinated changes. (1) handleVoidInvoice_ at ~line 15349 — pre-fix the handler hit the per-tenant Billing_Ledger sheet first (4-row loop ~5-15s) then CB Consolidated_Ledger cleanup (~5-10s) then public.invoice_tracking delete, but never wrote public.billing — so React's Billing report (reads from public.billing) stayed at status=Invoiced for the full request-response duration plus the next full-client-sync. New flow: bulk supabasePatch_ on public.billing with filter tenant_id=eq.X+invoice_no=eq.Y+status=eq.Invoiced PATCHing status=Void+updated_at=now BEFORE any sheet/CB pass. Best-effort: SB failures log + degrade to sheet-only behavior so the GAS path stays authoritative. Response payload gains sbVoided/sbError so the React caller knows whether the SB-first leg succeeded. (2) New one-shot runRepair_INV_001127_Orphans_ at end of file + matching doPost case "repairInv001127Orphans" — wraps runRepairOrphanLedgerRows with hardcoded ledger row IDs REPAIR-RPR-62216-1776184145614 and REPAIR-RPR-62217-1776184161201 (the two orphan CB rows from Olson Kundig INV-001127 half-write state where CB has 4 rows and the client sheet only 2). Sets the property, runs the existing repair function, restores the property — so an operator can trigger the repair via HTTP POST after deploy without manually editing Script Properties. Idempotent: re-runs after the orphans are gone are no-ops (runRepairOrphanLedgerRows logs "nothing to do" when the IDs no longer match any CB row). Companion void-invoice-sb EF change moves the per-row writeThroughReverse loop behind EdgeRuntime.waitUntil so the SB path returns to the React caller after the SB writes + audit log (~100ms) instead of awaiting the slow GAS sheet mirror; companion React change in Billing.tsx handleVoid adds an optimistic reportData status flip so the row reads Void instantly with revert-on-error. No schema change, no migration; no change to v38.182 atomic invoice counter, half-write detection, or Reissue logic.
+   v38.242.0 — 2026-05-28 PST — [BILLING] QBO reconciliation pass: pull payment status back from QBO. Companion to v38.241.0's push-confirmation fix — that PR captured proof QBO created the invoice at push time, this one closes the second visibility gap: did the customer actually pay it? New handler `handleQboReconcileInvoices_` queries QBO for every pushed invoice in scope, captures (Id, DocNumber, TotalAmt, Balance), writes back qbo_invoice_id / qbo_doc_number / qbo_balance / qbo_paid / qbo_last_verified_at on public.invoice_tracking, and flags any pushed invoice QBO has no record of as "push failed" (action='qbo_push_failed' in billing_activity_log). Two match strategies: (a) per-id GET /invoice/{id} for rows that already have qbo_invoice_id stamped (the post-v38.240 happy path — cheap, one round-trip per invoice), (b) bulk Query API `SELECT Id, DocNumber, TotalAmt, Balance, PrivateNote FROM Invoice WHERE TxnDate >= '<sinceDate>' MAXRESULTS 1000 STARTPOSITION ...` paginated for rows without qbo_invoice_id (historical / pre-fix backfill). Bulk match key resolution: DocNumber → invoice_no first, then parse PrivateNote for "Stride INV# X" — covers both the pre-v38.121.0 (DocNumber = our INV#) and post-v38.121.0 (QBO auto-assigns DocNumber, our INV# in PrivateNote) push paths. Payload supports three scoping modes: explicit `invoiceNos: [...]`, `sinceDate: "YYYY-MM-DD"` for date-bounded backfills, or default = all pushed-but-unverified rows in invoice_tracking. Response is a per-invoice result list + counts (verified / paid / unpaid / missing). New doPost case `qboReconcileInvoices` wired through `withAdminGuard_` because the operation reads + writes payment status. Companion migration 20260528160000_invoice_tracking_qbo_payment_status.sql adds qbo_balance numeric / qbo_paid boolean / qbo_last_verified_at timestamptz + a partial index on the (unpaid, verified) combo. Companion React change: Billing.tsx renders a Paid/Unpaid badge alongside the existing QBO push status when qbo_last_verified_at is set, and adds a "Reconcile with QBO" button on the Invoiced section header that fires the handler against the visible invoice list. No change to billing dollar totals, no change to v38.182 atomic invoice counter, no change to the push path itself.
    v38.241.0 — 2026-05-28 PST — [BILLING] QBO push confirms success before recording, stores invoice ID as proof. INV-001132 surfaced a silent-success bug: the post-push invoice_tracking stamp wrote qbo_pushed_at for every result the loop flagged success=true, but didn't validate that QBO actually returned a non-empty Id — so a malformed response or any path that flipped success without a real ID (or a future Supabase write that fired before the QBO confirmation, etc.) could mark a push "done" without the invoice ever landing in QBO. Two coordinated changes. (1) handleQboCreateInvoice_ post-loop invoice_tracking stamp at ~line 44963 — pre-fix: ONE batched PATCH on invoice_no=in.(...) writing only qbo_pushed_at=now(); post-fix: per-invoice PATCH writing qbo_pushed_at, qbo_invoice_id, AND qbo_doc_number from each result's confirmed QBO response. Gate tightened to require BOTH res.success===true AND a non-empty res.qboInvoiceId — a success flag with empty Id no longer triggers the stamp. Per-invoice PATCH costs N round-trips instead of 1, but N is bounded by the batch size (typical 1–30, max ~50) and PostgREST handles these fast. Failures still log via the dispatch-level api_logBillingActivity_ call (action='qbo_push', status='failure') and additionally get an explicit action='qbo_push_failed' entry inside the handler so the Billing Activity tab can filter on the specific failure action. (2) qbo-create-invoice-sb Edge Function (supabase/functions/qbo-create-invoice-sb/index.ts) — its invoice_tracking UPDATE now writes the same three columns (qbo_pushed_at, qbo_invoice_id, qbo_doc_number) instead of just qbo_pushed_at. The EF already had the correct ordering (POST to QBO → parse Id → stamp), but was dropping the captured ID on the floor. Companion migration 20260528150000_invoice_tracking_qbo_id_columns.sql adds the two nullable text columns + a partial index. Companion React change in Billing.tsx renders a warning state ("?" badge) for the diagnostic case qbo_pushed_at SET + qbo_invoice_id NULL — covers historical pre-fix rows like INV-001132 so operators can audit and re-push if QBO has no record. No change to billing dollar totals, no change to v38.182 atomic invoice counter, no change to Void/Reissue logic.
    v38.240.0 — 2026-05-28 PST — [TASKS] RUSH tasks auto-stamped High priority + Due Date = today (PT) at create. New block in handleBatchCreateTasks_ runs after the existing dueDate/priority resolution and before the row build: when `svcCode === "RUSH"`, taskDueDate is rewritten to `new Date(<todayPT>T00:00:00)` (mirrors the `payload.dueDate` parse path's local-midnight construction) and taskPriority is forced to "High", regardless of caller-supplied payload.priority / payload.dueDate or any slaHoursBySvcCode["RUSH"] entry. RUSH semantically means "needs done today" — the catalog SLA might be 24h or 4h or anything else, but operators expect a RUSH task to render in the Dashboard's "due today" bucket the moment it's written, not after a manual priority chip click. Pairs with the companion React change (Tasks.tsx + TaskDetailPanel.tsx) that fires postUpdateTaskDueDate(today) on the High transition so the same rule applies after-the-fact to any priority toggle, not just create-time. No schema change, no React API change required for the GAS side (the existing batchCreateTasks contract is preserved — payload.priority + payload.dueDate are still honored for every non-RUSH svcCode). Time-zone: Utilities.formatDate(now, "America/Los_Angeles", "yyyy-MM-dd") matches the React TODAY_DASH constant which uses Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles' }) — the two compute the same YYYY-MM-DD value, so a React refetch after a RUSH create sees the same date string the optimistic-patch path would have written.
    v38.239.1 — 2026-05-28 PST — [BILLING followup] Verification fixes for v38.239.0's storage-summary commit, NONE of which change a dollar total. Two coordinated changes. (1) handleQboCreateInvoice_ description build (both SB-primary path at ~line 44669 and CB-fallback path at ~line 44579) now detects summary rows by the combination of empty item_id + "(N items)" in item_notes, and emits "<period> — <N> items — <description>" instead of "<period> — <qty> day(s) — <description>". Pre-fix the qty=1 on a monthly summary row would render to QBO (and therefore the customer-facing QBO invoice line) as "Storage 04/01/26 to 04/30/26 — 1 day(s) — Monthly Storage", which a customer could read as "you charged me one day of storage for $X" and call to complain even though the total is correct. The total itself was correct in both paths — this is presentation only. (2) The migration that PR #547 added (20260528120000_storage_charges_summary_commit.sql) is edited in place — has NOT been applied to the prod project yet — to drop the third "OR b.date BETWEEN window" condition from the delete-pass. public.billing.date is a text column (inserted via p.out_billable_end::text by _compute_storage_charges), so a row carrying a malformed date string would have thrown on the ::date cast and aborted the whole commit. The two surviving conditions (parseable task_id range OR parseable STOR-SUMMARY period) cover every row this function should be touching; rows with neither are by definition externally produced and stay as-is. _parse_stor_task_range and _parse_stor_summary_period both tolerate malformed input by returning no rows. No schema change; no React change; no EF change. Hand-verified vs handleQboCreateInvoice_ (SB+CB paths), handleQbExport_ (Stax IIF + Stax invoices + stax_reconcileInvoiceAmount_), handleCreateInvoice_ (CB write + sheet-markable filter + api_buildInvoiceLineItems_), handleVoidInvoice_ / handleReissueInvoice_ (by-Invoice# operations, summary-blind), reconcileCbFromBilling_ (per-ledger_row_id update/append), log_billing_parity trigger (parses NULL rate as 0, no abort), summarizeStorageRowsForInvoice (passes through unchanged when storRows.length<2 — the new normal). All five downstream paths produce the same dollar totals before and after.
@@ -10837,6 +10838,13 @@ function doPost(e) {
         var fixClassResult = fixClassValidation_20260526_();
         return jsonResponse_({ success: true, action: "fixClassValidation20260526", result: fixClassResult });
 
+      // v38.242.0 — One-shot repair for Olson Kundig INV-001127 half-write
+      // state (CB has 4 rows, client sheet only 2 flipped to Invoiced).
+      // Hardcoded ledger row IDs inside the runner; idempotent.
+      case "repairInv001127Orphans":
+        var inv1127Result = runRepair_INV_001127_Orphans_();
+        return jsonResponse_({ success: true, action: "repairInv001127Orphans", result: inv1127Result });
+
       default:
         return errorResponse_("Unknown POST action: " + action, "INVALID_ACTION");
     }
@@ -15361,6 +15369,30 @@ function handleVoidInvoice_(clientSheetId, payload) {
   var reason = String((payload || {}).reason || "").trim();
 
   try {
+    // v38.242.0 — SB-first write so public.billing flips to Status='Void'
+    // ahead of the slower sheet/CB passes below. React reads from
+    // public.billing (Billing → Report), so this is what makes the page
+    // reflect the void within a request-response round-trip rather than
+    // waiting on a full-client-sync. Best-effort: a SB failure is logged
+    // but doesn't fail the void — the sheet flip + CB cleanup below are
+    // still authoritative for the per-tenant Billing_Ledger and CB.
+    var sbVoidResult = { ok: false, error: null };
+    try {
+      var sbFilter = "tenant_id=eq." + encodeURIComponent(clientSheetId) +
+                     "&invoice_no=eq." + encodeURIComponent(invoiceNo) +
+                     "&status=eq.Invoiced";
+      sbVoidResult = supabasePatch_("billing", sbFilter, {
+        status:     "Void",
+        updated_at: new Date().toISOString()
+      });
+      if (!sbVoidResult.ok) {
+        Logger.log("handleVoidInvoice_: SB-first billing PATCH non-OK for " + invoiceNo + ": " + sbVoidResult.error);
+      }
+    } catch (sbErr) {
+      Logger.log("handleVoidInvoice_: SB-first billing PATCH threw for " + invoiceNo + ": " + sbErr.message);
+      sbVoidResult = { ok: false, error: String(sbErr && sbErr.message ? sbErr.message : sbErr) };
+    }
+
     var ss = SpreadsheetApp.openById(clientSheetId);
     var sheet = ss.getSheetByName("Billing_Ledger");
     if (!sheet) return errorResponse_("Billing_Ledger sheet not found", "SHEET_NOT_FOUND");
@@ -15438,7 +15470,9 @@ function handleVoidInvoice_(clientSheetId, payload) {
       rowsVoided: voided,
       alreadyVoid: skippedAlreadyVoid,
       cbRowsDeleted: cbCleanup.deleted || 0,
-      cbCleanupError: cbCleanup.error || null
+      cbCleanupError: cbCleanup.error || null,
+      sbVoided: !!sbVoidResult.ok,
+      sbError: sbVoidResult.error || null
     });
   } catch (err) {
     return errorResponse_("Failed to void invoice: " + String(err), "SERVER_ERROR");
@@ -49136,4 +49170,37 @@ function fixClassValidation_20260526_() {
     perSheetLog: perSheetLog,
     elapsedSec: elapsedSec
   };
+}
+
+// v38.242.0 — one-shot repair for Olson Kundig INV-001127 half-write state.
+// CB Consolidated_Ledger holds 4 rows under INV-001127 but only 2 are flipped
+// to Invoiced on the client sheet. Wraps runRepairOrphanLedgerRows with the
+// two known orphan ledger row IDs so it can be triggered via doPost without
+// the operator manually setting + clearing the REPAIR_ORPHAN_LEDGER_IDS
+// Script Property. Idempotent — re-runs after the rows are gone are no-ops.
+function runRepair_INV_001127_Orphans_() {
+  var IDS = [
+    "REPAIR-RPR-62216-1776184145614",
+    "REPAIR-RPR-62217-1776184161201"
+  ];
+  // Script-lock so concurrent invocations don't corrupt the
+  // REPAIR_ORPHAN_LEDGER_IDS Script Property snapshot/restore.
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(15000)) {
+    return { ok: false, error: "Could not acquire script lock within 15s" };
+  }
+  var props = PropertiesService.getScriptProperties();
+  var prior = props.getProperty("REPAIR_ORPHAN_LEDGER_IDS");
+  try {
+    props.setProperty("REPAIR_ORPHAN_LEDGER_IDS", IDS.join(","));
+    runRepairOrphanLedgerRows();
+    return { ok: true, ledgerRowIds: IDS };
+  } finally {
+    if (prior === null || prior === undefined) {
+      try { props.deleteProperty("REPAIR_ORPHAN_LEDGER_IDS"); } catch (_) {}
+    } else {
+      try { props.setProperty("REPAIR_ORPHAN_LEDGER_IDS", prior); } catch (_) {}
+    }
+    try { lock.releaseLock(); } catch (_) {}
+  }
 }
