@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.244.0 — 2026-05-28 PST — [CLIENTS] One-shot to push Hyrel Mathias stax_customer_id to CB Clients sheet. New `pushHyrelMathiasStaxId_()` runner + matching doPost case `pushHyrelMathiasStaxId` (API_TOKEN-gated, hardcoded body, idempotent). Wraps `__writeThroughReverseClients_` (the existing v38.224.0 SB→sheets writer) with tenantId=19Yvc_aherumnLSxJQ1Y9YDf9m3Q6hie27UHdrbXUIGk + row={stax_customer_id:'e296172d-731b-4d0e-b283-48aeff4790ce'}. Since `staxCustomerId` only has a `cbHeader` (no `clientSettingsKey`) on CLIENT_FIELDS_, the writer touches CB Clients column "Stax Customer ID" only — no per-tenant Settings tab write. Re-runs are no-ops on already-correct rows. Operator triggers via HTTP POST after the deploy lands. No schema change, no migration; no change to v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, or any billing logic.
+   StrideAPI.gs — v38.245.0 — 2026-05-28 PST — [BILLING] One-shot to push INV-001046 (Hyrel Mathias) into the Stax Invoices sheet + public.stax_invoices. The original "Send to Payments" run was rejected at the NO_CUSTOMER gate in handleQbExport_ (~line 25316) because Hyrel had no Stax Customer ID at the time. v38.244.0's pushHyrelMathiasStaxId_ closes that gap on the CB Clients side; v38.245.0's new pushInv001046ToStax_() runner + matching doPost case "pushInv001046ToStax" re-runs the export scoped to JUST INV-001046 so the row finally lands. Implementation: scans Consolidated_Ledger for every Invoiced row with Invoice # = "INV-001046", collects the Ledger Row IDs, then calls handleQbExport_({ source:"selected", ledgerRowIds:[...] }). handleQbExport_'s v38.229.0 invoice-number-grain filter promotes those row IDs to "every Invoiced row for that invoice number" so the line_items_json + Total snapshot stay complete. Reuses the existing export logic end-to-end — stax_customer_id lookup, sheet append, supabaseBatchUpsert_("stax_invoices", ...), batch row + IIF file. Idempotent: re-runs hit the UPDATE-in-place branch on the Stax sheet (existingStatus=PENDING refresh) and conflict-resolve on qb_invoice_no in the upsert. Must run AFTER pushHyrelMathiasStaxId so the gate sees the non-empty Stax Customer ID. No schema change, no migration; no change to v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, updateClient SB-primary route (v38.244.0 / PR #554), or any billing logic.
+   v38.244.0 — 2026-05-28 PST — [CLIENTS] One-shot to push Hyrel Mathias stax_customer_id to CB Clients sheet. New `pushHyrelMathiasStaxId_()` runner + matching doPost case `pushHyrelMathiasStaxId` (API_TOKEN-gated, hardcoded body, idempotent). Wraps `__writeThroughReverseClients_` (the existing v38.224.0 SB→sheets writer) with tenantId=19Yvc_aherumnLSxJQ1Y9YDf9m3Q6hie27UHdrbXUIGk + row={stax_customer_id:'e296172d-731b-4d0e-b283-48aeff4790ce'}. Since `staxCustomerId` only has a `cbHeader` (no `clientSettingsKey`) on CLIENT_FIELDS_, the writer touches CB Clients column "Stax Customer ID" only — no per-tenant Settings tab write. Re-runs are no-ops on already-correct rows. Operator triggers via HTTP POST after the deploy lands. No schema change, no migration; no change to v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, or any billing logic.
    v38.243.0 — 2026-05-28 PST — [BILLING] Void invoice writes Supabase first + INV-001127 one-shot orphan repair. Two coordinated changes. (1) handleVoidInvoice_ at ~line 15349 — pre-fix the handler hit the per-tenant Billing_Ledger sheet first (4-row loop ~5-15s) then CB Consolidated_Ledger cleanup (~5-10s) then public.invoice_tracking delete, but never wrote public.billing — so React's Billing report (reads from public.billing) stayed at status=Invoiced for the full request-response duration plus the next full-client-sync. New flow: bulk supabasePatch_ on public.billing with filter tenant_id=eq.X+invoice_no=eq.Y+status=eq.Invoiced PATCHing status=Void+updated_at=now BEFORE any sheet/CB pass. Best-effort: SB failures log + degrade to sheet-only behavior so the GAS path stays authoritative. Response payload gains sbVoided/sbError so the React caller knows whether the SB-first leg succeeded. (2) New one-shot runRepair_INV_001127_Orphans_ at end of file + matching doPost case "repairInv001127Orphans" — wraps runRepairOrphanLedgerRows with hardcoded ledger row IDs REPAIR-RPR-62216-1776184145614 and REPAIR-RPR-62217-1776184161201 (the two orphan CB rows from Olson Kundig INV-001127 half-write state where CB has 4 rows and the client sheet only 2). Sets the property, runs the existing repair function, restores the property — so an operator can trigger the repair via HTTP POST after deploy without manually editing Script Properties. Idempotent: re-runs after the orphans are gone are no-ops (runRepairOrphanLedgerRows logs "nothing to do" when the IDs no longer match any CB row). Companion void-invoice-sb EF change moves the per-row writeThroughReverse loop behind EdgeRuntime.waitUntil so the SB path returns to the React caller after the SB writes + audit log (~100ms) instead of awaiting the slow GAS sheet mirror; companion React change in Billing.tsx handleVoid adds an optimistic reportData status flip so the row reads Void instantly with revert-on-error. No schema change, no migration; no change to v38.182 atomic invoice counter, half-write detection, or Reissue logic.
    v38.242.0 — 2026-05-28 PST — [BILLING] QBO reconciliation pass: pull payment status back from QBO. Companion to v38.241.0's push-confirmation fix — that PR captured proof QBO created the invoice at push time, this one closes the second visibility gap: did the customer actually pay it? New handler `handleQboReconcileInvoices_` queries QBO for every pushed invoice in scope, captures (Id, DocNumber, TotalAmt, Balance), writes back qbo_invoice_id / qbo_doc_number / qbo_balance / qbo_paid / qbo_last_verified_at on public.invoice_tracking, and flags any pushed invoice QBO has no record of as "push failed" (action='qbo_push_failed' in billing_activity_log). Two match strategies: (a) per-id GET /invoice/{id} for rows that already have qbo_invoice_id stamped (the post-v38.240 happy path — cheap, one round-trip per invoice), (b) bulk Query API `SELECT Id, DocNumber, TotalAmt, Balance, PrivateNote FROM Invoice WHERE TxnDate >= '<sinceDate>' MAXRESULTS 1000 STARTPOSITION ...` paginated for rows without qbo_invoice_id (historical / pre-fix backfill). Bulk match key resolution: DocNumber → invoice_no first, then parse PrivateNote for "Stride INV# X" — covers both the pre-v38.121.0 (DocNumber = our INV#) and post-v38.121.0 (QBO auto-assigns DocNumber, our INV# in PrivateNote) push paths. Payload supports three scoping modes: explicit `invoiceNos: [...]`, `sinceDate: "YYYY-MM-DD"` for date-bounded backfills, or default = all pushed-but-unverified rows in invoice_tracking. Response is a per-invoice result list + counts (verified / paid / unpaid / missing). New doPost case `qboReconcileInvoices` wired through `withAdminGuard_` because the operation reads + writes payment status. Companion migration 20260528160000_invoice_tracking_qbo_payment_status.sql adds qbo_balance numeric / qbo_paid boolean / qbo_last_verified_at timestamptz + a partial index on the (unpaid, verified) combo. Companion React change: Billing.tsx renders a Paid/Unpaid badge alongside the existing QBO push status when qbo_last_verified_at is set, and adds a "Reconcile with QBO" button on the Invoiced section header that fires the handler against the visible invoice list. No change to billing dollar totals, no change to v38.182 atomic invoice counter, no change to the push path itself.
    v38.241.0 — 2026-05-28 PST — [BILLING] QBO push confirms success before recording, stores invoice ID as proof. INV-001132 surfaced a silent-success bug: the post-push invoice_tracking stamp wrote qbo_pushed_at for every result the loop flagged success=true, but didn't validate that QBO actually returned a non-empty Id — so a malformed response or any path that flipped success without a real ID (or a future Supabase write that fired before the QBO confirmation, etc.) could mark a push "done" without the invoice ever landing in QBO. Two coordinated changes. (1) handleQboCreateInvoice_ post-loop invoice_tracking stamp at ~line 44963 — pre-fix: ONE batched PATCH on invoice_no=in.(...) writing only qbo_pushed_at=now(); post-fix: per-invoice PATCH writing qbo_pushed_at, qbo_invoice_id, AND qbo_doc_number from each result's confirmed QBO response. Gate tightened to require BOTH res.success===true AND a non-empty res.qboInvoiceId — a success flag with empty Id no longer triggers the stamp. Per-invoice PATCH costs N round-trips instead of 1, but N is bounded by the batch size (typical 1–30, max ~50) and PostgREST handles these fast. Failures still log via the dispatch-level api_logBillingActivity_ call (action='qbo_push', status='failure') and additionally get an explicit action='qbo_push_failed' entry inside the handler so the Billing Activity tab can filter on the specific failure action. (2) qbo-create-invoice-sb Edge Function (supabase/functions/qbo-create-invoice-sb/index.ts) — its invoice_tracking UPDATE now writes the same three columns (qbo_pushed_at, qbo_invoice_id, qbo_doc_number) instead of just qbo_pushed_at. The EF already had the correct ordering (POST to QBO → parse Id → stamp), but was dropping the captured ID on the floor. Companion migration 20260528150000_invoice_tracking_qbo_id_columns.sql adds the two nullable text columns + a partial index. Companion React change in Billing.tsx renders a warning state ("?" badge) for the diagnostic case qbo_pushed_at SET + qbo_invoice_id NULL — covers historical pre-fix rows like INV-001132 so operators can audit and re-push if QBO has no record. No change to billing dollar totals, no change to v38.182 atomic invoice counter, no change to Void/Reissue logic.
@@ -10853,6 +10854,14 @@ function doPost(e) {
       case "pushHyrelMathiasStaxId":
         var hyrelStaxResult = pushHyrelMathiasStaxId_();
         return jsonResponse_({ success: true, action: "pushHyrelMathiasStaxId", result: hyrelStaxResult });
+
+      // v38.245.0 — One-shot to push INV-001046 (Hyrel Mathias) through
+      // handleQbExport_ scoped to that invoice number, so the row lands
+      // in the Stax Invoices sheet + public.stax_invoices. Run AFTER
+      // pushHyrelMathiasStaxId so the NO_CUSTOMER gate passes. Idempotent.
+      case "pushInv001046ToStax":
+        var inv1046Result = pushInv001046ToStax_();
+        return jsonResponse_({ success: true, action: "pushInv001046ToStax", result: inv1046Result });
 
       default:
         return errorResponse_("Unknown POST action: " + action, "INVALID_ACTION");
@@ -49234,5 +49243,90 @@ function pushHyrelMathiasStaxId_() {
     return { ok: true, tenantId: TENANT_ID, staxCustomerId: STAX_ID, writerResult: result };
   } catch (werr) {
     return { ok: false, tenantId: TENANT_ID, error: String(werr && werr.message || werr) };
+  }
+}
+
+// v38.245.0 — one-shot to push INV-001046 (Hyrel Mathias) through the Stax
+// IIF + sheet + public.stax_invoices pipeline. The original "Send to Payments"
+// run was rejected at the NO_CUSTOMER gate in handleQbExport_ (~line 25316)
+// because Hyrel had no Stax Customer ID at the time. v38.244.0's
+// pushHyrelMathiasStaxId_ closes that gap on the CB Clients side; this
+// function re-runs the export scoped to JUST INV-001046 so the row finally
+// lands in the Stax Invoices sheet AND public.stax_invoices.
+//
+// Implementation: resolves the Consolidated_Ledger Ledger Row IDs for the
+// target Invoice #, then calls handleQbExport_({ ledgerRowIds: [...] }).
+// handleQbExport_'s v38.229.0 invoice-number-grain filter promotes those
+// row IDs to "every Invoiced row for these invoice numbers", so the line
+// items + Total + line_items_json snapshot stay complete. Reuses the full
+// export logic: stax_customer_id lookup, sheet append, supabaseBatchUpsert_,
+// batch row + IIF file generation.
+//
+// Run AFTER pushHyrelMathiasStaxId_ has updated CB Clients so the gate at
+// line 25316 sees the non-empty Stax Customer ID. Idempotent — re-runs hit
+// the UPDATE branch on the Stax sheet (existingStatus=PENDING refresh) and
+// supabaseBatchUpsert_ conflict-resolves on qb_invoice_no.
+function pushInv001046ToStax_() {
+  var TARGET_INV_NO = "INV-001046";
+  var cbId = prop_("CB_SPREADSHEET_ID");
+  if (!cbId) return { ok: false, error: "CB_SPREADSHEET_ID not configured" };
+  var cbSS;
+  try { cbSS = SpreadsheetApp.openById(cbId); }
+  catch (e) { return { ok: false, error: "Could not open CB spreadsheet: " + e.message }; }
+  var consolSh = cbSS.getSheetByName("Consolidated_Ledger");
+  if (!consolSh) return { ok: false, error: "Consolidated_Ledger sheet not found" };
+  var lr = consolSh.getLastRow();
+  if (lr < 2) return { ok: false, error: "Consolidated_Ledger is empty" };
+  var vals = consolSh.getRange(1, 1, lr, consolSh.getLastColumn()).getValues();
+  var hdr = {};
+  vals[0].forEach(function(h, i) { hdr[String(h).trim().toUpperCase()] = i; });
+  var invIdx = hdr["INVOICE #"];
+  var lridIdx = hdr["LEDGER ROW ID"];
+  var statusIdx = hdr["STATUS"];
+  if (invIdx === undefined || lridIdx === undefined) {
+    return { ok: false, error: "Invoice # or Ledger Row ID column not found in Consolidated_Ledger" };
+  }
+  var ledgerRowIds = [];
+  for (var r = 1; r < vals.length; r++) {
+    var rowInv = String(vals[r][invIdx] || "").trim();
+    if (rowInv !== TARGET_INV_NO) continue;
+    if (statusIdx !== undefined) {
+      var rowStatus = String(vals[r][statusIdx] || "").trim().toUpperCase();
+      if (rowStatus && rowStatus !== "INVOICED") continue;
+    }
+    var rowLrid = String(vals[r][lridIdx] || "").trim();
+    if (rowLrid) ledgerRowIds.push(rowLrid);
+  }
+  if (!ledgerRowIds.length) {
+    return { ok: false, error: "No Invoiced rows found in Consolidated_Ledger for " + TARGET_INV_NO };
+  }
+  try {
+    var exportResult = handleQbExport_({
+      source: "selected",
+      ledgerRowIds: ledgerRowIds
+    });
+    var payload = null;
+    try {
+      if (exportResult && typeof exportResult.getContent === "function") {
+        payload = JSON.parse(exportResult.getContent());
+      } else {
+        payload = exportResult;
+      }
+    } catch (_) {
+      payload = { raw: String(exportResult) };
+    }
+    return {
+      ok: !!(payload && payload.success !== false),
+      invoiceNo: TARGET_INV_NO,
+      ledgerRowIds: ledgerRowIds,
+      exportResult: payload
+    };
+  } catch (qbErr) {
+    return {
+      ok: false,
+      invoiceNo: TARGET_INV_NO,
+      ledgerRowIds: ledgerRowIds,
+      error: String(qbErr && qbErr.message || qbErr)
+    };
   }
 }
