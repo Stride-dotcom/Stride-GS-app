@@ -1,0 +1,1 @@
+import{r as e}from"./index-gozPU0Bp.js";export{e as renderDocUpload};
