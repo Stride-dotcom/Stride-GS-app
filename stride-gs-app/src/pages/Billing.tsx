@@ -61,7 +61,7 @@ import { useQBO } from '../hooks/useQBO';
 import { useAuth } from '../contexts/AuthContext';
 import { useBillingBatch, type BatchInvoiceResult } from '../contexts/BillingBatchContext';
 import { useQboPushJobs } from '../contexts/QboPushJobsContext';
-import { postVoidManualCharge, postVoidInvoice, postVoidUnbilledRows, postReissueInvoice } from '../lib/api';
+import { postVoidManualCharge, postVoidInvoice, postVoidUnbilledRows, postReissueInvoice, postQboReconcileInvoices } from '../lib/api';
 import { supabase } from '../lib/supabase';
 import { entityEvents } from '../lib/entityEvents';
 import {
@@ -615,12 +615,20 @@ export function Billing() {
   // pushes (and the INV-001132 class of silent failures) show up with
   // pushedAt set but no Id — operators can audit those in QBO and
   // re-push if needed.
+  //
+  // v38.242.0 — also pull qbo_balance / qbo_paid / qbo_last_verified_at
+  // from the reconciliation pass. The QBO column renders "Paid" /
+  // "Unpaid $X" when verifiedAt is set, lets operators see at a glance
+  // which pushed invoices the customer has actually paid in QBO.
   type InvoicePushStatus = {
-    qboPushedAt:   string | null;
-    qboInvoiceId:  string | null;
-    qboDocNumber:  string | null;
-    staxPushedAt:  string | null;
-    autoCharge:    boolean;
+    qboPushedAt:       string | null;
+    qboInvoiceId:      string | null;
+    qboDocNumber:      string | null;
+    qboBalance:        number | null;
+    qboPaid:           boolean;
+    qboLastVerifiedAt: string | null;
+    staxPushedAt:      string | null;
+    autoCharge:        boolean;
   };
   const [pushStatusByInvoice, setPushStatusByInvoice] = useState<Record<string, InvoicePushStatus>>({});
   useEffect(() => {
@@ -628,16 +636,19 @@ export function Billing() {
     (async () => {
       const { data, error } = await supabase
         .from('invoice_tracking')
-        .select('invoice_no, qbo_pushed_at, qbo_invoice_id, qbo_doc_number, stax_pushed_at, auto_charge');
+        .select('invoice_no, qbo_pushed_at, qbo_invoice_id, qbo_doc_number, qbo_balance, qbo_paid, qbo_last_verified_at, stax_pushed_at, auto_charge');
       if (cancelled || error || !data) return;
       const map: Record<string, InvoicePushStatus> = {};
       for (const r of data) {
         map[String(r.invoice_no)] = {
-          qboPushedAt:  r.qbo_pushed_at  ? String(r.qbo_pushed_at)  : null,
-          qboInvoiceId: r.qbo_invoice_id ? String(r.qbo_invoice_id) : null,
-          qboDocNumber: r.qbo_doc_number ? String(r.qbo_doc_number) : null,
-          staxPushedAt: r.stax_pushed_at ? String(r.stax_pushed_at) : null,
-          autoCharge:   Boolean(r.auto_charge),
+          qboPushedAt:       r.qbo_pushed_at        ? String(r.qbo_pushed_at)        : null,
+          qboInvoiceId:      r.qbo_invoice_id       ? String(r.qbo_invoice_id)       : null,
+          qboDocNumber:      r.qbo_doc_number       ? String(r.qbo_doc_number)       : null,
+          qboBalance:        r.qbo_balance        != null ? Number(r.qbo_balance)    : null,
+          qboPaid:           Boolean(r.qbo_paid),
+          qboLastVerifiedAt: r.qbo_last_verified_at ? String(r.qbo_last_verified_at) : null,
+          staxPushedAt:      r.stax_pushed_at       ? String(r.stax_pushed_at)       : null,
+          autoCharge:        Boolean(r.auto_charge),
         };
       }
       setPushStatusByInvoice(map);
@@ -665,11 +676,14 @@ export function Billing() {
           if (inv) setPushStatusByInvoice(prev => ({
             ...prev,
             [inv]: {
-              qboPushedAt:  r.qbo_pushed_at  ? String(r.qbo_pushed_at)  : null,
-              qboInvoiceId: r.qbo_invoice_id ? String(r.qbo_invoice_id) : null,
-              qboDocNumber: r.qbo_doc_number ? String(r.qbo_doc_number) : null,
-              staxPushedAt: r.stax_pushed_at ? String(r.stax_pushed_at) : null,
-              autoCharge:   Boolean(r.auto_charge),
+              qboPushedAt:       r.qbo_pushed_at        ? String(r.qbo_pushed_at)        : null,
+              qboInvoiceId:      r.qbo_invoice_id       ? String(r.qbo_invoice_id)       : null,
+              qboDocNumber:      r.qbo_doc_number       ? String(r.qbo_doc_number)       : null,
+              qboBalance:        r.qbo_balance        != null ? Number(r.qbo_balance)    : null,
+              qboPaid:           Boolean(r.qbo_paid),
+              qboLastVerifiedAt: r.qbo_last_verified_at ? String(r.qbo_last_verified_at) : null,
+              staxPushedAt:      r.stax_pushed_at       ? String(r.stax_pushed_at)       : null,
+              autoCharge:        Boolean(r.auto_charge),
             },
           }));
         }
@@ -1070,6 +1084,13 @@ export function Billing() {
   // QBO Push state
   const [qboResult, setQboResult] = useState<{ success?: string; error?: string; details?: Array<{ strideInvoiceNumber: string; error?: string; success?: boolean; qboInvoiceId?: string }>; retryIds?: string[] } | null>(null);
   const [qboRetrying, setQboRetrying] = useState(false);
+  // v38.242.0 — QBO Reconcile state. Operators trigger a reconcile pass
+  // from the Invoices section header; result toast is dismissable.
+  const [qboReconciling, setQboReconciling] = useState(false);
+  const [qboReconcileResult, setQboReconcileResult] = useState<{
+    success: boolean; scanned?: number; verified?: number; paid?: number;
+    unpaid?: number; missing?: number; errors?: number; error?: string;
+  } | null>(null);
 
   // Create Invoice state
   const [showInvoiceModal, setShowInvoiceModal] = useState(false);
@@ -1709,7 +1730,7 @@ export function Billing() {
     }),
     invCol.display({
       id: 'qboPushed',
-      header: 'QBO', size: 130,
+      header: 'QBO', size: 170,
       cell: i => {
         const inv = i.row.original.invoiceNo;
         const status = pushStatusByInvoice[inv];
@@ -1730,7 +1751,7 @@ export function Billing() {
               title={
                 `Pushed to QBO at ${pushedAt}, but no QBO Invoice ID was captured. ` +
                 `Either this is a pre-fix historical push, or the QBO confirmation failed silently. ` +
-                `Verify in QBO and re-push if missing.`
+                `Click "Reconcile with QBO" above to verify, then re-push if missing.`
               }
               style={{
                 fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 4,
@@ -1742,8 +1763,13 @@ export function Billing() {
             </span>
           );
         }
+        // v38.242.0 — When a reconcile pass has verified the invoice,
+        // render the Paid/Unpaid badge alongside the push confirmation.
+        const verifiedAt = status?.qboLastVerifiedAt;
+        const balance = status?.qboBalance;
+        const paid = status?.qboPaid;
         const label = qboDoc || `#${qboId}`;
-        return (
+        const pushBadge = (
           <span
             title={`Pushed to QBO at ${pushedAt}\nQBO Invoice ID: ${qboId}${qboDoc ? `\nDocNumber: ${qboDoc}` : ''}`}
             style={{
@@ -1753,6 +1779,34 @@ export function Billing() {
             }}
           >
             <CheckCircle size={11} /> {dateOnly} · {label}
+          </span>
+        );
+        if (!verifiedAt) return pushBadge;
+        const paidBadge = paid ? (
+          <span
+            title={`Paid in QBO (Balance $0.00). Verified ${verifiedAt}.`}
+            style={{
+              fontSize: 10, fontWeight: 700, padding: '2px 6px', borderRadius: 4,
+              background: '#DCFCE7', color: '#15803D',
+            }}
+          >
+            Paid
+          </span>
+        ) : (
+          <span
+            title={`Unpaid in QBO. Balance $${(balance ?? 0).toFixed(2)}. Verified ${verifiedAt}.`}
+            style={{
+              fontSize: 10, fontWeight: 700, padding: '2px 6px', borderRadius: 4,
+              background: '#FEE2E2', color: '#991B1B',
+            }}
+          >
+            ${(balance ?? 0).toFixed(2)} due
+          </span>
+        );
+        return (
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
+            {pushBadge}
+            {paidBadge}
           </span>
         );
       },
@@ -2834,11 +2888,79 @@ export function Billing() {
       {/* ─── Invoice Summary Section (report tab only, when invoiced rows exist) ── */}
       {isReportTab && billingSections.invoicedGroups.length > 0 && (
         <section style={{ marginBottom: billingSections.unbilledRows.length > 0 ? 20 : 0 }}>
-          {billingSections.unbilledRows.length > 0 && (
-            <h3 style={{ fontSize: 13, fontWeight: 600, margin: '4px 0 8px', color: theme.colors.textSecondary, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-              Invoices ({billingSections.invoicedGroups.length})
-            </h3>
-          )}
+          {/* v38.242.0 — Reconcile against QBO. Fires the GAS handler
+              against the currently-visible invoice list, then refreshes
+              the realtime-backed pushStatusByInvoice map. */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, margin: '4px 0 8px', flexWrap: 'wrap' }}>
+            {billingSections.unbilledRows.length > 0 && (
+              <h3 style={{ fontSize: 13, fontWeight: 600, margin: 0, color: theme.colors.textSecondary, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                Invoices ({billingSections.invoicedGroups.length})
+              </h3>
+            )}
+            <button
+              onClick={async () => {
+                setQboReconciling(true);
+                setQboReconcileResult(null);
+                try {
+                  const invoiceNos = billingSections.invoicedGroups
+                    .map(g => g.invoiceNo)
+                    .filter(Boolean);
+                  const res = await postQboReconcileInvoices({ invoiceNos });
+                  if (!res.ok || !res.data?.success) {
+                    setQboReconcileResult({ success: false, error: res.error || res.data?.error || 'Reconcile failed' });
+                  } else {
+                    setQboReconcileResult({
+                      success:  true,
+                      scanned:  res.data.scanned,
+                      verified: res.data.verified,
+                      paid:     res.data.paid,
+                      unpaid:   res.data.unpaid,
+                      missing:  res.data.missing,
+                      errors:   res.data.errors,
+                    });
+                  }
+                } catch (err) {
+                  setQboReconcileResult({ success: false, error: (err as Error).message });
+                } finally {
+                  setQboReconciling(false);
+                }
+              }}
+              disabled={qboReconciling}
+              title="Query QBO for every visible invoice and pull back payment status (Balance / paid). Flags any invoice QBO doesn't have as push failed."
+              style={{
+                padding: '6px 12px', fontSize: 11, fontWeight: 600,
+                border: `1px solid ${theme.colors.border}`, borderRadius: 6,
+                background: qboReconciling ? '#F1F5F9' : '#fff',
+                cursor: qboReconciling ? 'wait' : 'pointer',
+                color: theme.colors.text, fontFamily: 'inherit',
+                display: 'inline-flex', alignItems: 'center', gap: 6,
+              }}
+            >
+              {qboReconciling
+                ? <><Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> Reconciling…</>
+                : <><RefreshCw size={12} /> Reconcile with QBO</>}
+            </button>
+            {qboReconcileResult && qboReconcileResult.success && (
+              <span style={{ fontSize: 11, color: theme.colors.textSecondary, display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                Scanned {qboReconcileResult.scanned}, verified {qboReconcileResult.verified}
+                {qboReconcileResult.paid != null && <> · paid {qboReconcileResult.paid}</>}
+                {qboReconcileResult.unpaid != null && <> · unpaid {qboReconcileResult.unpaid}</>}
+                {qboReconcileResult.missing != null && qboReconcileResult.missing > 0 && (
+                  <strong style={{ color: '#B45309' }}> · {qboReconcileResult.missing} missing in QBO</strong>
+                )}
+                {qboReconcileResult.errors != null && qboReconcileResult.errors > 0 && (
+                  <strong style={{ color: '#991B1B' }}> · {qboReconcileResult.errors} errors</strong>
+                )}
+                <button onClick={() => setQboReconcileResult(null)} style={{ background: 'none', border: 'none', color: theme.colors.textMuted, cursor: 'pointer', padding: 0 }}><X size={12} /></button>
+              </span>
+            )}
+            {qboReconcileResult && !qboReconcileResult.success && (
+              <span style={{ fontSize: 11, color: '#991B1B', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                <AlertTriangle size={12} /> {qboReconcileResult.error}
+                <button onClick={() => setQboReconcileResult(null)} style={{ background: 'none', border: 'none', color: theme.colors.textMuted, cursor: 'pointer', padding: 0 }}><X size={12} /></button>
+              </span>
+            )}
+          </div>
           <div style={{ border: `1px solid ${borderColor}`, borderRadius: isMobile ? 8 : 12, overflow: 'hidden', background: '#fff' }}>
             <div style={{ overflowY: 'auto', overflowX: 'auto', maxHeight: isMobile ? 'calc(60dvh)' : 'calc(70dvh)', WebkitOverflowScrolling: 'touch' }}>
               <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: isMobile ? 700 : undefined }}>
