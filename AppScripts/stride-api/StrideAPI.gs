@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.245.0 — 2026-05-28 PST — [BILLING] One-shot to push INV-001046 (Hyrel Mathias) into the Stax Invoices sheet + public.stax_invoices. The original "Send to Payments" run was rejected at the NO_CUSTOMER gate in handleQbExport_ (~line 25316) because Hyrel had no Stax Customer ID at the time. v38.244.0's pushHyrelMathiasStaxId_ closes that gap on the CB Clients side; v38.245.0's new pushInv001046ToStax_() runner + matching doPost case "pushInv001046ToStax" re-runs the export scoped to JUST INV-001046 so the row finally lands. Implementation: scans Consolidated_Ledger for every Invoiced row with Invoice # = "INV-001046", collects the Ledger Row IDs, then calls handleQbExport_({ source:"selected", ledgerRowIds:[...] }). handleQbExport_'s v38.229.0 invoice-number-grain filter promotes those row IDs to "every Invoiced row for that invoice number" so the line_items_json + Total snapshot stay complete. Reuses the existing export logic end-to-end — stax_customer_id lookup, sheet append, supabaseBatchUpsert_("stax_invoices", ...), batch row + IIF file. Idempotent: re-runs hit the UPDATE-in-place branch on the Stax sheet (existingStatus=PENDING refresh) and conflict-resolve on qb_invoice_no in the upsert. Must run AFTER pushHyrelMathiasStaxId so the gate sees the non-empty Stax Customer ID. No schema change, no migration; no change to v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, updateClient SB-primary route (v38.244.0 / PR #554), or any billing logic.
+   StrideAPI.gs — v38.245.1 — 2026-05-28 PST — [BILLING] fix: exclude transferred-out source rows from storage charges. Bug: source client billed up to transfer_date - 1 on items transferred to another client (item 62218 / Brume billed $6 for 04/06–04/07 even after transfer to Allison Lind on 04/08). Destination already covers the holding period via the at-transfer backfill in handleTransferItems_ (~line 23582), so source charges were duplicates. Three GAS changes: (1) handleTransferItems_ now voids Unbilled STOR rows on source without copying them to destination — preventing double-billing of the holding period (svc_code 'STOR' detected pre-projection, srcBillVoids.push then continue). (2) handleGenerateStorageCharges_ now early-continues on invStatus 'transferred' and removes the source-side Transfer Date cutover branch — destination cutover branch (transferDate + active/on hold/released) preserved. (3) handlePreviewStorageCharges_ same change for preview/write parity. Postgres migration 20260528120000_storage_charges_exclude_transferred_source.sql adds a NOT EXISTS clause to _compute_storage_charges' WHERE filter scoping to status 'transferred' rows with a sibling at another tenant sharing item_id + receive_date — destination row (status 'active') is unaffected and continues to bill from transfer_date forward via the existing cutover. No change to v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, updateClient SB-primary route, or storage-summary commit pattern.
+   v38.245.0 — 2026-05-28 PST — [BILLING] One-shot to push INV-001046 (Hyrel Mathias) into the Stax Invoices sheet + public.stax_invoices. The original "Send to Payments" run was rejected at the NO_CUSTOMER gate in handleQbExport_ (~line 25316) because Hyrel had no Stax Customer ID at the time. v38.244.0's pushHyrelMathiasStaxId_ closes that gap on the CB Clients side; v38.245.0's new pushInv001046ToStax_() runner + matching doPost case "pushInv001046ToStax" re-runs the export scoped to JUST INV-001046 so the row finally lands. Implementation: scans Consolidated_Ledger for every Invoiced row with Invoice # = "INV-001046", collects the Ledger Row IDs, then calls handleQbExport_({ source:"selected", ledgerRowIds:[...] }). handleQbExport_'s v38.229.0 invoice-number-grain filter promotes those row IDs to "every Invoiced row for that invoice number" so the line_items_json + Total snapshot stay complete. Reuses the existing export logic end-to-end — stax_customer_id lookup, sheet append, supabaseBatchUpsert_("stax_invoices", ...), batch row + IIF file. Idempotent: re-runs hit the UPDATE-in-place branch on the Stax sheet (existingStatus=PENDING refresh) and conflict-resolve on qb_invoice_no in the upsert. Must run AFTER pushHyrelMathiasStaxId so the gate sees the non-empty Stax Customer ID. No schema change, no migration; no change to v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, updateClient SB-primary route (v38.244.0 / PR #554), or any billing logic.
    v38.244.0 — 2026-05-28 PST — [CLIENTS] One-shot to push Hyrel Mathias stax_customer_id to CB Clients sheet. New `pushHyrelMathiasStaxId_()` runner + matching doPost case `pushHyrelMathiasStaxId` (API_TOKEN-gated, hardcoded body, idempotent). Wraps `__writeThroughReverseClients_` (the existing v38.224.0 SB→sheets writer) with tenantId=19Yvc_aherumnLSxJQ1Y9YDf9m3Q6hie27UHdrbXUIGk + row={stax_customer_id:'e296172d-731b-4d0e-b283-48aeff4790ce'}. Since `staxCustomerId` only has a `cbHeader` (no `clientSettingsKey`) on CLIENT_FIELDS_, the writer touches CB Clients column "Stax Customer ID" only — no per-tenant Settings tab write. Re-runs are no-ops on already-correct rows. Operator triggers via HTTP POST after the deploy lands. No schema change, no migration; no change to v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, or any billing logic.
    v38.243.0 — 2026-05-28 PST — [BILLING] Void invoice writes Supabase first + INV-001127 one-shot orphan repair. Two coordinated changes. (1) handleVoidInvoice_ at ~line 15349 — pre-fix the handler hit the per-tenant Billing_Ledger sheet first (4-row loop ~5-15s) then CB Consolidated_Ledger cleanup (~5-10s) then public.invoice_tracking delete, but never wrote public.billing — so React's Billing report (reads from public.billing) stayed at status=Invoiced for the full request-response duration plus the next full-client-sync. New flow: bulk supabasePatch_ on public.billing with filter tenant_id=eq.X+invoice_no=eq.Y+status=eq.Invoiced PATCHing status=Void+updated_at=now BEFORE any sheet/CB pass. Best-effort: SB failures log + degrade to sheet-only behavior so the GAS path stays authoritative. Response payload gains sbVoided/sbError so the React caller knows whether the SB-first leg succeeded. (2) New one-shot runRepair_INV_001127_Orphans_ at end of file + matching doPost case "repairInv001127Orphans" — wraps runRepairOrphanLedgerRows with hardcoded ledger row IDs REPAIR-RPR-62216-1776184145614 and REPAIR-RPR-62217-1776184161201 (the two orphan CB rows from Olson Kundig INV-001127 half-write state where CB has 4 rows and the client sheet only 2). Sets the property, runs the existing repair function, restores the property — so an operator can trigger the repair via HTTP POST after deploy without manually editing Script Properties. Idempotent: re-runs after the orphans are gone are no-ops (runRepairOrphanLedgerRows logs "nothing to do" when the IDs no longer match any CB row). Companion void-invoice-sb EF change moves the per-row writeThroughReverse loop behind EdgeRuntime.waitUntil so the SB path returns to the React caller after the SB writes + audit log (~100ms) instead of awaiting the slow GAS sheet mirror; companion React change in Billing.tsx handleVoid adds an optimistic reportData status flip so the row reads Void instantly with revert-on-error. No schema change, no migration; no change to v38.182 atomic invoice counter, half-write detection, or Reissue logic.
    v38.242.0 — 2026-05-28 PST — [BILLING] QBO reconciliation pass: pull payment status back from QBO. Companion to v38.241.0's push-confirmation fix — that PR captured proof QBO created the invoice at push time, this one closes the second visibility gap: did the customer actually pay it? New handler `handleQboReconcileInvoices_` queries QBO for every pushed invoice in scope, captures (Id, DocNumber, TotalAmt, Balance), writes back qbo_invoice_id / qbo_doc_number / qbo_balance / qbo_paid / qbo_last_verified_at on public.invoice_tracking, and flags any pushed invoice QBO has no record of as "push failed" (action='qbo_push_failed' in billing_activity_log). Two match strategies: (a) per-id GET /invoice/{id} for rows that already have qbo_invoice_id stamped (the post-v38.240 happy path — cheap, one round-trip per invoice), (b) bulk Query API `SELECT Id, DocNumber, TotalAmt, Balance, PrivateNote FROM Invoice WHERE TxnDate >= '<sinceDate>' MAXRESULTS 1000 STARTPOSITION ...` paginated for rows without qbo_invoice_id (historical / pre-fix backfill). Bulk match key resolution: DocNumber → invoice_no first, then parse PrivateNote for "Stride INV# X" — covers both the pre-v38.121.0 (DocNumber = our INV#) and post-v38.121.0 (QBO auto-assigns DocNumber, our INV# in PrivateNote) push paths. Payload supports three scoping modes: explicit `invoiceNos: [...]`, `sinceDate: "YYYY-MM-DD"` for date-bounded backfills, or default = all pushed-but-unverified rows in invoice_tracking. Response is a per-invoice result list + counts (verified / paid / unpaid / missing). New doPost case `qboReconcileInvoices` wired through `withAdminGuard_` because the operation reads + writes payment status. Companion migration 20260528160000_invoice_tracking_qbo_payment_status.sql adds qbo_balance numeric / qbo_paid boolean / qbo_last_verified_at timestamptz + a partial index on the (unpaid, verified) combo. Companion React change: Billing.tsx renders a Paid/Unpaid badge alongside the existing QBO push status when qbo_last_verified_at is set, and adds a "Reconcile with QBO" button on the Invoiced section header that fires the handler against the visible invoice list. No change to billing dollar totals, no change to v38.182 atomic invoice counter, no change to the push path itself.
@@ -23517,6 +23518,18 @@ function handleTransferItems_(sourceClientSheetId, payload) {
         var bStatus = String(bRow[bStatusCol - 1] || "").trim();
         if (bStatus !== "Unbilled") continue;
 
+        // v38.245.1 (2026-05-28): STOR rows on source — void without copying.
+        // Destination owns storage end-to-end: the at-transfer backfill below
+        // (lines ~23582) creates Unbilled STOR on destination for receive_date
+        // → transfer_date - 1, and the monthly storage gen picks up from
+        // transfer_date forward via the Transfer Date cutover. Copying source
+        // STOR onto destination would double-bill the holding period.
+        var bSvcCodePre = bSvcCodeCol ? String(bRow[bSvcCodeCol - 1] || "").trim().toUpperCase() : "";
+        if (bSvcCodePre === "STOR") {
+          srcBillVoids.push(bi + 1);
+          continue;
+        }
+
         var destBRow = api_projectRow_(bRow, srcBillHeaders, destBillHeaders);
 
         // Update Client column in dest row
@@ -24145,17 +24158,19 @@ function handleGenerateStorageCharges_(payload) {
 
         // v38.24.0: Released and On Hold items participate in storage billing for the
         // active dates they were physically in stock.
-        // v38.25.0: Transferred items now participate too IF they have a Transfer Date set.
-        // The Transfer Date acts as a cutover: source bills up to the day before, destination
-        // (which has a new Active row with Transfer Date set) bills from that date forward.
+        // v38.245.1 (2026-05-28): Transferred-out source rows NEVER bill. Destination
+        // owns storage end-to-end (at-transfer backfill in handleTransferItems_ covers
+        // receive_date → transfer_date - 1; the destination Active row with Transfer
+        // Date set picks up from transfer_date forward via the cutover branch below).
+        // Pre-fix this branch billed source up to transfer_date - 1, producing the
+        // duplicate-charge bug seen in 2026-05 (Brume / Allison Lind item 62218).
         var invStatus = cStatus ? String(invVals[r][cStatus - 1] || "").trim().toLowerCase() : "";
 
         // Read Transfer Date (may be empty/null)
         var transferDate = cTransferDate ? api_normalizeDateToMidnight_(invVals[r][cTransferDate - 1]) : null;
 
         if (invStatus === "transferred") {
-          // Source side: skip if no Transfer Date (legacy transfers excluded from billing)
-          if (!transferDate) continue;
+          continue;
         } else if (invStatus && invStatus !== "active" && invStatus !== "released" && invStatus !== "on hold") {
           continue;
         }
@@ -24173,18 +24188,14 @@ function handleGenerateStorageCharges_(payload) {
           continue;
         }
 
-        // ── v38.25.0: Transfer Date cutover logic ──────────────────────────
-        // For Active destinations (Transfer Date set): treat Transfer Date as the new
-        //   Receive Date for billing purposes. Fresh free-days credit applies.
-        // For Transferred sources: end charge period at Transfer Date - 1 (day before).
+        // v38.25.0 / v38.245.1: Transfer Date cutover for DESTINATION side only.
+        // Source ('transferred') skipped above — destination's transfer-time backfill
+        // owns the holding period. Active/On Hold/Released rows with Transfer Date
+        // set are destinations: bill from Transfer Date forward with a fresh
+        // free-days credit. Anything without Transfer Date follows standard logic.
         var effectiveRecv = recv;
         var effectiveEnd;
-        if (invStatus === "transferred" && transferDate) {
-          // Source side — bill up through day before transfer
-          var transferDayBefore = api_addDays_(transferDate, -1);
-          effectiveEnd = (rel && rel.getTime() <= transferDayBefore.getTime()) ? api_addDays_(rel, -1) : transferDayBefore;
-          if (effectiveEnd.getTime() > endDate.getTime()) effectiveEnd = endDate;
-        } else if (transferDate && (invStatus === "active" || invStatus === "on hold" || invStatus === "released")) {
+        if (transferDate && (invStatus === "active" || invStatus === "on hold" || invStatus === "released")) {
           // Destination side — fresh free-days from Transfer Date
           effectiveRecv = transferDate;
           effectiveEnd = (rel && rel.getTime() <= endDate.getTime()) ? api_addDays_(rel, -1) : endDate;
@@ -24737,14 +24748,15 @@ function handlePreviewStorageCharges_(payload) {
         if (!itemId) continue;
 
         // v38.24.0: Released and On Hold items participate in storage billing.
-        // v38.25.0: Transferred items participate IF Transfer Date is set (cutover model).
+        // v38.245.1 (2026-05-28): Transferred-out source rows NEVER bill (preview parity
+        // with handleGenerateStorageCharges_ + Postgres _compute_storage_charges).
         var invStatus = cStatus ? String(invVals[r][cStatus - 1] || "").trim().toLowerCase() : "";
 
         // Read Transfer Date (may be empty/null)
         var transferDate = cTransferDate ? api_normalizeDateToMidnight_(invVals[r][cTransferDate - 1]) : null;
 
         if (invStatus === "transferred") {
-          if (!transferDate) continue; // legacy transfer — excluded
+          continue;
         } else if (invStatus && invStatus !== "active" && invStatus !== "released" && invStatus !== "on hold") {
           continue;
         }
@@ -24760,15 +24772,10 @@ function handlePreviewStorageCharges_(payload) {
           continue;
         }
 
-        // ── v38.25.0: Transfer Date cutover logic ──────────────────────────
+        // v38.25.0 / v38.245.1: Transfer Date cutover for DESTINATION side only.
         var effectiveRecv = recv;
         var effectiveEnd;
-        if (invStatus === "transferred" && transferDate) {
-          // Source side — bill up through day before transfer
-          var transferDayBefore = api_addDays_(transferDate, -1);
-          effectiveEnd = (rel && rel.getTime() <= transferDayBefore.getTime()) ? api_addDays_(rel, -1) : transferDayBefore;
-          if (effectiveEnd.getTime() > endDate.getTime()) effectiveEnd = endDate;
-        } else if (transferDate && (invStatus === "active" || invStatus === "on hold" || invStatus === "released")) {
+        if (transferDate && (invStatus === "active" || invStatus === "on hold" || invStatus === "released")) {
           // Destination side — fresh free-days from Transfer Date
           effectiveRecv = transferDate;
           effectiveEnd = (rel && rel.getTime() <= endDate.getTime()) ? api_addDays_(rel, -1) : endDate;

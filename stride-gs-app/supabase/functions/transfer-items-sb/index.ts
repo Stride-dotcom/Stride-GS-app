@@ -223,6 +223,36 @@ Deno.serve(async (req: Request) => {
     }
   }
 
+  // 4b. Void any Unbilled STOR rows on the source tenant for the transferred items
+  //     (v38.245.1 — 2026-05-28). Destination owns storage end-to-end (at-transfer
+  //     backfill in handleTransferItems_ covers receive_date → transfer_date - 1;
+  //     destination Active row picks up from transfer_date forward via the cutover
+  //     in _compute_storage_charges). Without this void, an Unbilled STOR row sitting
+  //     on source (created by a partial run before transfer) would still get picked
+  //     up by the next unbilled-report and invoiced — exactly the duplicate-charge
+  //     bug we're closing. GAS handleTransferItems_ already does the equivalent
+  //     sheet-side void; this mirrors it in public.billing.
+  //
+  //     Note: public.billing.tenant_id stays = source through transfer (it's set
+  //     at row insert and NOT migrated by step 2's inventory PATCH), so .eq on
+  //     tenantId here correctly targets the pre-transfer billing rows.
+  if (toTransfer.length > 0) {
+    const ids = toTransfer.map(t => t.itemId);
+    const { error: voidErr, count: voidedCount } = await sb
+      .from('billing')
+      .update({ status: 'Void', updated_at: nowIso }, { count: 'exact' })
+      .eq('tenant_id', tenantId)
+      .eq('svc_code', 'STOR')
+      .eq('status', 'Unbilled')
+      .in('item_id', ids);
+    if (voidErr) {
+      console.error('[transfer-items-sb] billing STOR void failed:', voidErr.message);
+      warnings.push(`Source STOR void: ${voidErr.message}`);
+    } else if (typeof voidedCount === 'number' && voidedCount > 0) {
+      warnings.push(`Voided ${voidedCount} Unbilled STOR row(s) on source for transferred items`);
+    }
+  }
+
   // 5. Reverse-writethrough per item — best-effort. The GAS side handles
   // the cross-sheet projection (destination Inventory append, billing
   // projection, storage backfill) via the legacy transferItems endpoint.
