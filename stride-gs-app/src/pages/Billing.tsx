@@ -608,19 +608,34 @@ export function Billing() {
   // canonical source: GAS hooks PATCH qbo_pushed_at / stax_pushed_at on
   // every successful push, and a realtime subscription keeps the map fresh
   // without a manual refresh.
-  type InvoicePushStatus = { qboPushedAt: string | null; staxPushedAt: string | null; autoCharge: boolean };
+  // v38.240.0 — Include qbo_invoice_id + qbo_doc_number from the new
+  // invoice_tracking columns so the QBO column can render the actual
+  // QBO Id (proof of confirmation) and surface the diagnostic
+  // qbo_pushed_at SET + qbo_invoice_id NULL combo as a warning. Pre-fix
+  // pushes (and the INV-001132 class of silent failures) show up with
+  // pushedAt set but no Id — operators can audit those in QBO and
+  // re-push if needed.
+  type InvoicePushStatus = {
+    qboPushedAt:   string | null;
+    qboInvoiceId:  string | null;
+    qboDocNumber:  string | null;
+    staxPushedAt:  string | null;
+    autoCharge:    boolean;
+  };
   const [pushStatusByInvoice, setPushStatusByInvoice] = useState<Record<string, InvoicePushStatus>>({});
   useEffect(() => {
     let cancelled = false;
     (async () => {
       const { data, error } = await supabase
         .from('invoice_tracking')
-        .select('invoice_no, qbo_pushed_at, stax_pushed_at, auto_charge');
+        .select('invoice_no, qbo_pushed_at, qbo_invoice_id, qbo_doc_number, stax_pushed_at, auto_charge');
       if (cancelled || error || !data) return;
       const map: Record<string, InvoicePushStatus> = {};
       for (const r of data) {
         map[String(r.invoice_no)] = {
-          qboPushedAt:  r.qbo_pushed_at ? String(r.qbo_pushed_at) : null,
+          qboPushedAt:  r.qbo_pushed_at  ? String(r.qbo_pushed_at)  : null,
+          qboInvoiceId: r.qbo_invoice_id ? String(r.qbo_invoice_id) : null,
+          qboDocNumber: r.qbo_doc_number ? String(r.qbo_doc_number) : null,
           staxPushedAt: r.stax_pushed_at ? String(r.stax_pushed_at) : null,
           autoCharge:   Boolean(r.auto_charge),
         };
@@ -650,7 +665,9 @@ export function Billing() {
           if (inv) setPushStatusByInvoice(prev => ({
             ...prev,
             [inv]: {
-              qboPushedAt:  r.qbo_pushed_at ? String(r.qbo_pushed_at) : null,
+              qboPushedAt:  r.qbo_pushed_at  ? String(r.qbo_pushed_at)  : null,
+              qboInvoiceId: r.qbo_invoice_id ? String(r.qbo_invoice_id) : null,
+              qboDocNumber: r.qbo_doc_number ? String(r.qbo_doc_number) : null,
               staxPushedAt: r.stax_pushed_at ? String(r.stax_pushed_at) : null,
               autoCharge:   Boolean(r.auto_charge),
             },
@@ -1692,23 +1709,50 @@ export function Billing() {
     }),
     invCol.display({
       id: 'qboPushed',
-      header: 'QBO', size: 110,
+      header: 'QBO', size: 130,
       cell: i => {
         const inv = i.row.original.invoiceNo;
         const status = pushStatusByInvoice[inv];
         const pushedAt = status?.qboPushedAt;
         if (!pushedAt) return <span style={{ fontSize: 11, color: theme.colors.textMuted }}>—</span>;
         const dateOnly = pushedAt.slice(0, 10);
+        // v38.240.0 — Warning state: pushedAt is stamped but no QBO Id
+        // was captured. Pre-v38.240 pushes always landed in this state
+        // because the GAS handler never wrote qbo_invoice_id; INV-001132
+        // is the canonical example where the push apparently succeeded
+        // but QBO has no record. Operators should audit in QBO and
+        // re-push if needed.
+        const qboId = status?.qboInvoiceId;
+        const qboDoc = status?.qboDocNumber;
+        if (!qboId) {
+          return (
+            <span
+              title={
+                `Pushed to QBO at ${pushedAt}, but no QBO Invoice ID was captured. ` +
+                `Either this is a pre-fix historical push, or the QBO confirmation failed silently. ` +
+                `Verify in QBO and re-push if missing.`
+              }
+              style={{
+                fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 4,
+                background: '#FEF3C7', color: '#B45309', display: 'inline-flex',
+                alignItems: 'center', gap: 4,
+              }}
+            >
+              <AlertTriangle size={11} /> {dateOnly} ?
+            </span>
+          );
+        }
+        const label = qboDoc || `#${qboId}`;
         return (
           <span
-            title={`Pushed to QBO: ${pushedAt}`}
+            title={`Pushed to QBO at ${pushedAt}\nQBO Invoice ID: ${qboId}${qboDoc ? `\nDocNumber: ${qboDoc}` : ''}`}
             style={{
               fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 4,
               background: '#F0FDF4', color: '#15803D', display: 'inline-flex',
               alignItems: 'center', gap: 4,
             }}
           >
-            <CheckCircle size={11} /> {dateOnly}
+            <CheckCircle size={11} /> {dateOnly} · {label}
           </span>
         );
       },
