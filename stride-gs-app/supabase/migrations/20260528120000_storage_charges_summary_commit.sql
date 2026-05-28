@@ -165,16 +165,23 @@ BEGIN
         AND p.period_end   >= v_period_start
    );
 
-  -- Widen the delete pass: any Unbilled STOR row in the window goes
-  -- (per-item leftovers from older builds + prior summary in the same
-  -- window). Idempotent re-runs replace cleanly.
+  -- Widen the delete pass: any Unbilled STOR row whose parsed task_id
+  -- range overlaps the window (per-item leftovers from pre-summary
+  -- builds), plus any Unbilled STOR row whose parsed STOR-SUMMARY
+  -- period overlaps (a prior summary in the same window being replaced
+  -- by this re-run). public.billing.date is text, so dropping a third
+  -- "date column in window" fallback intentionally — a malformed date
+  -- string would throw on the ::date cast and abort the entire commit.
+  -- Both helpers below tolerate malformed input by returning no rows;
+  -- an Unbilled STOR row with NEITHER a parseable task_id NOR a
+  -- parseable summary id is by definition externally produced and is
+  -- left in place.
   DELETE FROM public.billing b
    USING (SELECT DISTINCT tenant_id FROM _stor_summary) s
    WHERE b.tenant_id = s.tenant_id
      AND b.svc_code  = 'STOR'
      AND LOWER(COALESCE(b.status, '')) IN ('unbilled', '')
      AND (
-       -- Unbilled per-item rows whose parsed range overlaps the window.
        EXISTS (
          SELECT 1
            FROM public._parse_stor_task_range(b.task_id) rng
@@ -183,7 +190,6 @@ BEGIN
             AND rng.range_start <= v_period_end
             AND rng.range_end   >= v_period_start
        )
-       -- OR Unbilled summary row whose parsed period overlaps the window.
        OR EXISTS (
          SELECT 1
            FROM public._parse_stor_summary_period(b.ledger_row_id) p
@@ -191,12 +197,6 @@ BEGIN
             AND p.period_end   IS NOT NULL
             AND p.period_start <= v_period_end
             AND p.period_end   >= v_period_start
-       )
-       -- OR Unbilled row whose date column falls in the window (catches
-       -- any legacy per-item Unbilled row written without a parseable task id).
-       OR (
-         b.date IS NOT NULL
-         AND NULLIF(TRIM(b.date), '')::date BETWEEN v_period_start AND v_period_end
        )
      );
 
