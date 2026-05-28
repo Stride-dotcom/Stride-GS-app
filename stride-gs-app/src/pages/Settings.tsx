@@ -300,15 +300,39 @@ function IntegrationsTab() {
   // the escape hatch when an issue is rediscovered (e.g., DT-side account
   // got renamed). Operates on the canonical array stored in the DB so a
   // failed write leaves local state untouched.
+  //
+  // Multi-row race: the array column is shared across every row, so
+  // rapid-fire clicks on DIFFERENT rows would each read the same
+  // pre-update closure snapshot and the last write would clobber the
+  // earlier ones. Re-fetch the canonical array from Postgres immediately
+  // before computing `next` and dispatching the write, so each toggle
+  // is built on top of whatever the previous toggle landed (and we
+  // never round-trip a stale `dtCreds.verified_account_tenants` to the
+  // DB).
   const handleDtVerifyToggle = async (spreadsheetId: string) => {
     if (!dtCreds) return;
-    const current = Array.isArray(dtCreds.verified_account_tenants) ? dtCreds.verified_account_tenants : [];
-    const willVerify = !current.includes(spreadsheetId);
     setDtVerifySaving(prev => ({ ...prev, [spreadsheetId]: true }));
     setDtVerifyError(null);
+    // Read the authoritative row before mutating so a sibling toggle's
+    // in-flight write isn't trampled by this one's closure-captured copy.
+    const { data: fresh, error: fetchErr } = await supabase
+      .from('dt_credentials')
+      .select('verified_account_tenants')
+      .eq('id', dtCreds.id)
+      .single();
+    if (fetchErr) {
+      setDtVerifyError(fetchErr.message);
+      setDtVerifySaving(prev => { const n = { ...prev }; delete n[spreadsheetId]; return n; });
+      return;
+    }
+    const liveRaw = (fresh as { verified_account_tenants: unknown } | null)?.verified_account_tenants;
+    const live: string[] = Array.isArray(liveRaw)
+      ? (liveRaw as unknown[]).filter((v): v is string => typeof v === 'string')
+      : [];
+    const willVerify = !live.includes(spreadsheetId);
     const next = willVerify
-      ? Array.from(new Set([...current, spreadsheetId]))
-      : current.filter(t => t !== spreadsheetId);
+      ? Array.from(new Set([...live, spreadsheetId]))
+      : live.filter(t => t !== spreadsheetId);
     const { error } = await supabase
       .from('dt_credentials')
       .update({ verified_account_tenants: next })
