@@ -13,11 +13,16 @@
  *     pre-computed set of rows (operator may have edited the preview).
  *
  * SB approach: lean on `public.generate_storage_charges(tenant_id, sidemark,
- * period_start, period_end)` RPC (migration 20260502200000) which already
- * mirrors the GAS calculation byte-for-byte AND handles the dedup-against-
- * Invoiced + delete-stale-Unbilled passes inside one Postgres transaction.
- * This handler is a thin orchestrator: validate input, call RPC, read back
- * the new rows, mirror to per-tenant sheets, audit-log.
+ * period_start, period_end)` RPC. As of migration 20260528120000 the RPC
+ * aggregates per-item charges into ONE public.billing row per tenant per
+ * commit (ledger_row_id = STOR-SUMMARY-<tenantId>-<YYYYMMDD>-<YYYYMMDD>),
+ * description = "Monthly Storage", total = SUM. The per-item dedup pass +
+ * delete-stale-Unbilled pass + finalized-summary fence are all inside the
+ * Postgres transaction. This handler stays as a thin orchestrator: validate
+ * input, call RPC, read back the new summary row(s), mirror to per-tenant
+ * sheets, audit-log. The read-back returns 1 row per affected tenant
+ * (was N per tenant), so the mirror fan-out is now bounded by tenant
+ * count rather than item count.
  *
  * Inputs:
  *   { tenantId, callerEmail, requestId?, billingMonth?, startDate?, endDate?, sidemark? }

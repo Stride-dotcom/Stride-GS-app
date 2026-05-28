@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.238.0 — 2026-05-26 PST — [DATA-FIX] Class column data validation on every per-tenant Inventory sheet allowed only XS/S/M/L/XL/XXL — saving NC (No Charge, added to public.item_classes in PR #529) failed with "data you entered violates the data validation rules set on this cell" on item 63623 (MR. Studio). Three changes in one bump. (1) New one-shot operator function fixClassValidation_20260526_ iterates every active CB client, opens the per-tenant Inventory sheet, locates the Class column via header map (defensive against R-column drift), and replaces the cell-range data validation across rows 2..maxRows with SpreadsheetApp.newDataValidation().requireValueInList(["XS","S","M","L","XL","XXL","NC"], true).setAllowInvalid(false).build(). Also applies the same validation to the CLIENT_INVENTORY_TEMPLATE_ID sheet so future onboarded clients get NC from day one. Idempotent — re-running on already-fixed sheets writes the same rule and is a no-op. Returns a per-client summary (sheetsFixed / sheetsSkipped / sheetsMissing / templateFixed / errors). (2) New doPost case "fixClassValidation20260526" wired to the one-shot, gated only by the API_TOKEN bearer (same pattern as oneshotFixStorageAuditCorrections in v38.237.0) — no payload, hardcoded body, zero per-call risk. (3) No schema change, no React change. Run once via HTTP POST after deploy; safe to re-run.
+   StrideAPI.gs — v38.239.0 — 2026-05-28 PST — [BILLING] Summarize storage charges at commit. Pre-fix handleCommitStorageRows_ wrote one Billing_Ledger row per item per period — Roche Bobois alone produced 372 rows for a single monthly cycle, the fleet shipped 2,340 STOR rows after one cycle. The per-item detail was already being collapsed into a single line at invoice time by Billing.tsx summarizeStorageRowsForInvoice, but by then the bloat had already landed in the sheet + public.billing. New behavior: handleCommitStorageRows_ groups incoming per-item rows by tenant and appends ONE summary STOR row per tenant per commit. ledger_row_id / task_id = STOR-SUMMARY-<tenantId>-<YYYYMMDD>-<YYYYMMDD> (deterministic, sheet-resident, distinct from the legacy invoice-time synthetic STOR-SUMMARY-<uuid> form). Description = "Monthly Storage" per operator preference. Qty=1, Rate blank, Total=sum of per-item totals (integer-cents to dodge float drift). Date = max billable end across the input rows. Item Notes carries human-readable "Storage MM/DD/YY to MM/DD/YY (N items)". Two safety gates: (a) when any finalized (Invoiced/Billed/Void) STOR-SUMMARY row already covers the requested window for the tenant, the commit is skipped for that tenant — prevents double billing on accidental re-runs since _compute_storage_charges's per-item dedup keys on item_id (blank on summary rows) and would not catch this case; (b) the existing delete-pass widens to remove any Unbilled STOR row in the window (per-item leftovers from older builds + prior summaries) so re-running cleanly replaces the working state. New helper api_parseStorSummaryPeriod_(ledgerRowId) parses the YYYYMMDD-YYYYMMDD suffix for the gate. Companion handleCreateInvoice_ filter at the sheet-markable-subset step distinguishes the new deterministic form (suffix /-\d{8}-\d{8}$/, IS on sheet, must be marked Invoiced) from the legacy invoice-time synthetic form (UUID suffix, NOT on sheet, must be excluded from the partial-flip check) — without this the new STOR-SUMMARY rows would be filtered out of the sheet flip and the v38.157.0 half-write detector would fire HALF_WRITE_DETECTED on every storage invoice. _compute_storage_charges + handlePreviewStorageCharges_ + handleGenerateStorageCharges_ (the preview path) are intentionally unchanged — the per-item table operators review before committing still shows per-item detail. Companion supabase migration 20260528120000_storage_charges_summary_commit.sql replaces public.generate_storage_charges with the aggregating variant for the SB-primary flag flip; companion EF commit-storage-charges-sb (no logic change — already calls the RPC) automatically picks up the new behavior once the migration deploys.
+   v38.238.0 — 2026-05-26 PST — [DATA-FIX] Class column data validation on every per-tenant Inventory sheet allowed only XS/S/M/L/XL/XXL — saving NC (No Charge, added to public.item_classes in PR #529) failed with "data you entered violates the data validation rules set on this cell" on item 63623 (MR. Studio). Three changes in one bump. (1) New one-shot operator function fixClassValidation_20260526_ iterates every active CB client, opens the per-tenant Inventory sheet, locates the Class column via header map (defensive against R-column drift), and replaces the cell-range data validation across rows 2..maxRows with SpreadsheetApp.newDataValidation().requireValueInList(["XS","S","M","L","XL","XXL","NC"], true).setAllowInvalid(false).build(). Also applies the same validation to the CLIENT_INVENTORY_TEMPLATE_ID sheet so future onboarded clients get NC from day one. Idempotent — re-running on already-fixed sheets writes the same rule and is a no-op. Returns a per-client summary (sheetsFixed / sheetsSkipped / sheetsMissing / templateFixed / errors). (2) New doPost case "fixClassValidation20260526" wired to the one-shot, gated only by the API_TOKEN bearer (same pattern as oneshotFixStorageAuditCorrections in v38.237.0) — no payload, hardcoded body, zero per-call risk. (3) No schema change, no React change. Run once via HTTP POST after deploy; safe to re-run.
    v38.237.0 — 2026-05-25 PST — [DATA-FIX] Storage-billing audit on 2026-05-25 uncovered 18 inventory rows where Status='Released' but release_date IS NULL in public.inventory, plus 17 rows with the wrong receive_date (cross-dock items where the sheet receive cell was typo'd a year ahead). Three changes ship in one bump. (1) Defensive direct supabasePatch_ on the inventory row inside handleReleaseItems_ (bulk release), handleProcessWcRelease_ (will-call release), and the disposal branch inside handleCompleteTask_ (DT auto-release). The router's existing api_writeThrough_ / api_fullClientSync_ already includes release_date in its payload via sbInventoryRow_, but rare races (sheet-write batched in memory when fullClientSync re-reads, transient PostgREST 4xx swallowed by api_writeThrough_'s outer try/catch) have left rows status-only on SB. The new inline PATCH guarantees both fields land atomically for every release path — belt-and-suspenders, idempotent re-runs OK. Also adds the missing SpreadsheetApp.flush() to handleProcessWcRelease_ before the api_fullClientSync_ re-read (handleReleaseItems_ already had this since v38.42.0). (2) New one-shot operator function oneshot_2026_05_25_FixStorageBillingAuditCorrections_ that applies all 35 data corrections from the audit: 17 receive_date adjustments (Allison Lind 61863 / Couch Seattle 57395 / Roche Bobois 60215 / 15 Vida Design Waymark cross-docks 62975-62983+62994-62998+63028), 18 release_date backfills from audit/sheet (K&M 62021/62228/62235, Modern Design Sofa 62315/62316/62317/62319-62325/62332, MR Studio 62210/62211/62213, Nip Tuck 61936), and 2 item_class corrections (MR Studio 46506->M, 47693->L). For each correction the function opens the per-tenant sheet, finds the row by Item ID, writes the cell value(s), flushes, then calls resyncEntityToSupabase_ to push to public.inventory. For Modern Design Sofa / MR Studio / Nip Tuck items with 'audit not found' the function reads the existing Release Date cell from the sheet (which IS populated — sheet has the truth) and uses that. Idempotent: a re-run on rows already at the target state no-ops cleanly. Returns a per-item summary list for paste-into-BUILD_STATUS. Run once from the GAS Apps Script editor after deploy; future receive/release-with-wrong-year typos are independent and would need their own targeted invocation. (3) No schema change. No React change. Companion docs land in BUILD_STATUS.md.
    v38.236.0 — 2026-05-25 PST — [MIGRATION-P1.2] Completion-side logging for public.gas_call_log. New helper api_logCallComplete_(correlationId, status, durationMs, errorMessage) PATCHes the existing started row with status (success or error), completed_at=now(), gas_duration_ms, and (on error) a 2KB-truncated error_message. doPost captures Date.now() at the top, retains the correlation_id returned by api_logCallInput_, wraps the switch in an IIFE so the dispatched case's return value can be inspected, then logs completion best-effort. Success/error classification reads the response JSON: presence of an `error` key or `success:false` flips status to error and captures the message; everything else is success. The outer catch path logs completion too, guarded by a __logged flag so a single request never PATCHes twice. Best-effort throughout: missing credentials, JSON-parse failures, network errors, and PATCH 4xx responses all Logger.log and continue without blocking the GAS response. No schema change required — status, completed_at, gas_duration_ms, and error_message columns already exist on public.gas_call_log from the P1.1 substrate migration (20260509000001_migration_parity_substrate.sql). Closes the long-standing observability gap where every gas_call_log row had completed_at NULL, unblocking duration-percentile dashboards and error-rate alerts on the replay-harness corpus.
    v38.235.0 — 2026-05-24 PST — [AUDIT-REDEPLOY] PM audit on 2026-05-24 found gs_sync_events failures still showing the pre-v38.231.0 stubs for inventory insert + will_calls insert + shipments + tasks. Code verification confirms: REVERSE_WRITETHROUGH_TABLES_ registry already routes inventory to __writeThroughReverseInventory_ (insert path added v38.231.0), will_calls to __writeThroughReverseWillCalls_ (insert path added v38.233.0), tasks to __writeThroughReverseTasks_ (insert+update since v38.227.0), shipments to __writeThroughReverseShipments_ (insert+update since v38.232.0), billing to __writeThroughReverseBilling_ (since v38.217.0). Every entry in the registry points at a real writer (no stub references). Root cause of the audit findings is therefore deploy lag — the canonical source branch was ahead of what clasp had pushed to the live script. NO CODE CHANGE in this version bump — header advance only, to force a clean clasp push that picks up v38.231.0 through v38.234.0 in one commit. Companion PR also ships supabase/functions/replay-shadow/index.ts entity_type fix (was hardcoded to inventory).
@@ -17876,6 +17877,25 @@ function api_buildStorTaskId_(itemId, startDate, endDate) {
 }
 
 /**
+ * Parse the period bounds out of a STOR-SUMMARY ledger row id.
+ * Returns { start: Date, end: Date } when the id matches the
+ * deterministic format STOR-SUMMARY-<tenantId>-<YYYYMMDD>-<YYYYMMDD>;
+ * returns null for the legacy synthetic STOR-SUMMARY-<uuid> format
+ * written by the React invoice-time summarizer (those don't carry a
+ * period in the id — they're keyed to the invoice instead).
+ */
+function api_parseStorSummaryPeriod_(ledgerRowId) {
+  if (!ledgerRowId) return null;
+  var m = String(ledgerRowId).match(/-(\d{8})-(\d{8})$/);
+  if (!m) return null;
+  var s = m[1], e = m[2];
+  var start = new Date(Number(s.slice(0, 4)), Number(s.slice(4, 6)) - 1, Number(s.slice(6, 8)));
+  var end   = new Date(Number(e.slice(0, 4)), Number(e.slice(4, 6)) - 1, Number(e.slice(6, 8)));
+  if (isNaN(start.getTime()) || isNaN(end.getTime())) return null;
+  return { start: start, end: end };
+}
+
+/**
  * Load class → cubic-foot volume map from Class_Cache tab.
  * Returns e.g. { "XS": 10, "S": 25, "M": 50, "L": 75, "XL": 110 }
  */
@@ -24266,24 +24286,30 @@ function handleGenerateStorageCharges_(payload) {
 // ─── Commit Storage Rows (pre-computed by Postgres) ─────────────────────────
 
 /**
- * handleCommitStorageRows_ — write phase only. Takes rows already computed
- * elsewhere (the React Storage tab feeds in the result of the
- * `calculate_storage_charges` Postgres RPC) and appends them to each
- * affected client's Billing_Ledger Sheet. Skips the slow read+compute
- * phase that used to time out on big clients (e.g. Allison Lind Design).
+ * handleCommitStorageRows_ — write phase only. Takes per-item rows already
+ * computed elsewhere (the React Storage tab feeds in the result of the
+ * `calculate_storage_charges` Postgres RPC) and writes ONE summary STOR
+ * row per tenant to each affected client's Billing_Ledger Sheet.
  *
- * Mirrors the write half of handleGenerateStorageCharges_:
- *   • Skip pending rows whose task id already matches a finalized
- *     (Invoiced/Billed/Void) row — pre-computer should already have
- *     done this dedup, but guard belt-and-suspenders.
- *   • Delete existing Unbilled STOR rows in the period window AND any
- *     Unbilled STOR row whose task id collides with a pending row.
- *   • Bulk-write the remaining pending rows in one setValues per
- *     client (Class C bulk-write recipe).
- *   • Invalidate per-client cache + best-effort full client billing
- *     resync to Supabase so the React table refreshes immediately.
+ * v38.239.0 — summary commit. Pre-fix, every per-item row was appended
+ * individually (Roche Bobois = 372 rows in one cycle). Now per-item rows
+ * are aggregated to a single line per tenant with svc_code=STOR,
+ * description="Monthly Storage", qty=1, total=SUM. Per-item detail
+ * remains visible via the React preview path (handlePreviewStorageCharges_
+ * + the Storage tab table).
  *
- * Payload shape:
+ * Write algorithm:
+ *   • Group incoming rows by tenant.
+ *   • Block re-commit when a finalized (Invoiced/Billed/Void) STOR-SUMMARY
+ *     row already covers the window for that tenant — prevents double
+ *     billing on accidental re-runs (the per-item dedup the inner Postgres
+ *     compute uses keys on item_id, which is blank on summary rows).
+ *   • Delete existing Unbilled STOR rows in the window for the tenant
+ *     (per-item leftovers from older versions + prior summary rows).
+ *   • Append ONE summary row with the aggregate total.
+ *   • Invalidate per-client cache + the EF re-fires its own writethrough.
+ *
+ * Payload shape (unchanged for the caller — React still POSTs per-item):
  *   {
  *     periodStart: "YYYY-MM-DD",
  *     periodEnd:   "YYYY-MM-DD",
@@ -24297,7 +24323,8 @@ function handleGenerateStorageCharges_(payload) {
  *   }
  *
  * Returns counts identical to handleGenerateStorageCharges_ so the
- * React commit handler can swap callers without UI changes.
+ * React commit handler can swap callers without UI changes — but
+ * totalCreated now reflects summary row count, not per-item count.
  */
 function handleCommitStorageRows_(payload) {
   var rows = Array.isArray(payload && payload.rows) ? payload.rows : [];
@@ -24376,91 +24403,112 @@ function handleCommitStorageRows_(payload) {
         return;
       }
 
-      // Read existing rows once for dedup + delete decisions.
+      // Read existing rows once for finalized-period detection + delete decisions.
       var blLastRow = api_getLastDataRow_(blSh);
       var blAllData = (blLastRow >= 2)
         ? blSh.getRange(2, 1, blLastRow - 1, blSh.getLastColumn()).getValues()
         : [];
 
-      // Build set of finalized STOR task ids — pending rows whose task
-      // id matches one of these are skipped (already invoiced/billed).
-      var finalizedTaskIds = {};
+      // Block re-commit when a finalized STOR-SUMMARY already covers this
+      // tenant + window. Per-item dedup in _compute_storage_charges keys on
+      // item_id (blank on summary rows) so it can't catch this case — the
+      // gate has to live here at the write boundary.
+      var summaryLockedNote = null;
       for (var fi = 0; fi < blAllData.length; fi++) {
         var fStatus = String(blAllData[fi][blCols.status - 1] || "").trim().toLowerCase();
         if (fStatus !== "invoiced" && fStatus !== "billed" && fStatus !== "void") continue;
         var fSvc = blCols.svcCode ? String(blAllData[fi][blCols.svcCode - 1] || "").trim().toUpperCase() : "";
         if (fSvc !== "STOR") continue;
-        var fTid = blCols.taskId ? String(blAllData[fi][blCols.taskId - 1] || "").trim() : "";
-        if (fTid) finalizedTaskIds[fTid] = true;
+        var fLrid = blCols.ledgerRowId ? String(blAllData[fi][blCols.ledgerRowId - 1] || "").trim() : "";
+        if (!fLrid || fLrid.indexOf("STOR-SUMMARY-") !== 0) continue;
+        var fPeriod = api_parseStorSummaryPeriod_(fLrid);
+        if (!fPeriod) continue;
+        // Reject any overlap with the request window.
+        if (fPeriod.end.getTime() < startDate.getTime()) continue;
+        if (fPeriod.start.getTime() > endDate.getTime()) continue;
+        summaryLockedNote = fLrid;
+        break;
+      }
+      if (summaryLockedNote) {
+        skipped.push(clientName + " (finalized summary " + summaryLockedNote + " already covers window)");
+        return;
       }
 
-      // Filter pending rows: drop any whose task id is already finalized.
-      var pendingRowObjs = [];
-      var pendingTaskIds = {};
+      // Compute the aggregate. Per-item rows from the React payload are
+      // summed here so the sheet sees ONE row per client per commit.
+      var totalCents = 0;
+      var itemIds = {};
+      var summaryDate = endDate;
       for (var pri = 0; pri < clientRows.length; pri++) {
         var pr = clientRows[pri];
-        var ptid = String(pr.taskId || "").trim();
-        if (!ptid) continue;
-        if (finalizedTaskIds[ptid]) {
-          skipped.push(clientName + " / " + (pr.itemId || ptid) + " (already finalized)");
-          continue;
-        }
-        if (pendingTaskIds[ptid]) continue; // dedup within payload
-        pendingTaskIds[ptid] = true;
-        pendingRowObjs.push(pr);
+        var pRow = Number(pr.total);
+        if (!isFinite(pRow)) pRow = 0;
+        totalCents += Math.round(pRow * 100);
+        var pid = String(pr.itemId || "").trim();
+        if (pid) itemIds[pid] = true;
+        var pEnd = api_normalizeDateToMidnight_(pr.billableEnd);
+        if (pEnd && pEnd.getTime() > summaryDate.getTime()) summaryDate = pEnd;
+      }
+      var summaryTotal = Math.round(totalCents) / 100;
+      var itemCount = Object.keys(itemIds).length;
+      if (summaryTotal <= 0) {
+        skipped.push(clientName + " (computed summary total <= 0)");
+        return;
       }
 
-      // Delete Unbilled STOR rows in window AND any Unbilled STOR row
-      // whose task id collides with a pending row (clean-slate replace).
+      var summaryTaskId = "STOR-SUMMARY-" + tenantId + "-" +
+        api_formatYMD_(startDate) + "-" + api_formatYMD_(endDate);
+
+      // Delete every Unbilled STOR row in the window (per-item leftovers
+      // from older versions OR a prior summary in the same window). Also
+      // delete any Unbilled STOR whose ledger row id matches the new
+      // summary id (idempotent re-run replaces in place).
       var rowsToDelete = [];
       for (var di = blAllData.length - 1; di >= 0; di--) {
         var dStatus = String(blAllData[di][blCols.status - 1] || "").trim().toLowerCase();
         var dSvc    = String(blAllData[di][blCols.svcCode - 1] || "").trim().toUpperCase();
         if (dSvc !== "STOR") continue;
         if (dStatus !== "unbilled" && dStatus !== "") continue;
-        var dTid = blCols.taskId ? String(blAllData[di][blCols.taskId - 1] || "").trim() : "";
-        var collides = dTid && pendingTaskIds[dTid];
+        var dLrid = blCols.ledgerRowId ? String(blAllData[di][blCols.ledgerRowId - 1] || "").trim() : "";
+        var collides = dLrid && dLrid === summaryTaskId;
         var dDate = blCols.date ? api_normalizeDateToMidnight_(blAllData[di][blCols.date - 1]) : null;
         var inWindow = dDate && dDate.getTime() >= startDate.getTime() && dDate.getTime() <= endDate.getTime();
         if (collides || inWindow) {
           rowsToDelete.push(di + 2);
         }
       }
-      // Delete bottom-up.
       for (var dri = 0; dri < rowsToDelete.length; dri++) {
         blSh.deleteRow(rowsToDelete[dri]);
       }
 
-      // Build the value matrix for one bulk setValues.
-      if (!pendingRowObjs.length) return;
+      // Build the single summary row.
       var blWidth = blSh.getLastColumn();
-      var matrix = pendingRowObjs.map(function(p) {
-        var arr = new Array(blWidth).fill("");
-        if (blCols.status)     arr[blCols.status - 1]     = "Unbilled";
-        if (blCols.invoice)    arr[blCols.invoice - 1]    = "";
-        if (blCols.client)     arr[blCols.client - 1]     = String(p.clientName || clientName);
-        if (blCols.date)       arr[blCols.date - 1]       = api_normalizeDateToMidnight_(p.billableEnd) || endDate;
-        if (blCols.svcCode)    arr[blCols.svcCode - 1]    = "STOR";
-        if (blCols.svcName)    arr[blCols.svcName - 1]    = "Storage";
-        if (blCols.category)   arr[blCols.category - 1]   = "Storage Charges";
-        if (blCols.itemId)     arr[blCols.itemId - 1]     = String(p.itemId || "");
-        if (blCols.desc)       arr[blCols.desc - 1]       = String(p.description || "");
-        if (blCols.klass)      arr[blCols.klass - 1]      = String(p.itemClass || "").toUpperCase();
-        if (blCols.qty)        arr[blCols.qty - 1]        = Number(p.qty) || 0;
-        if (blCols.rate)       arr[blCols.rate - 1]       = Number(p.rate) || 0;
-        if (blCols.total)      arr[blCols.total - 1]      = Number(p.total) || 0;
-        if (blCols.taskId)     arr[blCols.taskId - 1]     = String(p.taskId || "");
-        if (blCols.repairId)   arr[blCols.repairId - 1]   = "";
-        if (blCols.shipNo)     arr[blCols.shipNo - 1]     = String(p.shipmentNo || "");
-        if (blCols.notes)      arr[blCols.notes - 1]      = String(p.notes || "");
-        if (blCols.sidemark)   arr[blCols.sidemark - 1]   = String(p.sidemark || "");
-        if (blCols.ledgerRowId) arr[blCols.ledgerRowId - 1] = String(p.taskId || "");
-        return arr;
-      });
+      var arr = new Array(blWidth).fill("");
+      if (blCols.status)     arr[blCols.status - 1]     = "Unbilled";
+      if (blCols.invoice)    arr[blCols.invoice - 1]    = "";
+      if (blCols.client)     arr[blCols.client - 1]     = clientName;
+      if (blCols.date)       arr[blCols.date - 1]       = summaryDate;
+      if (blCols.svcCode)    arr[blCols.svcCode - 1]    = "STOR";
+      if (blCols.svcName)    arr[blCols.svcName - 1]    = "Storage";
+      if (blCols.category)   arr[blCols.category - 1]   = "Storage Charges";
+      if (blCols.itemId)     arr[blCols.itemId - 1]     = "";
+      if (blCols.desc)       arr[blCols.desc - 1]       = "Monthly Storage";
+      if (blCols.klass)      arr[blCols.klass - 1]      = "";
+      if (blCols.qty)        arr[blCols.qty - 1]        = 1;
+      if (blCols.rate)       arr[blCols.rate - 1]       = "";
+      if (blCols.total)      arr[blCols.total - 1]      = summaryTotal;
+      if (blCols.taskId)     arr[blCols.taskId - 1]     = summaryTaskId;
+      if (blCols.repairId)   arr[blCols.repairId - 1]   = "";
+      if (blCols.shipNo)     arr[blCols.shipNo - 1]     = "";
+      if (blCols.notes)      arr[blCols.notes - 1]      = "Storage " +
+        api_formatMMDDYY_(startDate) + " to " + api_formatMMDDYY_(endDate) +
+        " (" + itemCount + " items)";
+      if (blCols.sidemark)   arr[blCols.sidemark - 1]   = "";
+      if (blCols.ledgerRowId) arr[blCols.ledgerRowId - 1] = summaryTaskId;
 
       var insertAt = api_getLastDataRow_(blSh) + 1;
-      blSh.getRange(insertAt, 1, matrix.length, blWidth).setValues(matrix);
-      totalCreated += matrix.length;
+      blSh.getRange(insertAt, 1, 1, blWidth).setValues([arr]);
+      totalCreated += 1;
 
       invalidateClientCache_(tenantId);
     } catch (err) {
@@ -27296,8 +27344,18 @@ function handleCreateInvoice_(payload) {
   // assume corruption, and roll back EVERY storage-summarized invoice.
   // The synthetic ID is left in `ledgerRowIds` for the CB write +
   // idempotency-check paths — those genuinely want it there.
+  //
+  // v38.239.0 — The COMMIT step now writes a DETERMINISTIC STOR-SUMMARY
+  // row to the sheet (STOR-SUMMARY-<tenantId>-<YYYYMMDD>-<YYYYMMDD>),
+  // which DOES exist on the sheet and must be marked. Only the legacy
+  // synthetic invoice-time form (STOR-SUMMARY-<uuid>, UUID ends in
+  // 12 hex chars) should be excluded. Discriminator: the deterministic
+  // form ends with -YYYYMMDD-YYYYMMDD (16 digits, one dash); the
+  // synthetic form ends with a UUID's hex segment (12 hex chars). A
+  // trailing /-\d{8}-\d{8}$/ match flags the new form as sheet-markable.
   var sheetMarkableLedgerRowIds = ledgerRowIds.filter(function(id) {
-    return id.indexOf("STOR-SUMMARY-") !== 0;
+    if (id.indexOf("STOR-SUMMARY-") !== 0) return true;
+    return /-\d{8}-\d{8}$/.test(id);
   });
   if (ledgerRowIds.length > 0) {
     var cl0 = cbSS.getSheetByName("Consolidated_Ledger");
