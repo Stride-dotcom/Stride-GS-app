@@ -989,13 +989,19 @@ export async function fetchBillingFromSupabase(
   clientSheetId?: string
 ): Promise<BillingResponse | null> {
   try {
-    let query = supabase.from('billing').select('*');
-    if (clientSheetId) {
-      query = query.eq('tenant_id', clientSheetId);
-    }
-    query = query.range(0, 49999); // override 1000-row cap
-    const { data, error } = await query;
-    if (error || !data) return null;
+    // Paginate via paginateAll — the Supabase project enforces a 1000-row
+    // server-side cap that silently truncates `.range(0, 49999)` calls.
+    // Without pagination, multi-tenant billing tables with >1000 rows lose
+    // entire clients (the back half of the alphabet, by tenant_id hash
+    // order). See pagination helper docstring above.
+    const data = await paginateAll<SupabaseBillingRow>(() => {
+      let query = supabase.from('billing').select('*');
+      if (clientSheetId) {
+        query = query.eq('tenant_id', clientSheetId);
+      }
+      return query as unknown as { range: (from: number, to: number) => Promise<{ data: SupabaseBillingRow[] | null; error: unknown }> };
+    });
+    if (!data) return null;
 
     const summary: BillingSummary = { unbilled: 0, invoiced: 0, billed: 0, void_count: 0, totalUnbilled: 0 };
 
@@ -1070,35 +1076,46 @@ export async function fetchBillingFromSupabaseFiltered(
       nameToId[name] = id;
     }
 
-    let query = supabase.from('billing').select('*');
-
+    // Pre-resolve clientFilter before paginateAll's buildQuery callback runs
+    // (the callback rebuilds the query on each page; resolving once avoids
+    // re-doing the name→id lookup per page).
+    let tenantIds: string[] | null = null;
     if (filters.clientFilter?.length) {
-      const tenantIds = filters.clientFilter.map(n => nameToId[n]).filter(Boolean);
+      tenantIds = filters.clientFilter.map(n => nameToId[n]).filter(Boolean);
       if (tenantIds.length === 0) {
         console.warn('[supabaseQueries] clientFilter provided but no tenant_ids resolved — falling back to GAS');
         return null;
       }
-      query = query.in('tenant_id', tenantIds);
-    }
-    if (filters.statusFilter?.length) {
-      query = query.in('status', filters.statusFilter);
-    }
-    if (filters.svcFilter?.length) {
-      query = query.in('svc_code', filters.svcFilter);
-    }
-    if (filters.sidemarkFilter?.length) {
-      query = query.in('sidemark', filters.sidemarkFilter);
-    }
-    if (filters.categoryFilter?.length) {
-      query = query.in('category', filters.categoryFilter);
-    }
-    if (filters.endDate) {
-      query = query.lte('date', filters.endDate);
     }
 
-    query = query.range(0, 49999); // override 1000-row cap
-    const { data, error } = await query;
-    if (error || !data) return null;
+    // Paginate via paginateAll — the Supabase project enforces a 1000-row
+    // server-side cap that silently truncates `.range(0, 49999)` calls.
+    // Without pagination, a filtered query like Invoiced status across all
+    // tenants caps at 1000 rows and the back half of the alphabet drops out
+    // (~3,493 invoiced rows shown as ~900). See pagination helper docstring.
+    const data = await paginateAll<SupabaseBillingRow>(() => {
+      let query = supabase.from('billing').select('*');
+      if (tenantIds) {
+        query = query.in('tenant_id', tenantIds);
+      }
+      if (filters.statusFilter?.length) {
+        query = query.in('status', filters.statusFilter);
+      }
+      if (filters.svcFilter?.length) {
+        query = query.in('svc_code', filters.svcFilter);
+      }
+      if (filters.sidemarkFilter?.length) {
+        query = query.in('sidemark', filters.sidemarkFilter);
+      }
+      if (filters.categoryFilter?.length) {
+        query = query.in('category', filters.categoryFilter);
+      }
+      if (filters.endDate) {
+        query = query.lte('date', filters.endDate);
+      }
+      return query as unknown as { range: (from: number, to: number) => Promise<{ data: SupabaseBillingRow[] | null; error: unknown }> };
+    });
+    if (!data) return null;
 
     const summary: BillingSummary = { unbilled: 0, invoiced: 0, billed: 0, void_count: 0, totalUnbilled: 0 };
 
