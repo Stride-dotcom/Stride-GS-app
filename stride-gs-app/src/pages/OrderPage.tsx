@@ -775,10 +775,29 @@ function DetailsTab({
         <EPCard>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
             <SectionTitle>Items</SectionTitle>
-            <span style={{ fontSize: 11, color: EP.textMuted }}>
-              {(order.items ?? []).reduce((s, it) => s + Math.max(1, Number(it.quantity) || 1), 0)} pieces ·
-              {' '}{order.items?.length ?? 0} line{order.items?.length === 1 ? '' : 's'}
-            </span>
+            {/* Order-level stats: pieces (sum of qty), item IDs (count of
+                rows), and cubic volume (sum of qty × cubic_feet). Per
+                PR #543, cubic_feet on dt_order_items is stored PER-UNIT,
+                so multiplying by quantity gives the row's total volume.
+                Items with null / missing cubic_feet contribute 0; the
+                cubic suffix is omitted entirely when the total rounds to
+                0 so an all-ad-hoc order doesn't show " · 0.0 ft³". */}
+            {(() => {
+              const items = order.items ?? [];
+              const pieces = items.reduce((s, it) => s + Math.max(1, Number(it.quantity) || 1), 0);
+              const idCount = items.length;
+              const cubicTotal = items.reduce((s, it) => {
+                const qty = Math.max(1, Number(it.quantity) || 1);
+                const perUnit = Number(it.cubicFeet) || 0;
+                return s + qty * perUnit;
+              }, 0);
+              return (
+                <span style={{ fontSize: 11, color: EP.textMuted }}>
+                  {pieces} pieces · {idCount} item ID{idCount === 1 ? '' : 's'}
+                  {cubicTotal >= 0.05 && ` · ${cubicTotal.toFixed(1)} ft³`}
+                </span>
+              );
+            })()}
           </div>
           <div style={{ overflowX: 'auto' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
