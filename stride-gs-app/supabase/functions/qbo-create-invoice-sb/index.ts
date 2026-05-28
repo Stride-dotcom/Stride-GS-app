@@ -347,15 +347,33 @@ Deno.serve(async (req: Request) => {
     }, 502);
   }
 
-  // ── Stamp public.invoice_tracking.qbo_pushed_at ─────────────────────
-  // GAS path writes qbo_pushed_at via a PATCH at StrideAPI.gs:43257.
+  // ── Stamp public.invoice_tracking with confirmed QBO IDs ────────────
+  // 2026-05-28 — v38.240.0 companion. Pre-fix this UPDATE wrote only
+  // qbo_pushed_at and dropped the captured QBO Id / DocNumber on the
+  // floor (the audit log was the only durable cross-reference, but
+  // that's not where the Billing report looks). The migration
+  // 20260528150000_invoice_tracking_qbo_id_columns.sql adds qbo_invoice_id
+  // + qbo_doc_number columns; we now stamp all three together so the
+  // Billing report can render the actual QBO Id as proof of confirmation
+  // and flag the silent-failure case (qbo_pushed_at SET + qbo_invoice_id
+  // NULL) for operator audit.
+  //
+  // Ordering note: this UPDATE only runs after the QBO POST returned 2xx
+  // with a non-empty Invoice.Id (the earlier qboInvoiceId guard at
+  // ~line 331 returns 502 if QBO sent 200 with no Id). So qbo_pushed_at
+  // is never written without qbo_invoice_id alongside it.
+  //
   // invoice_no is the primary key (globally unique via next_invoice_no()
   // atomic sequence) so collision across tenants is impossible by design,
   // but we add the tenant_id filter as defense-in-depth.
   try {
     const { error: itErr } = await sb
       .from('invoice_tracking')
-      .update({ qbo_pushed_at: new Date().toISOString() })
+      .update({
+        qbo_pushed_at:  new Date().toISOString(),
+        qbo_invoice_id: qboInvoiceId,
+        qbo_doc_number: qboDocNumber || null,
+      })
       .eq('invoice_no', invoiceNo)
       .eq('tenant_id', tenantId);
     if (itErr) console.error('[qbo-create-invoice-sb] invoice_tracking stamp failed:', itErr.message);
@@ -364,9 +382,10 @@ Deno.serve(async (req: Request) => {
   }
 
   // ── Audit log ───────────────────────────────────────────────────────
-  // No qbo_invoice_id column on billing/invoice_tracking — we record it
-  // here as the durable cross-reference instead. Schema: entity_type=
-  // 'billing', entity_id=invoiceNo, action='qbo_push'.
+  // qbo_invoice_id now lives on invoice_tracking too (v38.240.0); the
+  // audit row remains the immutable record of what was returned at push
+  // time. Schema: entity_type='billing', entity_id=invoiceNo,
+  // action='qbo_push'.
   await writeAudit(sb, tenantId, invoiceNo, callerEmail, 'qbo_push',
     { qboInvoiceId, qboDocNumber, qboInvoiceUrl, lines: liveLines.length, total: liveTotal });
 
