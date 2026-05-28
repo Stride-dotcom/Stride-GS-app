@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.240.0 — 2026-05-28 PST — [TASKS] RUSH tasks auto-stamped High priority + Due Date = today (PT) at create. New block in handleBatchCreateTasks_ runs after the existing dueDate/priority resolution and before the row build: when `svcCode === "RUSH"`, taskDueDate is rewritten to `new Date(<todayPT>T00:00:00)` (mirrors the `payload.dueDate` parse path's local-midnight construction) and taskPriority is forced to "High", regardless of caller-supplied payload.priority / payload.dueDate or any slaHoursBySvcCode["RUSH"] entry. RUSH semantically means "needs done today" — the catalog SLA might be 24h or 4h or anything else, but operators expect a RUSH task to render in the Dashboard's "due today" bucket the moment it's written, not after a manual priority chip click. Pairs with the companion React change (Tasks.tsx + TaskDetailPanel.tsx) that fires postUpdateTaskDueDate(today) on the High transition so the same rule applies after-the-fact to any priority toggle, not just create-time. No schema change, no React API change required for the GAS side (the existing batchCreateTasks contract is preserved — payload.priority + payload.dueDate are still honored for every non-RUSH svcCode). Time-zone: Utilities.formatDate(now, "America/Los_Angeles", "yyyy-MM-dd") matches the React TODAY_DASH constant which uses Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles' }) — the two compute the same YYYY-MM-DD value, so a React refetch after a RUSH create sees the same date string the optimistic-patch path would have written.
+   StrideAPI.gs — v38.241.0 — 2026-05-28 PST — [BILLING] QBO push confirms success before recording, stores invoice ID as proof. INV-001132 surfaced a silent-success bug: the post-push invoice_tracking stamp wrote qbo_pushed_at for every result the loop flagged success=true, but didn't validate that QBO actually returned a non-empty Id — so a malformed response or any path that flipped success without a real ID (or a future Supabase write that fired before the QBO confirmation, etc.) could mark a push "done" without the invoice ever landing in QBO. Two coordinated changes. (1) handleQboCreateInvoice_ post-loop invoice_tracking stamp at ~line 44963 — pre-fix: ONE batched PATCH on invoice_no=in.(...) writing only qbo_pushed_at=now(); post-fix: per-invoice PATCH writing qbo_pushed_at, qbo_invoice_id, AND qbo_doc_number from each result's confirmed QBO response. Gate tightened to require BOTH res.success===true AND a non-empty res.qboInvoiceId — a success flag with empty Id no longer triggers the stamp. Per-invoice PATCH costs N round-trips instead of 1, but N is bounded by the batch size (typical 1–30, max ~50) and PostgREST handles these fast. Failures still log via the dispatch-level api_logBillingActivity_ call (action='qbo_push', status='failure') and additionally get an explicit action='qbo_push_failed' entry inside the handler so the Billing Activity tab can filter on the specific failure action. (2) qbo-create-invoice-sb Edge Function (supabase/functions/qbo-create-invoice-sb/index.ts) — its invoice_tracking UPDATE now writes the same three columns (qbo_pushed_at, qbo_invoice_id, qbo_doc_number) instead of just qbo_pushed_at. The EF already had the correct ordering (POST to QBO → parse Id → stamp), but was dropping the captured ID on the floor. Companion migration 20260528150000_invoice_tracking_qbo_id_columns.sql adds the two nullable text columns + a partial index. Companion React change in Billing.tsx renders a warning state ("?" badge) for the diagnostic case qbo_pushed_at SET + qbo_invoice_id NULL — covers historical pre-fix rows like INV-001132 so operators can audit and re-push if QBO has no record. No change to billing dollar totals, no change to v38.182 atomic invoice counter, no change to Void/Reissue logic.
+   v38.240.0 — 2026-05-28 PST — [TASKS] RUSH tasks auto-stamped High priority + Due Date = today (PT) at create. New block in handleBatchCreateTasks_ runs after the existing dueDate/priority resolution and before the row build: when `svcCode === "RUSH"`, taskDueDate is rewritten to `new Date(<todayPT>T00:00:00)` (mirrors the `payload.dueDate` parse path's local-midnight construction) and taskPriority is forced to "High", regardless of caller-supplied payload.priority / payload.dueDate or any slaHoursBySvcCode["RUSH"] entry. RUSH semantically means "needs done today" — the catalog SLA might be 24h or 4h or anything else, but operators expect a RUSH task to render in the Dashboard's "due today" bucket the moment it's written, not after a manual priority chip click. Pairs with the companion React change (Tasks.tsx + TaskDetailPanel.tsx) that fires postUpdateTaskDueDate(today) on the High transition so the same rule applies after-the-fact to any priority toggle, not just create-time. No schema change, no React API change required for the GAS side (the existing batchCreateTasks contract is preserved — payload.priority + payload.dueDate are still honored for every non-RUSH svcCode). Time-zone: Utilities.formatDate(now, "America/Los_Angeles", "yyyy-MM-dd") matches the React TODAY_DASH constant which uses Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles' }) — the two compute the same YYYY-MM-DD value, so a React refetch after a RUSH create sees the same date string the optimistic-patch path would have written.
    v38.239.1 — 2026-05-28 PST — [BILLING followup] Verification fixes for v38.239.0's storage-summary commit, NONE of which change a dollar total. Two coordinated changes. (1) handleQboCreateInvoice_ description build (both SB-primary path at ~line 44669 and CB-fallback path at ~line 44579) now detects summary rows by the combination of empty item_id + "(N items)" in item_notes, and emits "<period> — <N> items — <description>" instead of "<period> — <qty> day(s) — <description>". Pre-fix the qty=1 on a monthly summary row would render to QBO (and therefore the customer-facing QBO invoice line) as "Storage 04/01/26 to 04/30/26 — 1 day(s) — Monthly Storage", which a customer could read as "you charged me one day of storage for $X" and call to complain even though the total is correct. The total itself was correct in both paths — this is presentation only. (2) The migration that PR #547 added (20260528120000_storage_charges_summary_commit.sql) is edited in place — has NOT been applied to the prod project yet — to drop the third "OR b.date BETWEEN window" condition from the delete-pass. public.billing.date is a text column (inserted via p.out_billable_end::text by _compute_storage_charges), so a row carrying a malformed date string would have thrown on the ::date cast and aborted the whole commit. The two surviving conditions (parseable task_id range OR parseable STOR-SUMMARY period) cover every row this function should be touching; rows with neither are by definition externally produced and stay as-is. _parse_stor_task_range and _parse_stor_summary_period both tolerate malformed input by returning no rows. No schema change; no React change; no EF change. Hand-verified vs handleQboCreateInvoice_ (SB+CB paths), handleQbExport_ (Stax IIF + Stax invoices + stax_reconcileInvoiceAmount_), handleCreateInvoice_ (CB write + sheet-markable filter + api_buildInvoiceLineItems_), handleVoidInvoice_ / handleReissueInvoice_ (by-Invoice# operations, summary-blind), reconcileCbFromBilling_ (per-ledger_row_id update/append), log_billing_parity trigger (parses NULL rate as 0, no abort), summarizeStorageRowsForInvoice (passes through unchanged when storRows.length<2 — the new normal). All five downstream paths produce the same dollar totals before and after.
    v38.239.0 — 2026-05-28 PST — [BILLING] Summarize storage charges at commit. Pre-fix handleCommitStorageRows_ wrote one Billing_Ledger row per item per period — Roche Bobois alone produced 372 rows for a single monthly cycle, the fleet shipped 2,340 STOR rows after one cycle. The per-item detail was already being collapsed into a single line at invoice time by Billing.tsx summarizeStorageRowsForInvoice, but by then the bloat had already landed in the sheet + public.billing. New behavior: handleCommitStorageRows_ groups incoming per-item rows by tenant and appends ONE summary STOR row per tenant per commit. ledger_row_id / task_id = STOR-SUMMARY-<tenantId>-<YYYYMMDD>-<YYYYMMDD> (deterministic, sheet-resident, distinct from the legacy invoice-time synthetic STOR-SUMMARY-<uuid> form). Description = "Monthly Storage" per operator preference. Qty=1, Rate blank, Total=sum of per-item totals (integer-cents to dodge float drift). Date = max billable end across the input rows. Item Notes carries human-readable "Storage MM/DD/YY to MM/DD/YY (N items)". Two safety gates: (a) when any finalized (Invoiced/Billed/Void) STOR-SUMMARY row already covers the requested window for the tenant, the commit is skipped for that tenant — prevents double billing on accidental re-runs since _compute_storage_charges's per-item dedup keys on item_id (blank on summary rows) and would not catch this case; (b) the existing delete-pass widens to remove any Unbilled STOR row in the window (per-item leftovers from older builds + prior summaries) so re-running cleanly replaces the working state. New helper api_parseStorSummaryPeriod_(ledgerRowId) parses the YYYYMMDD-YYYYMMDD suffix for the gate. Companion handleCreateInvoice_ filter at the sheet-markable-subset step distinguishes the new deterministic form (suffix /-\d{8}-\d{8}$/, IS on sheet, must be marked Invoiced) from the legacy invoice-time synthetic form (UUID suffix, NOT on sheet, must be excluded from the partial-flip check) — without this the new STOR-SUMMARY rows would be filtered out of the sheet flip and the v38.157.0 half-write detector would fire HALF_WRITE_DETECTED on every storage invoice. _compute_storage_charges + handlePreviewStorageCharges_ + handleGenerateStorageCharges_ (the preview path) are intentionally unchanged — the per-item table operators review before committing still shows per-item detail. Companion supabase migration 20260528120000_storage_charges_summary_commit.sql replaces public.generate_storage_charges with the aggregating variant for the SB-primary flag flip; companion EF commit-storage-charges-sb (no logic change — already calls the RPC) automatically picks up the new behavior once the migration deploys.
    v38.238.0 — 2026-05-26 PST — [DATA-FIX] Class column data validation on every per-tenant Inventory sheet allowed only XS/S/M/L/XL/XXL — saving NC (No Charge, added to public.item_classes in PR #529) failed with "data you entered violates the data validation rules set on this cell" on item 63623 (MR. Studio). Three changes in one bump. (1) New one-shot operator function fixClassValidation_20260526_ iterates every active CB client, opens the per-tenant Inventory sheet, locates the Class column via header map (defensive against R-column drift), and replaces the cell-range data validation across rows 2..maxRows with SpreadsheetApp.newDataValidation().requireValueInList(["XS","S","M","L","XL","XXL","NC"], true).setAllowInvalid(false).build(). Also applies the same validation to the CLIENT_INVENTORY_TEMPLATE_ID sheet so future onboarded clients get NC from day one. Idempotent — re-running on already-fixed sheets writes the same rule and is a no-op. Returns a per-client summary (sheetsFixed / sheetsSkipped / sheetsMissing / templateFixed / errors). (2) New doPost case "fixClassValidation20260526" wired to the one-shot, gated only by the API_TOKEN bearer (same pattern as oneshotFixStorageAuditCorrections in v38.237.0) — no payload, hardcoded body, zero per-call risk. (3) No schema change, no React change. Run once via HTTP POST after deploy; safe to re-run.
@@ -44977,44 +44978,102 @@ function handleQboCreateInvoice_(payload) {
     });
   }
 
-  // v38.194.0 (Invoice Review overhaul, Step 3a) — Stamp qbo_pushed_at on
-  // public.invoice_tracking for every successfully pushed invoice. One PATCH
-  // round-trip via PostgREST `qb_invoice_no=in.(...)` regardless of batch size.
-  // The Invoice Review tab's QBO Status column reads from this column to
-  // render the green check + push-time tooltip. Best-effort: never blocks the
-  // QBO push response.
+  // v38.240.0 — Confirm-before-record stamp on public.invoice_tracking.
+  // Pre-fix (v38.194.0 -> v38.239.1): one batched PATCH writing
+  //   qbo_pushed_at=now() to invoice_no=in.(...all success results...).
+  // That stamp wrote nothing else, so a malformed QBO response (success
+  // flag true but Id missing) or any future code path that flipped
+  // res.success without confirming the actual QBO invoice creation
+  // could mark a push "done" without proof. INV-001132 was an example.
+  //
+  // Post-fix: per-invoice PATCH that writes qbo_pushed_at + qbo_invoice_id
+  // + qbo_doc_number from the per-result QBO response. Gate tightened
+  // to require BOTH res.success===true AND a non-empty qboInvoiceId —
+  // a success flag with empty Id is treated as a failure for stamping
+  // purposes and logged via the qbo_push_failed audit entry below.
+  // Cost: N round-trips instead of 1, but N is bounded by batch size
+  // (typical 1–30, max ~50) and PostgREST handles these fast.
+  var stampNowIso = new Date().toISOString();
   try {
-    var pushedInvoiceNos = [];
-    for (var pi = 0; pi < results.length; pi++) {
-      if (results[pi].success && results[pi].strideInvoiceNumber) {
-        pushedInvoiceNos.push(String(results[pi].strideInvoiceNumber));
-      }
-    }
-    if (pushedInvoiceNos.length > 0) {
-      var sbUrlIT2 = prop_("SUPABASE_URL");
-      var sbKeyIT2 = prop_("SUPABASE_SERVICE_ROLE_KEY");
-      if (sbUrlIT2 && sbKeyIT2) {
-        var inFilterIT2 = pushedInvoiceNos.map(function(n) {
-          return '"' + String(n).replace(/"/g, '\\"') + '"';
-        }).join(",");
-        UrlFetchApp.fetch(
-          sbUrlIT2 + "/rest/v1/invoice_tracking?invoice_no=in.(" + encodeURIComponent(inFilterIT2) + ")",
-          {
-            method: "PATCH",
-            headers: {
-              "Authorization": "Bearer " + sbKeyIT2,
-              "apikey":        sbKeyIT2,
-              "Content-Type":  "application/json",
-              "Prefer":        "return=minimal"
-            },
-            payload: JSON.stringify({ qbo_pushed_at: new Date().toISOString() }),
-            muteHttpExceptions: true
-          }
-        );
+    var sbUrlIT2 = prop_("SUPABASE_URL");
+    var sbKeyIT2 = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (sbUrlIT2 && sbKeyIT2) {
+      for (var pi = 0; pi < results.length; pi++) {
+        var resIT = results[pi];
+        var invNoIT = String(resIT.strideInvoiceNumber || "").trim();
+        var qboIdIT = String(resIT.qboInvoiceId || "").trim();
+        // Tightened gate: BOTH success===true AND a non-empty Id.
+        // qboDocNumber can legitimately be empty when QBO auto-assigns
+        // and the response omits it from the echo (rare but possible).
+        if (!resIT.success || !invNoIT || !qboIdIT) continue;
+        try {
+          UrlFetchApp.fetch(
+            sbUrlIT2 + "/rest/v1/invoice_tracking?invoice_no=eq." + encodeURIComponent(invNoIT),
+            {
+              method: "PATCH",
+              headers: {
+                "Authorization": "Bearer " + sbKeyIT2,
+                "apikey":        sbKeyIT2,
+                "Content-Type":  "application/json",
+                "Prefer":        "return=minimal"
+              },
+              payload: JSON.stringify({
+                qbo_pushed_at:  stampNowIso,
+                qbo_invoice_id: qboIdIT,
+                qbo_doc_number: String(resIT.qboDocNumber || "") || null
+              }),
+              muteHttpExceptions: true
+            }
+          );
+        } catch (perInvErr) {
+          Logger.log("invoice_tracking stamp failed for " + invNoIT + " (non-fatal): " + perInvErr.message);
+        }
       }
     }
   } catch (itErr) {
-    Logger.log("invoice_tracking qbo_pushed_at stamp failed (non-fatal): " + itErr.message);
+    Logger.log("invoice_tracking stamp loop failed (non-fatal): " + itErr.message);
+  }
+
+  // v38.240.0 — Explicit qbo_push_failed audit entries for any result
+  // that did NOT land cleanly. The dispatch-level api_logBillingActivity_
+  // call at ~line 10749 already writes action='qbo_push' with
+  // status='failure' for the same set, so this is intentionally
+  // duplicative — operators searching for the user-asked
+  // action='qbo_push_failed' filter find a 1:1 match, while the
+  // existing 'qbo_push' label keeps the UI's BillingActivityTab labels
+  // and KPI counts unchanged. Also captures the bad-but-not-thrown
+  // case where success===true but qboInvoiceId is empty — that's the
+  // class of bug INV-001132 represents.
+  try {
+    var tenantIdLog = String(payload.tenantId || payload.clientSheetId || payload.sourceSheetId || "");
+    if (tenantIdLog) {
+      for (var fi = 0; fi < results.length; fi++) {
+        var resF = results[fi];
+        var idMissing = resF.success && !String(resF.qboInvoiceId || "").trim();
+        if (!resF.success || idMissing) {
+          // Skip the "already pushed, no force re-push" skipped path — that's
+          // not a failure, it's a deliberate no-op.
+          if (resF.skipped) continue;
+          api_logBillingActivity_({
+            tenantId:     tenantIdLog,
+            clientName:   resF.customerName || null,
+            action:       "qbo_push_failed",
+            status:       "failure",
+            invoiceNo:    resF.strideInvoiceNumber || null,
+            qboInvoiceId: resF.qboInvoiceId || null,
+            qboDocNumber: resF.qboDocNumber || null,
+            summary:      idMissing
+                            ? ("QBO push returned success=true but no Invoice Id for " + resF.strideInvoiceNumber + " — treating as failure, invoice_tracking NOT stamped")
+                            : ("QBO push failed for " + resF.strideInvoiceNumber),
+            errorMessage: resF.error || (idMissing ? "Empty qboInvoiceId in QBO response" : null),
+            details:      { subJobName: resF.subJobName || null, warning: resF.warning || null, idMissing: idMissing },
+            performedBy:  "system"
+          });
+        }
+      }
+    }
+  } catch (failLogErr) {
+    Logger.log("qbo_push_failed audit log failed (non-fatal): " + failLogErr.message);
   }
 
   return {
