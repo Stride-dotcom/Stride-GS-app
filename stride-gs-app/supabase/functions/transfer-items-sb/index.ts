@@ -232,6 +232,10 @@ Deno.serve(async (req: Request) => {
   //     up by the next unbilled-report and invoiced — exactly the duplicate-charge
   //     bug we're closing. GAS handleTransferItems_ already does the equivalent
   //     sheet-side void; this mirrors it in public.billing.
+  //
+  //     Note: public.billing.tenant_id stays = source through transfer (it's set
+  //     at row insert and NOT migrated by step 2's inventory PATCH), so .eq on
+  //     tenantId here correctly targets the pre-transfer billing rows.
   if (toTransfer.length > 0) {
     const ids = toTransfer.map(t => t.itemId);
     const { error: voidErr, count: voidedCount } = await sb
