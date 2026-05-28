@@ -517,10 +517,11 @@ function DetailsTab({
           dt_credentials.verified_account_tenants yet — see the v41
           fallback in dt-push-order). The order is visible in DT but
           attached to the wrong account; operator needs to verify the
-          DT-side account name matches the Stride map exactly, mark
-          the tenant verified via SQL (or a future admin UI), then
-          Republish. Self-hides once pushed_account_was_fallback flips
-          back to false on a clean re-push. */}
+          DT-side account name matches the Stride map exactly, mark the
+          tenant verified via Settings → Integrations → DispatchTrack
+          Account Mapping → Verify, then Republish. Self-hides once
+          pushed_account_was_fallback flips back to false on a clean
+          re-push. */}
       {order.pushedAccountWasFallback && (
         <div style={{
           background: '#FEF3C7',
@@ -540,11 +541,11 @@ function DetailsTab({
             but attached to the wrong account.
           </div>
           <div style={{ marginTop: 6 }}>
-            <strong>To fix:</strong> verify the DT-side account name exactly matches what's in Stride's
-            Account Mapping (Settings → Integrations → DispatchTrack Account Mapping).
-            Once the names match, an admin marks the tenant verified via SQL
-            (<code style={{ background: 'rgba(0,0,0,0.06)', padding: '1px 4px', borderRadius: 3 }}>verified_account_tenants</code>)
-            and you click Republish to DT — the order will land under the correct account.
+            <strong>To fix:</strong> open <strong>Settings → Integrations → DispatchTrack → Manage Account Mapping</strong>,
+            confirm the DT account name matches DispatchTrack exactly (spelling + capitalization),
+            then click <strong>Verify</strong> next to this client. Once verified, click <strong>Republish to DT</strong> above —
+            the order will land under the correct account. (Note: the original push will likely remain on
+            STRIDE LOGISTICS in DT until you delete it there.)
           </div>
         </div>
       )}

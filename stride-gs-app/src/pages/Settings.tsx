@@ -195,20 +195,34 @@ function IntegrationsTab() {
   const [staxError, setStaxError] = useState<string | null>(null);
 
   // ── DispatchTrack account mapping ────────────────────────────────────────
-  type DtCredsRow = { id: string; api_base_url: string | null; account_name_map: Record<string, string>; house_tenant_id: string | null };
+  // verified_account_tenants (v41 — 2026-05-26) is a JSONB array of
+  // tenant_id strings. Tenants in the list push under their mapped DT
+  // account; tenants NOT in the list fall back to STRIDE LOGISTICS on
+  // every push. Toggling verification is the self-service replacement
+  // for the SQL update the migration introduced as a stopgap.
+  type DtCredsRow = {
+    id: string;
+    api_base_url: string | null;
+    account_name_map: Record<string, string>;
+    house_tenant_id: string | null;
+    verified_account_tenants: string[] | null;
+  };
   const [dtCreds, setDtCreds] = useState<DtCredsRow | null>(null);
   const [dtCredsLoading, setDtCredsLoading] = useState(true);
   const [dtOpen, setDtOpen] = useState(false);
-  const [dtFilter, setDtFilter] = useState<'all' | 'missing'>('all');
+  const [dtFilter, setDtFilter] = useState<'all' | 'missing' | 'unverified'>('all');
   const [dtSearch, setDtSearch] = useState('');
   const [dtActiveEdit, setDtActiveEdit] = useState<string | null>(null); // spreadsheetId being edited
   const [dtEditValue, setDtEditValue] = useState('');
   const [dtSaving, setDtSaving] = useState<Record<string, boolean>>({});
   const [dtSaveError, setDtSaveError] = useState<string | null>(null);
+  // Per-row verify toggle in-flight state, keyed by spreadsheetId.
+  const [dtVerifySaving, setDtVerifySaving] = useState<Record<string, boolean>>({});
+  const [dtVerifyError, setDtVerifyError] = useState<string | null>(null);
   const { apiClients: dtClients } = useClients(true);
 
   useEffect(() => {
-    supabase.from('dt_credentials').select('id, api_base_url, account_name_map, house_tenant_id').single()
+    supabase.from('dt_credentials').select('id, api_base_url, account_name_map, house_tenant_id, verified_account_tenants').single()
       .then(({ data }) => {
         if (data) setDtCreds(data as DtCredsRow);
         setDtCredsLoading(false);
@@ -227,7 +241,20 @@ function IntegrationsTab() {
     return dtCreds.account_name_map[spreadsheetId] ?? '';
   };
 
+  // True when this tenant is in dt_credentials.verified_account_tenants.
+  // Unmapped tenants (no DT name) report false too — verification only
+  // matters once a name exists.
+  const isDtVerified = (spreadsheetId: string): boolean => {
+    const list = dtCreds?.verified_account_tenants;
+    if (!Array.isArray(list)) return false;
+    return list.includes(spreadsheetId);
+  };
+
   const dtMissingCount = dtClients.filter(c => !getDtName(c.spreadsheetId)).length;
+  // Unverified = mapped but not yet on the verified allowlist. The
+  // problematic case the operator wants to find and fix — these push
+  // under STRIDE LOGISTICS instead of the mapped account.
+  const dtUnverifiedCount = dtClients.filter(c => getDtName(c.spreadsheetId) && !isDtVerified(c.spreadsheetId)).length;
 
   const handleDtEditStart = (spreadsheetId: string) => {
     setDtActiveEdit(spreadsheetId);
@@ -267,6 +294,33 @@ function IntegrationsTab() {
     return Object.values(dtCreds.account_name_map).filter(v => v === name).length;
   };
 
+  // Toggle a tenant in/out of dt_credentials.verified_account_tenants.
+  // Verifying signals "I confirmed the DT-side account exists exactly as
+  // mapped, future pushes are safe to use the real name." Unverifying is
+  // the escape hatch when an issue is rediscovered (e.g., DT-side account
+  // got renamed). Operates on the canonical array stored in the DB so a
+  // failed write leaves local state untouched.
+  const handleDtVerifyToggle = async (spreadsheetId: string) => {
+    if (!dtCreds) return;
+    const current = Array.isArray(dtCreds.verified_account_tenants) ? dtCreds.verified_account_tenants : [];
+    const willVerify = !current.includes(spreadsheetId);
+    setDtVerifySaving(prev => ({ ...prev, [spreadsheetId]: true }));
+    setDtVerifyError(null);
+    const next = willVerify
+      ? Array.from(new Set([...current, spreadsheetId]))
+      : current.filter(t => t !== spreadsheetId);
+    const { error } = await supabase
+      .from('dt_credentials')
+      .update({ verified_account_tenants: next })
+      .eq('id', dtCreds.id);
+    if (!error) {
+      setDtCreds(prev => prev ? { ...prev, verified_account_tenants: next } : prev);
+    } else {
+      setDtVerifyError(error.message);
+    }
+    setDtVerifySaving(prev => { const n = { ...prev }; delete n[spreadsheetId]; return n; });
+  };
+
   // House tenant — webhook events for unrecognized DT accounts bind
   // here instead of quarantining. Pair with the push-side "STRIDE
   // LOGISTICS" account fallback so neither direction ever blocks.
@@ -291,6 +345,7 @@ function IntegrationsTab() {
   const dtDisplayClients = dtClients
     .filter(c => {
       if (dtFilter === 'missing') return !getDtName(c.spreadsheetId);
+      if (dtFilter === 'unverified') return !!getDtName(c.spreadsheetId) && !isDtVerified(c.spreadsheetId);
       return true;
     })
     .filter(c => !dtSearch || c.name.toLowerCase().includes(dtSearch.toLowerCase()) || getDtName(c.spreadsheetId).toLowerCase().includes(dtSearch.toLowerCase()));
@@ -463,7 +518,7 @@ function IntegrationsTab() {
             ) : dtCreds ? (
               <>
                 {/* Stats row */}
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginBottom: 14 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, marginBottom: 14 }}>
                   <div style={{ background: theme.colors.bgSubtle, border: `1px solid ${theme.colors.border}`, borderRadius: 8, padding: '8px 12px' }}>
                     <div style={{ fontSize: 10, fontWeight: 600, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 2 }}>API URL</div>
                     <div style={{ fontSize: 12, color: theme.colors.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{dtCreds.api_base_url || '—'}</div>
@@ -476,9 +531,20 @@ function IntegrationsTab() {
                     <div style={{ fontSize: 10, fontWeight: 600, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 2 }}>Missing</div>
                     <div style={{ fontSize: 18, fontWeight: 700, color: dtMissingCount > 0 ? '#DC2626' : '#15803D' }}>{dtMissingCount}</div>
                   </div>
+                  <div style={{ background: dtUnverifiedCount > 0 ? '#FFFBEB' : theme.colors.bgSubtle, border: `1px solid ${dtUnverifiedCount > 0 ? '#FCD34D' : theme.colors.border}`, borderRadius: 8, padding: '8px 12px' }}>
+                    <div style={{ fontSize: 10, fontWeight: 600, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 2 }}>Unverified</div>
+                    <div style={{ fontSize: 18, fontWeight: 700, color: dtUnverifiedCount > 0 ? '#B45309' : '#15803D' }}>{dtUnverifiedCount}</div>
+                  </div>
                 </div>
                 <button
-                  onClick={() => { setDtOpen(true); setDtFilter(dtMissingCount > 0 ? 'missing' : 'all'); setDtSearch(''); }}
+                  onClick={() => {
+                    setDtOpen(true);
+                    // Open straight to whichever filter has work waiting:
+                    // missing wins (it's blocker-level); unverified next;
+                    // then 'all' when everything is in good shape.
+                    setDtFilter(dtMissingCount > 0 ? 'missing' : dtUnverifiedCount > 0 ? 'unverified' : 'all');
+                    setDtSearch('');
+                  }}
                   style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 14px', fontSize: 12, fontWeight: 600, background: theme.colors.primary, color: '#fff', border: 'none', borderRadius: 7, cursor: 'pointer', fontFamily: 'inherit' }}
                 >
                   <Link2 size={13} /> Manage Account Mapping
@@ -537,9 +603,9 @@ function IntegrationsTab() {
             <div style={{ padding: '10px 20px', borderBottom: `1px solid ${theme.colors.border}`, display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0, background: theme.colors.bgSubtle }}>
               {/* Filter tabs */}
               <div style={{ display: 'flex', background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 7, overflow: 'hidden', flexShrink: 0 }}>
-                {(['all', 'missing'] as const).map(f => (
+                {(['all', 'missing', 'unverified'] as const).map(f => (
                   <button key={f} onClick={() => setDtFilter(f)} style={{ padding: '5px 12px', fontSize: 11, fontWeight: 600, border: 'none', cursor: 'pointer', fontFamily: 'inherit', background: dtFilter === f ? theme.colors.primary : 'transparent', color: dtFilter === f ? '#fff' : theme.colors.textSecondary }}>
-                    {f === 'all' ? `All (${dtClients.length})` : `Missing (${dtMissingCount})`}
+                    {f === 'all' ? `All (${dtClients.length})` : f === 'missing' ? `Missing (${dtMissingCount})` : `Unverified (${dtUnverifiedCount})`}
                   </button>
                 ))}
               </div>
@@ -558,8 +624,10 @@ function IntegrationsTab() {
 
             {/* Table */}
             <div style={{ flex: 1, overflowY: 'auto' }}>
-              {/* Column headers */}
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 90px', padding: '8px 20px', borderBottom: `1px solid ${theme.colors.border}`, background: theme.colors.bgSubtle }}>
+              {/* Column headers — grid widened to fit the Verify column.
+                  Status now carries both the Linked/Missing badge and a
+                  Verified ✓ / Verify button on a mapped row. */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 150px', padding: '8px 20px', borderBottom: `1px solid ${theme.colors.border}`, background: theme.colors.bgSubtle }}>
                 <div style={{ fontSize: 10, fontWeight: 700, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Stride Client</div>
                 <div style={{ fontSize: 10, fontWeight: 700, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em' }}>DT Account Name</div>
                 <div style={{ fontSize: 10, fontWeight: 700, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Status</div>
@@ -567,15 +635,19 @@ function IntegrationsTab() {
 
               {dtDisplayClients.length === 0 ? (
                 <div style={{ padding: 40, textAlign: 'center', color: theme.colors.textMuted, fontSize: 13 }}>
-                  {dtFilter === 'missing' ? '🎉 All clients have a DT account linked' : 'No clients found'}
+                  {dtFilter === 'missing' ? '🎉 All clients have a DT account linked'
+                    : dtFilter === 'unverified' ? '🎉 All mapped clients are verified'
+                    : 'No clients found'}
                 </div>
               ) : dtDisplayClients.map(client => {
                 const dtName = getDtName(client.spreadsheetId);
                 const isMissing = !dtName;
                 const isEditing = dtActiveEdit === client.spreadsheetId;
                 const isSaving = dtSaving[client.spreadsheetId];
+                const verified = isDtVerified(client.spreadsheetId);
+                const verifySaving = !!dtVerifySaving[client.spreadsheetId];
                 return (
-                  <div key={client.spreadsheetId} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 90px', padding: '10px 20px', borderBottom: `1px solid ${theme.colors.border}`, alignItems: 'center', background: isEditing ? '#FAFAFA' : '#fff' }}>
+                  <div key={client.spreadsheetId} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 150px', padding: '10px 20px', borderBottom: `1px solid ${theme.colors.border}`, alignItems: 'center', background: isEditing ? '#FAFAFA' : '#fff' }}>
                     {/* Client name */}
                     <div style={{ fontSize: 13, fontWeight: 500, paddingRight: 12 }}>{client.name}</div>
 
@@ -622,23 +694,45 @@ function IntegrationsTab() {
                       {isEditing && dtSaveError && <div style={{ fontSize: 11, color: '#DC2626', marginTop: 3 }}>{dtSaveError}</div>}
                     </div>
 
-                    {/* Status badge */}
-                    <div>
+                    {/* Status — Missing (unmapped) | Verify (mapped + not verified, click-to-toggle) | Verified ✓ (click-to-unverify).
+                        Verified rows push under the real DT account; non-verified mapped rows fall back to STRIDE LOGISTICS. */}
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-start' }}>
                       {isMissing ? (
                         <span style={{ fontSize: 10, fontWeight: 600, background: '#FEF2F2', color: '#DC2626', border: '1px solid #FECACA', borderRadius: 4, padding: '2px 7px' }}>Missing</span>
+                      ) : verified ? (
+                        <button
+                          onClick={() => handleDtVerifyToggle(client.spreadsheetId)}
+                          disabled={verifySaving}
+                          title="Click to unverify (future pushes will fall back to STRIDE LOGISTICS)"
+                          style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 10, fontWeight: 600, background: '#F0FDF4', color: '#15803D', border: '1px solid #BBF7D0', borderRadius: 4, padding: '3px 8px', cursor: verifySaving ? 'default' : 'pointer', fontFamily: 'inherit' }}
+                        >
+                          {verifySaving ? <Loader2 size={10} style={{ animation: 'spin 1s linear infinite' }} /> : <CheckCircle2 size={10} />}
+                          Verified
+                        </button>
                       ) : (
-                        <span style={{ fontSize: 10, fontWeight: 600, background: '#F0FDF4', color: '#15803D', border: '1px solid #BBF7D0', borderRadius: 4, padding: '2px 7px', display: 'flex', alignItems: 'center', gap: 3 }}><CheckCircle2 size={9} /> Linked</span>
+                        <button
+                          onClick={() => handleDtVerifyToggle(client.spreadsheetId)}
+                          disabled={verifySaving}
+                          title="Mark this tenant verified once you've confirmed the DT-side account name matches exactly. Until then, pushes fall back to STRIDE LOGISTICS."
+                          style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 10, fontWeight: 700, background: '#FFFBEB', color: '#B45309', border: '1px solid #FCD34D', borderRadius: 4, padding: '3px 8px', cursor: verifySaving ? 'default' : 'pointer', fontFamily: 'inherit' }}
+                        >
+                          {verifySaving ? <Loader2 size={10} style={{ animation: 'spin 1s linear infinite' }} /> : null}
+                          Verify
+                        </button>
                       )}
                     </div>
                   </div>
                 );
               })}
+              {dtVerifyError && <div style={{ padding: '8px 20px', fontSize: 11, color: '#DC2626' }}>Verify toggle failed: {dtVerifyError}</div>}
             </div>
 
             {/* Footer */}
             <div style={{ padding: '10px 20px', borderTop: `1px solid ${theme.colors.border}`, background: theme.colors.bgSubtle, flexShrink: 0 }}>
-              <div style={{ fontSize: 11, color: theme.colors.textMuted, lineHeight: 1.5 }}>
-                DT account names must match exactly as they appear in DispatchTrack (spelling and capitalization matter). Multiple clients can share the same DT account — just enter the same name on each, and a ×N badge will appear next to it. Changes save immediately.
+              <div style={{ fontSize: 11, color: theme.colors.textMuted, lineHeight: 1.55 }}>
+                DT account names must match exactly as they appear in DispatchTrack (spelling and capitalization matter). Multiple clients can share the same DT account — enter the same name on each and a ×N badge will appear next to it.
+                <br />
+                <strong>Verify</strong> a mapped client once you've confirmed the DT-side account exists exactly as written. Unverified clients push under <strong>STRIDE LOGISTICS</strong> as a safety net so the order lands somewhere visible — but it'll be on the wrong account until verified and re-pushed. Changes save immediately.
               </div>
             </div>
           </div>
