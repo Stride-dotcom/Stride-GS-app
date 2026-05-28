@@ -1864,7 +1864,13 @@ export function Inventory() {
           STRIDE LOGISTICS · INVENTORY
         </div>
       </div>
-      <div className="no-print" style={{ background: '#FFFFFF', borderRadius: 20, padding: 24, border: '1px solid rgba(0,0,0,0.04)', display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
+      {/* 2026-05-28 fix — removed `no-print` from this wrapper. It was
+          swallowing the table during print (the @media print rule sets
+          display:none on .no-print), leaving the print preview with only
+          the header above. The inner toolbars / filters / pagination
+          rows each carry their own `no-print` (see ~1874, 1880, 2087,
+          2115, 2434, 2443) so they still hide correctly. */}
+      <div style={{ background: '#FFFFFF', borderRadius: 20, padding: 24, border: '1px solid rgba(0,0,0,0.04)', display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
 
       <SyncBanner syncing={refreshing} label={clientFilter.length === 1 ? clientFilter[0] : clientFilter.length > 1 ? `${clientFilter.length} clients` : undefined} />
 
