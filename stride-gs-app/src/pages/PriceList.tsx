@@ -68,6 +68,11 @@ function savePrefs(email: string, prefs: PriceListPrefs) {
 const ALL_CATEGORIES: ServiceCategory[] = [
   'Warehouse', 'Storage', 'Shipping', 'Assembly',
   'Repair', 'Labor', 'Admin', 'Delivery',
+  // 'Fabric Protection' was in SHAREABLE_CATEGORIES + the
+  // ServiceCategory type union but was missing here, so the 11 FAB_*
+  // services were only visible via the "All services" view — operators
+  // couldn't pick the category from the sidebar.
+  'Fabric Protection',
 ];
 
 const SHAREABLE_CATEGORIES: ServiceCategory[] = [
