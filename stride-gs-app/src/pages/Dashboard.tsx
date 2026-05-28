@@ -535,7 +535,14 @@ const REPAIR_COL_LABELS: Record<string, string> = { repairId: 'Repair ID', repai
 
 function RepairsTab({ repairs, onNavigate, userRole, indicators }: { repairs: SummaryRepair[]; onNavigate: (repair: SummaryRepair) => void; userRole?: string; indicators?: { inspOpenItems: Set<string>; inspDoneItems: Set<string>; inspFailedItems: Set<string>; asmOpenItems: Set<string>; asmDoneItems: Set<string>; repairOpenItems: Set<string>; repairDoneItems: Set<string>; wcOpenItems: Set<string>; wcDoneItems: Set<string> } }) {
   const colR = createColumnHelper<SummaryRepair>();
-  const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder } = useTablePreferences('dashboard-repairs', [{ id: 'repairCreated', desc: true }], {}, REPAIR_DEFAULT_ORDER);
+  // Default sort: Created ascending (oldest first). Repairs don't have
+  // a due-date column, so "oldest waiting" is the closest proxy for
+  // "most urgent — work this next" — matches the Tasks (due date asc)
+  // and Will Calls (scheduled asc) defaults so all three Dashboard
+  // sections surface the most-overdue rows at the top.
+  // Per Justin 2026-05-28: dashboard default view for everyone =
+  // nearest due date / oldest waiting at the top.
+  const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder } = useTablePreferences('dashboard-repairs', [{ id: 'repairCreated', desc: false }], {}, REPAIR_DEFAULT_ORDER);
   const [statusFilters, setStatusFilters] = useState<string[]>(DEFAULT_REPAIR_STATUSES);
   const [showCols, setShowCols] = useState(false);
   const [dragColId, setDragColId] = useState<string | null>(null);
