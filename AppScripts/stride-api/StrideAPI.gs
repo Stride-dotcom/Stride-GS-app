@@ -1,5 +1,7 @@
 /* ===================================================
-   StrideAPI.gs — v38.248.0 — 2026-05-29 PST — [TASKS] feat: handleBatchCreateTasks_ now accepts payload.taskNotes (single string applied to every row in the batch) so the React CreateTaskModal "Advanced (optional)" section can stamp warehouse instructions at create time instead of forcing a per-task follow-up edit. payload.dueDate (already supported) and payload.priority (already supported) are unchanged; only the Task Notes column changes from a hardcoded "" to String(payload.taskNotes || "").trim(). Empty/missing taskNotes preserves the legacy blank-cell behavior so existing callers are unaffected. No change to invoice-counter, half-write, void-invoice SB-first, updateClient SB-primary, storage-charges transfer exclusion, auto-inspection-on-transfer, or any billing logic.
+   StrideAPI.gs — v38.249.0 — 2026-05-29 PST — [REPAIRS] feat: handleSendRepairQuote_ now accepts payload.isRevision (boolean) and payload.skipEmail (boolean) to power the new "Edit Quote after sent" flow in RepairDetailPanel.tsx. Three behavioral changes when isRevision=true: (1) the same-lines-and-total idempotency guards at the start of the handler and inside the lock no longer short-circuit — the operator explicitly asked to resend so the persistence pass and email send always fire; (2) the customer-facing email subject is prefixed with "REVISED — " ("REVISED — Repair Quote Ready: <ITEM_ID> $<GRAND>") so the client mailbox shows the revision clearly; (3) Quote Sent Date is preserved if it was already populated (no overwrite). When skipEmail=true (Save Draft path) the email block is skipped entirely while all sheet/Supabase writes still land. Status flip logic is unchanged — a Quote Sent repair stays Quote Sent on resend; only Pending Quote → Quote Sent transitions on first send. payload.isRevision defaults to false and payload.skipEmail defaults to false so existing callers (first-time send) are unaffected. No change to invoice-counter, half-write, void-invoice SB-first, updateClient SB-primary, storage-charges transfer exclusion, auto-inspection-on-transfer, or any billing logic.
+
+   v38.248.0 — 2026-05-29 PST — [TASKS] feat: handleBatchCreateTasks_ now accepts payload.taskNotes (single string applied to every row in the batch) so the React CreateTaskModal "Advanced (optional)" section can stamp warehouse instructions at create time instead of forcing a per-task follow-up edit. payload.dueDate (already supported) and payload.priority (already supported) are unchanged; only the Task Notes column changes from a hardcoded "" to String(payload.taskNotes || "").trim(). Empty/missing taskNotes preserves the legacy blank-cell behavior so existing callers are unaffected. No change to invoice-counter, half-write, void-invoice SB-first, updateClient SB-primary, storage-charges transfer exclusion, auto-inspection-on-transfer, or any billing logic.
 
    v38.247.0 — 2026-05-29 PST — [TRANSFER] feat: auto-create INSP tasks on transfer to an auto-inspect client. handleTransferItems_ gains a post-transfer block (between repairs and Move History) that fires when destSettings.AUTO_INSPECTION=true AND payload.createInspectionTasks !== false (i.e., operator did NOT explicitly opt out from the new frontend dialog). Logic: scan both source and destination Tasks sheets for any Task ID prefixed INSP- with Status=Completed against the transferred item IDs — item_id is preserved across transfers so a prior owner's inspection counts (mirrors the React pre-check). For uninspected items, generate one INSP task per item on the destination Tasks sheet using api_nextTaskCounter_ + api_buildRow_ with vendor/description/location/sidemark/shipment# pulled from the source inventory rows already loaded into rowsToCopy. Also flips the destination Inventory row's "Needs Inspection" column to TRUE (api_ensureColumn_ adds the column on legacy sheets that don't have it). Response gains inspectionTasksCreated count. All wrapped in a try/catch — auto-inspection failures push to warnings instead of aborting the transfer, mirroring the storage-backfill and email blocks. No change to v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, updateClient SB-primary route, storage-charges transfer exclusion (v38.245.1), or any billing logic.
    v38.246.0 — 2026-05-28 PST — [WRITETHROUGH] fix: complete reverse-writethrough field coverage for all entity types. Closes the five field gaps surfaced by AUDIT-writethrough-field-gaps.md (2026-05-28). (1) __writeThroughReverseWillCalls_ — UPDATE path was COD-only, threw on any non-COD edit when update-will-call-sb sent the full payload; refactored to share WC_REVERSE_FIELDS_ with the INSERT path and accept any subset (status, carrier, pickup_party, pickup_phone, requested_by, estimated_pickup_date, notes, item_count, cod, cod_amount, item_ids). New helpers __wcCoerceValue_ + __wcValueMatches_ centralize date/JSON coercion and idempotency comparison. (2) ShipmentDetailPanel direct supabase.from('shipments').update() now invokes new EF push-shipment-edit-to-sheet (modeled on push-will-call-cod-to-sheet) to mirror carrier / tracking_number / receive_date / notes via the existing __writeThroughReverseShipments_ writer — eliminates the silent sheet drift on every Edit-panel save. (3) REVERSE_REPAIR_FIELDS_ gains scheduled_date → "Scheduled Date" so update-repair-sb's scheduledDate payload reaches the sheet (legacy handleUpdateRepairNotes_ writes the same column). (4) REVERSE_TASK_FIELDS_ gains custom_price → "Custom Price" so a future update-task-sb path mirrors the per-task billing override read by completion handlers (StrideAPI.gs:8462, 8722, 9063). (5) REVERSE_CLIENTS_SB_ONLY_SETTINGS_ gains payment_method_required → "PAYMENT_METHOD_REQUIRED" for ops-visible per-tenant Settings mirror; paired with new migration 20260528150000 extending propagate_clients_to_sheet WHEN clause and adding the column to MIRRORED_COLUMNS in push-client-settings-to-sheet/index.ts so a standalone flip of just this field still fires. No change to v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, updateClient SB-primary route, storage-charges transfer exclusion (v38.245.1), or any billing logic.
@@ -20145,6 +20147,13 @@ function handleSendRepairQuote_(clientSheetId, payload) {
   var repairId = String(payload.repairId || "").trim();
   if (!repairId) return errorResponse_("repairId must not be empty", "INVALID_PARAMS");
 
+  // v38.249.0 — Edit-quote-after-sent flow flags. isRevision bypasses the
+  // same-lines idempotency skip (operator explicitly asked to resend) and
+  // prefixes the email subject with "REVISED — ". skipEmail (Save Draft)
+  // persists the updated quote without sending the customer-facing email.
+  var isRevision = payload && payload.isRevision === true;
+  var skipEmail  = payload && payload.skipEmail  === true;
+
   // ─── PARSE PAYLOAD — multi-line OR legacy single-amount ──────────────────
   // New shape (preferred):
   //   { repairId, quoteLines: [{ svcCode, svcName, qty, rate, taxable }],
@@ -20258,10 +20267,12 @@ function handleSendRepairQuote_(clientSheetId, payload) {
   }
 
   // Idempotency — same lines + same totals already sent → skip.
+  // v38.249.0 — bypass when isRevision=true: operator clicked "Save & Resend"
+  // explicitly and we honor that intent even when the lines are unchanged.
   var existingLinesJson = getVal("Quote Lines JSON");
   var newLinesJson = JSON.stringify(quoteLines);
   var quoteSentAt  = getVal("Quote Sent At");
-  if (quoteSentAt && existingLinesJson === newLinesJson && Number(getVal("Quote Grand Total")) === grandTotal) {
+  if (!isRevision && quoteSentAt && existingLinesJson === newLinesJson && Number(getVal("Quote Grand Total")) === grandTotal) {
     return jsonResponse_({ success: true, skipped: true, repairId: repairId, message: "Repair quote already sent (idempotency guard)" });
   }
 
@@ -20285,7 +20296,8 @@ function handleSendRepairQuote_(clientSheetId, payload) {
     var freshData = repSheet.getRange(repRow, 1, 1, repSheet.getLastColumn()).getValues()[0];
     function getFresh(h) { return repMap[h] ? String(freshData[repMap[h] - 1] || "").trim() : ""; }
     var freshQSA = getFresh("Quote Sent At");
-    if (freshQSA && getFresh("Quote Lines JSON") === newLinesJson && Number(getFresh("Quote Grand Total")) === grandTotal) {
+    // v38.249.0 — same isRevision bypass as the pre-lock check.
+    if (!isRevision && freshQSA && getFresh("Quote Lines JSON") === newLinesJson && Number(getFresh("Quote Grand Total")) === grandTotal) {
       lock.releaseLock();
       return jsonResponse_({ success: true, skipped: true, repairId: repairId, message: "Repair quote already sent (concurrent request)" });
     }
@@ -20341,8 +20353,13 @@ function handleSendRepairQuote_(clientSheetId, payload) {
   }
 
   // ─── EMAIL (non-critical — outside lock) ─────────────────────────────────
+  // v38.249.0 — Save Draft path (skipEmail=true) persists the updated
+  // quote rows without sending the customer-facing email so the operator
+  // can review before resending.
   var emailSent = false;
-  if (notifOn && allRecip) {
+  if (skipEmail) {
+    warnings.push("Email skipped: save-draft mode (operator requested no resend)");
+  } else if (notifOn && allRecip) {
     try {
       var itemId      = getVal("Item ID");
       var desc        = getVal("Description");
@@ -20382,8 +20399,11 @@ function handleSendRepairQuote_(clientSheetId, payload) {
       var taxRateFmt    = (Math.round(taxRate * 100) / 100).toFixed(2) + "%";
       var taxAreaLabel  = taxAreaName || "—";
 
+      // v38.249.0 — REVISED prefix on the subject when the operator
+      // clicked "Save & Resend" on an existing Quote Sent repair.
+      var emailSubject = (isRevision ? "REVISED — " : "") + "Repair Quote Ready: " + itemId + " $" + grandFmt;
       var emailResult = api_sendTemplateEmail_(settings, "REPAIR_QUOTE", allRecip,
-        "Repair Quote Ready: " + itemId + " $" + grandFmt,
+        emailSubject,
         {
           "{{ITEM_ID}}":                itemId       || "",
           "{{CLIENT_NAME}}":            clientName   || "Client",

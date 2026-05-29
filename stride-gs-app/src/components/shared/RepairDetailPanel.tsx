@@ -305,6 +305,47 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitResult, setSubmitResult] = useState<SendRepairQuoteResponse | null>(null);
 
+  // ─── Edit-quote-after-sent flow (v2026-05-29) ─────────────────────────────
+  // Operator can re-open the multi-line builder on a Quote Sent repair
+  // without voiding. Approved+ stays locked — those go through Void.
+  // Toggling on snapshots the persisted quote into the builder state so a
+  // Cancel reverts to the original lines/tax-area selection. Save & Resend
+  // and Save Draft both call handleSendQuote with the appropriate flags.
+  const [isEditingQuote, setIsEditingQuote] = useState(false);
+  const [editMode, setEditMode] = useState<'resend' | 'draft' | null>(null);
+  const [editSavedMessage, setEditSavedMessage] = useState<string | null>(null);
+
+  const handleStartEditQuote = () => {
+    setSubmitError(null);
+    // Snapshot persisted quote → builder state. Re-runs the same shape
+    // as the initialLines IIFE at mount but reads the latest repair prop
+    // so optimistic patches from a prior Save Draft are reflected.
+    if (Array.isArray(repair.quoteLines) && repair.quoteLines.length > 0) {
+      setQuoteLines(repair.quoteLines.map(l => ({
+        svcCode: l.svcCode, svcName: l.svcName,
+        qty: String(l.qty), rate: String(l.rate),
+        taxable: l.taxable === true,
+      })));
+    }
+    if (repair.quoteTaxAreaId) setTaxAreaId(repair.quoteTaxAreaId);
+    setIsEditingQuote(true);
+  };
+
+  const handleCancelEditQuote = () => {
+    // Reset to persisted state — same logic as Start Edit (idempotent).
+    if (Array.isArray(repair.quoteLines) && repair.quoteLines.length > 0) {
+      setQuoteLines(repair.quoteLines.map(l => ({
+        svcCode: l.svcCode, svcName: l.svcName,
+        qty: String(l.qty), rate: String(l.rate),
+        taxable: l.taxable === true,
+      })));
+    }
+    if (repair.quoteTaxAreaId) setTaxAreaId(repair.quoteTaxAreaId);
+    setIsEditingQuote(false);
+    setEditMode(null);
+    setSubmitError(null);
+  };
+
   // Print Work Order state — client-side render via DOC_REPAIR_WORK_ORDER
   // template + browser print dialog. Separate from submitting/startResult so
   // the WO regenerate path doesn't compete with the Approve/Start/Complete
@@ -521,8 +562,19 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   };
 
   // ─── Send Quote ────────────────────────────────────────────────────────────
-  const handleSendQuote = async () => {
+  // opts.isRevision — set by Save & Resend on the edit-after-sent flow so
+  //   the backend prefixes the email subject with "REVISED — " and bypasses
+  //   the same-lines idempotency skip.
+  // opts.skipEmail  — Save Draft path; persist the updated lines without
+  //   sending the customer email.
+  const handleSendQuote = async (opts?: { isRevision?: boolean; skipEmail?: boolean }) => {
+    const isRevision = opts?.isRevision === true;
+    const skipEmail  = opts?.skipEmail  === true;
+    // Capture once — state changes during the async work shouldn't flip
+    // the post-success branch.
+    const isEditFlow = isRevision || skipEmail;
     setSubmitError(null);
+    setEditSavedMessage(null);
 
     // ─── Validate the multi-line quote ──────────────────────────────────────
     // Backend accepts either shape, but we always send the multi-line form
@@ -557,15 +609,25 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
 
     if (demoMode) {
       setEffectiveStatus('Quote Sent');
-      setSubmitResult({
-        success: true, repairId: repair.repairId,
-        quoteAmount: totals.subtotal,
-        quoteSubtotal: totals.subtotal,
-        quoteTaxAmount: totals.taxAmount,
-        quoteGrandTotal: totals.grand,
-        quoteLineCount: cleanLines.length,
-        emailSent: false, warnings: ['Demo mode — no API configured'],
-      });
+      if (isEditFlow) {
+        setIsEditingQuote(false);
+        setEditMode(null);
+        setEditSavedMessage(
+          skipEmail
+            ? 'Draft saved (demo) — customer not notified.'
+            : 'Revised quote saved (demo) — email not sent in demo mode.'
+        );
+      } else {
+        setSubmitResult({
+          success: true, repairId: repair.repairId,
+          quoteAmount: totals.subtotal,
+          quoteSubtotal: totals.subtotal,
+          quoteTaxAmount: totals.taxAmount,
+          quoteGrandTotal: totals.grand,
+          quoteLineCount: cleanLines.length,
+          emailSent: false, warnings: ['Demo mode — no API configured'],
+        });
+      }
       return;
     }
 
@@ -595,28 +657,44 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
           taxAreaId:   taxArea?.id || null,
           taxAreaName: taxArea?.name || null,
           taxRate:     totals.taxRate,
+          isRevision,
+          skipEmail,
         });
         if (!resp.ok) {
           clearRepairPatch?.(repair.repairId);
           setSubmitError(resp.error || 'Failed to send repair quote.');
         } else {
           setEffectiveStatus('Quote Sent');
-          // Synthesize a minimal SendRepairQuoteResponse-shape for the
-          // existing setSubmitResult banner so the success UI path
-          // doesn't need a separate branch.
-          setSubmitResult({
-            success: true,
-            repairId: resp.repairId ?? repair.repairId,
-            grandTotal: resp.grandTotal,
-            subtotal: resp.subtotal,
-            taxAmount: resp.taxAmount,
-            emailSent: resp.emailSent,
-          } as unknown as SendRepairQuoteResponse);
+          if (isEditFlow) {
+            // Edit-after-sent path: leave the read-only summary in place,
+            // surface a small confirmation pill instead of the close-out
+            // success card.
+            setIsEditingQuote(false);
+            setEditMode(null);
+            setEditSavedMessage(
+              skipEmail
+                ? 'Draft saved — customer not notified.'
+                : resp.emailSent === false
+                  ? `Revised quote saved, but email failed: ${resp.emailError ?? 'unknown'}.`
+                  : 'Revised quote sent to customer.'
+            );
+          } else {
+            // First-time send — synthesize a minimal SendRepairQuoteResponse
+            // shape for the existing setSubmitResult close-out card.
+            setSubmitResult({
+              success: true,
+              repairId: resp.repairId ?? repair.repairId,
+              grandTotal: resp.grandTotal,
+              subtotal: resp.subtotal,
+              taxAmount: resp.taxAmount,
+              emailSent: resp.emailSent,
+            } as unknown as SendRepairQuoteResponse);
+          }
           onRepairUpdated?.();
           if (resp.mirrorOk === false) {
             console.warn('[sendRepairQuote-sb] sheet mirror failed:', resp.mirrorError);
           }
-          if (resp.emailSent === false) {
+          if (!isEditFlow && resp.emailSent === false) {
             setSubmitError(`Quote saved, but email send failed: ${resp.emailError ?? 'unknown'}. Resend from the order page.`);
           }
         }
@@ -628,6 +706,8 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
             taxAreaId:   taxArea?.id || '',
             taxAreaName: taxArea?.name || '',
             taxRate:     totals.taxRate,
+            isRevision,
+            skipEmail,
           },
           clientSheetId
         );
@@ -647,7 +727,19 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
           });
         } else {
           setEffectiveStatus('Quote Sent');
-          setSubmitResult(resp.data);
+          if (isEditFlow) {
+            setIsEditingQuote(false);
+            setEditMode(null);
+            setEditSavedMessage(
+              skipEmail
+                ? 'Draft saved — customer not notified.'
+                : resp.data?.emailSent === false
+                  ? 'Revised quote saved, but email did not send. Check email settings.'
+                  : 'Revised quote sent to customer.'
+            );
+          } else {
+            setSubmitResult(resp.data);
+          }
           onRepairUpdated?.();
         }
       }
@@ -1627,45 +1719,132 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
               icon={submitting ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <Send size={16} />}
               style={{ width: '100%', padding: '10px', fontSize: 13, opacity: submitting ? 0.7 : 1, marginTop: 12 }}
               disabled={submitting}
-              onClick={handleSendQuote}
+              onClick={() => { void handleSendQuote(); }}
             />
           </div>
         )}
 
-        {/* Quote Sent / Approved — read-only breakdown + Void escape hatch.
-            Per spec, lines are locked at Approved; admin must Void to edit.
-            Void available on Quote Sent too so admin can pull back a
-            mis-built quote before the customer responds. Hidden once a
+        {/* Quote Sent / Approved — read-only breakdown + Void escape hatch +
+            Edit-after-sent (Quote Sent only — Approved stays locked because
+            the customer accepted that exact dollar figure). Hidden once a
             repair starts (status=In Progress) — by then billing context
             is in flight and editing the quote shouldn't happen here. */}
         {isActive && (effectiveStatus === 'Quote Sent' || effectiveStatus === 'Approved')
           && Array.isArray(repair.quoteLines) && repair.quoteLines.length > 0 && (
           <div style={{ padding: '14px 20px', borderTop: `1px solid ${theme.colors.border}`, flexShrink: 0 }}>
-            <RepairQuoteSummary
-              lines={repair.quoteLines}
-              subtotal={repair.quoteSubtotal ?? 0}
-              taxAreaName={repair.quoteTaxAreaName ?? ''}
-              taxRate={repair.quoteTaxRate ?? 0}
-              taxAmount={repair.quoteTaxAmount ?? 0}
-              grandTotal={repair.quoteGrandTotal ?? 0}
-            />
-            {canStaffEdit && (
-              <button
-                onClick={handleVoidQuote}
-                disabled={submitting}
-                style={{
-                  marginTop: 10, width: '100%',
-                  padding: '8px 12px', fontSize: 12, fontWeight: 600,
-                  background: '#FFFFFF', color: '#B91C1C',
-                  border: '1px solid #FCA5A5', borderRadius: 8,
-                  cursor: submitting ? 'wait' : 'pointer',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-                  opacity: submitting ? 0.6 : 1,
-                }}
-                title="Reset to Pending Quote so you can rebuild the line items"
-              >
-                <Undo2 size={13} /> Void Quote (re-issue)
-              </button>
+            {editSavedMessage && !isEditingQuote && (
+              <div style={{ marginBottom: 10, padding: '8px 12px', background: '#F0FDF4', border: '1px solid #86EFAC', borderRadius: 8, fontSize: 12, color: '#166534', display: 'flex', alignItems: 'center', gap: 6 }}>
+                <CheckCircle2 size={14} /> <span>{editSavedMessage}</span>
+              </div>
+            )}
+            {submitError && (
+              <div style={{ marginBottom: 10, padding: '8px 12px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8, fontSize: 12, color: '#DC2626', display: 'flex', alignItems: 'flex-start', gap: 6 }}>
+                <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                <span>{submitError}</span>
+              </div>
+            )}
+            {isEditingQuote && effectiveStatus === 'Quote Sent' ? (
+              <>
+                <RepairQuoteBuilder
+                  lines={quoteLines}
+                  taxAreaId={taxAreaId}
+                  taxAreas={taxAreas}
+                  catalog={serviceCatalog}
+                  totals={totals}
+                  disabled={submitting}
+                  onAddLine={addLineFromCatalog}
+                  onChangeService={changeLineService}
+                  onUpdateField={updateLineField}
+                  onRemoveLine={removeLine}
+                  onTaxAreaChange={setTaxAreaId}
+                />
+                <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+                  <WriteButton
+                    label={submitting && editMode === 'resend' ? 'Sending...' : 'Save & Resend'}
+                    variant="primary"
+                    icon={submitting && editMode === 'resend' ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <Send size={14} />}
+                    style={{ flex: 1, padding: '9px 12px', fontSize: 12, opacity: submitting ? 0.7 : 1 }}
+                    disabled={submitting}
+                    onClick={() => { setEditMode('resend'); void handleSendQuote({ isRevision: true }); }}
+                  />
+                  <button
+                    onClick={() => { setEditMode('draft'); void handleSendQuote({ isRevision: true, skipEmail: true }); }}
+                    disabled={submitting}
+                    style={{
+                      flex: 1, padding: '9px 12px', fontSize: 12, fontWeight: 600,
+                      background: '#fff', color: theme.colors.text,
+                      border: `1px solid ${theme.colors.border}`, borderRadius: 8,
+                      cursor: submitting ? 'wait' : 'pointer', fontFamily: 'inherit',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                      opacity: submitting ? 0.6 : 1,
+                    }}
+                    title="Save updated lines without resending the customer email"
+                  >
+                    {submitting && editMode === 'draft' ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : null}
+                    Save Draft
+                  </button>
+                  <button
+                    onClick={handleCancelEditQuote}
+                    disabled={submitting}
+                    style={{
+                      padding: '9px 12px', fontSize: 12, fontWeight: 600,
+                      background: 'transparent', color: theme.colors.textMuted,
+                      border: `1px solid ${theme.colors.border}`, borderRadius: 8,
+                      cursor: submitting ? 'wait' : 'pointer', fontFamily: 'inherit',
+                      opacity: submitting ? 0.6 : 1,
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <RepairQuoteSummary
+                  lines={repair.quoteLines}
+                  subtotal={repair.quoteSubtotal ?? 0}
+                  taxAreaName={repair.quoteTaxAreaName ?? ''}
+                  taxRate={repair.quoteTaxRate ?? 0}
+                  taxAmount={repair.quoteTaxAmount ?? 0}
+                  grandTotal={repair.quoteGrandTotal ?? 0}
+                />
+                {canStaffEdit && (
+                  <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                    {effectiveStatus === 'Quote Sent' && (
+                      <button
+                        onClick={handleStartEditQuote}
+                        disabled={submitting}
+                        style={{
+                          flex: 1, padding: '8px 12px', fontSize: 12, fontWeight: 600,
+                          background: '#FFFFFF', color: theme.colors.orange,
+                          border: `1px solid ${theme.colors.orange}`, borderRadius: 8,
+                          cursor: submitting ? 'wait' : 'pointer',
+                          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                          opacity: submitting ? 0.6 : 1, fontFamily: 'inherit',
+                        }}
+                        title="Edit line items / rates / tax — save and optionally resend a revised quote without voiding"
+                      >
+                        <Pencil size={13} /> Edit Quote
+                      </button>
+                    )}
+                    <button
+                      onClick={handleVoidQuote}
+                      disabled={submitting}
+                      style={{
+                        flex: 1, padding: '8px 12px', fontSize: 12, fontWeight: 600,
+                        background: '#FFFFFF', color: '#B91C1C',
+                        border: '1px solid #FCA5A5', borderRadius: 8,
+                        cursor: submitting ? 'wait' : 'pointer',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                        opacity: submitting ? 0.6 : 1, fontFamily: 'inherit',
+                      }}
+                      title="Reset to Pending Quote so you can rebuild the line items"
+                    >
+                      <Undo2 size={13} /> Void Quote (re-issue)
+                    </button>
+                  </div>
+                )}
+              </>
             )}
           </div>
         )}
@@ -2008,6 +2187,13 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
           </div>
         )}
 
+        {/* Edit-saved confirmation pill — shown after Save & Resend / Save Draft */}
+        {editSavedMessage && !isEditingQuote && (
+          <div style={{ marginBottom: 12, padding: '8px 12px', background: '#F0FDF4', border: '1px solid #86EFAC', borderRadius: 8, fontSize: 12, color: '#166534', display: 'flex', alignItems: 'center', gap: 6 }}>
+            <CheckCircle2 size={14} /> <span>{editSavedMessage}</span>
+          </div>
+        )}
+
         {/* Pending Quote → editable builder */}
         {isPending && (
           <>
@@ -2030,13 +2216,69 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
               icon={submitting ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <Send size={16} />}
               style={{ width: '100%', padding: '10px', fontSize: 13, opacity: submitting ? 0.7 : 1, marginTop: 12 }}
               disabled={submitting}
-              onClick={handleSendQuote}
+              onClick={() => { void handleSendQuote(); }}
             />
           </>
         )}
 
-        {/* Quote Sent / Approved + has line items → read-only summary */}
-        {isLockedWithLines && (
+        {/* Quote Sent / Approved + has line items → read-only summary OR
+            edit-after-sent builder (Quote Sent only; Approved stays locked). */}
+        {isLockedWithLines && isEditingQuote && sLocal === 'Quote Sent' ? (
+          <>
+            <RepairQuoteBuilder
+              lines={quoteLines}
+              taxAreaId={taxAreaId}
+              taxAreas={taxAreas}
+              catalog={serviceCatalog}
+              totals={totals}
+              disabled={submitting}
+              onAddLine={addLineFromCatalog}
+              onChangeService={changeLineService}
+              onUpdateField={updateLineField}
+              onRemoveLine={removeLine}
+              onTaxAreaChange={setTaxAreaId}
+            />
+            <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+              <WriteButton
+                label={submitting && editMode === 'resend' ? 'Sending...' : 'Save & Resend'}
+                variant="primary"
+                icon={submitting && editMode === 'resend' ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <Send size={14} />}
+                style={{ flex: 1, padding: '10px 12px', fontSize: 13, opacity: submitting ? 0.7 : 1 }}
+                disabled={submitting}
+                onClick={() => { setEditMode('resend'); void handleSendQuote({ isRevision: true }); }}
+              />
+              <button
+                onClick={() => { setEditMode('draft'); void handleSendQuote({ isRevision: true, skipEmail: true }); }}
+                disabled={submitting}
+                style={{
+                  flex: 1, padding: '10px 12px', fontSize: 13, fontWeight: 600,
+                  background: '#fff', color: theme.colors.text,
+                  border: `1px solid ${theme.colors.border}`, borderRadius: 8,
+                  cursor: submitting ? 'wait' : 'pointer', fontFamily: 'inherit',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                  opacity: submitting ? 0.6 : 1,
+                }}
+                title="Save updated lines without resending the customer email"
+              >
+                {submitting && editMode === 'draft' ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : null}
+                Save Draft
+              </button>
+              <button
+                onClick={handleCancelEditQuote}
+                disabled={submitting}
+                style={{
+                  padding: '10px 14px', fontSize: 13, fontWeight: 600,
+                  background: 'transparent', color: theme.colors.textMuted,
+                  border: `1px solid ${theme.colors.border}`, borderRadius: 8,
+                  cursor: submitting ? 'wait' : 'pointer', fontFamily: 'inherit',
+                  opacity: submitting ? 0.6 : 1,
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          </>
+        ) : isLockedWithLines && (
           <>
             <RepairQuoteSummary
               lines={repair.quoteLines!}
@@ -2047,22 +2289,40 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
               grandTotal={repair.quoteGrandTotal ?? 0}
             />
             {canStaffEdit && (
-              <button
-                onClick={handleVoidQuote}
-                disabled={submitting}
-                style={{
-                  marginTop: 10, width: '100%',
-                  padding: '8px 12px', fontSize: 12, fontWeight: 600,
-                  background: '#FFFFFF', color: '#B91C1C',
-                  border: '1px solid #FCA5A5', borderRadius: 8,
-                  cursor: submitting ? 'wait' : 'pointer',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-                  opacity: submitting ? 0.6 : 1,
-                }}
-                title="Reset to Pending Quote so you can rebuild the line items"
-              >
-                <Undo2 size={13} /> Void Quote (re-issue)
-              </button>
+              <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                {sLocal === 'Quote Sent' && (
+                  <button
+                    onClick={handleStartEditQuote}
+                    disabled={submitting}
+                    style={{
+                      flex: 1, padding: '8px 12px', fontSize: 12, fontWeight: 600,
+                      background: '#FFFFFF', color: theme.colors.orange,
+                      border: `1px solid ${theme.colors.orange}`, borderRadius: 8,
+                      cursor: submitting ? 'wait' : 'pointer',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                      opacity: submitting ? 0.6 : 1, fontFamily: 'inherit',
+                    }}
+                    title="Edit line items / rates / tax — save and optionally resend a revised quote without voiding"
+                  >
+                    <Pencil size={13} /> Edit Quote
+                  </button>
+                )}
+                <button
+                  onClick={handleVoidQuote}
+                  disabled={submitting}
+                  style={{
+                    flex: 1, padding: '8px 12px', fontSize: 12, fontWeight: 600,
+                    background: '#FFFFFF', color: '#B91C1C',
+                    border: '1px solid #FCA5A5', borderRadius: 8,
+                    cursor: submitting ? 'wait' : 'pointer',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                    opacity: submitting ? 0.6 : 1, fontFamily: 'inherit',
+                  }}
+                  title="Reset to Pending Quote so you can rebuild the line items"
+                >
+                  <Undo2 size={13} /> Void Quote (re-issue)
+                </button>
+              </div>
             )}
           </>
         )}
@@ -2226,7 +2486,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
       )}
       {/* State-aware primary actions */}
       {s === 'Pending Quote' && (
-        <button onClick={handleSendQuote} disabled={submitting} style={{ ...rpOrange, opacity: submitting ? 0.6 : 1, cursor: submitting ? 'progress' : 'pointer' }}>
+        <button onClick={() => { void handleSendQuote(); }} disabled={submitting} style={{ ...rpOrange, opacity: submitting ? 0.6 : 1, cursor: submitting ? 'progress' : 'pointer' }}>
           {submitting && <BtnSpinner size={11} color="#fff" />} Send Quote
         </button>
       )}
