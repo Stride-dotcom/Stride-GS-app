@@ -1,0 +1,1 @@
+import{r as e}from"./index-BA1rUReD.js";export{e as renderDocUpload};
