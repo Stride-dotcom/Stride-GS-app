@@ -110,12 +110,16 @@ export function TransferItemsModal({
       setLoading(true);
       try {
         const itemIdsArr = [...selectedIds];
-        // Items previously inspected anywhere (item_id is preserved across transfers).
+        // Items previously inspected anywhere (item_id is preserved across
+        // transfers). Filter by Task ID prefix instead of `type` because the
+        // type column carries the friendly service name ("Inspection") in some
+        // rows and the code ("INSP") in others — the task_id format is the one
+        // load-bearing invariant.
         const { data: doneRows } = await supabase
           .from('tasks')
           .select('item_id')
           .in('item_id', itemIdsArr)
-          .eq('type', 'INSP')
+          .like('task_id', 'INSP-%')
           .eq('status', 'Completed');
         const inspectedIds = new Set<string>(
           (doneRows ?? [])
