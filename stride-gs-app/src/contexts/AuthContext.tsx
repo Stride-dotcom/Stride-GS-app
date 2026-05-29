@@ -793,6 +793,50 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return { error: resolveErr || 'Target user lookup failed.' };
       }
 
+      // Sync the target's user_metadata into the live JWT before any RLS-
+      // gated query runs. handleSession does this on normal login (lines
+      // ~290-301 / ~384-394) but is suppressed here by impersonationSwapRef,
+      // so without an explicit sync the target's JWT carries whatever
+      // user_metadata is stored on auth.users.raw_user_meta_data — which
+      // is empty or stale for any client who hasn't logged in via password
+      // since the metadata-sync code shipped (and stale whenever their
+      // tenant assignments change). The RLS helper user_has_tenant_access
+      // (migration 20260504210000_multi_tenant_rls_access.sql) reads
+      // clientSheetId + accessibleClientSheetIds straight from the JWT, so
+      // missing/stale values silently filter every row out and the
+      // impersonated session sees empty inventory, tasks, repairs, will
+      // calls, etc. Best-effort: a failure here is logged but doesn't
+      // block impersonation — partial access is still better than a hard
+      // bounce, and the admin can exit/retry.
+      try {
+        const { data: { session: targetSession } } = await supabase.auth.getSession();
+        const jwtMeta = (targetSession?.user?.user_metadata ?? {}) as {
+          role?: string;
+          clientSheetId?: string;
+          accessibleClientSheetIds?: string[];
+          childClientSheetIds?: string[];
+        };
+        const targetClientSheetId = targetUser.clientSheetId ?? '';
+        const targetAccessible = targetUser.accessibleClientSheetIds ?? [];
+        const targetChildren = targetUser.childClientSheetIds ?? [];
+        const inSync = jwtMeta.role === targetUser.role
+          && (jwtMeta.clientSheetId ?? '') === targetClientSheetId
+          && arraysEqualOrderless(jwtMeta.accessibleClientSheetIds ?? [], targetAccessible)
+          && arraysEqualOrderless(jwtMeta.childClientSheetIds ?? [], targetChildren);
+        if (!inSync) {
+          await supabase.auth.updateUser({
+            data: {
+              role: targetUser.role,
+              clientSheetId: targetClientSheetId,
+              accessibleClientSheetIds: targetAccessible,
+              childClientSheetIds: targetChildren,
+            },
+          });
+        }
+      } catch (err) {
+        console.warn('[AuthContext] impersonation user_metadata sync failed:', (err as Error).message);
+      }
+
       // Clear the API response cache so admin's cached data doesn't leak
       // into the impersonated view, and seed the active-impersonation
       // flag in sessionStorage so a page refresh stays in this mode.
