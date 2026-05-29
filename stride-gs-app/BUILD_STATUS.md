@@ -68,6 +68,16 @@
 
 ---
 
+## Recent Changes (2026-05-29, build version chip near logout — feat/ui/build-version, PR #565)
+
+- **Problem:** Users (and Justin during incidents) couldn't tell at a glance whether a tab was on the current bundle or a stale cached one. `useVersionCheck` silently reloads on next navigation, but that's invisible until a click — leaving "is this user on the fix yet?" as a guessing game.
+- **Solution:** New `src/components/layout/BuildVersionChip.tsx` renders a small muted `v.<short-sha>` footer below the Sign Out row in `Sidebar.tsx`. Hover tooltip shows full build time. The chip independently polls `/version.json` every 5 min; when the server has a newer bundle than `__APP_VERSION__`, it turns amber with "update ready" and clicks reload immediately. `useVersionCheck` still owns the silent on-next-navigation reload — the chip is purely the visible signal that complements it.
+- **Build infra:** Already in place from a prior session — `vite.config.ts` resolves the short SHA via `git rev-parse --short HEAD` and injects `__APP_VERSION__` + `__BUILD_TIME__` at build time, plus emits `dist/version.json` with the same values. No build-side changes in this PR.
+- **A11y:** When stale, the chip exposes `role="button"`, `tabIndex={0}`, and an Enter/Space handler so keyboard users can trigger the manual reload. When not stale, it stays non-interactive.
+- **Files:**
+  - `stride-gs-app/src/components/layout/BuildVersionChip.tsx` (new)
+  - `stride-gs-app/src/components/layout/Sidebar.tsx` — import + render below Sign Out
+
 ## Recent Changes (2026-05-20, Supabase-authoritative client-settings write-back — feat/migration/client-settings-writeback)
 
 - **Problem:** React Settings modal + intake form write to `public.clients` directly, but the per-tenant Google Sheet's Settings tab (where per-client GAS scripts read `AUTO_INSPECTION`, `FREE_STORAGE_DAYS`, etc. at runtime) and the CB Clients tab (read by `handleResyncClients_` → `sbClientRow_` → Supabase) had no write-back path. Two consequences: (1) per-tenant GAS handlers used stale values until a manual sync; (2) the next CB-driven resync silently overwrote SB-side changes with the CB sheet's stale values. Concrete failure: Brian Paquette's `auto_inspection` flip never reached the sheet, and reverted in Supabase on the next resync.
