@@ -1,7 +1,11 @@
 # DESIGN — Multi-pickup → single-delivery
 
-**Status:** Draft v1, 2026-05-29
+**Status:** v2, 2026-05-29 — all open questions resolved, Phase 1 ready to scope
 **Author:** Claude (Opus 4.7) with Justin
+
+## Changelog
+- **v2 (2026-05-29):** Justin answered the 4 open questions. Locked in per-pickup billing (one discount across the order), `-P` + `-P2`/`-P3` identifier pattern, contact-name-defaulted free-text pickup labels, and `dt_pickup_links.notes` for operator/driver crosstalk. Billing change requires a separate billing SYSTEM_MASTER review before Phase 1 ships — surfaced as a Phase 1.5 prerequisite.
+- **v1 (2026-05-29):** Initial draft.
 
 ## 1. Problem
 
@@ -11,12 +15,23 @@ Today's options force the operator into either two independent P+D pairs (loses 
 
 ## 2. Locked decisions (from Justin, 2026-05-29)
 
+### 2a. Initial architecture choices
+
 | # | Question | Decision |
 |---|----------|----------|
 | 1 | Per-item attribution on delivery items | **Yes** — each delivery item knows which pickup it came from (or `null` = from inventory / delivery-only ad-hoc) |
 | 2 | Partial-pickup display when 1 of N completes | **Partial** — UI shows "1 of 3 pickups complete"; `linked_pickup_finished_at` only stamps when ALL pickups finish |
 | 3 | Add-pickup UX after order exists | **OrderPage "Add Pickup" button** opens a focused mini-modal. Main `CreateDeliveryOrderModal` stays single-pickup at create time; multi-pickup is achieved by adding more legs post-create |
 | 4 | Migration strategy | **Transitional dual-write** — add `dt_pickup_links` join table; keep `linked_order_id` as a denormalized "primary pickup" pointer. Retire column in a later phase |
+
+### 2b. Resolved open questions (v2)
+
+| # | Question | Decision | Affects |
+|---|----------|----------|---------|
+| 5 | Per-pickup billing | **One pickup fee per pickup leg. Only one multi-pickup discount applies across the order regardless of leg count.** | §11 R5 closed → see Phase 1.5 below. Billing change requires a separate spec PR against the billing SYSTEM_MASTER. |
+| 6 | Identifier rename on 2nd-pickup add | **No rename.** Original pickup stays at `-P`. Additions start at `-P2`. Pattern: `-P`, `-P2`, `-P3`, … | §5 |
+| 7 | Pickup display label | **Free-text on the join row, defaulting to the pickup contact name at create.** Shown in OrderPage linked-pickups list, items-section group header, and the DT description block on the delivery. Operator can edit (e.g. "Sarah's house"). | §4.1, §7.3 |
+| 8 | Per-pickup notes on the join table | **Yes** — `dt_pickup_links.notes` text column. Carries operator/driver crosstalk specific to this pickup leg ("Sarah said elevator broken, take stairs", "Left rug in plastic, watch for water damage"). Surfaced on the delivery's OrderPage. | §4.1 |
 
 ## 3. Current touch surface (what assumes singular linkage)
 
@@ -61,6 +76,19 @@ CREATE TABLE public.dt_pickup_links (
   delivery_order_id       uuid        NOT NULL REFERENCES public.dt_orders(id) ON DELETE CASCADE,
   pickup_order_id         uuid        NOT NULL REFERENCES public.dt_orders(id) ON DELETE CASCADE,
   sequence_no             smallint    NOT NULL CHECK (sequence_no BETWEEN 1 AND 9),
+  -- Free-text display label, shown in OrderPage linked-pickups list,
+  -- items-section group header, and the DT description block on the
+  -- delivery. Defaults to pickup_order.contact_name at create.
+  -- Operator-editable.
+  label                   text,
+  -- Operator/driver crosstalk specific to this pickup leg.
+  -- Surfaced on the delivery's OrderPage so the delivery team sees
+  -- pickup-context notes ("elevator broken, take stairs"; "left rug
+  -- in plastic, watch for water damage"). Distinct from the pickup
+  -- dt_orders row's `driver_notes` (which is DT-side driver-entered
+  -- on the pickup card itself) — operator can pre-populate this
+  -- before pickup happens.
+  notes                   text,
   -- Cached completion fields, refreshed by the stamp helper.
   -- Per-pickup mirror of the existing dt_orders.linked_pickup_* columns.
   pickup_finished_at      timestamptz,
@@ -104,15 +132,17 @@ CREATE TRIGGER set_updated_at_dt_pickup_links
 ```sql
 INSERT INTO public.dt_pickup_links
   (tenant_id, delivery_order_id, pickup_order_id, sequence_no,
-   pickup_finished_at, pickup_driver_name)
+   label, pickup_finished_at, pickup_driver_name)
 SELECT
   d.tenant_id,
   d.id                                AS delivery_order_id,
   d.linked_order_id                   AS pickup_order_id,
   1                                   AS sequence_no,
+  pu.contact_name                     AS label, -- default label = pickup contact
   d.linked_pickup_finished_at,
   d.linked_pickup_driver_name
 FROM public.dt_orders d
+LEFT JOIN public.dt_orders pu ON pu.id = d.linked_order_id
 WHERE d.order_type = 'pickup_and_delivery'
   AND d.linked_order_id IS NOT NULL
 ON CONFLICT (delivery_order_id, pickup_order_id) DO NOTHING;
@@ -123,11 +153,13 @@ ON CONFLICT (delivery_order_id, pickup_order_id) DO NOTHING;
 | Scenario | Pickup ids | Delivery id |
 |----------|-----------|-------------|
 | Today (1 pickup) | `MRS-00046-FORTH-P` | `MRS-00046-FORTH-D` |
-| Phase 1 (still 1 pickup, dual-write) | `MRS-00046-FORTH-P` (= `-P1`) | `MRS-00046-FORTH-D` |
-| Phase 2 (N pickups, on create with 2 pickups) | `MRS-00046-FORTH-P1`, `MRS-00046-FORTH-P2` | `MRS-00046-FORTH-D` |
-| Add-pickup later | New leg picks the next free `sequence_no` (`-P3`) | unchanged |
+| Phase 1 (still 1 pickup, dual-write) | `MRS-00046-FORTH-P` | `MRS-00046-FORTH-D` |
+| Phase 2, adding 2nd pickup | `MRS-00046-FORTH-P` (unchanged) + `MRS-00046-FORTH-P2` (new) | `MRS-00046-FORTH-D` |
+| Add 3rd pickup later | `MRS-00046-FORTH-P3` (new) | unchanged |
 
-**Compatibility rule:** when there is exactly one pickup, the suffix is `-P` (no number). The `-P1` form is reserved for orders with 2+ pickups. This keeps every existing identifier stable through Phase 1 and only changes the format when multi-pickup is actually used.
+**Compatibility rule (v2, Justin-confirmed):** the original pickup keeps the bare `-P` suffix forever — no rename. Subsequent pickups start at `-P2`. This means `sequence_no` and the identifier suffix number diverge: pickup with `sequence_no=1` has suffix `-P`; pickup with `sequence_no=2` has suffix `-P2`. The OrderPage UI surfaces `sequence_no` as the ordinal ("Pickup 1 of 3"), and the identifier suffix is purely a DT-side label.
+
+**Why no rename:** DT add_order is upsert-by-identifier (Ashok-confirmed). Renaming `-P` → `-P1` would create a new DT row at `-P1` and orphan the old `-P` (DT has no rename API). Leaving the original at `-P` keeps the DT-side history continuous.
 
 **DT-side note:** DT treats each pickup as an independent service order with its own identifier. There is no DT-native "this pickup belongs to that delivery" link. The cross-reference is communicated via the description block ("PICK UP for Del MRS-00046-FORTH-D"). Multi-pickup just means more independent DT pushes that all reference the same delivery in their description.
 
@@ -234,10 +266,15 @@ On save:
 
 ### 7.3 OrderPage changes
 
-- **Linked-pickup banner** becomes **linked-pickups list** (one row per pickup, with per-pickup status badge: Pending / In Transit / Picked up @ HH:MM by Driver).
-- **Items section:** group delivery items by `source_pickup_order_id` → render section headers ("From Sarah's house — pickup MRS-…-P1", "From Smith's — pickup MRS-…-P2", "From inventory"). Within a group, the existing per-item picked-up badges work unchanged.
+- **Linked-pickup banner** becomes **linked-pickups list** (one row per pickup, with per-pickup status badge: Pending / In Transit / Picked up @ HH:MM by Driver, plus the operator-editable `label` shown as the row title).
+- **Pickup label rendering** — three places:
+  1. OrderPage linked-pickups row title: `Pickup 2 of 3 — Sarah's house` (label = join row's `label`; falls back to pickup contact name).
+  2. Items-section group header: `From Sarah's house — pickup MRS-00046-FORTH-P2`.
+  3. DT description block on the delivery: `LINKED PICKUPS: -P (Smith's), -P2 (Sarah's house)`.
+- **Per-pickup notes display** — `dt_pickup_links.notes` shown inline under each linked-pickup row on the delivery's OrderPage, so the delivery team sees pickup-leg-specific instructions ("elevator broken — take stairs") without opening the pickup leg's page.
+- **Items section:** group delivery items by `source_pickup_order_id` → render section headers using the pickup label. Within a group, the existing per-item picked-up badges work unchanged.
 - **Order-level "Pickups: 2 of 3 complete"** badge in the header.
-- **`fetchDtOrderByIdFromSupabase(linkedOrderId)`** changes to `fetchLinkedPickupsForDelivery(deliveryId)` which returns `Array<{ pickup, sequenceNo, finishedAt }>`. Single-query JOIN against `dt_pickup_links`.
+- **`fetchDtOrderByIdFromSupabase(linkedOrderId)`** changes to `fetchLinkedPickupsForDelivery(deliveryId)` which returns `Array<{ pickup, sequenceNo, label, notes, finishedAt }>`. Single-query JOIN against `dt_pickup_links`.
 
 ### 7.4 `supabaseQueries.ts` / types
 
@@ -254,6 +291,25 @@ Keep as the **"add first pickup"** path. After Phase 2 ships, clicking "Add Pick
 ### Phase 0 — Foundation (this spec PR)
 - This document committed to `source`.
 - No code change.
+
+### Phase 1.5 — Billing model for multi-pickup (BLOCKING for Phase 2)
+
+**Decision (v2):** one pickup fee per linked pickup leg. One multi-pickup discount applies across the order regardless of how many legs.
+
+**Why this is its own phase:** the build skill marks any billing change as forbidden without a billing SYSTEM_MASTER review + parity verification. Today, P+D pricing largely rolls up onto the delivery row (`dt_orders.base_delivery_fee`, `accessorials_json`, `extra_items_*`). Adding a per-pickup pickup-fee + a once-per-order discount touches:
+- The Billing Gateway's order-total computation
+- `accessorials_json` schema (is each pickup an accessorial, or a first-class line type?)
+- Legacy `service_events` and new `charge_types + pricing_rules` parity
+- The pickup-fee unit price source (Master Price List, per-tenant override?)
+- The discount mechanic (fixed amount, %-off, conditional on N≥2 pickups?)
+
+**Required before Phase 1.5 build:**
+- Read `docs/systems/billing/SYSTEM_MASTER.md` in full (skill rule).
+- Justin confirms pickup-fee unit price source + discount rules (fixed $? %-off? threshold?).
+- Spec PR against billing system — separate from this one.
+- Parity test: existing single-pickup P+D orders produce identical totals before/after the schema change.
+
+**Phase 2 cannot ship the OrderPage "Add Pickup" button until Phase 1.5 lands** — otherwise adding a 2nd pickup silently produces an under-billed order.
 
 ### Phase 1 — Dual-write schema, helper-only consumer
 - Migration: create `dt_pickup_links`, add `source_pickup_order_id` to `dt_order_items`, backfill from existing `linked_order_id` rows.
@@ -331,21 +387,18 @@ Idempotent on re-apply (uses `ON CONFLICT DO NOTHING` for backfill rows; `CREATE
 
 ## 11. Risks + open questions
 
-| # | Risk | Mitigation |
-|---|------|------------|
-| R1 | DT add_order identifier-rename behaviour unknown (`-P` → `-P1`). Could orphan a DT row. | Phase 2 starts new pickups at `-P2`, `-P3` and leaves the existing `-P`. Address rename in a separate experiment. |
-| R2 | `stampPickupOnLinkedDelivery` "blanket pass" scoping change could regress the JAS-00096 fix for single-pickup orders. | Back-compat clause: when delivery has exactly one linked pickup AND item's `source_pickup_order_id IS NULL`, blanket-stamp anyway. |
-| R3 | DT-side push order matters (3 calls in sequence). One pickup's push failing should not abort the others. | Continue current behavior: each `pushSingleOrder` is independent; failures recorded per-leg in `gs_sync_events`. |
-| R4 | Operator removes a pickup leg (cancellation). | Out of scope for Phase 2. ON DELETE CASCADE handles the join row; the pickup `dt_orders` row's `review_status='cancelled'` is the existing path. UI affordance: Phase 3. |
-| R5 | Billing: multi-pickup may justify per-pickup fees. | Out of scope — current `dt_orders.base_delivery_fee` + `accessorials_json` is on the delivery row only. Justin to confirm if per-pickup billing is needed. |
-| R6 | Conversion: standalone delivery → P+D → multi-P+D — three discrete UX states with overlapping affordances. | Phase 2 keeps the existing PR #431 convert branch as-is for first-pickup; only subsequent pickups use the new mini-modal. Tested separately. |
+| # | Risk | Mitigation | Status |
+|---|------|------------|--------|
+| R1 | DT add_order identifier-rename behaviour unknown (`-P` → `-P1`). Could orphan a DT row. | Phase 2 starts new pickups at `-P2`, `-P3` and leaves the existing `-P`. | **Resolved (v2)** — no rename, ever. |
+| R2 | `stampPickupOnLinkedDelivery` "blanket pass" scoping change could regress the JAS-00096 fix for single-pickup orders. | Back-compat clause: when delivery has exactly one linked pickup AND item's `source_pickup_order_id IS NULL`, blanket-stamp anyway. | Open — Phase 1 test plan covers it. |
+| R3 | DT-side push order matters (N+1 calls in sequence). One pickup's push failing should not abort the others. | Continue current behavior: each `pushSingleOrder` is independent; failures recorded per-leg in `gs_sync_events`. | Open — Phase 2 design. |
+| R4 | Operator removes a pickup leg (cancellation). | Out of scope for Phase 2. ON DELETE CASCADE handles the join row; the pickup `dt_orders` row's `review_status='cancelled'` is the existing path. UI affordance: Phase 3. | Open — Phase 3. |
+| R5 | Billing: multi-pickup justifies per-pickup fees. | Per-pickup fee + once-per-order discount confirmed. Requires billing SYSTEM_MASTER review before Phase 1.5 build. | **Resolved (decision) but blocks Phase 2** — see Phase 1.5. |
+| R6 | Conversion: standalone delivery → P+D → multi-P+D — three discrete UX states with overlapping affordances. | Phase 2 keeps the existing PR #431 convert branch as-is for first-pickup; only subsequent pickups use the new mini-modal. Tested separately. | Open — Phase 2 test plan. |
 
 ### Open questions for Justin
 
-1. **R5 (billing):** does Sarah's "two pickups + inventory + one delivery" deserve two pickup fees or one? Today's billing model has one delivery row.
-2. **R1 (identifier):** acceptable to have `MRS-00046-FORTH-P` (the original) + `MRS-00046-FORTH-P2` (the 2nd) in DT, instead of renaming the first to `-P1`?
-3. **Pickup labels:** is a free-text label per pickup sufficient ("Sarah's house"), or do we want to surface the pickup contact name from the row as the label?
-4. **Per-pickup fee tracking:** do we need `dt_pickup_links.notes` or any pricing fields on the link table itself?
+_All v1 open questions resolved in v2 — see §2b. No outstanding questions. Phase 1 is ready to scope; Phase 2 is blocked on Phase 1.5 (billing spec)._
 
 ## 12. Files touched (estimate)
 
