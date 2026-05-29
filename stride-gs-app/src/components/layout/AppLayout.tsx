@@ -41,9 +41,11 @@ export function AppLayout() {
   // changes within 1-2s of GAS write completing (write-through is Phase 3)
   useSupabaseRealtime();
 
-  // Poll /version.json every 5 min and silently reload on next navigation
-  // when a newer bundle has been deployed.
-  useVersionCheck();
+  // Poll /version.json and auto-reload on the first of: next navigation,
+  // tab refocus, or a 2-min idle timer. `isStale` drives the build
+  // version chip in the sidebar so users see the pending update and can
+  // click to refresh immediately.
+  const { isStale: isBundleStale } = useVersionCheck();
 
   // Session 74: useNotifications() removed (notifications module deleted).
   // Unread count on the bell is driven by useMessages directly.
@@ -122,6 +124,7 @@ export function AppLayout() {
             onNavigate={() => setMobileMenuOpen(false)}
             failureCount={unresolvedCount}
             onOpenFailures={() => setFailuresOpen(true)}
+            isBundleStale={isBundleStale}
           />
         </div>
       ) : (
@@ -130,6 +133,7 @@ export function AppLayout() {
           onToggle={() => setSidebarCollapsed((v) => !v)}
           failureCount={unresolvedCount}
           onOpenFailures={() => setFailuresOpen(true)}
+          isBundleStale={isBundleStale}
         />
       )}
 

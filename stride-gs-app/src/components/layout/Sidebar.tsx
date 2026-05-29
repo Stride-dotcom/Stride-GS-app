@@ -96,9 +96,10 @@ interface SidebarProps {
   onNavigate?: () => void;
   failureCount?: number;
   onOpenFailures?: () => void;
+  isBundleStale?: boolean;
 }
 
-export function Sidebar({ collapsed, onToggle, onNavigate, failureCount = 0, onOpenFailures }: SidebarProps) {
+export function Sidebar({ collapsed, onToggle, onNavigate, failureCount = 0, onOpenFailures, isBundleStale = false }: SidebarProps) {
   const { user, signOut } = useAuth();
   const location = useLocation();
 
@@ -512,10 +513,11 @@ export function Sidebar({ collapsed, onToggle, onNavigate, failureCount = 0, onO
         </div>
 
         {/* Build version chip — lets the user tell at a glance whether they're
-            on the latest deploy. Compares to /version.json polled by
-            useVersionCheck; turns amber when a newer bundle is live but the
-            user hasn't navigated yet to pick it up. Hover shows full build time. */}
-        <BuildVersionChip collapsed={collapsed} />
+            on the latest deploy. `isBundleStale` is driven by useVersionCheck
+            (single source of truth); turns amber when a newer bundle is live
+            but the auto-reload hasn't fired yet. Hover shows full build time;
+            click force-reloads immediately. */}
+        <BuildVersionChip collapsed={collapsed} isStale={isBundleStale} />
       </div>
 
       {changePasswordOpen && (

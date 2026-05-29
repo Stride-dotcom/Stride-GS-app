@@ -1,13 +1,9 @@
-import { useEffect, useState } from 'react';
 import { theme } from '../../styles/theme';
+import { hardReloadForUpdate } from '../../lib/versionReload';
 
 // __APP_VERSION__ and __BUILD_TIME__ are injected at build time by vite.config.ts.
 const RUNNING_VERSION = __APP_VERSION__;
 const RUNNING_BUILD_TIME = __BUILD_TIME__;
-
-const POLL_INTERVAL_MS = 5 * 60 * 1000;
-
-type VersionPayload = { version?: string; buildTime?: string };
 
 function formatBuildTime(iso: string): string {
   try {
@@ -24,55 +20,23 @@ function formatBuildTime(iso: string): string {
 
 interface Props {
   collapsed: boolean;
+  // Driven by useVersionCheck at the AppLayout level — single source of
+  // truth for "is the running bundle stale". When true the chip turns
+  // amber and clicks force-reload via the same cache-busting helper
+  // useVersionCheck uses internally.
+  isStale: boolean;
 }
 
-export function BuildVersionChip({ collapsed }: Props) {
-  const [serverVersion, setServerVersion] = useState<string | null>(null);
-
-  // Light second polling loop next to useVersionCheck so the chip can show
-  // a stale-build state. useVersionCheck handles the actual reload; this
-  // is purely a UI signal. Sharing the poll between them would couple the
-  // hook to the chip's lifetime — keeping them independent is simpler.
-  useEffect(() => {
-    let cancelled = false;
-    let intervalId: number | undefined;
-
-    const check = async () => {
-      try {
-        const res = await fetch(`/version.json?t=${Date.now()}`, {
-          cache: 'no-store',
-          headers: { 'Cache-Control': 'no-cache' },
-        });
-        if (!res.ok || cancelled) return;
-        const data = (await res.json()) as VersionPayload;
-        if (cancelled) return;
-        if (typeof data?.version === 'string') setServerVersion(data.version);
-      } catch {
-        // ignore — chip just stays in its current state
-      }
-    };
-
-    void check();
-    intervalId = window.setInterval(check, POLL_INTERVAL_MS);
-    return () => {
-      cancelled = true;
-      if (intervalId !== undefined) window.clearInterval(intervalId);
-    };
-  }, []);
-
+export function BuildVersionChip({ collapsed, isStale }: Props) {
   if (!RUNNING_VERSION) return null;
 
-  const isStale = serverVersion !== null && serverVersion !== RUNNING_VERSION;
   const shortTime = formatBuildTime(RUNNING_BUILD_TIME);
   const tooltip = isStale
-    ? `Build ${RUNNING_VERSION} (${shortTime})\nNewer build available: ${serverVersion}\nReloads on next navigation`
+    ? `Build ${RUNNING_VERSION} (${shortTime})\nNewer build available — refreshing on next navigation, tab focus, or 2 min.\nClick to refresh now.`
     : `Build ${RUNNING_VERSION}\nDeployed ${shortTime}`;
 
   const handleClick = () => {
-    // Click reloads — gives users a manual escape hatch if they're
-    // sitting on a stale bundle and don't want to wait for the next
-    // navigation.
-    if (isStale) window.location.reload();
+    if (isStale) hardReloadForUpdate();
   };
 
   return (

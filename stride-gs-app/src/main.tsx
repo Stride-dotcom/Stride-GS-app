@@ -8,6 +8,12 @@ import { BillingBatchProvider } from './contexts/BillingBatchContext.tsx'
 import { FeatureFlagProvider } from './contexts/FeatureFlagContext.tsx'
 import { QboPushJobsProvider } from './contexts/QboPushJobsContext.tsx'
 import { supabase } from './lib/supabase.ts'
+import { stripVersionReloadParam } from './lib/versionReload.ts'
+
+// If we got here from hardReloadForUpdate(), the URL carries `?_v=<ts>`
+// for cache-busting. Strip it so subsequent shares/copies don't carry
+// the param. Cosmetic only.
+stripVersionReloadParam();
 
 // ─── Pre-bootstrap PASSWORD_RECOVERY detection ──────────────────────────────
 // Problem: bootstrap() calls getSession() to process the recovery token, which
