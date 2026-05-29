@@ -68,14 +68,24 @@ export function BuildVersionChip({ collapsed }: Props) {
     ? `Build ${RUNNING_VERSION} (${shortTime})\nNewer build available: ${serverVersion}\nReloads on next navigation`
     : `Build ${RUNNING_VERSION}\nDeployed ${shortTime}`;
 
+  const handleClick = () => {
+    // Click reloads — gives users a manual escape hatch if they're
+    // sitting on a stale bundle and don't want to wait for the next
+    // navigation.
+    if (isStale) window.location.reload();
+  };
+
   return (
     <div
       title={tooltip}
-      onClick={() => {
-        // Click reloads — gives users a manual escape hatch if they're
-        // sitting on a stale bundle and don't want to wait for the next
-        // navigation.
-        if (isStale) window.location.reload();
+      onClick={handleClick}
+      role={isStale ? 'button' : undefined}
+      tabIndex={isStale ? 0 : undefined}
+      onKeyDown={(e) => {
+        if (isStale && (e.key === 'Enter' || e.key === ' ')) {
+          e.preventDefault();
+          handleClick();
+        }
       }}
       style={{
         display: 'flex',
