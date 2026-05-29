@@ -41,13 +41,16 @@ type Payload = Record<string, unknown>;
 interface ShadowResult { ok: boolean; changes?: Record<string, unknown>; error?: string; errorCode?: string }
 
 export function runReceiveShipmentShadow(payload: Payload): ShadowResult {
-  const items   = Array.isArray(payload?.items) ? payload.items : [];
-  const carrier = typeof payload?.carrier === 'string' ? payload.carrier : '';
+  // Mirror the GAS coercion at StrideAPI.gs:9533:
+  //   { itemCount: (payload.items || []).length, carrier: payload.carrier || "" }
+  // Using the same `String(... ?? '')` shape on both sides (here + the
+  // shadowRegistry override) avoids per-payload drift on null/undefined.
+  const items = Array.isArray(payload?.items) ? payload.items : [];
   return {
     ok: true,
     changes: {
       itemCount: items.length,
-      carrier,
+      carrier:   String(payload?.carrier ?? ''),
     },
   };
 }

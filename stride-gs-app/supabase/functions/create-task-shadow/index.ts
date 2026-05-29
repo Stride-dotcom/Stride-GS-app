@@ -42,8 +42,12 @@ type Payload = Record<string, unknown>;
 interface ShadowResult { ok: boolean; changes?: Record<string, unknown>; error?: string; errorCode?: string }
 
 export function runCreateTaskShadow(payload: Payload): ShadowResult {
+  // GAS at StrideAPI.gs:10183 uses raw `.join(",")` — Array.prototype.join
+  // calls String() on each element with null/undefined → "". `.map(String)`
+  // first would diverge for null entries (`"null"` vs `""`). Keep raw join
+  // so the EF and the shadowRegistry override produce identical strings.
   const svcCodes = Array.isArray(payload?.svcCodes)
-    ? (payload.svcCodes as unknown[]).map(String).join(',')
+    ? (payload.svcCodes as unknown[]).join(',')
     : '';
   return {
     ok: true,
