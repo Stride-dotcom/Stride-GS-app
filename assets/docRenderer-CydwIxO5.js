@@ -1,0 +1,1 @@
+import{r as e}from"./index-B4u-jAa5.js";export{e as renderDocUpload};
