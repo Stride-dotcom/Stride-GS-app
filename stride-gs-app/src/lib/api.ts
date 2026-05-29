@@ -1637,6 +1637,15 @@ export interface SendRepairQuotePayload {
   taxAreaName?: string;
   /** Percent (e.g. 10.4 for 10.4%). Defaults to 0 if omitted. */
   taxRate?: number;
+  /** Edit-after-send flow: caller is editing a Quote Sent repair, not
+   *  building a brand-new quote. Server prefixes the email subject with
+   *  "REVISED — " and bypasses the same-lines idempotency skip so the
+   *  operator's "Save & Resend" actually re-sends even when totals match. */
+  isRevision?: boolean;
+  /** Save Draft path — persist updated lines/totals but do NOT send the
+   *  customer-facing email. Operator wants to review further before
+   *  resending. */
+  skipEmail?: boolean;
 }
 
 export interface SendRepairQuoteResponse {
@@ -3493,6 +3502,10 @@ export interface SendRepairQuoteSbPayload {
   // Legacy single-amount shape:
   quoteAmount?: number;
   notes?: string;
+  /** Edit-after-send flow — mirrors GAS payload (see SendRepairQuotePayload). */
+  isRevision?: boolean;
+  /** Save Draft — persist updated lines but skip the customer email. */
+  skipEmail?: boolean;
 }
 export interface SendRepairQuoteSbResponse {
   ok: boolean;

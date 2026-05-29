@@ -85,6 +85,12 @@ Deno.serve(async (req: Request) => {
     const repairId: string  = String(body.repairId ?? '').trim();
     const requestId: string = String(body.requestId ?? '').trim() || crypto.randomUUID();
     const notes: string     = String(body.notes ?? '').trim();
+    // Edit-quote-after-sent flow (mirrors GAS handleSendRepairQuote_
+    // v38.249.0). isRevision bypasses the same-lines idempotency skip
+    // and prefixes the email subject with "REVISED — "; skipEmail
+    // (Save Draft) persists the updated quote without firing the email.
+    const isRevision: boolean = body.isRevision === true;
+    const skipEmail:  boolean = body.skipEmail  === true;
 
     if (!tenantId) return json({ ok: false, error: 'tenantId is required' }, 400);
     if (!repairId) return json({ ok: false, error: 'repairId is required' }, 400);
@@ -155,7 +161,7 @@ Deno.serve(async (req: Request) => {
     // ── 2. Load existing repair + validate state ─────────────────────
     const { data: existing, error: existingErr } = await supabase
       .from('repairs')
-      .select('repair_id, status, quote_lines_json, quote_grand_total, item_id, repair_notes, task_notes')
+      .select('repair_id, status, quote_lines_json, quote_grand_total, quote_sent_date, item_id, repair_notes, task_notes')
       .eq('tenant_id', tenantId)
       .eq('repair_id', repairId)
       .maybeSingle();
@@ -172,12 +178,14 @@ Deno.serve(async (req: Request) => {
     }
 
     // Idempotency — same lines + same grand total → skip email + mirror.
+    // Bypassed when isRevision=true so a Save & Resend on unchanged lines
+    // still re-sends the customer email per operator intent.
     const existingLines = Array.isArray(existing.quote_lines_json) ? existing.quote_lines_json : null;
     const linesMatch = existingLines
       && existingLines.length === quoteLines.length
       && JSON.stringify(existingLines) === JSON.stringify(quoteLines.map(({ amount: _a, ...rest }) => rest));
     const totalMatches = Number(existing.quote_grand_total ?? -1) === grandTotal;
-    if (linesMatch && totalMatches && previousStatus === 'Quote Sent') {
+    if (!isRevision && linesMatch && totalMatches && previousStatus === 'Quote Sent') {
       return json({
         ok: true, repairId, previousStatus,
         subtotal, taxAmount, grandTotal,
@@ -187,13 +195,19 @@ Deno.serve(async (req: Request) => {
     }
 
     // ── 3. UPDATE public.repairs ─────────────────────────────────────
+    // Preserve quote_sent_date when an original is already stamped — matches
+    // GAS handleSendRepairQuote_'s "set only if blank" guard so a Save &
+    // Resend / Save Draft on an existing Quote Sent repair keeps the
+    // original send-out date as the customer-visible Quote Sent Date.
     const ptDate = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+    const existingQuoteSentDate = String(existing.quote_sent_date ?? '').trim();
+    const nextQuoteSentDate = existingQuoteSentDate || ptDate;
     const { error: updErr } = await supabase
       .from('repairs')
       .update({
         status:                 'Quote Sent',
         quote_amount:           grandTotal,  // back-compat with single-amount readers
-        quote_sent_date:        ptDate,
+        quote_sent_date:        nextQuoteSentDate,
         quote_lines_json:       quoteLines.map(({ amount: _a, ...rest }) => rest),
         quote_subtotal:         subtotal,
         quote_taxable_subtotal: taxableSubtotal,
@@ -209,12 +223,20 @@ Deno.serve(async (req: Request) => {
     if (updErr) return json({ ok: false, error: `Update failed: ${updErr.message}` }, 500);
 
     // ── 4. entity_audit_log ──────────────────────────────────────────
+    // Distinguish a first-send (Pending Quote → Quote Sent) from an
+    // edit-after-sent revision (Quote Sent → Quote Sent). Pre-fix the
+    // entry hard-coded the Pending→Sent transition on every call,
+    // polluting the timeline with phantom status flips on Save & Resend
+    // and Save Draft.
+    const isFirstSend = previousStatus === 'Pending Quote';
     await supabase.from('entity_audit_log').insert({
       entity_type:  'repair',
       entity_id:    repairId,
       tenant_id:    tenantId,
-      action:       'status_change',
-      changes:      { status: { old: 'Pending Quote', new: 'Quote Sent' } },
+      action:       isFirstSend ? 'status_change' : 'quote_revised',
+      changes:      isFirstSend
+        ? { status: { old: previousStatus, new: 'Quote Sent' } }
+        : { revision: true, skipEmail },
       performed_by: callerEmail,
       source:       'edge',
     });
@@ -241,7 +263,7 @@ Deno.serve(async (req: Request) => {
             row:   {
               status:                 'Quote Sent',
               quote_amount:           grandTotal,
-              quote_sent_date:        ptDate,
+              quote_sent_date:        nextQuoteSentDate,
               quote_lines_json:       JSON.stringify(quoteLines.map(({ amount: _a, ...rest }) => rest)),
               quote_subtotal:         subtotal,
               quote_taxable_subtotal: taxableSubtotal,
@@ -312,65 +334,81 @@ Deno.serve(async (req: Request) => {
     const appDeepLink    = `${APP_URL}/#/repairs?open=${encodeURIComponent(repairId)}&client=${encodeURIComponent(tenantId)}`;
 
     // ── 7. Send email ────────────────────────────────────────────────
+    // Save Draft (skipEmail=true) lands the SB + sheet writes but skips
+    // the customer-facing send so the operator can review before
+    // resending. emailSent stays false; no error is surfaced.
     let emailSent = false;
     let emailError: string | undefined;
-    try {
-      const sendRes = await fetch(`${supabaseUrl}/functions/v1/send-email`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${serviceKey}`,
-          'apikey':         serviceKey,
-          'Content-Type':   'application/json',
-        },
-        body: JSON.stringify({
-          templateKey: 'REPAIR_QUOTE',
-          tokens: {
-            CLIENT_NAME:           clientName,
-            REPAIR_ID:             repairId,
-            ITEM_ID:               itemId,
-            ITEM_TABLE_HTML:       itemTableHtml,
-            QUOTE_LINE_ITEMS_HTML: quoteLinesHtml,
-            // Token values are RAW numbers — the template surrounds each
-            // with a literal '$' (e.g. `${{QUOTE_GRAND_TOTAL}}`). Passing
-            // formatCurrency() here used to render $$808.92 (double $).
-            // The inline HTML in QUOTE_LINE_ITEMS_HTML keeps using
-            // formatCurrency() because it builds the $ into the cells
-            // itself (no surrounding template prefix).
-            QUOTE_SUBTOTAL:        formatMoney(subtotal),
-            QUOTE_TAX_AREA_NAME:   taxAreaName ?? '',
-            QUOTE_TAX_RATE:        taxRate ? `${taxRate.toFixed(3)}%` : '',
-            QUOTE_TAX_AMOUNT:      formatMoney(taxAmount),
-            QUOTE_GRAND_TOTAL:     formatMoney(grandTotal),
-            NOTES:                 notes || String(existing.repair_notes ?? ''),
-            TASK_NOTES:            String(existing.task_notes ?? ''),
-            APP_URL:               APP_URL,
-            APP_DEEP_LINK:         appDeepLink,
+    if (!skipEmail) {
+      // REVISED prefix mirrors GAS handleSendRepairQuote_ — the customer
+      // mailbox sees the same "REVISED — ..." subject regardless of
+      // which backend serviced the request.
+      const subjectOverride = `${isRevision ? 'REVISED — ' : ''}Repair Quote Ready: ${itemId} $${formatMoney(grandTotal)}`;
+      // Bump the idempotency key on a revision so send-email's
+      // per-template dedup doesn't drop the resend when nothing else
+      // changed in the tokens.
+      const idempotencyKey = isRevision
+        ? `repair-quote:${repairId}:${grandTotal}:rev:${Date.now()}`
+        : `repair-quote:${repairId}:${grandTotal}`;
+      try {
+        const sendRes = await fetch(`${supabaseUrl}/functions/v1/send-email`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${serviceKey}`,
+            'apikey':         serviceKey,
+            'Content-Type':   'application/json',
           },
-          idempotencyKey:    `repair-quote:${repairId}:${grandTotal}`,
-          relatedEntityType: 'repair',
-          relatedEntityId:   repairId,
-          tenantId,
-        }),
-      });
-      const sendJson = await sendRes.json().catch(() => ({})) as Record<string, unknown>;
-      if (sendJson.ok) emailSent = true;
-      else emailError = String(sendJson.error ?? 'unknown');
-    } catch (e) {
-      emailError = e instanceof Error ? e.message : String(e);
-    }
-    if (!emailSent) {
-      console.error('[send-repair-quote-sb] email failed:', emailError);
-      await supabase.from('gs_sync_events').insert({
-        tenant_id:     tenantId,
-        entity_type:   'repair',
-        entity_id:     repairId,
-        action_type:   'send_repair_quote_email',
-        sync_status:   'sync_failed',
-        requested_by:  `send-repair-quote-sb:${callerEmail}`,
-        request_id:    requestId,
-        payload:       { templateKey: 'REPAIR_QUOTE', grandTotal },
-        error_message: (emailError ?? 'unknown').slice(0, 1000),
-      }).then(() => {}, () => {});
+          body: JSON.stringify({
+            templateKey: 'REPAIR_QUOTE',
+            subjectOverride,
+            tokens: {
+              CLIENT_NAME:           clientName,
+              REPAIR_ID:             repairId,
+              ITEM_ID:               itemId,
+              ITEM_TABLE_HTML:       itemTableHtml,
+              QUOTE_LINE_ITEMS_HTML: quoteLinesHtml,
+              // Token values are RAW numbers — the template surrounds each
+              // with a literal '$' (e.g. `${{QUOTE_GRAND_TOTAL}}`). Passing
+              // formatCurrency() here used to render $$808.92 (double $).
+              // The inline HTML in QUOTE_LINE_ITEMS_HTML keeps using
+              // formatCurrency() because it builds the $ into the cells
+              // itself (no surrounding template prefix).
+              QUOTE_SUBTOTAL:        formatMoney(subtotal),
+              QUOTE_TAX_AREA_NAME:   taxAreaName ?? '',
+              QUOTE_TAX_RATE:        taxRate ? `${taxRate.toFixed(3)}%` : '',
+              QUOTE_TAX_AMOUNT:      formatMoney(taxAmount),
+              QUOTE_GRAND_TOTAL:     formatMoney(grandTotal),
+              NOTES:                 notes || String(existing.repair_notes ?? ''),
+              TASK_NOTES:            String(existing.task_notes ?? ''),
+              APP_URL:               APP_URL,
+              APP_DEEP_LINK:         appDeepLink,
+            },
+            idempotencyKey,
+            relatedEntityType: 'repair',
+            relatedEntityId:   repairId,
+            tenantId,
+          }),
+        });
+        const sendJson = await sendRes.json().catch(() => ({})) as Record<string, unknown>;
+        if (sendJson.ok) emailSent = true;
+        else emailError = String(sendJson.error ?? 'unknown');
+      } catch (e) {
+        emailError = e instanceof Error ? e.message : String(e);
+      }
+      if (!emailSent) {
+        console.error('[send-repair-quote-sb] email failed:', emailError);
+        await supabase.from('gs_sync_events').insert({
+          tenant_id:     tenantId,
+          entity_type:   'repair',
+          entity_id:     repairId,
+          action_type:   'send_repair_quote_email',
+          sync_status:   'sync_failed',
+          requested_by:  `send-repair-quote-sb:${callerEmail}`,
+          request_id:    requestId,
+          payload:       { templateKey: 'REPAIR_QUOTE', grandTotal },
+          error_message: (emailError ?? 'unknown').slice(0, 1000),
+        }).then(() => {}, () => {});
+      }
     }
 
     return json({
