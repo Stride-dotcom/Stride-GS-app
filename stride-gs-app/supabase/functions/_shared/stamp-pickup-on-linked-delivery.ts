@@ -21,6 +21,12 @@
  * for picked_up_at ONLY — never for Tier-B field writes, since
  * dt_item_code is unreliable across orders (DT regenerates UUIDs).
  *
+ * Blanket pass (2026-05-29): when the pickup order completes, any
+ * remaining delivery items still unstamped after the FK + code passes
+ * receive picked_up_at + a default pickup_delivered_quantity (= item
+ * quantity) + pickup_return_codes = ['Pick Up']. Closes the silent-skip
+ * class for delivery items created without a pickup-side counterpart.
+ *
  * Order-level merge rules (so the poll path can correct the webhook
  * path without overwriting good data with NULL):
  *   linked_pickup_finished_at = COALESCE(pickup.finished_at, now())
@@ -221,6 +227,55 @@ export async function stampPickupOnLinkedDelivery(
       .is('picked_up_at', null)
       .select('id');
     itemsStamped += (data ?? []).length;
+  }
+
+  // ── 5b. Blanket stamp — items with no PU match still rode the truck ──
+  // When the pickup order reaches Completed, every item on the linked
+  // delivery should reflect that pickup happened — even items with no
+  // `parent_pickup_item_id` FK and no `dt_item_code` match against an
+  // eligible PU row. Real-world reason: P+D pairs frequently have
+  // delivery items created from inventory in the modal without an
+  // explicit pickup-side counterpart (the pickup is a leg-level event,
+  // not a per-item event), and historical rows from before the FK
+  // backfill have NULL parent_pickup_item_id. Pre-fix, those items
+  // stayed picked_up_at=NULL forever, and downstream surfaces (UI badges,
+  // dt-push-order's "[✓ Picked up M/D DRIVER]" prefix, billing prompts)
+  // silently skipped them. JAS-00096-ROZE-D 2026-05-28 surfaced this:
+  // 1 of 9 delivery items stamped, the rest dark.
+  //
+  // Defaults applied (audit-column writes only — never touch the
+  // delivery's own quantity / item_note / return_codes):
+  //   • pickup_delivered_quantity ← dit.quantity
+  //       (assumes all pieces picked up; matches the leg-level
+  //        invariant — if the driver had partial PU on these items,
+  //        the operator would have edited the PU manifest, which
+  //        would have produced a parent_pickup_item_id link via the
+  //        modal or the dt-sync-statuses P+D mirror)
+  //   • pickup_return_codes       ← ['Pick Up']
+  //       (DT's generic "this was picked up" return code; the
+  //        Tier-B path above uses the actual codes from the matched
+  //        PU row when available)
+  //   • picked_up_at              ← finishedAt (same as matched paths)
+  //
+  // Idempotent via `.is('picked_up_at', null)` — never overwrites a
+  // prior stamp, and itemsStamped only counts rows where the WHERE
+  // clause matched (rows already stamped this run don't double-count).
+  const matchedStampIds = new Set([...stampByFKIds, ...stampByCodeCodes]);
+  const blanketCandidates = deliveryItems.filter(dit =>
+    !dit.picked_up_at && !matchedStampIds.has(dit.id),
+  );
+  for (const dit of blanketCandidates) {
+    const { data } = await supabase
+      .from('dt_order_items')
+      .update({
+        picked_up_at:              finishedAt,
+        pickup_delivered_quantity: dit.quantity,
+        pickup_return_codes:       ['Pick Up'],
+      })
+      .eq('id', dit.id)
+      .is('picked_up_at', null)
+      .select('id');
+    if ((data ?? []).length > 0) itemsStamped += 1;
   }
 
   // ── 6. Tier B — per-item field propagation (sync path only) ──────
