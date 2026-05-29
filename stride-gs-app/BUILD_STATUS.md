@@ -70,6 +70,15 @@
 
 ---
 
+## Recent Changes (2026-05-29, build preflight: fail if Supabase env vars missing — fix/build/env-preflight, PR #571)
+
+- **Problem:** Session 72 incident — a deploy from a fresh worktree that hadn't copied `.env` produced a bundle with `VITE_SUPABASE_URL = undefined` inlined. `vite build` succeeded; the deployed bundle then crashed at module load with `Uncaught Error: supabaseUrl is required`. The build silently shipped a broken bundle. The CLAUDE.md "Worktrees for parallel builders" section now calls this out, but a procedural reminder is not the same as a build-time gate.
+- **Solution:** `stride-gs-app/vite.config.ts` now uses the `defineConfig(({ command, mode }) => ...)` function form. When `command === 'build'`, `loadEnv(mode, process.cwd(), '')` reads the same `.env` files Vite uses for substitution, falls back to `process.env` for CI shells, and throws `FATAL: VITE_SUPABASE_URL[, VITE_SUPABASE_ANON_KEY] must be set in .env. Build aborted to prevent shipping a broken bundle.` if either is empty. Vite exits 1, deploy aborts.
+- **Verification:** Built with `.env` renamed → exits 1 with the FATAL error. Built with `.env` present → tsc clean, vite build OK, post-build sanity checks pass.
+- **Dev mode unaffected:** the check is gated on `command === 'build'`, so `vite dev` keeps loading `.env` the normal way.
+- **Files:**
+  - `stride-gs-app/vite.config.ts` — switch to function-form config, add loadEnv preflight
+
 ## Recent Changes (2026-05-29, build version chip near logout — feat/ui/build-version, PR #565)
 
 - **Problem:** Users (and Justin during incidents) couldn't tell at a glance whether a tab was on the current bundle or a stale cached one. `useVersionCheck` silently reloads on next navigation, but that's invisible until a click — leaving "is this user on the fix yet?" as a guessing game.
