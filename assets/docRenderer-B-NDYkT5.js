@@ -1,0 +1,1 @@
+import{r as e}from"./index-DDrKKDDX.js";export{e as renderDocUpload};
