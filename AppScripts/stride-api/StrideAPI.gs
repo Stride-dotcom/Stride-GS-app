@@ -30916,10 +30916,10 @@ function api_mirrorSplitWriteback_(clientSheetId, taskId, parentItemId, childCod
 function handleBatchCreateTasks_(clientSheetId, payload) {
   var svcCodes = payload.svcCodes || [];
   var items = payload.items || [];
-  // 2026-05-29 — Advanced batch-stamp from CreateTaskModal. Single value
-  // applied to every task in the batch; UI exposes "Standard" / "High" /
-  // "Urgent" but normalizes to the existing Normal/High wire vocabulary
-  // (Urgent piggybacks on High + due_date=today, set client-side).
+  // 2026-05-29 — Advanced batch-stamp from CreateTaskModal. Wire vocab is
+  // Normal/High only — the modal's "Urgent" option is a UI-only label that
+  // resolves client-side to priority='High' + dueDate=today before posting,
+  // so don't add an 'Urgent' branch server-side.
   var batchTaskNotes = String(payload.taskNotes || "").trim();
   // v38.214.0 — per-svcCode default SLA hours from the React-side
   // service catalog. When present, this map overrides the legacy

@@ -215,8 +215,8 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
           tempIds.push(tempId);
           addOptimisticTask({
             taskId: tempId,
-            type: code as Task['type'],
-            svcCode: code as Task['svcCode'],
+            type: code,
+            svcCode: code,
             status: 'Open',
             itemId: item.itemId,
             clientId: clientSheetId,

@@ -70,8 +70,9 @@ function mapToAppTask(api: ApiTask): Task {
   // column for modern catalog codes (FAB_RUG, DISP, MULTI_INS, …). The
   // service_catalog is the source of truth now; pass through whatever the
   // API returns and only default when it's empty. The Tasks page resolves
-  // the human-readable label via svcNameByCode.
-  const svcCode = (api.svcCode || 'OTHER').trim() || 'OTHER';
+  // the human-readable label via svcNameByCode. `String(... || '')`
+  // guards against historical null values in the wire payload.
+  const svcCode = String(api.svcCode || '').trim() || 'OTHER';
 
   return {
     taskId: api.taskId,
