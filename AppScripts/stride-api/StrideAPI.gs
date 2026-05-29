@@ -9634,7 +9634,15 @@ function doPost(e) {
           invalidateClientCache_(effectiveId);
           api_notifySupabase_(r, { tenant_id: effectiveId, entity_type: "repair", entity_id: String(payload.repairId || ""), action_type: "send_repair_quote", requested_by: callerEmail, request_id: String(payload.requestId || "") });
           api_writeThrough_(r, "repair", effectiveId, String(payload.repairId || ""));
-          api_auditLog_("repair", String(payload.repairId || ""), effectiveId, "status_change", { status: { old: "Pending Quote", new: "Quote Sent" } }, callerEmail);
+          // v38.249.0 — distinguish first-send (Pending Quote → Quote Sent)
+          // from edit-after-sent (Quote Sent → Quote Sent revision). Without
+          // this guard the audit log carried a phantom Pending→Sent entry
+          // on every Save & Resend / Save Draft.
+          var sqAction = payload && payload.isRevision === true ? "quote_revised" : "status_change";
+          var sqChanges = payload && payload.isRevision === true
+            ? { revision: true, skipEmail: payload && payload.skipEmail === true }
+            : { status: { old: "Pending Quote", new: "Quote Sent" } };
+          api_auditLog_("repair", String(payload.repairId || ""), effectiveId, sqAction, sqChanges, callerEmail);
           return r;
         });
 

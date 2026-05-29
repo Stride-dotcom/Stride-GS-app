@@ -223,12 +223,20 @@ Deno.serve(async (req: Request) => {
     if (updErr) return json({ ok: false, error: `Update failed: ${updErr.message}` }, 500);
 
     // ── 4. entity_audit_log ──────────────────────────────────────────
+    // Distinguish a first-send (Pending Quote → Quote Sent) from an
+    // edit-after-sent revision (Quote Sent → Quote Sent). Pre-fix the
+    // entry hard-coded the Pending→Sent transition on every call,
+    // polluting the timeline with phantom status flips on Save & Resend
+    // and Save Draft.
+    const isFirstSend = previousStatus === 'Pending Quote';
     await supabase.from('entity_audit_log').insert({
       entity_type:  'repair',
       entity_id:    repairId,
       tenant_id:    tenantId,
-      action:       'status_change',
-      changes:      { status: { old: 'Pending Quote', new: 'Quote Sent' } },
+      action:       isFirstSend ? 'status_change' : 'quote_revised',
+      changes:      isFirstSend
+        ? { status: { old: previousStatus, new: 'Quote Sent' } }
+        : { revision: true, skipEmail },
       performed_by: callerEmail,
       source:       'edge',
     });
