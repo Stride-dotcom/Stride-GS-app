@@ -55,7 +55,11 @@ export type InventoryStatus = 'Active' | 'Released' | 'On Hold' | 'Transferred';
 
 export interface Task {
   taskId: string;
-  type: ServiceCode;
+  // Widened to `string` 2026-05-29: tasks can carry any service_catalog code
+  // (FAB_RUG, FAB_SOFA, DISP, MULTI_INS, NO_ID, …), not just the legacy
+  // ServiceCode union. The Tasks page and detail panel resolve the
+  // human-readable label by joining to service_catalog.name.
+  type: string;
   status: TaskStatus;
   itemId: string;
   clientId?: string;
@@ -80,7 +84,8 @@ export interface Task {
   result?: 'Pass' | 'Fail';
   itemNotes?: string;
   taskNotes?: string;
-  svcCode: ServiceCode;
+  // Widened 2026-05-29 — see `type` above.
+  svcCode: string;
   billed: boolean;
   billedAmount?: number;
   customPrice?: number;

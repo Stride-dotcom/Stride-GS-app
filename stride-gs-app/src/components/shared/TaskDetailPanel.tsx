@@ -28,6 +28,7 @@ import { FloatingActionMenu, type FABAction } from './FloatingActionMenu';
 import type { CompleteTaskResponse, StartTaskResponse } from '../../lib/api';
 import { useAuth } from '../../contexts/AuthContext';
 import { SERVICE_CODES } from '../../lib/constants';
+import { useServiceCatalog } from '../../hooks/useServiceCatalog';
 import { ProcessingOverlay } from './ProcessingOverlay';
 import { useTaskAddons } from '../../hooks/useTaskAddons';
 import { BillingPreviewCard } from './BillingPreviewCard';
@@ -84,6 +85,25 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
 
   const { user } = useAuth();
   const { isMobile, isTablet } = useIsMobile();
+  // 2026-05-29 — Service label resolution. Master Price List service_catalog is
+  // the source of truth for human-readable names. svcNameByCode lets the
+  // Service field and Type badge render the catalog name (e.g.
+  // "Fabric Protection" for FAB_RUG, "Disposal" for DISP) rather than
+  // falling through to the SERVICE_CODES static map (which doesn't know
+  // about custom catalog codes).
+  const { services: catalogServices } = useServiceCatalog();
+  const svcNameByCode = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const s of catalogServices) if (s.code && s.name) m.set(s.code, s.name);
+    return m;
+  }, [catalogServices]);
+  const resolveServiceLabel = useCallback((code: string | null | undefined): string => {
+    if (!code) return '—';
+    const c = String(code);
+    return svcNameByCode.get(c)
+      || SERVICE_CODES[c as keyof typeof SERVICE_CODES]
+      || c;
+  }, [svcNameByCode]);
   // [MIGRATION-P3] flag-routed Request Repair Quote — SB path creates ONE
   // repair with item + sourceTaskId stamped; legacy GAS path same shape.
   const requestRepairQuoteBackend = useFeatureFlag('requestRepairQuote');
@@ -923,7 +943,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
             <Field label="Client" value={task.clientName} />
             <Field label="Sidemark" value={task.sidemark} />
             <Field label="Assigned To" value={task.assignedTo} />
-            <Field label="Service" value={SERVICE_CODES[(task.svcCode || task.serviceCode) as keyof typeof SERVICE_CODES] || task.svcCode || task.serviceCode} />
+            <Field label="Service" value={resolveServiceLabel(task.svcCode || task.serviceCode || task.type)} />
             <Field label="Created" value={fmtDate(task.created || task.createdDate)} />
             <div style={{ marginBottom: 10 }}>
               <div style={{ fontSize: 11, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.3, marginBottom: 2 }}>Shipment</div>
@@ -1159,7 +1179,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
     && (correctedResult || submitResult?.result || task.result) === 'Fail';
   const belowIdContent = (
     <div style={{ display: 'flex', gap: 6 }}>
-      <Badge t={SERVICE_CODES[task.type as keyof typeof SERVICE_CODES] || task.type} bg={tc.bg} color={tc.color} />
+      <Badge t={resolveServiceLabel(task.svcCode || task.type)} bg={tc.bg} color={tc.color} />
       <Badge t={completed ? 'Completed' : task.status} bg={completed ? STATUS_CFG.Completed.bg : sc.bg} color={completed ? STATUS_CFG.Completed.color : sc.color} />
       {task.result && <Badge t={task.result} bg={task.result === 'Pass' ? '#F0FDF4' : '#FEF2F2'} color={task.result === 'Pass' ? '#15803D' : '#DC2626'} />}
     </div>
