@@ -15,9 +15,14 @@
  *   4. INSERT entity_audit_log matching GAS shape:
  *      { status: { old: 'Pending Quote', new: 'Quote Sent' } } with
  *      action='status_change'.
- *   5. Fire reverse writethrough — writer's REVERSE_REPAIR_FIELDS_ map
- *      (v38.216.0) now covers all the quote_* columns.
- *   6. Send REPAIR_QUOTE email via send-email (Resend). Tokens:
+ *   5. Fire reverse writethrough in the BACKGROUND via EdgeRuntime.waitUntil
+ *      so the EF returns after the SB writes + email (~1-2s) instead of
+ *      waiting for the ~30s GAS sheet round-trip. Writer's REVERSE_REPAIR_FIELDS_
+ *      map (v38.216.0) covers all the quote_* columns. Failures land in
+ *      gs_sync_events; next full-client-sync reconciles.
+ *   6. Send REPAIR_QUOTE email via send-email (Resend) — kept synchronous
+ *      so emailSent / emailError surface in the response and the operator
+ *      sees an immediate confirmation. Tokens:
  *      CLIENT_NAME, REPAIR_ID, ITEM_ID, ITEM_TABLE_HTML, QUOTE_LINE_ITEMS_HTML,
  *      QUOTE_SUBTOTAL, QUOTE_TAX_*, QUOTE_GRAND_TOTAL, NOTES, TASK_NOTES,
  *      APP_URL, APP_DEEP_LINK. send-email resolves recipients via the
@@ -28,6 +33,10 @@
  *   • Same lines + same totals already sent → skip email + reverse
  *     writethrough; return alreadyMatching=true. Prevents accidental
  *     re-sends. The legacy GAS handler has the same protection.
+ *   • isRevision=true (edit-after-sent flow) bypasses the idempotency skip
+ *     so a Save & Resend on unchanged lines still re-fires the email.
+ *   • skipEmail=true (Save Draft) lands the SB + sheet writes but skips
+ *     the customer email.
  *
  * Auth: verified caller email via supabase.auth.getUser(token); falls
  * back to 'system' on service_role / unauthenticated calls.
@@ -37,11 +46,10 @@
  *   quoteLines?: [{ svcCode, svcName, qty, rate, taxable }],
  *   quoteAmount?: number (legacy single-line),
  *   taxAreaId?, taxAreaName?, taxRate?,
- *   notes?
+ *   notes?, isRevision?, skipEmail?
  * }
  * Response: { ok, repairId, previousStatus, subtotal, taxAmount, grandTotal,
- *             alreadyMatching?, mirrorOk, mirrorError?,
- *             emailSent, emailError? }
+ *             alreadyMatching?, mirrorQueued, emailSent, emailError? }
  */
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
@@ -190,7 +198,7 @@ Deno.serve(async (req: Request) => {
         ok: true, repairId, previousStatus,
         subtotal, taxAmount, grandTotal,
         alreadyMatching: true,
-        mirrorOk: true, emailSent: false,
+        mirrorQueued: false, emailSent: false,
       });
     }
 
@@ -241,69 +249,91 @@ Deno.serve(async (req: Request) => {
       source:       'edge',
     });
 
-    // ── 5. Reverse writethrough ──────────────────────────────────────
-    let mirrorOk = true;
-    let mirrorError: string | undefined;
-    try {
-      const gasUrl = Deno.env.get('GAS_API_URL');
-      const gasToken = Deno.env.get('GAS_API_TOKEN');
-      if (gasUrl && gasToken) {
+    // ── 5. Reverse writethrough (BACKGROUND) ─────────────────────────
+    // 2026-05-29 — moved the GAS sheet mirror behind EdgeRuntime.waitUntil
+    // so the EF returns success right after the SB UPDATE + audit log +
+    // email send (~1-2s, dominated by the customer email), instead of
+    // waiting on the ~30s sheet round-trip. Same gs_sync_events failure
+    // capture path; only the await point moves. Pattern mirrors
+    // void-invoice-sb (v38.243.0).
+    const mirrorPayload = {
+      tenantId,
+      table: 'repairs',
+      op:    'update',
+      rowId: repairId,
+      row:   {
+        status:                 'Quote Sent',
+        quote_amount:           grandTotal,
+        quote_sent_date:        nextQuoteSentDate,
         // Stringify quote_lines_json before sending — the GAS writer
         // does setValue() and setValue([object]) writes "[object Object]"
         // to the sheet. The legacy GAS handler stores the lines as
         // JSON.stringify'd text. We mirror that.
-        const mirrorRes = await fetch(`${gasUrl}?action=writeThroughReverse&token=${encodeURIComponent(gasToken)}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            tenantId,
-            table: 'repairs',
-            op:    'update',
-            rowId: repairId,
-            row:   {
-              status:                 'Quote Sent',
-              quote_amount:           grandTotal,
-              quote_sent_date:        nextQuoteSentDate,
-              quote_lines_json:       JSON.stringify(quoteLines.map(({ amount: _a, ...rest }) => rest)),
-              quote_subtotal:         subtotal,
-              quote_taxable_subtotal: taxableSubtotal,
-              quote_tax_area_id:      taxAreaId,
-              quote_tax_area_name:    taxAreaName,
-              quote_tax_rate:         taxRate,
-              quote_tax_amount:       taxAmount,
-              quote_grand_total:      grandTotal,
-            },
-            requestId,
-          }),
-        });
-        const text = await mirrorRes.text();
-        let parsed: { success?: boolean; error?: string } = {};
-        try { parsed = JSON.parse(text); } catch { parsed = { error: `non-JSON: ${text.slice(0, 200)}` }; }
-        if (!mirrorRes.ok || !parsed.success) {
-          mirrorOk = false;
-          mirrorError = parsed.error ?? `HTTP ${mirrorRes.status}`;
+        quote_lines_json:       JSON.stringify(quoteLines.map(({ amount: _a, ...rest }) => rest)),
+        quote_subtotal:         subtotal,
+        quote_taxable_subtotal: taxableSubtotal,
+        quote_tax_area_id:      taxAreaId,
+        quote_tax_area_name:    taxAreaName,
+        quote_tax_rate:         taxRate,
+        quote_tax_amount:       taxAmount,
+        quote_grand_total:      grandTotal,
+      },
+      requestId,
+    };
+    const gasUrl   = Deno.env.get('GAS_API_URL');
+    const gasToken = Deno.env.get('GAS_API_TOKEN');
+    let mirrorQueued = false;
+    if (gasUrl && gasToken) {
+      const mirrorPromise = (async () => {
+        try {
+          const mirrorRes = await fetch(`${gasUrl}?action=writeThroughReverse&token=${encodeURIComponent(gasToken)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(mirrorPayload),
+          });
+          const text = await mirrorRes.text();
+          let parsed: { success?: boolean; error?: string } = {};
+          try { parsed = JSON.parse(text); } catch { parsed = { error: `non-JSON: ${text.slice(0, 200)}` }; }
+          if (!mirrorRes.ok || !parsed.success) {
+            const errMsg = parsed.error ?? `HTTP ${mirrorRes.status}`;
+            console.error('[send-repair-quote-sb] sheet mirror failed:', errMsg);
+            await supabase.from('gs_sync_events').insert({
+              tenant_id:     tenantId,
+              entity_type:   'repair',
+              entity_id:     repairId,
+              action_type:   'writethrough_reverse',
+              sync_status:   'sync_failed',
+              requested_by:  `send-repair-quote-sb:${callerEmail}`,
+              request_id:    requestId,
+              payload:       { table: 'repairs', op: 'update', rowId: repairId, fieldCount: 11 },
+              error_message: String(errMsg).slice(0, 1000),
+            }).then(() => {}, () => {});
+          }
+        } catch (e) {
+          const errMsg = e instanceof Error ? e.message : String(e);
+          console.error('[send-repair-quote-sb] sheet mirror threw:', errMsg);
+          await supabase.from('gs_sync_events').insert({
+            tenant_id:     tenantId,
+            entity_type:   'repair',
+            entity_id:     repairId,
+            action_type:   'writethrough_reverse',
+            sync_status:   'sync_failed',
+            requested_by:  `send-repair-quote-sb:${callerEmail}`,
+            request_id:    requestId,
+            payload:       { table: 'repairs', op: 'update', rowId: repairId, fieldCount: 11 },
+            error_message: errMsg.slice(0, 1000),
+          }).then(() => {}, () => {});
         }
-      } else {
-        mirrorOk = false;
-        mirrorError = 'GAS_API_URL or GAS_API_TOKEN not configured';
+      })();
+      const edgeRuntime = (globalThis as unknown as { EdgeRuntime?: { waitUntil(p: Promise<unknown>): void } }).EdgeRuntime;
+      if (edgeRuntime && typeof edgeRuntime.waitUntil === 'function') {
+        edgeRuntime.waitUntil(mirrorPromise);
       }
-    } catch (e) {
-      mirrorOk = false;
-      mirrorError = e instanceof Error ? e.message : String(e);
-    }
-
-    if (!mirrorOk) {
-      await supabase.from('gs_sync_events').insert({
-        tenant_id:     tenantId,
-        entity_type:   'repair',
-        entity_id:     repairId,
-        action_type:   'writethrough_reverse',
-        sync_status:   'sync_failed',
-        requested_by:  `send-repair-quote-sb:${callerEmail}`,
-        request_id:    requestId,
-        payload:       { table: 'repairs', op: 'update', rowId: repairId, fieldCount: 11 },
-        error_message: (mirrorError ?? 'unknown').slice(0, 1000),
-      }).then(() => {}, () => {});
+      // If EdgeRuntime is unavailable (local dev), the promise still runs —
+      // we just won't be told when it finishes. Don't await it.
+      mirrorQueued = true;
+    } else {
+      console.warn('[send-repair-quote-sb] GAS_API_URL / GAS_API_TOKEN not configured — sheet mirror skipped');
     }
 
     // ── 6. Resolve client + item info for email tokens ───────────────
@@ -414,7 +444,13 @@ Deno.serve(async (req: Request) => {
     return json({
       ok: true, repairId, previousStatus,
       subtotal, taxAmount, grandTotal,
-      mirrorOk, mirrorError,
+      // Sheet mirror runs in the background via EdgeRuntime.waitUntil —
+      // we don't know the outcome at response time. Failures land in
+      // gs_sync_events (FailedOperationsDrawer pickup); the next
+      // full-client-sync reconciles regardless. mirrorOk/mirrorError are
+      // retained as undefined for back-compat with older React clients
+      // that destructure them but treat undefined as "OK".
+      mirrorQueued,
       emailSent, emailError,
     });
 

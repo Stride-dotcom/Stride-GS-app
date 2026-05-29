@@ -3515,7 +3515,14 @@ export interface SendRepairQuoteSbResponse {
   taxAmount?: number;
   grandTotal?: number;
   alreadyMatching?: boolean;
+  /** 2026-05-29: sheet mirror runs in the background via EdgeRuntime.waitUntil
+   *  so the EF returns ~28s sooner. true when a writethrough promise was
+   *  scheduled; failures land in gs_sync_events (FailedOperationsDrawer pickup). */
+  mirrorQueued?: boolean;
+  /** @deprecated kept for back-compat with the pre-2026-05-29 EF that
+   *  awaited the mirror inline. New send-repair-quote-sb omits this. */
   mirrorOk?: boolean;
+  /** @deprecated paired with mirrorOk. */
   mirrorError?: string;
   emailSent?: boolean;
   emailError?: string;
