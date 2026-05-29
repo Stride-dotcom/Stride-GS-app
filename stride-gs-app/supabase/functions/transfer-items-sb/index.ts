@@ -75,6 +75,13 @@ interface TransferItemsBody {
   requestId?:                 string;
   itemIds?:                   string[];
   transferDate?:              string;
+  /** Frontend opt-out signal from the auto-inspection prompt. When `false`,
+   *  the EF skips its auto-inspection fallback so the explicit operator choice
+   *  ("Transfer Without Inspection") is respected. When `true` or missing, the
+   *  fallback applies if the destination has `auto_inspection=true` AND the
+   *  item lacks a Completed INSP task — mirrors the GAS handler at the same
+   *  decision point. */
+  createInspectionTasks?:     boolean;
 }
 
 Deno.serve(async (req: Request) => {
@@ -93,6 +100,7 @@ Deno.serve(async (req: Request) => {
   const callerEmail = String(body.callerEmail ?? '').trim();
   const requestId   = String(body.requestId   ?? '').trim() || crypto.randomUUID();
   const itemIds     = (body.itemIds ?? []).map(s => String(s).trim()).filter(Boolean);
+  const operatorOptedOutOfInspection = body.createInspectionTasks === false;
 
   // Default transfer date to today if not supplied; reject future dates
   // (matches handleTransferItems_ Phase 1 constraint at StrideAPI.gs:22198).
@@ -263,6 +271,160 @@ Deno.serve(async (req: Request) => {
     t.itemId, transferDate, tenantId, requestId, callerEmail, sb,
   )));
 
+  // 5.5 Auto-inspection on transfer (v38.247.0 parity).
+  //
+  // When the destination client has auto_inspection=true and any transferred
+  // item lacks a Completed INSP task on ANY tenant (item_id is preserved across
+  // transfers, so a prior owner's inspection counts), create new INSP tasks on
+  // the destination side and flip needs_inspection=true on the destination
+  // inventory row. The frontend prompt offers an explicit opt-out via
+  // createInspectionTasks=false; honor that. Otherwise apply unconditionally —
+  // the whole reason this lives on the server is to catch the case where the
+  // operator bypassed or never saw the prompt.
+  let inspectionTasksCreated = 0;
+  if (toTransfer.length > 0 && !operatorOptedOutOfInspection) {
+    try {
+      const { data: destClientRow } = await sb
+        .from('clients')
+        .select('auto_inspection')
+        .eq('tenant_id', destId)
+        .maybeSingle();
+      const destAutoInspection = (destClientRow as { auto_inspection?: boolean } | null)?.auto_inspection === true;
+
+      if (destAutoInspection) {
+        const transferIds = toTransfer.map(t => t.itemId);
+
+        // Items that already have a Completed INSP task — anywhere in the
+        // tasks table. Item ID is the join key (preserved across transfers).
+        const { data: inspectedRows } = await sb
+          .from('tasks')
+          .select('item_id')
+          .in('item_id', transferIds)
+          .like('task_id', 'INSP-%')
+          .eq('status', 'Completed');
+        const inspectedSet = new Set<string>(
+          (inspectedRows ?? [])
+            .map(r => String((r as { item_id: string | null }).item_id ?? '').trim())
+            .filter(Boolean)
+        );
+        const uninspectedIds = transferIds.filter(id => !inspectedSet.has(id));
+
+        if (uninspectedIds.length > 0) {
+          // Pull inventory context for each uninspected item — the row now
+          // lives on the destination tenant (step 2 PATCHed tenant_id), so
+          // query against destId. Vendor/description/location/sidemark feed
+          // into the new task rows and let the destination operator open the
+          // task and immediately see what they're inspecting.
+          const { data: invCtx } = await sb
+            .from('inventory')
+            .select('item_id, vendor, description, location, sidemark, shipment_number')
+            .eq('tenant_id', destId)
+            .in('item_id', uninspectedIds);
+          const ctxById = new Map<string, {
+            vendor: string; description: string; location: string;
+            sidemark: string; shipment_number: string;
+          }>();
+          for (const row of (invCtx ?? []) as Array<{
+            item_id: string;
+            vendor: string | null;
+            description: string | null;
+            location: string | null;
+            sidemark: string | null;
+            shipment_number: string | null;
+          }>) {
+            ctxById.set(String(row.item_id), {
+              vendor:          String(row.vendor          ?? '').trim(),
+              description:     String(row.description     ?? '').trim(),
+              location:        String(row.location        ?? '').trim(),
+              sidemark:        String(row.sidemark        ?? '').trim(),
+              shipment_number: String(row.shipment_number ?? '').trim(),
+            });
+          }
+
+          // Resolve the friendly INSP service name (matches receiving flow).
+          const { data: catRows } = await sb
+            .from('service_catalog')
+            .select('code, name')
+            .eq('code', 'INSP');
+          const inspName = (catRows ?? [])
+            .map(r => String((r as { name: string | null }).name ?? '').trim())
+            .find(s => s.length > 0) || 'Inspection';
+
+          // Per-item counter: max existing INSP-{itemId}-N across any tenant + 1.
+          // Same algorithm as nextTaskCounter in complete-shipment-sb.
+          const newTaskRows: Array<Record<string, unknown>> = [];
+          const newTaskIds: string[] = [];
+          for (const itemId of uninspectedIds) {
+            const prefix = `INSP-${itemId}-`;
+            const { data: existing } = await sb
+              .from('tasks')
+              .select('task_id')
+              .like('task_id', `${prefix}%`);
+            let max = 0;
+            for (const r of (existing ?? []) as Array<{ task_id: string }>) {
+              const n = Number(String(r.task_id ?? '').slice(prefix.length));
+              if (Number.isFinite(n) && n > max) max = n;
+            }
+            const taskId = `${prefix}${max + 1}`;
+            const ctx = ctxById.get(itemId) ?? {
+              vendor: '', description: '', location: '', sidemark: '', shipment_number: '',
+            };
+            newTaskRows.push({
+              tenant_id:       destId,
+              task_id:         taskId,
+              item_id:         itemId,
+              type:            inspName,
+              status:          'Open',
+              vendor:          ctx.vendor,
+              description:     ctx.description,
+              location:        ctx.location,
+              sidemark:        ctx.sidemark,
+              shipment_number: ctx.shipment_number,
+              created:         nowIso,
+              item_notes:      'Auto-created on transfer (destination requires inspection)',
+              billed:          false,
+              updated_at:      nowIso,
+            });
+            newTaskIds.push(taskId);
+          }
+
+          if (newTaskRows.length > 0) {
+            const { error: insErr } = await sb.from('tasks').insert(newTaskRows);
+            if (insErr) {
+              warnings.push(`INSP task insert: ${insErr.message}`);
+            } else {
+              inspectionTasksCreated = newTaskRows.length;
+              await Promise.all(newTaskIds.map(taskId =>
+                sb.from('entity_audit_log').insert({
+                  entity_type:  'task',
+                  entity_id:    taskId,
+                  tenant_id:    destId,
+                  action:       'create',
+                  changes:      { source: 'transferItems', reason: 'auto_inspection_on_transfer' },
+                  performed_by: callerEmail || 'transfer-items-sb',
+                  source:       'supabase',
+                }).then(() => {}, () => {})
+              ));
+            }
+          }
+
+          // Mark needs_inspection=true on the destination inventory rows so the
+          // sheet writethrough + React indicators stay in sync with the new
+          // tasks. Only patch rows where it isn't already set.
+          const { error: niErr } = await sb
+            .from('inventory')
+            .update({ needs_inspection: true, updated_at: nowIso })
+            .eq('tenant_id', destId)
+            .in('item_id', uninspectedIds)
+            .neq('needs_inspection', true);
+          if (niErr) warnings.push(`needs_inspection PATCH: ${niErr.message}`);
+        }
+      }
+    } catch (e) {
+      warnings.push(`Auto-inspection on transfer failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
   // 6. Audit log per item on both tenants (mirrors StrideAPI.gs:8895-8896).
   await Promise.all(toTransfer.flatMap(t => [
     sb.from('entity_audit_log').insert({
@@ -286,11 +448,12 @@ Deno.serve(async (req: Request) => {
   ]));
 
   return json({
-    success:        true,
-    transferred:    updated,
-    skipped:        skipped.length > 0 ? skipped : undefined,
-    totalRequested: itemIds.length,
-    warnings:       warnings.length > 0 ? warnings : undefined,
+    success:                true,
+    transferred:            updated,
+    skipped:                skipped.length > 0 ? skipped : undefined,
+    totalRequested:         itemIds.length,
+    inspectionTasksCreated,
+    warnings:               warnings.length > 0 ? warnings : undefined,
   }, 200);
 });
 
