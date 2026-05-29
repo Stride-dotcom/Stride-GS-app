@@ -245,7 +245,11 @@ function cols(
     col.accessor('completedAt', { header: 'Completed', size: 100, cell: i => <span style={{ fontSize: 12, color: theme.colors.textMuted }}>{fmt(i.getValue())}</span> }),
     col.accessor('result', { header: 'Result', size: 80, cell: i => i.getValue() ? <Badge t={i.getValue()!} c={RESULT_CFG[i.getValue()!]} /> : <span style={{ color: theme.colors.textMuted }}>{'\u2014'}</span> }),
     col.accessor('taskNotes', { header: 'Notes', size: 200, cell: i => <span style={{ color: theme.colors.textSecondary, fontSize: 12, maxWidth: 190, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}>{i.getValue() || '\u2014'}</span> }),
-    col.accessor('svcCode', { header: 'Service', size: 100, cell: i => <span style={{ fontSize: 11, color: theme.colors.textMuted }}>{SERVICE_CODES[i.getValue() as keyof typeof SERVICE_CODES] || i.getValue()}</span> }),
+    col.accessor('svcCode', { header: 'Service', size: 100, cell: i => {
+      const code = String(i.getValue() || '').trim();
+      const label = svcNameByCode.get(code) || SERVICE_CODES[code as keyof typeof SERVICE_CODES] || code || '—';
+      return <span style={{ fontSize: 11, color: theme.colors.textMuted }}>{label}</span>;
+    } }),
     col.accessor('billed', { header: 'Billed', size: 60, cell: i => <span style={{ fontSize: 12, color: i.getValue() ? '#15803D' : theme.colors.textMuted }}>{i.getValue() ? '\u2713' : '\u2014'}</span> }),
     col.display({ id: 'actions', header: '', size: 40, enableSorting: false, cell: ({ row }) => <div className="row-actions" style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', opacity: 0 }}><Eye size={15} color={theme.colors.textSecondary} style={{ cursor: 'pointer' }} onClick={() => (window as any).__openTaskDetail?.(row.original)} /></div> }),
   ];
