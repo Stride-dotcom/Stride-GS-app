@@ -3,20 +3,25 @@
  * Originally deployed via Supabase MCP on 2026-05-19 without a source
  * file, leaving the EF without CORS preflight handling - every
  * `supabase.functions.invoke()` call from the React app surfaced
- * "Failed to send a request to the Edge Function". This source file
- * restores parity with the in-repo shadows fixed in PR #527 and adds
- * the OPTIONS handler.
+ * "Failed to send a request to the Edge Function". CORS was added in
+ * PR #540 (2026-05-27); curl-verified live on 2026-05-28.
  *
  * Project context: stride-gs-app/MIGRATION_STATUS.md.
  * Decisions: MIG-001 (dry-run-on-shadow), MIG-007 (live-traffic parity
  *            layer 1), MIG-008 (stripped-credential).
  *
- * Compare target: client-side `resolveAuditShape` in shadowRegistry.ts.
- * This handler is registered there with the default (payload minus
- * DEFAULT_IDENTIFIER_KEYS), so the shadow mirrors the same derivation.
- * Email-sender shadows have no audit-log counterpart in GAS today; the
- * default shape still gives parity_results something to hash without
- * producing side effects.
+ * Audit-shape contract (must stay in sync with shadowRegistry.ts and
+ * with GAS):
+ *   GAS dispatch for `batchCreateTasks` at StrideAPI.gs:10186-10194
+ *   writes ONE entity_audit_log row PER created task id, each with
+ *     changes: { summary: "Task created",
+ *                svcCodes: payload.svcCodes.join(",") }
+ *   The shadow returns the same per-payload shape so SHA-256 hashes
+ *   match. The original payload-minus-identifiers default produced
+ *   {tasks:[...], svcCodes:[...]} which never hashed equal — every
+ *   batchCreateTasks call surfaced as a parity mismatch since
+ *   2026-05-19 (33% match rate; the matching tail came from payloads
+ *   with empty tasks/svcCodes that happened to collide).
  *
  * Zero side effects - no DB writes, no GAS HTTP calls, no Resend/Stax
  * client construction (MIG-008 inert by construction).
@@ -33,24 +38,24 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-// Mirrors src/lib/shadowRegistry.ts DEFAULT_IDENTIFIER_KEYS. Keep in sync.
-const DEFAULT_IDENTIFIER_KEYS = new Set<string>([
-  'itemId', 'taskId', 'repairId', 'willCallNumber', 'wcNo', 'wcNumber',
-  'shipmentId', 'shipmentNo', 'invoiceNo', 'invoiceNumber',
-  'requestId', 'idempotencyKey', 'clientSheetId',
-]);
-
 type Payload = Record<string, unknown>;
 interface ShadowResult { ok: boolean; changes?: Record<string, unknown>; error?: string; errorCode?: string }
 
 export function runCreateTaskShadow(payload: Payload): ShadowResult {
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(payload ?? {})) {
-    if (DEFAULT_IDENTIFIER_KEYS.has(k)) continue;
-    if (v === undefined) continue;
-    out[k] = v;
-  }
-  return { ok: true, changes: out };
+  // GAS at StrideAPI.gs:10183 uses raw `.join(",")` — Array.prototype.join
+  // calls String() on each element with null/undefined → "". `.map(String)`
+  // first would diverge for null entries (`"null"` vs `""`). Keep raw join
+  // so the EF and the shadowRegistry override produce identical strings.
+  const svcCodes = Array.isArray(payload?.svcCodes)
+    ? (payload.svcCodes as unknown[]).join(',')
+    : '';
+  return {
+    ok: true,
+    changes: {
+      summary: 'Task created',
+      svcCodes,
+    },
+  };
 }
 
 serve(async (req: Request): Promise<Response> => {
