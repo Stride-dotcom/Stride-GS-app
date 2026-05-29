@@ -26,6 +26,7 @@ import {
   GitCompare,
 } from 'lucide-react';
 import { ChangePasswordModal } from '../shared/ChangePasswordModal';
+import { BuildVersionChip } from './BuildVersionChip';
 import { theme } from '../../styles/theme';
 import { cacheClearAll } from '../../lib/apiCache';
 import { useAuth } from '../../contexts/AuthContext';
@@ -509,6 +510,12 @@ export function Sidebar({ collapsed, onToggle, onNavigate, failureCount = 0, onO
             </span>
           )}
         </div>
+
+        {/* Build version chip — lets the user tell at a glance whether they're
+            on the latest deploy. Compares to /version.json polled by
+            useVersionCheck; turns amber when a newer bundle is live but the
+            user hasn't navigated yet to pick it up. Hover shows full build time. */}
+        <BuildVersionChip collapsed={collapsed} />
       </div>
 
       {changePasswordOpen && (
