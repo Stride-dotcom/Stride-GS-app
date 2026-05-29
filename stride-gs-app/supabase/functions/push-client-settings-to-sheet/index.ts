@@ -113,6 +113,7 @@ const MIRRORED_COLUMNS: string[] = [
   'tax_exempt_reason',
   'resale_cert_expires',
   'resale_cert_url',
+  'payment_method_required', // 2026-05-28 audit gap #5 — Stax payment-method enforcement
 ];
 
 Deno.serve(async (req: Request) => {
