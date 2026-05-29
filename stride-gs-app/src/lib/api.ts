@@ -3044,6 +3044,11 @@ export interface BatchCreateTasksPayload {
   svcCodes: string[];
   dueDate?: string | null;
   priority?: string;
+  /** Optional warehouse instructions stamped onto every task in the batch.
+   *  2026-05-29 — added so the CreateTaskModal Advanced section can pass
+   *  per-batch notes (e.g. "Only unroll half the rug, take photos of
+   *  pattern") without a second round-trip to edit each task. */
+  taskNotes?: string;
   /** Optional per-svcCode default SLA hours from the service catalog
    *  (Settings → Price List → Services). When present, GAS
    *  handleBatchCreateTasks_ stamps each new task's Due Date as

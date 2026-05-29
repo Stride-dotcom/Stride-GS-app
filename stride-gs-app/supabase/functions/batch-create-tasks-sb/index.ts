@@ -58,6 +58,9 @@ interface BatchCreateBody {
   slaHoursBySvcCode?: Record<string, number>;
   dueDate?: string;
   priority?: string;
+  /** 2026-05-29 — single string stamped on every task in the batch.
+   *  Mirrors GAS payload.taskNotes; empty/missing keeps task_notes blank. */
+  taskNotes?: string;
 }
 
 Deno.serve(async (req: Request) => {
@@ -79,6 +82,7 @@ Deno.serve(async (req: Request) => {
   const slaMap      = body.slaHoursBySvcCode && typeof body.slaHoursBySvcCode === 'object' ? body.slaHoursBySvcCode : {};
   const priority    = String(body.priority ?? 'Normal').trim() || 'Normal';
   const dueDateRaw  = String(body.dueDate ?? '').trim();
+  const taskNotes   = String(body.taskNotes ?? '').trim();
 
   if (!tenantId) return json({ error: 'tenantId is required' }, 400);
   if (svcCodes.length === 0) return json({ error: 'svcCodes array is required and must not be empty' }, 400);
@@ -165,6 +169,7 @@ Deno.serve(async (req: Request) => {
         sidemark:     String(item.sidemark ?? ''),
         shipment_number: String(item.shipmentNo ?? ''),
         item_notes:   String(item.itemNotes ?? ''),
+        task_notes:   taskNotes,
         created:      now.toISOString(),
         billed:       false,
         priority,

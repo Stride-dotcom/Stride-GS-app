@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { X, Check, ClipboardList, Loader2, AlertTriangle, Split as SplitIcon } from 'lucide-react';
+import { X, Check, ClipboardList, Loader2, AlertTriangle, Split as SplitIcon, ChevronDown, ChevronRight } from 'lucide-react';
 import { postBatchCreateTasks, postCreateSplitTask } from '../../lib/api';
 import type { InventoryItem, Task } from '../../lib/types';
 import { usePricing } from '../../hooks/usePricing';
@@ -62,6 +62,39 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
     return map;
   }, [serviceCatalog]);
   const [selectedCodes, setSelectedCodes] = useState<Set<string>>(new Set(['INSP']));
+
+  // 2026-05-29 — Advanced section state. All three fields are optional:
+  // dueDateOverride empty means "use the auto-calculated SLA from the
+  // service catalog"; taskNotes empty stamps a blank Task Notes cell;
+  // priority defaults to Standard (mapped to 'Normal' on submit so it
+  // round-trips with the legacy schema).
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [dueDateOverride, setDueDateOverride] = useState('');
+  const [taskNotesInput, setTaskNotesInput] = useState('');
+  const [priorityInput, setPriorityInput] = useState<'Standard' | 'High' | 'Urgent'>('Standard');
+  // Map the user-facing label back to the wire value. Schema today only
+  // distinguishes Normal vs High; Urgent piggybacks on High but also forces
+  // due_date = today so it floats to the top of the dashboard the same way
+  // the priority chip toggle does (Tasks.tsx __toggleTaskPriority).
+  const priorityForWire = priorityInput === 'Standard' ? 'Normal' : 'High';
+  const todayPT = useMemo(() => new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date()), []);
+  // Preview of the auto-calculated due date for the FIRST selected svcCode
+  // — shown as placeholder text on the date input so the operator knows
+  // what they'll get if they leave the override blank. Multi-svc selections
+  // will get per-svcCode dates from slaHoursBySvcCode, so we don't bother
+  // surfacing a "varies" preview.
+  const autoDueDatePreview = useMemo(() => {
+    if (selectedCodes.size !== 1) return '';
+    const code = Array.from(selectedCodes)[0];
+    const hrs = slaHoursBySvcCode[code];
+    if (!hrs || hrs <= 0) return '';
+    const dt = new Date(Date.now() + hrs * 3600 * 1000);
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit',
+    }).format(dt);
+  }, [selectedCodes, slaHoursBySvcCode]);
 
   // Grouped-item detection — same notice the WC modal shows. Any item with
   // qty > 1 will need a warehouse split before per-piece tasks can be done.
@@ -171,6 +204,10 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
     // Phase 2C: insert temp task rows immediately
     const tempIds: string[] = [];
     const now = new Date().toISOString().slice(0, 10);
+    // Urgent forces due_date = today (PT) at create time — see priorityForWire above.
+    const effectiveDueDate = dueDateOverride
+      || (priorityInput === 'Urgent' ? todayPT : '');
+    const trimmedNotes = taskNotesInput.trim();
     if (addOptimisticTask) {
       items.forEach((item, ii) => {
         Array.from(selectedCodes).forEach((code, ci) => {
@@ -190,6 +227,9 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
             sidemark: item.sidemark,
             created: now,
             billed: false,
+            dueDate: effectiveDueDate || undefined,
+            priority: priorityForWire as 'Normal' | 'High',
+            taskNotes: trimmedNotes || undefined,
           });
         });
       });
@@ -212,6 +252,13 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
           // GAS handleBatchCreateTasks_ stamps Due Date = now() + N hours
           // on each new task row when the svcCode has a value here.
           slaHoursBySvcCode,
+          // 2026-05-29 — Advanced fields from the collapsible section.
+          // Only sent when the operator filled them in; otherwise the
+          // GAS / SB handlers fall back to slaHoursBySvcCode + blank notes
+          // + Normal priority.
+          ...(effectiveDueDate ? { dueDate: effectiveDueDate } : {}),
+          ...(trimmedNotes     ? { taskNotes: trimmedNotes } : {}),
+          priority: priorityForWire,
         },
         clientSheetId
       );
@@ -341,6 +388,83 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
                     </div>
                   );
                 })}
+              </div>
+
+              {/* Advanced (optional): due date, notes, priority */}
+              <div style={{ marginBottom: 16 }}>
+                <button
+                  type="button"
+                  onClick={() => setAdvancedOpen(o => !o)}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 4,
+                    background: 'none', border: 'none', cursor: 'pointer',
+                    padding: 0, fontFamily: 'inherit',
+                    fontSize: 11, fontWeight: 600, color: theme.colors.textSecondary,
+                    textTransform: 'uppercase', letterSpacing: '0.04em',
+                  }}
+                  aria-expanded={advancedOpen}
+                >
+                  {advancedOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                  Advanced (optional)
+                </button>
+                {advancedOpen && (
+                  <div style={{ marginTop: 10, padding: '12px 14px', borderRadius: 10, background: theme.colors.bgSubtle, display: 'flex', flexDirection: 'column', gap: 12 }}>
+                    {/* Due date */}
+                    <div>
+                      <label style={{ display: 'block', fontSize: 11, color: theme.colors.textMuted, marginBottom: 4, fontWeight: 600 }}>
+                        Due date
+                      </label>
+                      <input
+                        type="date"
+                        value={dueDateOverride}
+                        onChange={e => setDueDateOverride(e.target.value)}
+                        style={{ width: '100%', padding: '8px 10px', fontSize: 13, border: `1px solid ${theme.colors.border}`, borderRadius: 8, outline: 'none', fontFamily: 'inherit' }}
+                      />
+                      <div style={{ fontSize: 10, color: theme.colors.textMuted, marginTop: 3 }}>
+                        {dueDateOverride
+                          ? 'Override applied to every task in this batch.'
+                          : autoDueDatePreview
+                            ? `Leave blank to auto-set to ${autoDueDatePreview} (catalog SLA).`
+                            : 'Leave blank to use the catalog SLA per service type.'}
+                      </div>
+                    </div>
+
+                    {/* Task notes */}
+                    <div>
+                      <label style={{ display: 'block', fontSize: 11, color: theme.colors.textMuted, marginBottom: 4, fontWeight: 600 }}>
+                        Task notes
+                      </label>
+                      <textarea
+                        value={taskNotesInput}
+                        onChange={e => setTaskNotesInput(e.target.value)}
+                        rows={3}
+                        placeholder="Warehouse instructions, e.g. &quot;Only unroll half the rug, take photos of pattern.&quot;"
+                        style={{ width: '100%', padding: '8px 10px', fontSize: 13, border: `1px solid ${theme.colors.border}`, borderRadius: 8, outline: 'none', fontFamily: 'inherit', resize: 'vertical', minHeight: 60 }}
+                      />
+                    </div>
+
+                    {/* Priority */}
+                    <div>
+                      <label style={{ display: 'block', fontSize: 11, color: theme.colors.textMuted, marginBottom: 4, fontWeight: 600 }}>
+                        Priority
+                      </label>
+                      <select
+                        value={priorityInput}
+                        onChange={e => setPriorityInput(e.target.value as 'Standard' | 'High' | 'Urgent')}
+                        style={{ width: '100%', padding: '8px 10px', fontSize: 13, border: `1px solid ${theme.colors.border}`, borderRadius: 8, outline: 'none', fontFamily: 'inherit', background: '#fff' }}
+                      >
+                        <option value="Standard">Standard</option>
+                        <option value="High">High</option>
+                        <option value="Urgent">Urgent (due today)</option>
+                      </select>
+                      {priorityInput === 'Urgent' && !dueDateOverride && (
+                        <div style={{ fontSize: 10, color: theme.colors.textMuted, marginTop: 3 }}>
+                          Urgent forces due date to today ({todayPT}).
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Items preview */}
