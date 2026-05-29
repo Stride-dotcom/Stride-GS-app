@@ -20,6 +20,7 @@ import type { ApiShipmentItem } from '../../lib/api';
 import { fetchShipmentItemsFromSupabase } from '../../lib/supabaseQueries';
 import { supabase } from '../../lib/supabase';
 import { entityEvents } from '../../lib/entityEvents';
+import { useAuth } from '../../contexts/AuthContext';
 import type { InventoryItem } from '../../lib/types';
 import { DriveFoldersList, type DriveFolderLink } from './DriveFoldersList';
 import { usePhotoGraphRollup, useNoteGraphRollup, type RollupContext } from '../../hooks/useGraphRollup';
@@ -82,6 +83,7 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
   const { isMobile, isTablet } = useIsMobile();
   const isCompactViewport = isMobile || isTablet;
   const navigate = useNavigate();
+  const { user } = useAuth();
   const sc = STATUS_CFG[shipment.status] || STATUS_CFG.Received;
   const isStaffAdmin = userRole === 'admin' || userRole === 'staff';
   const canTransfer = isStaffAdmin || !!isParent;
@@ -214,11 +216,11 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
 
   // ─── Edit mode (staff/admin only) ────────────────────────────────────────
   // Edits the four cache fields directly on public.shipments — there's no
-  // GAS-side updateShipment endpoint and these aren't authoritative on a
-  // sheet anyway (carrier/tracking/notes are Supabase-only metadata; the
-  // receive_date is on the client Inventory sheet too but the Supabase
-  // mirror gets re-synced on the next inventory write, so editing the
-  // mirror in isolation is fine for the React display path).
+  // GAS-side updateShipment endpoint. Supabase is authoritative; after the
+  // commit we fire push-shipment-edit-to-sheet to mirror the change back
+  // to the per-tenant Shipments sheet (Carrier / Tracking # / Receive Date
+  // / Shipment Notes) so legacy readers stay in sync. Failures land in
+  // gs_sync_events for the FailedOperationsDrawer.
   //
   // Optimistic-overrides pattern (mirrors ItemDetailPanel) — `optimistic`
   // values shadow the prop until either the parent's refetch arrives with
@@ -315,13 +317,32 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
       // consumers (Shipments list, anywhere else) refetch immediately rather
       // than waiting on the central Supabase channel debounce.
       entityEvents.emit('shipment', shipment.shipmentNo);
+
+      // Fire-and-forget sheet mirror via push-shipment-edit-to-sheet → GAS
+      // writeThroughReverse → __writeThroughReverseShipments_. Closes the
+      // gap flagged in AUDIT-writethrough-field-gaps.md §6: the direct SB
+      // update otherwise leaves Carrier / Tracking # / Receive Date /
+      // Shipment Notes stale in the per-tenant sheet. Failures land in
+      // gs_sync_events for the FailedOperationsDrawer retry — the SB
+      // commit already happened so this is purely about mirror eventual
+      // consistency. Same pattern as push-will-call-cod-to-sheet.
+      void supabase.functions
+        .invoke('push-shipment-edit-to-sheet', {
+          body: {
+            tenantId:       shipment.clientSheetId,
+            shipmentNumber: shipment.shipmentNo,
+            patch,
+            requestedBy:    user?.email ?? '',
+          },
+        })
+        .catch(err => console.warn('[shipment-edit] sheet mirror invoke failed:', err));
     } catch (err) {
       // Rollback the optimistic overrides on failure
       setOptimistic(null);
       setSaveError(err instanceof Error ? err.message : 'Save failed — please try again');
     }
     setSaving(false);
-  }, [shipment.clientSheetId, shipment.shipmentNo, draft, makeDraft]);
+  }, [shipment.clientSheetId, shipment.shipmentNo, draft, makeDraft, user?.email]);
 
   // Display helper: optimistic override > shipment prop > fallback
   const dv = useCallback((field: keyof ShipmentDraft): string => {

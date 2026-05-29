@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.245.1 — 2026-05-28 PST — [BILLING] fix: exclude transferred-out source rows from storage charges. Bug: source client billed up to transfer_date - 1 on items transferred to another client (item 62218 / Brume billed $6 for 04/06–04/07 even after transfer to Allison Lind on 04/08). Destination already covers the holding period via the at-transfer backfill in handleTransferItems_ (~line 23582), so source charges were duplicates. Three GAS changes: (1) handleTransferItems_ now voids Unbilled STOR rows on source without copying them to destination — preventing double-billing of the holding period (svc_code 'STOR' detected pre-projection, srcBillVoids.push then continue). (2) handleGenerateStorageCharges_ now early-continues on invStatus 'transferred' and removes the source-side Transfer Date cutover branch — destination cutover branch (transferDate + active/on hold/released) preserved. (3) handlePreviewStorageCharges_ same change for preview/write parity. Postgres migration 20260528120000_storage_charges_exclude_transferred_source.sql adds a NOT EXISTS clause to _compute_storage_charges' WHERE filter scoping to status 'transferred' rows with a sibling at another tenant sharing item_id + receive_date — destination row (status 'active') is unaffected and continues to bill from transfer_date forward via the existing cutover. No change to v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, updateClient SB-primary route, or storage-summary commit pattern.
+   StrideAPI.gs — v38.246.0 — 2026-05-28 PST — [WRITETHROUGH] fix: complete reverse-writethrough field coverage for all entity types. Closes the five field gaps surfaced by AUDIT-writethrough-field-gaps.md (2026-05-28). (1) __writeThroughReverseWillCalls_ — UPDATE path was COD-only, threw on any non-COD edit when update-will-call-sb sent the full payload; refactored to share WC_REVERSE_FIELDS_ with the INSERT path and accept any subset (status, carrier, pickup_party, pickup_phone, requested_by, estimated_pickup_date, notes, item_count, cod, cod_amount, item_ids). New helpers __wcCoerceValue_ + __wcValueMatches_ centralize date/JSON coercion and idempotency comparison. (2) ShipmentDetailPanel direct supabase.from('shipments').update() now invokes new EF push-shipment-edit-to-sheet (modeled on push-will-call-cod-to-sheet) to mirror carrier / tracking_number / receive_date / notes via the existing __writeThroughReverseShipments_ writer — eliminates the silent sheet drift on every Edit-panel save. (3) REVERSE_REPAIR_FIELDS_ gains scheduled_date → "Scheduled Date" so update-repair-sb's scheduledDate payload reaches the sheet (legacy handleUpdateRepairNotes_ writes the same column). (4) REVERSE_TASK_FIELDS_ gains custom_price → "Custom Price" so a future update-task-sb path mirrors the per-task billing override read by completion handlers (StrideAPI.gs:8462, 8722, 9063). (5) REVERSE_CLIENTS_SB_ONLY_SETTINGS_ gains payment_method_required → "PAYMENT_METHOD_REQUIRED" for ops-visible per-tenant Settings mirror; paired with new migration 20260528150000 extending propagate_clients_to_sheet WHEN clause and adding the column to MIRRORED_COLUMNS in push-client-settings-to-sheet/index.ts so a standalone flip of just this field still fires. No change to v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, updateClient SB-primary route, storage-charges transfer exclusion (v38.245.1), or any billing logic.
+   v38.245.1 — 2026-05-28 PST — [BILLING] fix: exclude transferred-out source rows from storage charges. Bug: source client billed up to transfer_date - 1 on items transferred to another client (item 62218 / Brume billed $6 for 04/06–04/07 even after transfer to Allison Lind on 04/08). Destination already covers the holding period via the at-transfer backfill in handleTransferItems_ (~line 23582), so source charges were duplicates. Three GAS changes: (1) handleTransferItems_ now voids Unbilled STOR rows on source without copying them to destination — preventing double-billing of the holding period (svc_code 'STOR' detected pre-projection, srcBillVoids.push then continue). (2) handleGenerateStorageCharges_ now early-continues on invStatus 'transferred' and removes the source-side Transfer Date cutover branch — destination cutover branch (transferDate + active/on hold/released) preserved. (3) handlePreviewStorageCharges_ same change for preview/write parity. Postgres migration 20260528120000_storage_charges_exclude_transferred_source.sql adds a NOT EXISTS clause to _compute_storage_charges' WHERE filter scoping to status 'transferred' rows with a sibling at another tenant sharing item_id + receive_date — destination row (status 'active') is unaffected and continues to bill from transfer_date forward via the existing cutover. No change to v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, updateClient SB-primary route, or storage-summary commit pattern.
    v38.245.0 — 2026-05-28 PST — [BILLING] One-shot to push INV-001046 (Hyrel Mathias) into the Stax Invoices sheet + public.stax_invoices. The original "Send to Payments" run was rejected at the NO_CUSTOMER gate in handleQbExport_ (~line 25316) because Hyrel had no Stax Customer ID at the time. v38.244.0's pushHyrelMathiasStaxId_ closes that gap on the CB Clients side; v38.245.0's new pushInv001046ToStax_() runner + matching doPost case "pushInv001046ToStax" re-runs the export scoped to JUST INV-001046 so the row finally lands. Implementation: scans Consolidated_Ledger for every Invoiced row with Invoice # = "INV-001046", collects the Ledger Row IDs, then calls handleQbExport_({ source:"selected", ledgerRowIds:[...] }). handleQbExport_'s v38.229.0 invoice-number-grain filter promotes those row IDs to "every Invoiced row for that invoice number" so the line_items_json + Total snapshot stay complete. Reuses the existing export logic end-to-end — stax_customer_id lookup, sheet append, supabaseBatchUpsert_("stax_invoices", ...), batch row + IIF file. Idempotent: re-runs hit the UPDATE-in-place branch on the Stax sheet (existingStatus=PENDING refresh) and conflict-resolve on qb_invoice_no in the upsert. Must run AFTER pushHyrelMathiasStaxId so the gate sees the non-empty Stax Customer ID. No schema change, no migration; no change to v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, updateClient SB-primary route (v38.244.0 / PR #554), or any billing logic.
    v38.244.0 — 2026-05-28 PST — [CLIENTS] One-shot to push Hyrel Mathias stax_customer_id to CB Clients sheet. New `pushHyrelMathiasStaxId_()` runner + matching doPost case `pushHyrelMathiasStaxId` (API_TOKEN-gated, hardcoded body, idempotent). Wraps `__writeThroughReverseClients_` (the existing v38.224.0 SB→sheets writer) with tenantId=19Yvc_aherumnLSxJQ1Y9YDf9m3Q6hie27UHdrbXUIGk + row={stax_customer_id:'e296172d-731b-4d0e-b283-48aeff4790ce'}. Since `staxCustomerId` only has a `cbHeader` (no `clientSettingsKey`) on CLIENT_FIELDS_, the writer touches CB Clients column "Stax Customer ID" only — no per-tenant Settings tab write. Re-runs are no-ops on already-correct rows. Operator triggers via HTTP POST after the deploy lands. No schema change, no migration; no change to v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, or any billing logic.
    v38.243.0 — 2026-05-28 PST — [BILLING] Void invoice writes Supabase first + INV-001127 one-shot orphan repair. Two coordinated changes. (1) handleVoidInvoice_ at ~line 15349 — pre-fix the handler hit the per-tenant Billing_Ledger sheet first (4-row loop ~5-15s) then CB Consolidated_Ledger cleanup (~5-10s) then public.invoice_tracking delete, but never wrote public.billing — so React's Billing report (reads from public.billing) stayed at status=Invoiced for the full request-response duration plus the next full-client-sync. New flow: bulk supabasePatch_ on public.billing with filter tenant_id=eq.X+invoice_no=eq.Y+status=eq.Invoiced PATCHing status=Void+updated_at=now BEFORE any sheet/CB pass. Best-effort: SB failures log + degrade to sheet-only behavior so the GAS path stays authoritative. Response payload gains sbVoided/sbError so the React caller knows whether the SB-first leg succeeded. (2) New one-shot runRepair_INV_001127_Orphans_ at end of file + matching doPost case "repairInv001127Orphans" — wraps runRepairOrphanLedgerRows with hardcoded ledger row IDs REPAIR-RPR-62216-1776184145614 and REPAIR-RPR-62217-1776184161201 (the two orphan CB rows from Olson Kundig INV-001127 half-write state where CB has 4 rows and the client sheet only 2). Sets the property, runs the existing repair function, restores the property — so an operator can trigger the repair via HTTP POST after deploy without manually editing Script Properties. Idempotent: re-runs after the orphans are gone are no-ops (runRepairOrphanLedgerRows logs "nothing to do" when the IDs no longer match any CB row). Companion void-invoice-sb EF change moves the per-row writeThroughReverse loop behind EdgeRuntime.waitUntil so the SB path returns to the React caller after the SB writes + audit log (~100ms) instead of awaiting the slow GAS sheet mirror; companion React change in Billing.tsx handleVoid adds an optimistic reportData status flip so the row reads Void instantly with revert-on-error. No schema change, no migration; no change to v38.182 atomic invoice counter, half-write detection, or Reissue logic.
@@ -3280,42 +3281,99 @@ function __writeThroughReverseWillCallItems_(ss, payload) {
 /**
  * v38.212.0 — Will Calls reverse-writethrough writer. Second per-table
  * writer against the P1.4 framework (inventory was first in v38.208.0).
- * Fires from the Edge Function `push-will-call-cod-to-sheet` after the
- * React WillCallDetailPanel commits a Supabase-authoritative
- * will_calls.cod / cod_amount write directly to Supabase. This writer
- * mirrors that single-row change into the per-tenant Will_Calls sheet
- * so legacy readers (PDF release doc generator, full-client-sync, the
- * COD payment page launcher, etc.) see the same state.
- *
- * Scope: COD fields only (cod, cod_amount). Other Will_Calls fields
- * still flow through the legacy GAS-authoritative `handleUpdateWillCall_`
- * path until they migrate. Adding fields here is a one-line registry
- * extension at COD_REVERSE_WC_FIELDS_.
+ * Fires from the Edge Functions `push-will-call-cod-to-sheet`,
+ * `update-will-call-sb`, `cancel-will-call-sb`, `process-wc-release-sb`,
+ * `create-will-call-sb` after a Supabase-authoritative will_calls
+ * write commits. Mirrors the change into the per-tenant Will_Calls
+ * sheet so legacy readers (PDF release doc generator, full-client-sync,
+ * the COD payment page launcher, etc.) see the same state.
  *
  * Contract — receives (ss, payload):
  *   ss      — SpreadsheetApp.openById(tenantId), already validated +
  *             opened by handleWriteThroughReverse_
- *   payload — { tenantId, table:'will_calls', op:'update',
- *               row:{cod, cod_amount}, rowId:<WC Number>,
+ *   payload — { tenantId, table:'will_calls', op:'insert'|'update',
+ *               row:<subset of WC_REVERSE_FIELDS_>, rowId:<WC Number>,
  *               requestId?, correlationId? }
  *
- * Idempotent by WC Number: looks up the row, no-ops when the row
- * already matches the target cod + cod_amount. Throws on any
- * unrecoverable error so handleWriteThroughReverse_ catches it and
- * writes gs_sync_events for the FailedOperationsDrawer.
+ * Idempotent by WC Number: looks up the row, no-ops when every present
+ * field already matches the sheet. Throws on any unrecoverable error so
+ * handleWriteThroughReverse_ catches it and writes gs_sync_events for
+ * the FailedOperationsDrawer.
  *
  * Op support:
- *   - 'update' (v38.213.0) — COD + COD Amount fields only.
+ *   - 'update' (v38.246.0) — accepts any subset of WC_REVERSE_FIELDS_
+ *     (status, carrier, pickup_party, pickup_phone, requested_by,
+ *     estimated_pickup_date, notes, item_count, cod, cod_amount,
+ *     item_ids). Previously COD-only — extended after the writethrough
+ *     field-gap audit (2026-05-28) showed `update-will-call-sb` sends
+ *     the full updates payload and the writer threw on non-COD edits.
  *   - 'insert' (v38.233.0) — full-row append for `create-will-call-sb`.
  *     Idempotent: existing WC Number falls through to update semantics.
- *     Mirrors the canonical WC sheet columns (WC Number / Status /
- *     Carrier / Pickup Party / Pickup Phone / Requested By / Created
- *     Date / Estimated Pickup Date / Notes / Items Count / COD / COD
- *     Amount / Item IDs). Date columns parsed local-time so cells
- *     format as dates; Item IDs serialized as JSON array.
  *   - 'delete' still on the GAS-authoritative path (cancellation flows
  *     through handleCancelWillCall_).
+ *
+ * Date columns are parsed local-time so cells format as dates;
+ * item_ids is serialized as a JSON array (legacy reader accepts both
+ * JSON array text and comma/newline-delimited).
  */
+// SB column → sheet header. Mirrors public.will_calls + sheet headers
+// verified in handleGetWillCalls_ (StrideAPI.gs:7900) +
+// sbWillCallRow_ (the GAS→SB direction). Shared between INSERT and
+// UPDATE paths so adding a field is a one-line change.
+var WC_REVERSE_FIELDS_ = {
+  "wc_number":             "WC Number",
+  "status":                "Status",
+  "carrier":               "Carrier",
+  "pickup_party":          "Pickup Party",
+  "pickup_phone":          "Pickup Phone",
+  "requested_by":          "Requested By",
+  "created_date":          "Created Date",
+  "estimated_pickup_date": "Estimated Pickup Date",
+  "notes":                 "Notes",
+  "item_count":            "Items Count",
+  "cod":                   "COD",
+  "cod_amount":            "COD Amount",
+  "item_ids":              "Item IDs"
+};
+var WC_REVERSE_DATE_KEYS_ = { "created_date": true, "estimated_pickup_date": true };
+
+function __wcCoerceValue_(sbKey, raw) {
+  // Date columns: parse YYYY-MM-DD as local-time Date (UTC-shift dodge).
+  // created_date can be full ISO; the slice(0,10) handles both shapes.
+  if (WC_REVERSE_DATE_KEYS_[sbKey] && typeof raw === "string" && raw.length >= 10) {
+    var dParts = raw.slice(0, 10).split("-");
+    if (dParts.length === 3) {
+      var d = new Date(parseInt(dParts[0], 10), parseInt(dParts[1], 10) - 1, parseInt(dParts[2], 10));
+      if (!isNaN(d.getTime())) return d;
+    }
+  }
+  if (sbKey === "item_ids" && Array.isArray(raw)) {
+    return JSON.stringify(raw);
+  }
+  if (sbKey === "cod") return !!raw;
+  if (sbKey === "cod_amount") return raw == null ? "" : Number(raw);
+  return raw == null ? "" : raw;
+}
+
+function __wcValueMatches_(sbKey, current, target) {
+  if (sbKey === "cod") return !!current === !!target;
+  if (sbKey === "cod_amount") {
+    var cur = current === "" || current == null ? null : Number(current);
+    var tgt = target  === "" || target  == null ? null : Number(target);
+    if (cur == null && tgt == null) return true;
+    if (cur == null) return tgt === 0;
+    if (tgt == null) return cur === 0;
+    return cur === tgt;
+  }
+  if (WC_REVERSE_DATE_KEYS_[sbKey]) {
+    if (target instanceof Date && current instanceof Date) {
+      return current.getTime() === target.getTime();
+    }
+    return String(current == null ? "" : current) === String(target == null ? "" : target);
+  }
+  return String(current == null ? "" : current) === String(target == null ? "" : target);
+}
+
 function __writeThroughReverseWillCalls_(ss, payload) {
   var rowId = payload && payload.rowId ? String(payload.rowId).trim() : "";
   var row   = (payload && payload.row) || {};
@@ -3358,55 +3416,18 @@ function __writeThroughReverseWillCalls_(ss, payload) {
   // canonical SB column set. Idempotent: if WC Number already exists,
   // fall through to UPDATE semantics rather than appending a duplicate.
   if (op === "insert" && foundRow < 0) {
-    // SB column → sheet header. Mirrors public.will_calls + sheet
-    // headers verified in handleGetWillCalls_ (StrideAPI.gs:7900) +
-    // sbWillCallRow_ (the GAS→SB direction).
-    var WC_INSERT_FIELDS = {
-      "wc_number":             "WC Number",
-      "status":                "Status",
-      "carrier":               "Carrier",
-      "pickup_party":          "Pickup Party",
-      "pickup_phone":          "Pickup Phone",
-      "requested_by":          "Requested By",
-      "created_date":          "Created Date",
-      "estimated_pickup_date": "Estimated Pickup Date",
-      "notes":                 "Notes",
-      "item_count":            "Items Count",
-      "cod":                   "COD",
-      "cod_amount":            "COD Amount",
-      "item_ids":              "Item IDs"
-    };
-
     var insertRowNum = (lastRow < 1 ? 2 : lastRow + 1);
     var maxCol = wcSheet.getLastColumn();
 
     // Resolve target columns (api_ensureColumn_ appends missing ones so
     // older templates self-heal).
     var insertTargets = [{ col: wcNumCol, value: rowId }];
-    for (var sbKey in WC_INSERT_FIELDS) {
+    for (var sbKey in WC_REVERSE_FIELDS_) {
       if (!row.hasOwnProperty(sbKey) || row[sbKey] === undefined) continue;
       if (sbKey === "wc_number") continue; // already in targets
-      var col = api_ensureColumn_(wcSheet, WC_INSERT_FIELDS[sbKey]);
+      var col = api_ensureColumn_(wcSheet, WC_REVERSE_FIELDS_[sbKey]);
       if (col > maxCol) maxCol = col;
-      var raw = row[sbKey];
-      // Date columns: parse YYYY-MM-DD as local-time Date (UTC-shift
-      // dodge). created_date is full ISO timestamp; the slice handles
-      // both shapes.
-      if ((sbKey === "created_date" || sbKey === "estimated_pickup_date")
-          && typeof raw === "string" && raw.length >= 10) {
-        var dParts = raw.slice(0, 10).split("-");
-        if (dParts.length === 3) {
-          var d = new Date(parseInt(dParts[0], 10), parseInt(dParts[1], 10) - 1, parseInt(dParts[2], 10));
-          if (!isNaN(d.getTime())) raw = d;
-        }
-      }
-      // item_ids is a JSON array; serialize for the sheet cell so it
-      // round-trips with the legacy reader (api_getWillCalls_ parses
-      // both JSON array text and comma/newline-delimited).
-      if (sbKey === "item_ids" && Array.isArray(raw)) {
-        raw = JSON.stringify(raw);
-      }
-      insertTargets.push({ col: col, value: raw });
+      insertTargets.push({ col: col, value: __wcCoerceValue_(sbKey, row[sbKey]) });
     }
 
     var rowValues = new Array(maxCol);
@@ -3419,54 +3440,60 @@ function __writeThroughReverseWillCalls_(ss, payload) {
     return { rowNumber: insertRowNum, inserted: true, wcNumber: rowId };
   }
 
-  // UPDATE path requires the COD column set.
-  var codCol    = wcMap["COD"];
-  var amtCol    = wcMap["COD Amount"];
-  if (!codCol)   throw new Error("__writeThroughReverseWillCalls_: 'COD' column not found");
-  if (!amtCol)   throw new Error("__writeThroughReverseWillCalls_: 'COD Amount' column not found");
+  // UPDATE path (v38.246.0 — full field coverage).
   if (lastRow < 2) throw new Error("__writeThroughReverseWillCalls_: Will_Calls sheet has no data rows");
-
   if (foundRow < 0) {
     throw new Error("__writeThroughReverseWillCalls_: WC Number '" + rowId + "' not found in Will_Calls sheet");
   }
 
-  // Coerce inputs. row.cod is the SB boolean column; absence is treated
-  // as "no change to that field" so a future caller can update only one
-  // of {cod, cod_amount}. row.cod_amount of null clears the cell.
-  var hasCod      = row.hasOwnProperty("cod");
-  var hasAmount   = row.hasOwnProperty("cod_amount");
-  if (!hasCod && !hasAmount) {
-    throw new Error("__writeThroughReverseWillCalls_: row must include at least one of {cod, cod_amount}");
+  // Collect every present field from WC_REVERSE_FIELDS_ (excluding the
+  // wc_number lookup key). EF callers may include bookkeeping fields like
+  // `updated_at` that aren't in the map — those are silently ignored.
+  var updateTargets = [];
+  for (var sbKey2 in WC_REVERSE_FIELDS_) {
+    if (sbKey2 === "wc_number") continue;
+    if (!row.hasOwnProperty(sbKey2) || row[sbKey2] === undefined) continue;
+    var col2 = api_ensureColumn_(wcSheet, WC_REVERSE_FIELDS_[sbKey2]);
+    updateTargets.push({
+      key:    sbKey2,
+      col:    col2,
+      value:  __wcCoerceValue_(sbKey2, row[sbKey2])
+    });
   }
-  var newCod    = hasCod    ? !!row.cod                              : null;
-  var newAmount = hasAmount ? (row.cod_amount == null ? "" : Number(row.cod_amount)) : null;
 
-  // Idempotency — skip when both fields already match the target. Cheap
-  // 2-cell read avoids redundant setValue round-trips on FailedOps retry.
-  var currentCod    = !!wcSheet.getRange(foundRow, codCol).getValue();
-  var currentAmount = wcSheet.getRange(foundRow, amtCol).getValue();
-  var currentAmountNum = currentAmount === "" || currentAmount == null ? null : Number(currentAmount);
-  var codMatches    = !hasCod    || currentCod === newCod;
-  var amountMatches = !hasAmount || (
-    (newAmount === "" && (currentAmountNum == null || currentAmountNum === 0))
-    || (newAmount !== "" && currentAmountNum === newAmount)
-  );
-  if (codMatches && amountMatches) {
+  if (updateTargets.length === 0) {
+    throw new Error(
+      "__writeThroughReverseWillCalls_: row must include at least one updatable field " +
+      "(supported: status, carrier, pickup_party, pickup_phone, requested_by, " +
+      "estimated_pickup_date, notes, item_count, cod, cod_amount, item_ids)"
+    );
+  }
+
+  // Idempotency — skip when every present field already matches the
+  // target. Avoids redundant setValue round-trips on FailedOps retry.
+  var allMatch = true;
+  for (var v = 0; v < updateTargets.length; v++) {
+    var current = wcSheet.getRange(foundRow, updateTargets[v].col).getValue();
+    if (!__wcValueMatches_(updateTargets[v].key, current, updateTargets[v].value)) {
+      allMatch = false;
+      break;
+    }
+  }
+  if (allMatch) {
     return { rowNumber: foundRow, skipped: true, reason: "already-matches-target-state" };
   }
 
-  if (hasCod)    wcSheet.getRange(foundRow, codCol).setValue(newCod);
-  if (hasAmount) wcSheet.getRange(foundRow, amtCol).setValue(newAmount);
+  var changed = {};
+  for (var w = 0; w < updateTargets.length; w++) {
+    wcSheet.getRange(foundRow, updateTargets[w].col).setValue(updateTargets[w].value);
+    changed[updateTargets[w].key] = updateTargets[w].value;
+  }
 
   // Flush so a chained reader (e.g. PDF doc generator running in the
   // same execution) sees committed values.
   SpreadsheetApp.flush();
 
-  return {
-    rowNumber:  foundRow,
-    cod:        hasCod    ? newCod    : currentCod,
-    codAmount:  hasAmount ? newAmount : currentAmountNum
-  };
+  return { rowNumber: foundRow, updated: changed };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3958,6 +3985,12 @@ var REVERSE_REPAIR_FIELDS_ = {
   "status":                  "Status",
   "quote_amount":            "Quote Amount",
   "quote_sent_date":         "Quote Sent Date",
+  // v38.246.0 — Repair Edit panel saves scheduledDate via update-repair-sb
+  // (FIELD_MAP: scheduledDate → scheduled_date). Without this entry the
+  // SB-primary path leaves the sheet's "Scheduled Date" column stale,
+  // even though the legacy handleUpdateRepairNotes_ (StrideAPI.gs:20775)
+  // wrote to the same column. Closes gap #3 from AUDIT-writethrough-field-gaps.md.
+  "scheduled_date":          "Scheduled Date",
   "start_date":              "Start Date",
   "completed_date":          "Completed Date",
   "repair_result":           "Repair Result",
@@ -4152,7 +4185,14 @@ var REVERSE_TASK_FIELDS_ = {
   "billed":           "Billed",
   "due_date":         "Due Date",
   "priority":         "Priority",
-  "created":          "Created"
+  "created":          "Created",
+  // v38.246.0 — Tasks have a "Custom Price" column (per-task billing
+  // override read at completion: StrideAPI.gs:8462, 8722, 9063, 18811).
+  // Today the GAS-authoritative handleUpdateTaskCustomPrice_ writes it,
+  // and an SB-primary update-task-sb path would set tasks.custom_price.
+  // Without this entry the SB-primary write leaves the sheet's Custom
+  // Price cell stale. Closes gap #4 from AUDIT-writethrough-field-gaps.md.
+  "custom_price":     "Custom Price"
 };
 
 function __writeThroughReverseTasks_(ss, payload) {
@@ -4442,7 +4482,16 @@ var REVERSE_CLIENTS_SB_ONLY_SETTINGS_ = {
   "tax_exempt":              "TAX_EXEMPT",
   "tax_exempt_reason":       "TAX_EXEMPT_REASON",
   "resale_cert_expires":     "RESALE_CERT_EXPIRES",
-  "resale_cert_url":         "RESALE_CERT_URL"
+  "resale_cert_url":         "RESALE_CERT_URL",
+  // v38.246.0 — Stax payment-method enforcement. Today React Settings
+  // writes `payment_method_required` alongside `billing_*` (the trigger
+  // fires on the sibling change), but the writer had no mapping so the
+  // value never reached the per-tenant Settings tab. Closes gap #5 from
+  // AUDIT-writethrough-field-gaps.md. Paired with adding the column to
+  // MIRRORED_COLUMNS (push-client-settings-to-sheet) and the trigger
+  // WHEN clause (migration 20260528150000) so a future standalone flip
+  // of just this field also reaches the sheet.
+  "payment_method_required": "PAYMENT_METHOD_REQUIRED"
 };
 
 function __writeThroughReverseClients_(ss, payload) {
