@@ -2128,6 +2128,17 @@ export interface TransferItemsPayload {
    * Future dates rejected in Phase 1.
    */
   transferDate?: string;
+  /**
+   * Operator opt-in from the frontend prompt: when the destination client has
+   * auto_inspection=true and any selected item is uninspected, the modal asks
+   * whether to spin up INSP tasks on the destination side. When true, the GAS
+   * handler (and SB EF) create INSP tasks for the uninspected items as part of
+   * the transfer. The server-side fallback ALSO triggers regardless (a missing
+   * flag from a stale client cannot be allowed to silently skip inspections on
+   * an auto-inspect tenant) — this flag is the explicit-consent path; the
+   * server fallback is the safety net.
+   */
+  createInspectionTasks?: boolean;
 }
 
 export interface TransferItemsResponse {

@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { X, Search, ArrowRight, Check, Loader2, AlertTriangle, CheckCircle } from 'lucide-react';
+import { X, Search, ArrowRight, Check, Loader2, AlertTriangle, CheckCircle, ClipboardCheck } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { AutocompleteSelect } from './AutocompleteSelect';
 import { WriteButton } from './WriteButton';
@@ -9,6 +9,7 @@ import { isApiConfigured, postTransferItems, type TransferItemsResponse } from '
 import type { InventoryItem } from '../../lib/types';
 import { fmtDate } from '../../lib/constants';
 import { ProcessingOverlay } from './ProcessingOverlay';
+import { supabase } from '../../lib/supabase';
 
 interface Props {
   onClose: () => void;
@@ -55,6 +56,15 @@ export function TransferItemsModal({
   const [result, setResult]     = useState<TransferItemsResponse | null>(null);
   const [errorMsg, setErrorMsg] = useState('');
 
+  // Auto-inspection prompt state. Surfaced when the destination client has
+  // auto_inspection=true and one or more of the selected items has never had
+  // a Completed INSP task — so the operator decides whether to spin up
+  // inspection tasks on the destination side or skip them.
+  const [inspectionPrompt, setInspectionPrompt] = useState<{
+    uninspectedCount: number;
+    destClientName: string;
+  } | null>(null);
+
   // Source items: only Active items belonging to the source client
   // Note: InventoryItem.clientId === clientSheetId (mapped in useInventory)
   const sourceItems = useMemo(
@@ -91,6 +101,50 @@ export function TransferItemsModal({
 
   const handleTransfer = async () => {
     if (!canSubmit || !destClient) return;
+    setErrorMsg('');
+
+    // Auto-inspection pre-check: if destination requires auto-inspection and any
+    // selected item has never been inspected, surface a confirmation dialog so
+    // the operator can opt in/out of creating INSP tasks alongside the transfer.
+    if (apiConfigured && destClient.autoInspection) {
+      setLoading(true);
+      try {
+        const itemIdsArr = [...selectedIds];
+        // Items previously inspected anywhere (item_id is preserved across
+        // transfers). Filter by Task ID prefix instead of `type` because the
+        // type column carries the friendly service name ("Inspection") in some
+        // rows and the code ("INSP") in others — the task_id format is the one
+        // load-bearing invariant.
+        const { data: doneRows } = await supabase
+          .from('tasks')
+          .select('item_id')
+          .in('item_id', itemIdsArr)
+          .like('task_id', 'INSP-%')
+          .eq('status', 'Completed');
+        const inspectedIds = new Set<string>(
+          (doneRows ?? [])
+            .map(r => String((r as { item_id: string | null }).item_id ?? '').trim())
+            .filter(Boolean)
+        );
+        const uninspectedCount = itemIdsArr.filter(id => !inspectedIds.has(id)).length;
+        if (uninspectedCount > 0) {
+          setInspectionPrompt({ uninspectedCount, destClientName: destClient.name });
+          setLoading(false);
+          return;
+        }
+      } catch {
+        // Pre-check is best-effort — fall through to the unconditional transfer
+        // path so a transient Supabase error doesn't block a legitimate move.
+      }
+      setLoading(false);
+    }
+
+    await executeTransfer(null);
+  };
+
+  const executeTransfer = async (createInspectionTasks: boolean | null) => {
+    if (!destClient) return;
+    setInspectionPrompt(null);
     setLoading(true);
     setErrorMsg('');
     setResult(null);
@@ -117,10 +171,16 @@ export function TransferItemsModal({
     const itemIdsArr = [...selectedIds];
     itemIdsArr.forEach(id => applyItemPatch?.(id, { status: 'Transferred' }));
 
-    const { data, error } = await postTransferItems(
-      { destinationClientSheetId: destClient.spreadsheetId, itemIds: itemIdsArr, transferDate },
-      sourceClientSheetId
-    );
+    // Only send the createInspectionTasks flag when an explicit choice was made
+    // via the prompt — undefined lets the server-side fallback decide.
+    const transferPayload: Parameters<typeof postTransferItems>[0] = {
+      destinationClientSheetId: destClient.spreadsheetId,
+      itemIds: itemIdsArr,
+      transferDate,
+    };
+    if (createInspectionTasks !== null) transferPayload.createInspectionTasks = createInspectionTasks;
+
+    const { data, error } = await postTransferItems(transferPayload, sourceClientSheetId);
 
     setLoading(false);
 
@@ -359,6 +419,63 @@ export function TransferItemsModal({
               </div>
             )}
           </div>
+        )}
+
+        {/* Auto-inspection confirmation dialog (overlays the transfer modal) */}
+        {inspectionPrompt && (
+          <>
+            <div style={{ position: 'absolute', inset: 0, background: 'rgba(255,255,255,0.6)', zIndex: 10 }} />
+            <div style={{
+              position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
+              width: 480, maxWidth: '92%', background: '#fff', borderRadius: 14,
+              border: `1px solid ${theme.colors.border}`,
+              boxShadow: '0 18px 40px rgba(0,0,0,0.18)', zIndex: 11,
+              padding: 20, display: 'flex', flexDirection: 'column', gap: 14,
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <ClipboardCheck size={20} color={theme.colors.orange} />
+                <div style={{ fontSize: 15, fontWeight: 700 }}>Inspection Required</div>
+              </div>
+              <div style={{ fontSize: 13, color: theme.colors.textSecondary, lineHeight: 1.45 }}>
+                <strong>{inspectionPrompt.destClientName}</strong> requires auto-inspection.{' '}
+                <strong>{inspectionPrompt.uninspectedCount}</strong> of the selected items{' '}
+                {inspectionPrompt.uninspectedCount === 1 ? 'has' : 'have'} not been inspected yet.
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <button
+                  onClick={() => void executeTransfer(true)}
+                  style={{
+                    padding: '10px 14px', fontSize: 13, fontWeight: 600,
+                    borderRadius: 8, border: 'none', cursor: 'pointer',
+                    background: theme.colors.orange, color: '#fff', fontFamily: 'inherit',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                  }}
+                >
+                  <ClipboardCheck size={14} /> Create Inspection Tasks
+                </button>
+                <button
+                  onClick={() => void executeTransfer(false)}
+                  style={{
+                    padding: '10px 14px', fontSize: 13, fontWeight: 500,
+                    borderRadius: 8, border: `1px solid ${theme.colors.border}`, cursor: 'pointer',
+                    background: '#fff', color: theme.colors.textSecondary, fontFamily: 'inherit',
+                  }}
+                >
+                  Transfer Without Inspection
+                </button>
+                <button
+                  onClick={() => setInspectionPrompt(null)}
+                  style={{
+                    padding: '8px 14px', fontSize: 12, fontWeight: 500,
+                    borderRadius: 8, border: 'none', cursor: 'pointer',
+                    background: 'transparent', color: theme.colors.textMuted, fontFamily: 'inherit',
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </>
         )}
 
         {/* Footer */}

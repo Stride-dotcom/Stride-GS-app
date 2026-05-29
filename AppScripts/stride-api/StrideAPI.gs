@@ -1,5 +1,6 @@
 /* ===================================================
-   StrideAPI.gs — v38.246.0 — 2026-05-28 PST — [WRITETHROUGH] fix: complete reverse-writethrough field coverage for all entity types. Closes the five field gaps surfaced by AUDIT-writethrough-field-gaps.md (2026-05-28). (1) __writeThroughReverseWillCalls_ — UPDATE path was COD-only, threw on any non-COD edit when update-will-call-sb sent the full payload; refactored to share WC_REVERSE_FIELDS_ with the INSERT path and accept any subset (status, carrier, pickup_party, pickup_phone, requested_by, estimated_pickup_date, notes, item_count, cod, cod_amount, item_ids). New helpers __wcCoerceValue_ + __wcValueMatches_ centralize date/JSON coercion and idempotency comparison. (2) ShipmentDetailPanel direct supabase.from('shipments').update() now invokes new EF push-shipment-edit-to-sheet (modeled on push-will-call-cod-to-sheet) to mirror carrier / tracking_number / receive_date / notes via the existing __writeThroughReverseShipments_ writer — eliminates the silent sheet drift on every Edit-panel save. (3) REVERSE_REPAIR_FIELDS_ gains scheduled_date → "Scheduled Date" so update-repair-sb's scheduledDate payload reaches the sheet (legacy handleUpdateRepairNotes_ writes the same column). (4) REVERSE_TASK_FIELDS_ gains custom_price → "Custom Price" so a future update-task-sb path mirrors the per-task billing override read by completion handlers (StrideAPI.gs:8462, 8722, 9063). (5) REVERSE_CLIENTS_SB_ONLY_SETTINGS_ gains payment_method_required → "PAYMENT_METHOD_REQUIRED" for ops-visible per-tenant Settings mirror; paired with new migration 20260528150000 extending propagate_clients_to_sheet WHEN clause and adding the column to MIRRORED_COLUMNS in push-client-settings-to-sheet/index.ts so a standalone flip of just this field still fires. No change to v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, updateClient SB-primary route, storage-charges transfer exclusion (v38.245.1), or any billing logic.
+   StrideAPI.gs — v38.247.0 — 2026-05-29 PST — [TRANSFER] feat: auto-create INSP tasks on transfer to an auto-inspect client. handleTransferItems_ gains a post-transfer block (between repairs and Move History) that fires when destSettings.AUTO_INSPECTION=true AND payload.createInspectionTasks !== false (i.e., operator did NOT explicitly opt out from the new frontend dialog). Logic: scan both source and destination Tasks sheets for any Task ID prefixed INSP- with Status=Completed against the transferred item IDs — item_id is preserved across transfers so a prior owner's inspection counts (mirrors the React pre-check). For uninspected items, generate one INSP task per item on the destination Tasks sheet using api_nextTaskCounter_ + api_buildRow_ with vendor/description/location/sidemark/shipment# pulled from the source inventory rows already loaded into rowsToCopy. Also flips the destination Inventory row's "Needs Inspection" column to TRUE (api_ensureColumn_ adds the column on legacy sheets that don't have it). Response gains inspectionTasksCreated count. All wrapped in a try/catch — auto-inspection failures push to warnings instead of aborting the transfer, mirroring the storage-backfill and email blocks. No change to v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, updateClient SB-primary route, storage-charges transfer exclusion (v38.245.1), or any billing logic.
+   v38.246.0 — 2026-05-28 PST — [WRITETHROUGH] fix: complete reverse-writethrough field coverage for all entity types. Closes the five field gaps surfaced by AUDIT-writethrough-field-gaps.md (2026-05-28). (1) __writeThroughReverseWillCalls_ — UPDATE path was COD-only, threw on any non-COD edit when update-will-call-sb sent the full payload; refactored to share WC_REVERSE_FIELDS_ with the INSERT path and accept any subset (status, carrier, pickup_party, pickup_phone, requested_by, estimated_pickup_date, notes, item_count, cod, cod_amount, item_ids). New helpers __wcCoerceValue_ + __wcValueMatches_ centralize date/JSON coercion and idempotency comparison. (2) ShipmentDetailPanel direct supabase.from('shipments').update() now invokes new EF push-shipment-edit-to-sheet (modeled on push-will-call-cod-to-sheet) to mirror carrier / tracking_number / receive_date / notes via the existing __writeThroughReverseShipments_ writer — eliminates the silent sheet drift on every Edit-panel save. (3) REVERSE_REPAIR_FIELDS_ gains scheduled_date → "Scheduled Date" so update-repair-sb's scheduledDate payload reaches the sheet (legacy handleUpdateRepairNotes_ writes the same column). (4) REVERSE_TASK_FIELDS_ gains custom_price → "Custom Price" so a future update-task-sb path mirrors the per-task billing override read by completion handlers (StrideAPI.gs:8462, 8722, 9063). (5) REVERSE_CLIENTS_SB_ONLY_SETTINGS_ gains payment_method_required → "PAYMENT_METHOD_REQUIRED" for ops-visible per-tenant Settings mirror; paired with new migration 20260528150000 extending propagate_clients_to_sheet WHEN clause and adding the column to MIRRORED_COLUMNS in push-client-settings-to-sheet/index.ts so a standalone flip of just this field still fires. No change to v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, updateClient SB-primary route, storage-charges transfer exclusion (v38.245.1), or any billing logic.
    v38.245.1 — 2026-05-28 PST — [BILLING] fix: exclude transferred-out source rows from storage charges. Bug: source client billed up to transfer_date - 1 on items transferred to another client (item 62218 / Brume billed $6 for 04/06–04/07 even after transfer to Allison Lind on 04/08). Destination already covers the holding period via the at-transfer backfill in handleTransferItems_ (~line 23582), so source charges were duplicates. Three GAS changes: (1) handleTransferItems_ now voids Unbilled STOR rows on source without copying them to destination — preventing double-billing of the holding period (svc_code 'STOR' detected pre-projection, srcBillVoids.push then continue). (2) handleGenerateStorageCharges_ now early-continues on invStatus 'transferred' and removes the source-side Transfer Date cutover branch — destination cutover branch (transferDate + active/on hold/released) preserved. (3) handlePreviewStorageCharges_ same change for preview/write parity. Postgres migration 20260528120000_storage_charges_exclude_transferred_source.sql adds a NOT EXISTS clause to _compute_storage_charges' WHERE filter scoping to status 'transferred' rows with a sibling at another tenant sharing item_id + receive_date — destination row (status 'active') is unaffected and continues to bill from transfer_date forward via the existing cutover. No change to v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, updateClient SB-primary route, or storage-summary commit pattern.
    v38.245.0 — 2026-05-28 PST — [BILLING] One-shot to push INV-001046 (Hyrel Mathias) into the Stax Invoices sheet + public.stax_invoices. The original "Send to Payments" run was rejected at the NO_CUSTOMER gate in handleQbExport_ (~line 25316) because Hyrel had no Stax Customer ID at the time. v38.244.0's pushHyrelMathiasStaxId_ closes that gap on the CB Clients side; v38.245.0's new pushInv001046ToStax_() runner + matching doPost case "pushInv001046ToStax" re-runs the export scoped to JUST INV-001046 so the row finally lands. Implementation: scans Consolidated_Ledger for every Invoiced row with Invoice # = "INV-001046", collects the Ledger Row IDs, then calls handleQbExport_({ source:"selected", ledgerRowIds:[...] }). handleQbExport_'s v38.229.0 invoice-number-grain filter promotes those row IDs to "every Invoiced row for that invoice number" so the line_items_json + Total snapshot stay complete. Reuses the existing export logic end-to-end — stax_customer_id lookup, sheet append, supabaseBatchUpsert_("stax_invoices", ...), batch row + IIF file. Idempotent: re-runs hit the UPDATE-in-place branch on the Stax sheet (existingStatus=PENDING refresh) and conflict-resolve on qb_invoice_no in the upsert. Must run AFTER pushHyrelMathiasStaxId so the gate sees the non-empty Stax Customer ID. No schema change, no migration; no change to v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, updateClient SB-primary route (v38.244.0 / PR #554), or any billing logic.
    v38.244.0 — 2026-05-28 PST — [CLIENTS] One-shot to push Hyrel Mathias stax_customer_id to CB Clients sheet. New `pushHyrelMathiasStaxId_()` runner + matching doPost case `pushHyrelMathiasStaxId` (API_TOKEN-gated, hardcoded body, idempotent). Wraps `__writeThroughReverseClients_` (the existing v38.224.0 SB→sheets writer) with tenantId=19Yvc_aherumnLSxJQ1Y9YDf9m3Q6hie27UHdrbXUIGk + row={stax_customer_id:'e296172d-731b-4d0e-b283-48aeff4790ce'}. Since `staxCustomerId` only has a `cbHeader` (no `clientSettingsKey`) on CLIENT_FIELDS_, the writer touches CB Clients column "Stax Customer ID" only — no per-tenant Settings tab write. Re-runs are no-ops on already-correct rows. Operator triggers via HTTP POST after the deploy lands. No schema change, no migration; no change to v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, or any billing logic.
@@ -23940,6 +23941,158 @@ function handleTransferItems_(sourceClientSheetId, payload) {
     }
   }
 
+  // ── 4.5 AUTO-INSPECTION ON TRANSFER (v38.247.0) ─────────────────────────
+  //
+  // When destination has AUTO_INSPECTION=true and any transferred item has
+  // never had a Completed INSP task on either source or destination, spin up
+  // new INSP tasks on the destination side and flip the destination Inventory
+  // row's "Needs Inspection" to TRUE. Without this, an item picked up from a
+  // non-inspecting tenant slips into an auto-inspect tenant's inventory with
+  // no inspection scheduled — exactly the staff-forgets-to-do-this gap that
+  // the new frontend popup was added to catch on the client side.
+  //
+  // Frontend opt-out path: payload.createInspectionTasks === false means the
+  // operator saw the "Inspection Required" dialog and explicitly chose to
+  // transfer without creating inspection tasks. Respect that.
+  // Frontend opt-in or no-flag path: create INSP tasks on auto-inspect tenants
+  // for the uninspected subset (mirrors the receiving auto-inspection rule).
+  var inspectionTasksCreated = 0;
+  try {
+    var destAutoInspection = toBool_(destSettings["AUTO_INSPECTION"]);
+    var operatorChoice = payload.createInspectionTasks; // true/false/undefined
+    var operatorOptedOut = operatorChoice === false;
+
+    if (destAutoInspection && !operatorOptedOut) {
+      var destTasksSheet = destSS.getSheetByName("Tasks");
+      if (destTasksSheet) {
+        // Build set of items that ALREADY have a Completed INSP task — checked
+        // against BOTH source and destination Tasks sheets because the item_id
+        // is preserved across transfers, so an inspection done at the prior
+        // owner counts (mirrors the frontend pre-check query).
+        var inspectedSet = {};
+        function _markInspected(sheet) {
+          if (!sheet) return;
+          var map = api_getHeaderMap_(sheet);
+          var idCol = map["Task ID"];
+          var itemCol = map["Item ID"];
+          var statusCol = map["Status"];
+          if (!idCol || !itemCol || !statusCol) return;
+          var lr = api_getLastDataRow_(sheet);
+          if (lr < 2) return;
+          var data = sheet.getRange(2, 1, lr - 1, sheet.getLastColumn()).getValues();
+          for (var ix = 0; ix < data.length; ix++) {
+            var tid = String(data[ix][idCol - 1] || "").trim();
+            var itm = String(data[ix][itemCol - 1] || "").trim();
+            var st  = String(data[ix][statusCol - 1] || "").trim();
+            if (!tid || !itm) continue;
+            if (tid.indexOf("INSP-") !== 0) continue;
+            if (st !== "Completed") continue;
+            if (itemIds.indexOf(itm) === -1) continue;
+            inspectedSet[itm] = true;
+          }
+        }
+        _markInspected(srcSS.getSheetByName("Tasks"));
+        _markInspected(destTasksSheet);
+
+        // Resolve which transferred items still need inspection. Iterate the
+        // source inventory rows we already loaded so we have vendor/desc/etc.
+        // available without another read.
+        var srcInvItemCol  = srcInvMap["Item ID"];
+        var srcInvVendorCol = srcInvMap["Vendor"];
+        var srcInvDescCol   = srcInvMap["Description"];
+        var srcInvLocCol    = srcInvMap["Location"];
+        var srcInvSidemarkCol = srcInvMap["Sidemark"];
+        var srcInvShipCol   = srcInvMap["Shipment #"];
+
+        var uninspectedItems = [];
+        for (var rti = 0; rti < rowsToCopy.length; rti++) {
+          var rtRow = rowsToCopy[rti];
+          var rtItemId = srcInvItemCol ? String(rtRow[srcInvItemCol - 1] || "").trim() : "";
+          if (!rtItemId) continue;
+          if (inspectedSet[rtItemId]) continue;
+          uninspectedItems.push({
+            itemId:      rtItemId,
+            vendor:      srcInvVendorCol   ? String(rtRow[srcInvVendorCol - 1]   || "").trim() : "",
+            description: srcInvDescCol     ? String(rtRow[srcInvDescCol - 1]     || "").trim() : "",
+            location:    srcInvLocCol      ? String(rtRow[srcInvLocCol - 1]      || "").trim() : "",
+            sidemark:    srcInvSidemarkCol ? String(rtRow[srcInvSidemarkCol - 1] || "").trim() : "",
+            shipmentNo:  srcInvShipCol     ? String(rtRow[srcInvShipCol - 1]     || "").trim() : ""
+          });
+        }
+
+        if (uninspectedItems.length) {
+          var destTasksMapAi  = api_getHeaderMap_(destTasksSheet);
+          var destTasksWidth  = destTasksSheet.getLastColumn();
+          var inspSvcName     = api_lookupSvcName_(destSS, "INSP");
+          var nowAi           = new Date();
+          var pendingTaskIdsAi = [];
+          var inspBatch       = [];
+
+          for (var ui = 0; ui < uninspectedItems.length; ui++) {
+            var u = uninspectedItems[ui];
+            var inspN = api_nextTaskCounter_(destTasksSheet, "INSP", u.itemId, pendingTaskIdsAi);
+            var inspTaskId = "INSP-" + u.itemId + "-" + inspN;
+            pendingTaskIdsAi.push(inspTaskId);
+            inspBatch.push(api_buildRow_(destTasksMapAi, {
+              "Task ID":     inspTaskId,
+              "Type":        inspSvcName,
+              "Status":      "Open",
+              "Item ID":     u.itemId,
+              "Vendor":      u.vendor,
+              "Description": u.description,
+              "Location":    u.location,
+              "Sidemark":    u.sidemark,
+              "Shipment #":  u.shipmentNo,
+              "Created":     nowAi,
+              "Item Notes":  "Auto-created on transfer (destination requires inspection)"
+            }));
+          }
+
+          var inspStartRow = api_getLastDataRow_(destTasksSheet) + 1;
+          destTasksSheet.getRange(inspStartRow, 1, inspBatch.length, destTasksWidth)
+            .setValues(inspBatch.map(function(row) {
+              // Right-pad to sheet width so setValues doesn't error on shorter rows.
+              if (row.length === destTasksWidth) return row;
+              var padded = row.slice();
+              while (padded.length < destTasksWidth) padded.push("");
+              return padded;
+            }));
+          inspectionTasksCreated = inspBatch.length;
+
+          // Flip destination Inventory "Needs Inspection" to TRUE for the
+          // uninspected items. Walk the freshly-appended destination rows
+          // (destInvLast + 1 ... destInvLast + destInvAppend.length) and match
+          // by Item ID — order matches rowsToCopy, but we map by ID to be safe.
+          var destNeedsInspCol = destInvMap["Needs Inspection"];
+          if (!destNeedsInspCol) {
+            try {
+              destNeedsInspCol = api_ensureColumn_(destInv, "Needs Inspection");
+            } catch (_e) { /* legacy sheet may reject column add — non-fatal */ }
+          }
+          if (destNeedsInspCol) {
+            var uninspectedIdSet = {};
+            for (var uj = 0; uj < uninspectedItems.length; uj++) {
+              uninspectedIdSet[uninspectedItems[uj].itemId] = true;
+            }
+            // Re-read destination inventory item-id column for the appended slice.
+            var apdCount = destInvAppend.length;
+            if (apdCount > 0 && destInvItemIdCol) {
+              var apdRange = destInv.getRange(destInvLast + 1, destInvItemIdCol, apdCount, 1).getValues();
+              for (var ar = 0; ar < apdRange.length; ar++) {
+                var apdId = String(apdRange[ar][0] || "").trim();
+                if (uninspectedIdSet[apdId]) {
+                  destInv.getRange(destInvLast + 1 + ar, destNeedsInspCol).setValue(true);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  } catch (aiErr) {
+    warnings.push("Auto-inspection on transfer failed (non-fatal): " + aiErr);
+  }
+
   // ── 5. MOVE HISTORY (log transfer on both source and destination) ────────
   try {
     var callerEmail = Session.getActiveUser().getEmail() || "";
@@ -24007,6 +24160,7 @@ function handleTransferItems_(sourceClientSheetId, payload) {
     storageBackfillRows: storageBackfillRows,
     tasksTransferred:  tasksTransferred,
     repairsTransferred: repairsTransferred,
+    inspectionTasksCreated: inspectionTasksCreated,
     emailSent:         emailSent,
     transferDate:      transferDate ? Utilities.formatDate(transferDate, tz, "yyyy-MM-dd") : "",
     warnings:          warnings.length > 0 ? warnings : undefined
