@@ -14,6 +14,7 @@ import { useTasks } from '../../hooks/useTasks';
 import { useRepairs } from '../../hooks/useRepairs';
 import { useWillCalls } from '../../hooks/useWillCalls';
 import { useShipments } from '../../hooks/useShipments';
+import { useServiceCatalog } from '../../hooks/useServiceCatalog';
 import type { InventoryItem, Task, Repair, WillCall, Shipment } from '../../lib/types';
 
 interface Props { open: boolean; onClose: () => void; }
@@ -56,6 +57,7 @@ function buildSearchIndex(
   repairs: Repair[],
   willCalls: WillCall[],
   shipments: Shipment[],
+  svcNameByCode: Map<string, string>,
 ): Result[] {
   const results: Result[] = [];
 
@@ -73,10 +75,13 @@ function buildSearchIndex(
     clientSheetId: i.clientId, // clientId == clientSheetId (mapped in useInventory)
   }));
 
-  tasks.forEach(t => results.push({
+  tasks.forEach(t => {
+    const rawType = String(t.svcCode || t.type || '').trim();
+    const typeLabel = svcNameByCode.get(rawType) || rawType;
+    results.push({
     type: 'task',
     id: t.taskId,
-    title: `${t.taskId} — ${t.type}`,
+    title: `${t.taskId} — ${typeLabel}`,
     subtitle: `${t.description} · ${t.clientName}`,
     haystack: makeHaystack(
       t.reference, t.taskNotes, t.itemNotes, t.itemId, t.vendor,
@@ -85,7 +90,8 @@ function buildSearchIndex(
     ),
     path: '/tasks',
     clientSheetId: t.clientSheetId,
-  }));
+  });
+  });
 
   repairs.forEach(r => results.push({
     type: 'repair',
@@ -163,10 +169,16 @@ export function UniversalSearch({ open, onClose }: Props) {
   const { repairs } = useRepairs(true);
   const { willCalls } = useWillCalls(true);
   const { shipments } = useShipments(true);
+  const { services: catalogServices } = useServiceCatalog();
+  const svcNameByCode = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const s of catalogServices) if (s.code && s.name) m.set(s.code, s.name);
+    return m;
+  }, [catalogServices]);
 
   const allResults = useMemo(
-    () => buildSearchIndex(inventoryItems, tasks, repairs, willCalls, shipments),
-    [inventoryItems, tasks, repairs, willCalls, shipments],
+    () => buildSearchIndex(inventoryItems, tasks, repairs, willCalls, shipments, svcNameByCode),
+    [inventoryItems, tasks, repairs, willCalls, shipments, svcNameByCode],
   );
 
   const filtered = useMemo(() => {

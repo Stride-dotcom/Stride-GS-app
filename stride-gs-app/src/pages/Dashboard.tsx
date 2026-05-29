@@ -24,6 +24,7 @@ import { useIsMobile } from '../hooks/useIsMobile';
 import { useAuth } from '../contexts/AuthContext';
 import { FolderButton } from '../components/shared/FolderButton';
 import { ExpectedCalendar } from '../components/shipments/ExpectedCalendar';
+import { useServiceCatalog } from '../hooks/useServiceCatalog';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -186,6 +187,18 @@ const TASK_COL_LABELS: Record<string, string> = { taskId: 'Task ID', taskType: '
 
 function TasksTab({ tasks, onNavigate, indicators, canEditPriority }: { tasks: SummaryTask[]; onNavigate: (task: SummaryTask) => void; indicators?: { inspOpenItems: Set<string>; inspDoneItems: Set<string>; inspFailedItems: Set<string>; asmOpenItems: Set<string>; asmDoneItems: Set<string>; repairOpenItems: Set<string>; repairDoneItems: Set<string>; wcOpenItems: Set<string>; wcDoneItems: Set<string> }; canEditPriority: boolean }) {
   const colT = createColumnHelper<SummaryTask>();
+  // Service-label resolution from the live Master Price List service_catalog.
+  // public.tasks.type can carry either the raw svcCode (GAS writer path) or
+  // the svcName (SB EF writer path). svcNameByCode resolves the code form;
+  // the fallback chain handles the name form (passes through unchanged) and
+  // legacy hardcoded TASK_TYPE_LABELS for codes the operator hasn't yet
+  // configured in the catalog UI.
+  const { services: catalogServices } = useServiceCatalog();
+  const svcNameByCode = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const s of catalogServices) if (s.code && s.name) m.set(s.code, s.name);
+    return m;
+  }, [catalogServices]);
   // v2026-05-04: who-completed-it lookup for terminal tasks. Drives the
   // Assigned-column override below — Completed/Cancelled tasks show the
   // actor instead of the (now-irrelevant) assignee.
@@ -336,7 +349,11 @@ function TasksTab({ tasks, onNavigate, indicators, canEditPriority }: { tasks: S
 
   const columns = useMemo(() => [
     colT.accessor('taskId', { id: 'taskId', header: 'Task ID', size: 110, cell: i => <span style={{ fontWeight: 600, fontSize: 12, fontFamily: 'monospace', color: theme.colors.orange }}>{i.getValue()}</span> }),
-    colT.accessor('taskType', { id: 'taskType', header: 'Type', size: 100, cell: i => <span style={{ fontSize: 12 }}>{TASK_TYPE_LABELS[i.getValue()] || i.getValue() || '—'}</span> }),
+    colT.accessor('taskType', { id: 'taskType', header: 'Type', size: 100, cell: i => {
+      const v = String(i.getValue() || '').trim();
+      const label = svcNameByCode.get(v) || TASK_TYPE_LABELS[v] || v || '—';
+      return <span style={{ fontSize: 12 }}>{label}</span>;
+    } }),
     colT.accessor('status', { id: 'taskStatus', header: 'Status', size: 115, cell: i => <StatusBadge status={i.getValue()} /> }),
     colT.accessor('priority', { id: 'taskPriority', header: 'Priority', size: 80, cell: i => {
       const t = i.row.original;
