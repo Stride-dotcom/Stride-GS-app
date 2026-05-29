@@ -246,9 +246,23 @@ export const SHADOW_REGISTRY: Record<string, ShadowSpec> = {
   // canonical "router audit-logs payload minus identifiers" pattern.
   // If parity mismatches surface, refine these in a follow-up PR with
   // the actual shadow source in hand.
+  //
+  // batchCreateTasks: the GAS dispatch at StrideAPI.gs:10186-10194 writes
+  // ONE entity_audit_log row per created task id, each with
+  //   changes: { summary: 'Task created', svcCodes: <payload.svcCodes joined with ','> }
+  // The default `payload − identifiers` shape was never going to match
+  // (`{tasks:[...], svcCodes:[...]}` vs `{summary, svcCodes:'…'}`) and
+  // produced 0%/33% match rates surfaced as transport failures by the
+  // audit-doc's LIKE '%Failed to send%' query (which catches both real
+  // transport failures AND any non-empty mismatch_details). Override
+  // matches what GAS actually logs.
   batchCreateTasks: {
     flagKey: 'createTask',
     ef:      'create-task-shadow',
+    toAuditShape: (p) => ({
+      summary: 'Task created',
+      svcCodes: Array.isArray(p.svcCodes) ? p.svcCodes.join(',') : '',
+    }),
     toCallId: (p) => firstId(p, 'requestId'),
     toSummary: (p) => {
       const tasks = Array.isArray(p.tasks) ? p.tasks.length : '?';
@@ -302,9 +316,22 @@ export const SHADOW_REGISTRY: Record<string, ShadowSpec> = {
   // Naming aliases: GAS action `completeShipment` is what fires the
   // receiving flow; the feature_flags row is named `receiveShipment`
   // (the user-facing operation). The shadow EF mirrors the flag name.
+  //
+  // completeShipment: the GAS dispatch at StrideAPI.gs:9533 writes one
+  // entity_audit_log row with
+  //   changes: { itemCount: (payload.items || []).length, carrier: payload.carrier || '' }
+  // The default `payload − identifiers` shape gave the shadow side a
+  // big `{items:[…], carrier, …}` object instead, which never matched
+  // — every receiveShipment shadow run landed in mismatch_details and
+  // got captured as a "transport failure" by the audit-doc's LIKE
+  // '%Failed to send%' query (8/8 since the deploy).
   completeShipment: {
     flagKey: 'receiveShipment',
     ef:      'receive-shipment-shadow',
+    toAuditShape: (p) => ({
+      itemCount: Array.isArray(p.items) ? p.items.length : 0,
+      carrier:   String(p.carrier ?? ''),
+    }),
     toCallId: (p) => firstId(p, 'idempotencyKey', 'requestId'),
     toSummary: (p) => {
       const items = Array.isArray(p.items) ? p.items.length : '?';

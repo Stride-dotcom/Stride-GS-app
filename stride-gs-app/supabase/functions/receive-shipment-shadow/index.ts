@@ -3,20 +3,24 @@
  * Originally deployed via Supabase MCP on 2026-05-19 without a source
  * file, leaving the EF without CORS preflight handling - every
  * `supabase.functions.invoke()` call from the React app surfaced
- * "Failed to send a request to the Edge Function". This source file
- * restores parity with the in-repo shadows fixed in PR #527 and adds
- * the OPTIONS handler.
+ * "Failed to send a request to the Edge Function". CORS was added in
+ * PR #540 (2026-05-27); curl-verified live on 2026-05-28.
  *
  * Project context: stride-gs-app/MIGRATION_STATUS.md.
  * Decisions: MIG-001 (dry-run-on-shadow), MIG-007 (live-traffic parity
  *            layer 1), MIG-008 (stripped-credential).
  *
- * Compare target: client-side `resolveAuditShape` in shadowRegistry.ts.
- * This handler is registered there with the default (payload minus
- * DEFAULT_IDENTIFIER_KEYS), so the shadow mirrors the same derivation.
- * Email-sender shadows have no audit-log counterpart in GAS today; the
- * default shape still gives parity_results something to hash without
- * producing side effects.
+ * Audit-shape contract (must stay in sync with shadowRegistry.ts and
+ * with GAS):
+ *   GAS dispatch for `completeShipment` at StrideAPI.gs:9533 writes
+ *     api_auditLog_("shipment", shipmentNo, tenantId, "create",
+ *       { itemCount: (payload.items || []).length,
+ *         carrier: payload.carrier || "" },
+ *       callerEmail);
+ *   The shadow MUST return that exact shape so SHA-256 hashes match.
+ *   The original payload-minus-identifiers default produced
+ *   {items:[...], carrier, ...} which never hashed equal — every
+ *   receiveShipment call surfaced as a parity mismatch since 2026-05-19.
  *
  * Zero side effects - no DB writes, no GAS HTTP calls, no Resend/Stax
  * client construction (MIG-008 inert by construction).
@@ -33,24 +37,19 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-// Mirrors src/lib/shadowRegistry.ts DEFAULT_IDENTIFIER_KEYS. Keep in sync.
-const DEFAULT_IDENTIFIER_KEYS = new Set<string>([
-  'itemId', 'taskId', 'repairId', 'willCallNumber', 'wcNo', 'wcNumber',
-  'shipmentId', 'shipmentNo', 'invoiceNo', 'invoiceNumber',
-  'requestId', 'idempotencyKey', 'clientSheetId',
-]);
-
 type Payload = Record<string, unknown>;
 interface ShadowResult { ok: boolean; changes?: Record<string, unknown>; error?: string; errorCode?: string }
 
 export function runReceiveShipmentShadow(payload: Payload): ShadowResult {
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(payload ?? {})) {
-    if (DEFAULT_IDENTIFIER_KEYS.has(k)) continue;
-    if (v === undefined) continue;
-    out[k] = v;
-  }
-  return { ok: true, changes: out };
+  const items   = Array.isArray(payload?.items) ? payload.items : [];
+  const carrier = typeof payload?.carrier === 'string' ? payload.carrier : '';
+  return {
+    ok: true,
+    changes: {
+      itemCount: items.length,
+      carrier,
+    },
+  };
 }
 
 serve(async (req: Request): Promise<Response> => {
