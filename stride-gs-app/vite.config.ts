@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite'
+import { defineConfig, loadEnv } from 'vite'
 import type { Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import { execSync } from 'node:child_process'
@@ -40,12 +40,32 @@ const APP_VERSION = resolveBuildVersion()
 const BUILD_TIME = new Date().toISOString()
 
 // https://vite.dev/config/
-export default defineConfig({
-  plugins: [react(), versionJsonPlugin(APP_VERSION, BUILD_TIME)],
-  base: '/',
-  cacheDir: path.join(os.tmpdir(), 'vite-stride-gs-app'),
-  define: {
-    __APP_VERSION__: JSON.stringify(APP_VERSION),
-    __BUILD_TIME__: JSON.stringify(BUILD_TIME),
-  },
+export default defineConfig(({ command, mode }) => {
+  // Build-time preflight: fail loudly if Supabase env vars are missing.
+  // Without this, vite silently inlines `undefined` and the deployed bundle
+  // crashes at module load with `supabaseUrl is required` (session 72 incident).
+  if (command === 'build') {
+    const env = loadEnv(mode, process.cwd(), '')
+    const url = env.VITE_SUPABASE_URL || process.env.VITE_SUPABASE_URL
+    const key = env.VITE_SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY
+    if (!url || !key) {
+      const missing = [
+        !url && 'VITE_SUPABASE_URL',
+        !key && 'VITE_SUPABASE_ANON_KEY',
+      ].filter(Boolean).join(', ')
+      throw new Error(
+        `FATAL: ${missing} must be set in .env. Build aborted to prevent shipping a broken bundle.`
+      )
+    }
+  }
+
+  return {
+    plugins: [react(), versionJsonPlugin(APP_VERSION, BUILD_TIME)],
+    base: '/',
+    cacheDir: path.join(os.tmpdir(), 'vite-stride-gs-app'),
+    define: {
+      __APP_VERSION__: JSON.stringify(APP_VERSION),
+      __BUILD_TIME__: JSON.stringify(BUILD_TIME),
+    },
+  }
 })
