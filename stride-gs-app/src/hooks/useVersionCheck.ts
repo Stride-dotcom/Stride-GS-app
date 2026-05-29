@@ -124,15 +124,22 @@ export function useVersionCheck() {
   // also count — Stride deep links use ?open=<id>&client=<id>, so a user
   // who lives on one tab still gets the reload when they click through
   // to a different entity.
+  //
+  // `isStale` is read through a ref so this effect only fires on actual
+  // navigation, not the moment `isStale` flips true. That way a user
+  // mid-form-entry isn't reloaded out from under their cursor; the
+  // reload waits until they're between tasks.
+  const isStaleRef = useRef(isStale);
+  isStaleRef.current = isStale;
   useEffect(() => {
     if (firstLocation.current) {
       firstLocation.current = false;
       return;
     }
-    if (isStale) {
+    if (isStaleRef.current) {
       hardReloadForUpdate();
     }
-  }, [location.key, isStale]);
+  }, [location.key]);
 
   return { isStale, runningVersion: RUNNING_VERSION, runningBuildTime: RUNNING_BUILD_TIME };
 }
