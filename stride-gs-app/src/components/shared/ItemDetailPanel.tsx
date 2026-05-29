@@ -25,6 +25,7 @@ import { FloatingActionMenu, type FABAction } from './FloatingActionMenu';
 import { usePhotoGraphRollup, useNoteGraphRollup, type RollupContext } from '../../hooks/useGraphRollup';
 import { EntityNotesInline } from '../notes/EntityNotesInline';
 import { useDocuments } from '../../hooks/useDocuments';
+import { useServiceCatalog } from '../../hooks/useServiceCatalog';
 
 export interface LinkedRecord {
   id: string;
@@ -411,6 +412,16 @@ function ItemHistory({ tasks, repairs, willCalls, billing, moves, shipmentNumber
   auditByEntity: Record<string, AuditEntry[]>;
   clientSheetId?: string;
 }) {
+  // Service-label resolution for the task history rows below — pulls live
+  // names from the Price List service_catalog so custom codes (FAB_RUG,
+  // DISP, MULTI_INS, etc.) render as friendly labels rather than raw codes.
+  // Falls back to the legacy SERVICE_CODES static map, then raw code.
+  const { services: catalogServices } = useServiceCatalog();
+  const svcNameByCode = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const s of catalogServices) if (s.code && s.name) m.set(s.code, s.name);
+    return m;
+  }, [catalogServices]);
   return (
     <div>
       {/* Shipment — always first */}
@@ -475,7 +486,7 @@ function ItemHistory({ tasks, repairs, willCalls, billing, moves, shipmentNumber
                   {t.result && <MiniStatusBadge status={t.result} />}
                 </div>
                 <div style={histNoteStyle}>
-                  {SERVICE_CODES[t.svcCode] || t.svcCode || t.type || '\u2014'}
+                  {svcNameByCode.get(String(t.svcCode || t.type || '')) || SERVICE_CODES[t.svcCode] || t.svcCode || t.type || '\u2014'}
                 </div>
               </div>
             </div>
