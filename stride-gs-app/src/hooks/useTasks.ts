@@ -30,7 +30,7 @@ function taskBroadcast(evt: TaskBusEvent): void {
   taskBus.dispatchEvent(new CustomEvent<TaskBusEvent>('change', { detail: evt }));
 }
 import type { ApiTask, TasksResponse } from '../lib/api';
-import type { Task, TaskStatus, ServiceCode } from '../lib/types';
+import type { Task, TaskStatus } from '../lib/types';
 import { useApiData } from './useApiData';
 import { useClientFilter } from './useClientFilter';
 import { useBatchData } from '../contexts/BatchDataContext';
@@ -58,7 +58,6 @@ export interface UseTasksResult {
 }
 
 const VALID_STATUSES: TaskStatus[] = ['Open', 'In Progress', 'Completed', 'Cancelled'];
-const VALID_SVC_CODES: ServiceCode[] = ['RCVG', 'INSP', 'ASM', 'REPAIR', 'STOR', 'DLVR', 'WCPU', 'OTHER'];
 const PATCH_TTL_MS = 120_000; // 120 seconds
 
 function mapToAppTask(api: ApiTask): Task {
@@ -66,9 +65,13 @@ function mapToAppTask(api: ApiTask): Task {
     ? (api.status as TaskStatus)
     : 'Open';
 
-  const svcCode = VALID_SVC_CODES.includes(api.svcCode as ServiceCode)
-    ? (api.svcCode as ServiceCode)
-    : 'OTHER';
+  // 2026-05-29 — previously this whitelisted only legacy ServiceCode bucket
+  // values and coerced everything else to 'OTHER', which broke the Type
+  // column for modern catalog codes (FAB_RUG, DISP, MULTI_INS, …). The
+  // service_catalog is the source of truth now; pass through whatever the
+  // API returns and only default when it's empty. The Tasks page resolves
+  // the human-readable label via svcNameByCode.
+  const svcCode = (api.svcCode || 'OTHER').trim() || 'OTHER';
 
   return {
     taskId: api.taskId,
