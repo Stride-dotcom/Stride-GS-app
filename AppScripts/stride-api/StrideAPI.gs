@@ -23941,7 +23941,7 @@ function handleTransferItems_(sourceClientSheetId, payload) {
     }
   }
 
-  // ── 4.5 AUTO-INSPECTION ON TRANSFER (v38.246.0) ─────────────────────────
+  // ── 4.5 AUTO-INSPECTION ON TRANSFER (v38.247.0) ─────────────────────────
   //
   // When destination has AUTO_INSPECTION=true and any transferred item has
   // never had a Completed INSP task on either source or destination, spin up
