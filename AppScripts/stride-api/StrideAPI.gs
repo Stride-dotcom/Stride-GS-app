@@ -1,5 +1,7 @@
 /* ===================================================
-   StrideAPI.gs — v38.250.0 — 2026-05-30 PST — [BILLING] fix: sidemark-aware storage summary + stale-report guard. Closes the Allison Lind Design 2026-05-30 storage-invoice incident (6 orphan invoices INV-020021/020025-020029 in Consolidated_Ledger + invoice_tracking with NO flipped billing rows, plus 4 LEDGER_PARTIAL_FLIP "0 of 1" rollbacks). Root cause: v38.239.0 handleCommitStorageRows_ aggregated storage into ONE blank-sidemark STOR-SUMMARY row per tenant, but separate_by_sidemark=true clients are invoiced per-sidemark by Billing.tsx — the single blank-sidemark summary could not map onto per-sidemark invoice groups, and the commit had already deleted the per-item rows the operator's open unbilled report still referenced. Three changes. (1) handleCommitStorageRows_ now reads separate_by_sidemark via new helper api_clientSeparatesBySidemark_ and, when true, sub-groups the incoming per-item rows by normalized sidemark (trim+uppercase, matching React normalizeSidemarkForMatch) and appends ONE STOR-SUMMARY row PER sidemark with the Sidemark column populated and ledger row id STOR-SUMMARY-<tenant>-<SLUG>-<startYMD>-<endYMD> (new helper api_sidemarkSlug_, alnum-only uppercase, placed BEFORE the trailing dates so api_parseStorSummaryPeriod_ and the handleCreateInvoice_ sheet-markable regex both keep matching). separate_by_sidemark=false keeps the byte-identical legacy blank-sidemark id form. The finalized-summary gate now locks per-sidemark (a finalized BLANK-sidemark summary still locks the whole tenant); the in-window Unbilled-STOR delete pass runs once for the tenant before any append so no per-sidemark summary clobbers another. (2) handleCreateInvoice_ STALE-REPORT GUARD: when React sent extraSheetLedgerRowIdsToMark (the per-item ids its >=2-STOR invoice-time summarizer collapsed) but extraMarked===0 (none flipped — rows deleted/re-summarized or already invoiced), roll back the CB insert via rollbackByInvoiceNo_ and return STOR_SUMMARY_STALE_REPORT instead of committing an orphan summary CB row. (3) New admin runner runVoidOrphanInvoices (reads Script Property VOID_ORPHAN_INVOICE_NOS) deletes orphan CB rows + invoice_tracking for invoices that never flipped a Billing_Ledger row — the case handleVoidInvoice_ cannot clean (it bails "No rows found"). No change to dollar totals for separate_by_sidemark=false clients, the v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, or any non-storage billing logic.
+   StrideAPI.gs — v38.251.0 — 2026-05-30 PST — [BILLING] feat: per-item storage billed-tracking via new public.storage_billing_items. Storage still summarizes to ONE ledger line per sidemark (v38.250.0), but the per-item detail that the summary erases now lives in a durable Supabase table so storage is never double-billed or missed. (1) New migration 20260530160000_storage_billing_items.sql: public.storage_billing_items (tenant/sidemark/item/period/amount/summary_ledger_row_id/status/invoice), RLS mirroring public.billing, a partial-unique integrity guard (tenant,item,period WHERE status<>'Void') that keeps the table free of double-active charges while allowing re-bill-after-void, plus the mandatory parity_dryrun mirror + reset()/row_counts/check_drift() updates. (2) handleCommitStorageRows_ now reads storage_billing_items before summarizing: items already FINALIZED for an overlapping window are skipped (never re-billed), the Unbilled working set for the window is deleted + replaced, and one per-item row per included item is inserted linked to the summary's ledger_row_id. FAIL-SAFE: any Supabase read failure disables BOTH the skip AND the write for that tenant, falling back to legacy sheet-only behaviour (the finalized-summary gate stays the primary guard) so an outage can never block or alter a storage commit. (3) handleCreateInvoice_ stamps the matching storage_billing_items rows status=Invoiced + invoice_no/date by summary_ledger_row_id after a successful commit. (4) handleVoidInvoice_ flips them to Void (re-billable); handleReissueInvoice_ resets non-Unbilled rows back to Unbilled. All Supabase writes are best-effort/non-fatal. No change to dollar totals (the per-item skip only excludes genuinely-already-finalized items; with the table empty on first deploy nothing is excluded), the v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, or any non-storage billing logic. Billing stays GAS-authoritative — this is forward-compatible substrate the future P4a SB-primary createInvoice will read directly.
+
+   v38.250.0 — 2026-05-30 PST — [BILLING] fix: sidemark-aware storage summary + stale-report guard. Closes the Allison Lind Design 2026-05-30 storage-invoice incident (6 orphan invoices INV-020021/020025-020029 in Consolidated_Ledger + invoice_tracking with NO flipped billing rows, plus 4 LEDGER_PARTIAL_FLIP "0 of 1" rollbacks). Root cause: v38.239.0 handleCommitStorageRows_ aggregated storage into ONE blank-sidemark STOR-SUMMARY row per tenant, but separate_by_sidemark=true clients are invoiced per-sidemark by Billing.tsx — the single blank-sidemark summary could not map onto per-sidemark invoice groups, and the commit had already deleted the per-item rows the operator's open unbilled report still referenced. Three changes. (1) handleCommitStorageRows_ now reads separate_by_sidemark via new helper api_clientSeparatesBySidemark_ and, when true, sub-groups the incoming per-item rows by normalized sidemark (trim+uppercase, matching React normalizeSidemarkForMatch) and appends ONE STOR-SUMMARY row PER sidemark with the Sidemark column populated and ledger row id STOR-SUMMARY-<tenant>-<SLUG>-<startYMD>-<endYMD> (new helper api_sidemarkSlug_, alnum-only uppercase, placed BEFORE the trailing dates so api_parseStorSummaryPeriod_ and the handleCreateInvoice_ sheet-markable regex both keep matching). separate_by_sidemark=false keeps the byte-identical legacy blank-sidemark id form. The finalized-summary gate now locks per-sidemark (a finalized BLANK-sidemark summary still locks the whole tenant); the in-window Unbilled-STOR delete pass runs once for the tenant before any append so no per-sidemark summary clobbers another. (2) handleCreateInvoice_ STALE-REPORT GUARD: when React sent extraSheetLedgerRowIdsToMark (the per-item ids its >=2-STOR invoice-time summarizer collapsed) but extraMarked===0 (none flipped — rows deleted/re-summarized or already invoiced), roll back the CB insert via rollbackByInvoiceNo_ and return STOR_SUMMARY_STALE_REPORT instead of committing an orphan summary CB row. (3) New admin runner runVoidOrphanInvoices (reads Script Property VOID_ORPHAN_INVOICE_NOS) deletes orphan CB rows + invoice_tracking for invoices that never flipped a Billing_Ledger row — the case handleVoidInvoice_ cannot clean (it bails "No rows found"). No change to dollar totals for separate_by_sidemark=false clients, the v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, or any non-storage billing logic.
 
    v38.249.0 — 2026-05-29 PST — [REPAIRS] feat: handleSendRepairQuote_ now accepts payload.isRevision (boolean) and payload.skipEmail (boolean) to power the new "Edit Quote after sent" flow in RepairDetailPanel.tsx. Three behavioral changes when isRevision=true: (1) the same-lines-and-total idempotency guards at the start of the handler and inside the lock no longer short-circuit — the operator explicitly asked to resend so the persistence pass and email send always fire; (2) the customer-facing email subject is prefixed with "REVISED — " ("REVISED — Repair Quote Ready: <ITEM_ID> $<GRAND>") so the client mailbox shows the revision clearly; (3) Quote Sent Date is preserved if it was already populated (no overwrite). When skipEmail=true (Save Draft path) the email block is skipped entirely while all sheet/Supabase writes still land. Status flip logic is unchanged — a Quote Sent repair stays Quote Sent on resend; only Pending Quote → Quote Sent transitions on first send. payload.isRevision defaults to false and payload.skipEmail defaults to false so existing callers (first-time send) are unaffected. No change to invoice-counter, half-write, void-invoice SB-first, updateClient SB-primary, storage-charges transfer exclusion, auto-inspection-on-transfer, or any billing logic.
 
@@ -15547,6 +15549,22 @@ function handleVoidInvoice_(clientSheetId, payload) {
       Logger.log("invoice_tracking row delete failed (non-fatal): " + itErr.message);
     }
 
+    // v38.x — Void the per-item storage_billing_items rows tied to this
+    // invoice so the items become re-billable (the partial-unique double-bill
+    // guard excludes Void rows) and the billed-history record reflects the
+    // void. Best-effort; matches by invoice_no. No-op for non-storage invoices.
+    try {
+      supabasePatch_(
+        "storage_billing_items",
+        "tenant_id=eq." + encodeURIComponent(clientSheetId) +
+          "&invoice_no=eq." + encodeURIComponent(invoiceNo) +
+          "&status=neq.Void",
+        { status: "Void" }
+      );
+    } catch (sbiErr) {
+      Logger.log("handleVoidInvoice_ storage_billing_items void failed (non-fatal): " + sbiErr.message);
+    }
+
     return jsonResponse_({
       success: true,
       invoiceNo: invoiceNo,
@@ -15702,6 +15720,26 @@ function handleReissueInvoice_(clientSheetId, payload, callerEmail) {
       api_deleteInvoiceTrackingRow_(invoiceNo);
     } catch (itErr) {
       Logger.log("invoice_tracking row delete failed (non-fatal): " + itErr.message);
+    }
+
+    // v38.x — Return the per-item storage_billing_items rows tied to this
+    // invoice to the Unbilled working set (mirrors the sheet rows flipping
+    // Invoiced/Void → Unbilled above) so the next Create Invoices run re-bills
+    // and re-stamps them. Clear invoice linkage. status=neq.Unbilled catches
+    // BOTH Invoiced rows AND rows already Voided before this reissue (the sheet
+    // reissue path flips Void→Unbilled too, line ~15637-15639) — matching only
+    // Invoiced would leave voided-then-reissued rows as permanent Void orphans.
+    // Best-effort; matches by invoice_no.
+    try {
+      supabasePatch_(
+        "storage_billing_items",
+        "tenant_id=eq." + encodeURIComponent(clientSheetId) +
+          "&invoice_no=eq." + encodeURIComponent(invoiceNo) +
+          "&status=neq.Unbilled",
+        { status: "Unbilled", invoice_no: null, invoice_date: null }
+      );
+    } catch (sbiErr) {
+      Logger.log("handleReissueInvoice_ storage_billing_items reset failed (non-fatal): " + sbiErr.message);
     }
 
     // Audit — one entry per invoice with summary, not per-row (avoids audit
@@ -24799,6 +24837,52 @@ function handleCommitStorageRows_(payload) {
         return;
       }
 
+      // v38.x — storage_billing_items: per-item billed-tracking + dedup.
+      // Read which items already carry a FINALIZED (non-Void, non-Unbilled)
+      // storage charge overlapping this window so we never re-bill them, and
+      // clear the Unbilled working-set rows we're about to replace (mirrors the
+      // sheet delete-pass below). FAIL-SAFE: any Supabase read failure disables
+      // BOTH the per-item skip AND the storage_billing_items write for this
+      // tenant this commit, falling back to legacy sheet-only behaviour — the
+      // finalized-summary gate above stays the primary double-bill guard, so a
+      // Supabase outage can never block or corrupt a storage commit.
+      // period_start/period_end are DATE columns; the commit's
+      // periodStartStr/periodEndStr are already YYYY-MM-DD.
+      var sbiActive = false;
+      var sbiAlreadyBilled = {};   // item_id -> true (FINALIZED, overlapping window)
+      var sbiRows = [];            // per-item rows to insert for THIS commit
+      (function() {
+        var sel = supabaseSelect_(
+          "storage_billing_items",
+          "tenant_id=eq." + encodeURIComponent(tenantId) +
+            "&status=neq.Void" +
+            "&period_start=lte." + encodeURIComponent(periodEndStr) +
+            "&period_end=gte." + encodeURIComponent(periodStartStr),
+          "item_id,status"
+        );
+        if (!sel.ok) {
+          Logger.log("handleCommitStorageRows_ storage_billing_items dedup read failed for " +
+            clientName + " — sheet-only fallback (no per-item dedup/record this commit).");
+          return;
+        }
+        sbiActive = true;
+        for (var si = 0; si < sel.rows.length; si++) {
+          var iid = String(sel.rows[si].item_id || "").trim();
+          var ist = String(sel.rows[si].status || "").trim();
+          // Only FINALIZED rows block re-billing. Unbilled rows are the prior
+          // working set we're about to delete + replace, so they must NOT
+          // exclude their item from this commit.
+          if (iid && ist !== "Unbilled") sbiAlreadyBilled[iid] = true;
+        }
+        supabaseDelete_(
+          "storage_billing_items",
+          "tenant_id=eq." + encodeURIComponent(tenantId) +
+            "&status=eq.Unbilled" +
+            "&period_start=lte." + encodeURIComponent(periodEndStr) +
+            "&period_end=gte." + encodeURIComponent(periodStartStr)
+        );
+      })();
+
       // Sub-group the incoming per-item rows. separate_by_sidemark=true →
       // one group per normalized sidemark (uppercase+trim, matching React's
       // normalizeSidemarkForMatch so the summary row lands in the same invoice
@@ -24849,24 +24933,46 @@ function handleCommitStorageRows_(payload) {
           continue;
         }
 
-        // Aggregate this sidemark's per-item rows.
+        // Aggregate this sidemark's per-item rows. Items already FINALIZED for
+        // an overlapping window (sbiAlreadyBilled) are skipped so they're never
+        // re-billed; the rest are summed AND captured as per-item
+        // storage_billing_items rows (summary id backfilled once it's computed).
         var totalCents = 0;
         var itemIds = {};
         var summaryDate = endDate;
+        var grpSbiRows = [];
         for (var pri = 0; pri < grpRows.length; pri++) {
           var pr = grpRows[pri];
+          var pid = String(pr.itemId || "").trim();
+          if (sbiActive && pid && sbiAlreadyBilled[pid]) continue; // already billed for an overlapping window
           var pRow = Number(pr.total);
           if (!isFinite(pRow)) pRow = 0;
           totalCents += Math.round(pRow * 100);
-          var pid = String(pr.itemId || "").trim();
           if (pid) itemIds[pid] = true;
           var pEnd = api_normalizeDateToMidnight_(pr.billableEnd);
           if (pEnd && pEnd.getTime() > summaryDate.getTime()) summaryDate = pEnd;
+          if (sbiActive) {
+            var pRate = Number(pr.rate);
+            grpSbiRows.push({
+              tenant_id:    tenantId,
+              sidemark:     grp.display || "",
+              item_id:      pid,
+              description:  String(pr.description || ""),
+              period_start: periodStartStr,
+              period_end:   periodEndStr,
+              rate:         isFinite(pRate) ? pRate : null,
+              amount:       pRow,
+              status:       "Unbilled"
+              // summary_ledger_row_id backfilled after summaryTaskId below
+            });
+          }
         }
         var summaryTotal = Math.round(totalCents) / 100;
         var itemCount = Object.keys(itemIds).length;
         if (summaryTotal <= 0) {
-          skipped.push(clientName + (grp.display ? " · " + grp.display : "") + " (computed summary total <= 0)");
+          // Nothing new to bill for this sidemark (e.g. every item already
+          // finalized for the window). No summary row, no per-item rows.
+          skipped.push(clientName + (grp.display ? " · " + grp.display : "") + " (no unbilled storage this window)");
           continue;
         }
 
@@ -24879,6 +24985,15 @@ function handleCommitStorageRows_(payload) {
         var summaryTaskId = (sepBySidemark && smSlug)
           ? "STOR-SUMMARY-" + tenantId + "-" + smSlug + "-" + api_formatYMD_(startDate) + "-" + api_formatYMD_(endDate)
           : "STOR-SUMMARY-" + tenantId + "-" + api_formatYMD_(startDate) + "-" + api_formatYMD_(endDate);
+
+        // Link this sidemark's per-item storage_billing_items rows to the
+        // summary line they roll into, then queue them for the insert below.
+        if (sbiActive) {
+          for (var gsi = 0; gsi < grpSbiRows.length; gsi++) {
+            grpSbiRows[gsi].summary_ledger_row_id = summaryTaskId;
+            sbiRows.push(grpSbiRows[gsi]);
+          }
+        }
 
         var arr = new Array(blWidth).fill("");
         if (blCols.status)     arr[blCols.status - 1]     = "Unbilled";
@@ -24906,6 +25021,22 @@ function handleCommitStorageRows_(payload) {
         var insertAt = api_getLastDataRow_(blSh) + 1;
         blSh.getRange(insertAt, 1, 1, blWidth).setValues([arr]);
         totalCreated += 1;
+      }
+
+      // Persist the per-item storage_billing_items snapshot (best-effort, never
+      // blocks the commit). Window semantics match the sheet delete-pass above:
+      // storage is committed in fixed calendar windows (monthly), and both the
+      // sheet rows and these per-item rows are scoped to [periodStart,periodEnd]
+      // — re-committing the SAME window replaces in place. (Overlapping/shifting
+      // windows are not an operator pattern; if that ever changes, revisit both
+      // this delete-then-insert and the sheet delete-pass together.) The
+      // partial-unique index (tenant,item,period WHERE status<>'Void') keeps the
+      // table physically free of double-active charges; because we delete the
+      // Unbilled working set and skip already-finalized items, the normal path
+      // never conflicts, and a concurrent-commit collision is rejected (the
+      // existing row stands — idempotent) rather than double-recording.
+      if (sbiActive && sbiRows.length > 0) {
+        supabaseBatchUpsert_("storage_billing_items", sbiRows);
       }
 
       invalidateClientCache_(tenantId);
@@ -28331,6 +28462,32 @@ function handleCreateInvoice_(payload) {
         "STOR_SUMMARY_STALE_REPORT"
       );
     }
+  }
+
+  // v38.x — Stamp storage_billing_items for any STOR-SUMMARY line in this
+  // invoice: flip the per-item rows that rolled into the summary to Invoiced
+  // and record the invoice number/date. This is the per-item billed-history
+  // record (audit + dedup source for future storage commits). Best-effort —
+  // the invoice is already committed; a Supabase failure here only delays the
+  // per-item status reflection (the next storage commit's dedup read is the
+  // backstop). Matches by summary_ledger_row_id so it's exact regardless of
+  // how many items the summary collapsed.
+  try {
+    var sbiInvIso = Utilities.formatDate(invDate, "America/Los_Angeles", "yyyy-MM-dd");
+    for (var sbiI = 0; sbiI < ledgerRowIds.length; sbiI++) {
+      var sumId = String(ledgerRowIds[sbiI] || "").trim();
+      if (sumId.indexOf("STOR-SUMMARY-") !== 0) continue;
+      supabasePatch_(
+        "storage_billing_items",
+        "tenant_id=eq." + encodeURIComponent(sourceSheetId) +
+          "&summary_ledger_row_id=eq." + encodeURIComponent(sumId) +
+          "&status=eq.Unbilled",
+        { status: "Invoiced", invoice_no: invNo, invoice_date: sbiInvIso }
+      );
+    }
+  } catch (sbiErr) {
+    Logger.log("handleCreateInvoice_ storage_billing_items stamp failed (non-fatal) for " +
+      invNo + ": " + (sbiErr && sbiErr.message ? sbiErr.message : sbiErr));
   }
 
   // Email invoice to client (skippable via payload.skipEmail or when PDF was skipped)
