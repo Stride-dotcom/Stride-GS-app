@@ -103,6 +103,14 @@ function TextareaField({ label, value, onChange, rows = 3, placeholder, help }: 
   );
 }
 
+interface UnassignedItem {
+  id: string;
+  description: string;
+  quantity: number | null;
+  vendor: string;
+  room: string;
+}
+
 export function AddPickupLegModal({ open, onClose, deliveryOrder, onSuccess }: Props) {
   const [contactName, setContactName] = useState('');
   const [contactAddress, setContactAddress] = useState('');
@@ -118,6 +126,68 @@ export function AddPickupLegModal({ open, onClose, deliveryOrder, onSuccess }: P
   const [pickupNotes, setPickupNotes] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Phase 2 per-leg tracking — operator picks which existing delivery
+  // items belong to this pickup leg. Defaults to NONE selected (items
+  // commonly come from a fresh pickup site that doesn't yet have a
+  // delivery-side row; operator adds them via the new pickup's
+  // OrderPage after this modal closes). When set, the leg's id is
+  // stamped onto dt_order_items.pickup_leg_id on the selected rows,
+  // and the stamp-pickup-on-linked-delivery helper later scopes its
+  // picked_up_at writes to that set.
+  //
+  // Unassigned = pickup_leg_id IS NULL on the delivery order. These
+  // are warehouse inventory items or items the primary -P leg already
+  // owns but were never tagged (legacy pre-migration rows). Operator
+  // re-assigning them to a new leg is a legitimate edit — the primary
+  // leg's stamp helper will still match items by parent_pickup_item_id
+  // chain so reassignment doesn't break the FK path.
+  const [unassignedItems, setUnassignedItems] = useState<UnassignedItem[]>([]);
+  const [selectedItemIds, setSelectedItemIds] = useState<Set<string>>(new Set());
+  const [itemsLoading, setItemsLoading] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setItemsLoading(true);
+    setSelectedItemIds(new Set());
+    (async () => {
+      const { data, error: fetchErr } = await supabase
+        .from('dt_order_items')
+        .select('id, description, quantity, vendor, room, extras')
+        .eq('dt_order_id', deliveryOrder.id)
+        .is('removed_at', null)
+        .is('pickup_leg_id', null);
+      if (cancelled) return;
+      if (fetchErr) {
+        console.warn('[AddPickupLegModal] unassigned items fetch failed:', fetchErr.message);
+        setUnassignedItems([]);
+      } else {
+        const rows = ((data ?? []) as Array<Record<string, unknown>>).map(r => {
+          const extras = (r.extras as Record<string, unknown>) || {};
+          return {
+            id:          String(r.id ?? ''),
+            description: String(r.description ?? ''),
+            quantity:    r.quantity != null ? Number(r.quantity) : null,
+            vendor:      String(r.vendor ?? extras.vendor ?? ''),
+            room:        String(r.room ?? extras.room ?? ''),
+          };
+        });
+        setUnassignedItems(rows);
+      }
+      setItemsLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [open, deliveryOrder.id]);
+
+  const toggleItem = (id: string) => {
+    setSelectedItemIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
 
   // Per-leg zone fee preview. Resolved from delivery_zones when the
   // entered zip is a complete 5-digit code; null while loading or for
@@ -227,7 +297,7 @@ export function AddPickupLegModal({ open, onClose, deliveryOrder, onSuccess }: P
       //    pickup_leg_fee snapshots the zone baseRate at create time
       //    so historical rates don't drift if delivery_zones is later
       //    re-priced.
-      const { error: linkErr } = await supabase
+      const { data: newLinkRow, error: linkErr } = await supabase
         .from('dt_pickup_links')
         .insert({
           tenant_id:         deliveryOrder.tenantId,
@@ -236,8 +306,31 @@ export function AddPickupLegModal({ open, onClose, deliveryOrder, onSuccess }: P
           pickup_label:      label.trim() || contactName.trim() || null,
           pickup_leg_fee:    legFee > 0 ? legFee : null,
           sort_order:        nextSort,
-        });
-      if (linkErr) throw new Error(`Pickup created but join-row insert failed: ${linkErr.message}`);
+        })
+        .select('id')
+        .single();
+      if (linkErr || !newLinkRow) throw new Error(`Pickup created but join-row insert failed: ${linkErr?.message ?? 'no row returned'}`);
+      const newLegId = (newLinkRow as { id: string }).id;
+
+      // 4b. Phase 2 per-leg tracking — stamp pickup_leg_id on the
+      //    delivery items the operator picked. Best-effort: if this
+      //    fails, the leg is created but the stamper falls back to the
+      //    parent_pickup_item_id chain (still works for items that
+      //    have it) / the legacy-blanket path (for items that don't).
+      //    Surfaced in the final alert so the operator can retry the
+      //    assignment manually from the new pickup's OrderPage.
+      let assignFailed: string | null = null;
+      if (selectedItemIds.size > 0) {
+        const ids = Array.from(selectedItemIds);
+        const { error: assignErr } = await supabase
+          .from('dt_order_items')
+          .update({ pickup_leg_id: newLegId })
+          .in('id', ids);
+        if (assignErr) {
+          assignFailed = assignErr.message;
+          console.warn('[AddPickupLegModal] pickup_leg_id stamp failed:', assignErr.message);
+        }
+      }
 
       // 5. Increment the parent delivery's totals so the new leg is
       //    billed. SELECT-then-UPDATE — Postgres has no atomic
@@ -329,6 +422,9 @@ export function AddPickupLegModal({ open, onClose, deliveryOrder, onSuccess }: P
       }
       if (bumpFailed && legFee > 0) {
         lines.push(`\n⚠ The parent delivery's order total was NOT incremented by $${legFee.toFixed(2)} for this leg (${bumpFailed}). Edit the delivery and add this amount manually so it bills correctly.`);
+      }
+      if (assignFailed) {
+        lines.push(`\n⚠ Selected delivery items were NOT tagged to this pickup leg (${assignFailed}). When this leg's pickup completes, those items may not be auto-marked as picked up. Re-assign them from the delivery's OrderPage.`);
       }
       alert(lines.join('\n'));
     } catch (e) {
@@ -427,6 +523,68 @@ export function AddPickupLegModal({ open, onClose, deliveryOrder, onSuccess }: P
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
             <Field label="Window Start" value={windowStart} onChange={setWindowStart} type="time" />
             <Field label="Window End" value={windowEnd} onChange={setWindowEnd} type="time" />
+          </div>
+
+          {/* Phase 2 per-leg tracking — operator assigns which existing
+              delivery items come from this pickup. Items shown here are
+              currently unassigned (pickup_leg_id IS NULL on the delivery).
+              Common case is empty / a few items: the operator usually
+              ALSO adds items via the new pickup's OrderPage after the leg
+              is created, and those land directly on the pickup row with
+              the FK chain wiring up automatically. This picker is for
+              the case where the delivery already has rows that turn out
+              to belong to this new leg (e.g. an item that was originally
+              warehouse-sourced but the customer now wants picked up
+              from a third site instead). */}
+          <div style={{ marginBottom: 10 }}>
+            <label style={labelStyle}>Assign Delivery Items to This Leg</label>
+            {itemsLoading ? (
+              <div style={{ fontSize: 12, color: EP.textMuted, padding: '8px 10px' }}>Loading items…</div>
+            ) : unassignedItems.length === 0 ? (
+              <div style={{ fontSize: 11, color: EP.textMuted, padding: '6px 0', lineHeight: 1.5 }}>
+                No unassigned delivery items. You can add items to this pickup leg from its own page after it's created.
+              </div>
+            ) : (
+              <>
+                <div style={{ fontSize: 11, color: EP.textMuted, marginBottom: 6, lineHeight: 1.5 }}>
+                  Check items the driver will grab at <strong>{contactName.trim() || 'this pickup'}</strong>. Leave unchecked items as warehouse-sourced (no pickup needed).
+                </div>
+                <div style={{
+                  border: `1px solid ${theme.colors.border}`, borderRadius: 8,
+                  maxHeight: 180, overflowY: 'auto', background: '#fff',
+                }}>
+                  {unassignedItems.map(it => {
+                    const checked = selectedItemIds.has(it.id);
+                    return (
+                      <label
+                        key={it.id}
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: 8,
+                          padding: '6px 10px', borderBottom: `1px solid ${theme.colors.borderLight || '#f3f3f1'}`,
+                          fontSize: 12, cursor: 'pointer',
+                          background: checked ? '#ECFDF5' : '#fff',
+                        }}
+                      >
+                        <input type="checkbox" checked={checked} onChange={() => toggleItem(it.id)} />
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontWeight: 500, color: EP.textPrimary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {it.description || '—'}
+                          </div>
+                          <div style={{ fontSize: 11, color: EP.textMuted }}>
+                            {it.vendor && <span>{it.vendor} · </span>}
+                            {it.room && <span>{it.room} · </span>}
+                            Qty {it.quantity ?? 1}
+                          </div>
+                        </div>
+                      </label>
+                    );
+                  })}
+                </div>
+                <div style={{ fontSize: 11, color: EP.textMuted, marginTop: 4 }}>
+                  {selectedItemIds.size} of {unassignedItems.length} selected
+                </div>
+              </>
+            )}
           </div>
 
           <TextareaField

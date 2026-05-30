@@ -451,6 +451,12 @@ interface DtOrderItemRow {
    *  delivery item. Null on pickup-leg items + on delivery items
    *  whose linked PU hasn't finished yet. */
   picked_up_at: string | null;
+  /** Phase 2 per-leg tracking (2026-05-30). FK to dt_pickup_links.id —
+   *  identifies which pickup leg this item came from. Drives per-leg
+   *  driver-name resolution in buildItemDesc so a multi-pickup order's
+   *  "[✓ Picked up M/D DRIVER]" tag uses the correct driver per item
+   *  instead of the single order-level linked_pickup_driver_name. */
+  pickup_leg_id?: string | null;
 }
 
 // Logical field groups the caller can scope a re-push to. Required
@@ -537,6 +543,15 @@ function buildItemDesc(
   reference?: string,
   linkedDeliveryIdentifier?: string,
   pickupDriverName?: string | null,
+  /** Phase 2 per-leg tracking (2026-05-30). Map of dt_pickup_links.id
+   *  → driver name for each leg of this delivery. When present and
+   *  it.pickup_leg_id matches a key, this overrides the
+   *  pickupDriverName fallback (which is the order-level
+   *  linked_pickup_driver_name — wrong on multi-pickup orders because
+   *  the order row only stores ONE driver name, the last one stamped).
+   *  Falls back to pickupDriverName when item has no pickup_leg_id
+   *  (legacy single-leg orders) or no matching leg in the map. */
+  legDriverByLegId?: Map<string, string | null>,
 ): string {
   // Strip any pre-existing pickup marker (either historical v38 leading
   // prefix or v38.1 trailing suffix) from the stored description before
@@ -577,7 +592,17 @@ function buildItemDesc(
     const d = new Date(it.picked_up_at);
     if (!Number.isNaN(d.getTime())) {
       const mdy = `${d.getUTCMonth() + 1}/${d.getUTCDate()}`;
-      const drv = (pickupDriverName || '').trim();
+      // Phase 2 per-leg driver resolution. When the item is tagged to a
+      // specific pickup leg AND the caller passed a per-leg driver map,
+      // use the leg's own driver name. Otherwise fall back to the
+      // order-level pickupDriverName (single-pickup orders + legacy
+      // un-tagged items).
+      let driverSource = pickupDriverName ?? null;
+      if (legDriverByLegId && it.pickup_leg_id) {
+        const legDriver = legDriverByLegId.get(it.pickup_leg_id);
+        if (legDriver !== undefined) driverSource = legDriver;
+      }
+      const drv = (driverSource || '').trim();
       const tag = drv ? ` [✓ Picked up ${mdy} ${drv}]` : ` [✓ Picked up ${mdy}]`;
       return `${withRoom}${tag}`;
     }
@@ -826,6 +851,14 @@ function buildOrderXml(
   // linked pickups; we just splice the resulting string in here. Empty
   // string (or undefined) → no prefix, behaviour identical to pre-v42.
   completionWarningPrefix: string = '',
+  // Phase 2 per-leg tracking (2026-05-30) — per-leg driver name map.
+  // Keyed by dt_pickup_links.id, value is the leg's driver name (the
+  // pickup dt_orders row's driver_name). buildItemDesc uses this to
+  // render the correct "[✓ Picked up M/D DRIVER]" per item on multi-
+  // pickup delivery cards. Undefined / null on pickup-leg builds and
+  // on single-pickup deliveries (the order-level driver name fallback
+  // is correct there). Caller is pushSingleOrder.
+  legDriverByLegId?: Map<string, string | null>,
 ): string {
   const include = makeIncluder(groups);
   const nameParts = (order.contact_name || '').trim().split(/\s+/);
@@ -859,6 +892,10 @@ function buildOrderXml(
       // finished yet (picked_up_at IS NULL on the item gates the
       // emission anyway).
       isPickupLeg ? null : order.linked_pickup_driver_name,
+      // Phase 2 per-leg driver resolution — multi-pickup orders use the
+      // map to find the leg's actual driver, falling back to the
+      // order-level name above when no leg id is set or no entry exists.
+      isPickupLeg ? undefined : legDriverByLegId,
     );
     const cubeVal = it.cubic_feet != null ? `\n      <cube>${it.cubic_feet}</cube>` : '';
     // Warehouse location for the piece — drives where dispatch/
@@ -1316,7 +1353,31 @@ async function pushSingleOrder(
     }
   }
 
-  const xml = buildOrderXml(order, items, accountName, crossRefIdent, linkedDeliveryInfo, attachmentsField, groups, completionWarningPrefix);
+  // Phase 2 per-leg driver map — pre-resolved so buildItemDesc can
+  // pick the right "[✓ Picked up M/D DRIVER]" tag per item on a
+  // multi-pickup delivery card. Only fetched on the delivery leg
+  // (pickup-leg pushes don't render the tag) and only when items
+  // are in scope (a scoped re-push that skipped items doesn't need
+  // the map). One round-trip; the join pulls driver_name off each
+  // linked pickup's dt_orders row.
+  let legDriverByLegId: Map<string, string | null> | undefined;
+  if (isDeliveryLeg && (groups === null || groups.has('items'))) {
+    const { data: driverRows, error: driverErr } = await supabase
+      .from('dt_pickup_links')
+      .select('id, pickup_order:pickup_order_id(driver_name)')
+      .eq('delivery_order_id', order.id);
+    if (driverErr) {
+      console.warn(`[dt-push-order] per-leg driver map fetch failed for ${order.dt_identifier}: ${driverErr.message}`);
+    } else if (Array.isArray(driverRows) && driverRows.length > 0) {
+      legDriverByLegId = new Map();
+      for (const row of driverRows as Array<{ id: string; pickup_order: { driver_name: string | null } | null }>) {
+        const drv = (row.pickup_order?.driver_name ?? '').trim();
+        legDriverByLegId.set(row.id, drv || null);
+      }
+    }
+  }
+
+  const xml = buildOrderXml(order, items, accountName, crossRefIdent, linkedDeliveryInfo, attachmentsField, groups, completionWarningPrefix, legDriverByLegId);
   console.log(`[dt-push-order] POST order=${order.dt_identifier} type=${order.order_type || 'delivery'} items=${items.length} account=${accountName}${crossRefIdent ? ` crossRef=${crossRefIdent}` : ''} scope=${groups === null ? 'FULL' : [...groups].join(',')}`);
   console.log(`[dt-push-order] XML payload:\n${xml.slice(0, 800)}`);
   try {
@@ -1430,7 +1491,7 @@ Deno.serve(async (req: Request) => {
   // a republish. A republish should reflect Stride's current state.
   const { data: items, error: itemsErr } = await supabase
     .from('dt_order_items')
-    .select('id, inventory_id, dt_item_code, description, quantity, vendor, class_name, cubic_feet, room, extras, picked_up_at')
+    .select('id, inventory_id, dt_item_code, description, quantity, vendor, class_name, cubic_feet, room, extras, picked_up_at, pickup_leg_id')
     .eq('dt_order_id', orderId)
     .is('removed_at', null);
 
@@ -1556,7 +1617,7 @@ Deno.serve(async (req: Request) => {
       await pruneDuplicateOrderItems(supabase, linkedTyped.id);
       const { data: linkedItems } = await supabase
         .from('dt_order_items')
-        .select('id, inventory_id, dt_item_code, description, quantity, vendor, class_name, cubic_feet, room, extras, picked_up_at')
+        .select('id, inventory_id, dt_item_code, description, quantity, vendor, class_name, cubic_feet, room, extras, picked_up_at, pickup_leg_id')
         .eq('dt_order_id', linkedTyped.id)
         .is('removed_at', null);
       // v40 — same natural-numeric sort as the primary leg so a P+D pair
@@ -1704,7 +1765,7 @@ Deno.serve(async (req: Request) => {
         await pruneDuplicateOrderItems(supabase, extraTyped.id);
         const { data: extraItems } = await supabase
           .from('dt_order_items')
-          .select('id, inventory_id, dt_item_code, description, quantity, vendor, class_name, cubic_feet, room, extras, picked_up_at')
+          .select('id, inventory_id, dt_item_code, description, quantity, vendor, class_name, cubic_feet, room, extras, picked_up_at, pickup_leg_id')
           .eq('dt_order_id', extraTyped.id)
           .is('removed_at', null);
         const extraItemsTyped = sortItemsForPush((extraItems || []) as DtOrderItemRow[]);

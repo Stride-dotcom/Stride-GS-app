@@ -838,7 +838,127 @@ function DetailsTab({
                 </tr>
               </thead>
               <tbody>
-                {(order.items ?? []).map((item, idx) => {
+                {(() => {
+                  // Phase 2 per-leg item grouping (2026-05-30).
+                  //
+                  // On a delivery with N linked pickup legs, we group
+                  // items by their pickup_leg_id so the operator can see
+                  // at a glance which items come from which pickup, plus
+                  // a "Warehouse" group for items that ride from our
+                  // warehouse (no pickup). The group header shows the
+                  // pickup's label + status (✅ Completed / Pending) +
+                  // any driver-entered pickup_completion_notes from the
+                  // join row.
+                  //
+                  // Grouping suppressed on:
+                  //   • pickup-leg pages (thisIsPickupLeg)
+                  //   • orders with no linked pickups (standalone delivery)
+                  //   • orders with linkedPickups.length === 1 AND no
+                  //     item has pickup_leg_id set (legacy single-leg
+                  //     P+D before this migration — rendering one
+                  //     "Warehouse" + zero "Pickup X" group would look
+                  //     wrong vs the all-from-pickup flat list staff
+                  //     are used to).
+                  //
+                  // Renders the existing flat-table behaviour in the
+                  // suppressed case so single-pickup orders look identical
+                  // to today.
+                  const items = order.items ?? [];
+                  const anyLegTagged = items.some(it => !!it.pickupLegId);
+                  const shouldGroup = !thisIsPickupLeg
+                    && order.linkedPickups.length > 0
+                    && (order.linkedPickups.length > 1 || anyLegTagged);
+
+                  type Group = {
+                    key: string;
+                    header: { label: string; status: 'completed' | 'pending' | 'warehouse'; statusText: string; notes: string | null } | null;
+                    items: typeof items;
+                  };
+                  const groups: Group[] = [];
+                  if (!shouldGroup) {
+                    groups.push({ key: 'flat', header: null, items });
+                  } else {
+                    // One group per linked pickup, ordered by sort_order.
+                    const sortedLegs = [...order.linkedPickups].sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
+                    for (const lp of sortedLegs) {
+                      const legItems = items.filter(it => it.pickupLegId === lp.id);
+                      const labelDisplay = lp.pickupLabel
+                        || lp.pickupContactName
+                        || `Pickup ${(lp.sortOrder ?? 0) + 1}`;
+                      const isCompleted = !!lp.pickupFinishedAt;
+                      const statusText = isCompleted
+                        ? `Completed ${fmtDateTime(lp.pickupFinishedAt as string)}${lp.pickupDriverName ? ` by ${lp.pickupDriverName}` : ''}`
+                        : 'Pending';
+                      groups.push({
+                        key: lp.id,
+                        header: {
+                          label: `Pickup ${(lp.sortOrder ?? 0) + 1}: ${labelDisplay}`,
+                          status: isCompleted ? 'completed' : 'pending',
+                          statusText,
+                          notes: (lp.pickupCompletionNotes ?? '').trim() || null,
+                        },
+                        items: legItems,
+                      });
+                    }
+                    // Warehouse bucket — items with NULL pickup_leg_id.
+                    const warehouseItems = items.filter(it => !it.pickupLegId);
+                    if (warehouseItems.length > 0) {
+                      groups.push({
+                        key: 'warehouse',
+                        header: { label: 'Warehouse Items', status: 'warehouse', statusText: 'No pickup — riding from warehouse', notes: null },
+                        items: warehouseItems,
+                      });
+                    }
+                  }
+
+                  // Flatten groups into renderable rows. `idx` for the
+                  // zebra stripe runs across the whole table so the
+                  // alternating shading reads continuously through group
+                  // headers, not restarting per group.
+                  let rowIdx = -1;
+                  return groups.map(grp => (
+                    <React.Fragment key={grp.key}>
+                      {grp.header && (
+                        <tr>
+                          <td colSpan={8} style={{
+                            padding: '8px 10px',
+                            background: grp.header.status === 'completed' ? '#ECFDF5'
+                              : grp.header.status === 'pending' ? '#FEF3C7'
+                              : '#F4F4F2',
+                            borderTop: `2px solid ${grp.header.status === 'completed' ? '#86EFAC'
+                              : grp.header.status === 'pending' ? '#FCD34D'
+                              : theme.colors.border}`,
+                            fontSize: 12,
+                          }}>
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+                              <div style={{ fontWeight: 600, color: grp.header.status === 'completed' ? '#166534'
+                                : grp.header.status === 'pending' ? '#92400E'
+                                : EP.textPrimary }}>
+                                {grp.header.label}{grp.header.status === 'completed' ? ' ✅' : ''}
+                              </div>
+                              <div style={{ fontSize: 11, color: grp.header.status === 'completed' ? '#166534'
+                                : grp.header.status === 'pending' ? '#92400E'
+                                : EP.textMuted }}>
+                                {grp.header.statusText}
+                              </div>
+                            </div>
+                            {grp.header.notes && (
+                              <div style={{ marginTop: 4, fontSize: 11, color: EP.textPrimary, whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>
+                                <span style={{ fontWeight: 600 }}>Driver notes:</span> {grp.header.notes}
+                              </div>
+                            )}
+                            {grp.items.length === 0 && (
+                              <div style={{ marginTop: 4, fontSize: 11, color: EP.textMuted, fontStyle: 'italic' }}>
+                                No items assigned to this leg.
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                      )}
+                      {grp.items.map(item => {
+                        rowIdx += 1;
+                        const idx = rowIdx;
+                        return (() => {
                   const orderedQty = item.quantity ?? 0;
                   const delQty = item.deliveredQuantity ?? null;
                   const qtyShort = delQty != null && orderedQty > 0 && delQty < orderedQty;
@@ -963,7 +1083,11 @@ function DetailsTab({
                       )}
                     </React.Fragment>
                   );
-                })}
+                })();
+                      })}
+                    </React.Fragment>
+                  ));
+                })()}
               </tbody>
             </table>
           </div>

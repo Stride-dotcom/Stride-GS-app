@@ -2006,6 +2006,13 @@ export interface DtOrderItemForUI {
   pickupItemNote: string | null;
   pickupReturnCodes: string[] | null;
   pickupDeliveredQuantity: number | null;
+  // Phase 2 per-leg tracking (2026-05-30). FK to dt_pickup_links.id
+  // identifying which pickup leg this delivery item came from. NULL =
+  // warehouse item (no pickup) OR legacy row predating the backfill.
+  // Drives the OrderPage item grouping ("Pickup 1 ✅", "Pickup 2 Pending",
+  // "Warehouse") and the leg-aware blanket pass in
+  // stamp-pickup-on-linked-delivery.
+  pickupLegId: string | null;
 }
 
 export interface DtOrderForUI {
@@ -2377,6 +2384,7 @@ export async function fetchDtOrdersFromSupabase(
               ? (item.pickup_return_codes as unknown[]).filter(x => typeof x === 'string').map(String)
               : null,
             pickupDeliveredQuantity: item.pickup_delivered_quantity != null ? Number(item.pickup_delivered_quantity) : null,
+            pickupLegId: item.pickup_leg_id ? String(item.pickup_leg_id) : null,
           };
         }),
         // Pricing
@@ -2617,6 +2625,7 @@ export async function fetchDtOrderByIdFromSupabase(
             ? (item.pickup_return_codes as unknown[]).filter(x => typeof x === 'string').map(String)
             : null,
           pickupDeliveredQuantity: item.pickup_delivered_quantity != null ? Number(item.pickup_delivered_quantity) : null,
+          pickupLegId: item.pickup_leg_id ? String(item.pickup_leg_id) : null,
         };
       }),
       baseDeliveryFee: row.base_delivery_fee != null ? Number(row.base_delivery_fee) : null,

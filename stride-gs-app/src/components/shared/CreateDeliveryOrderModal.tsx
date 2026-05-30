@@ -1572,7 +1572,72 @@ export function CreateDeliveryOrderModal({
   //                           that joins the load at the warehouse).
   // Used by every P+D save path so all three refresh both legs
   // symmetrically.
-  const buildPDItemRows = (pickupId: string, deliveryId: string): Array<Record<string, unknown>> => {
+  //
+  // pickupLegId (2026-05-30, Phase 2 per-leg tracking) — when the
+  // caller has already created the dt_pickup_links row for the primary
+  // pickup, this stamps it on all delivery items that originate from
+  // that pickup (pickup ad-hoc mirrors). Inventory + delivery ad-hoc
+  // rows still get NULL because those items don't come from any
+  // pickup. Pass null to skip (e.g. draft save before the link row
+  // has been written; the post-save migration backfill chain will
+  // catch up via parent_pickup_item_id).
+  // ensurePrimaryPickupLink — Phase 2 per-leg tracking helper.
+  //
+  // The primary pickup of a P+D pair lives in dt_pickup_links with
+  // sort_order=0. Phase 1's backfill created these for existing rows,
+  // but NEW P+D pairs created via this modal had no link-row writer
+  // until now (the link row only got created later, via
+  // AddPickupLegModal or dt-sync-statuses' defensive insert when
+  // driver notes arrived). Phase 2 needs the link row at create time
+  // so we can stamp pickup_leg_id on the items belonging to it.
+  //
+  // ON CONFLICT (pickup_order_id) DO NOTHING — the table has a
+  // UNIQUE constraint on pickup_order_id, so a re-save (e.g. draft
+  // promote) that hits this code path twice doesn't create a dup.
+  // The SELECT after UPSERT returns the existing or newly-inserted
+  // id either way. Failing soft (returning null) keeps the save
+  // working even if RLS rejects the insert — the migration backfill
+  // will catch up later via parent_pickup_item_id.
+  const ensurePrimaryPickupLink = async (
+    tenantId: string | null,
+    deliveryRowId: string,
+    pickupRowId: string,
+    pickupContactName: string | null,
+  ): Promise<string | null> => {
+    if (!tenantId) return null;
+    try {
+      const { error: upsertErr } = await supabase
+        .from('dt_pickup_links')
+        .upsert(
+          {
+            tenant_id:         tenantId,
+            delivery_order_id: deliveryRowId,
+            pickup_order_id:   pickupRowId,
+            pickup_label:      pickupContactName ?? null,
+            sort_order:        0,
+          },
+          { onConflict: 'pickup_order_id', ignoreDuplicates: true },
+        );
+      if (upsertErr) {
+        console.warn('[ensurePrimaryPickupLink] upsert failed:', upsertErr.message);
+      }
+      const { data, error: selErr } = await supabase
+        .from('dt_pickup_links')
+        .select('id')
+        .eq('pickup_order_id', pickupRowId)
+        .maybeSingle();
+      if (selErr || !data) {
+        console.warn('[ensurePrimaryPickupLink] select failed:', selErr?.message);
+        return null;
+      }
+      return (data as { id: string }).id;
+    } catch (e) {
+      console.warn('[ensurePrimaryPickupLink] threw:', (e as Error).message);
+      return null;
+    }
+  };
+
+  const buildPDItemRows = (pickupId: string, deliveryId: string, pickupLegId: string | null = null): Array<Record<string, unknown>> => {
     const rows: Array<Record<string, unknown>> = [];
     // v2026-05-14 — every row gets a client-side UUID id.
     //
@@ -1670,6 +1735,7 @@ export function CreateDeliveryOrderModal({
         quantity: qty,
         original_quantity: qty,
         parent_pickup_item_id: pickupRowId,
+        pickup_leg_id: pickupLegId,
         extras: { source: 'pickup_free_text_delivered' },
       });
     }
@@ -2747,7 +2813,13 @@ export function CreateDeliveryOrderModal({
               .delete().eq('dt_order_id', editingPickupRowIdRef.current);
             if (delPErr) throw new Error(`P+D draft items delete (pickup) failed: ${delPErr.message}`);
           }
-          const pdItemRows = buildPDItemRows(editingPickupRowIdRef.current, editingDraftRowIdRef.current);
+          const primaryLegId = await ensurePrimaryPickupLink(
+            clientSheetId,
+            editingDraftRowIdRef.current,
+            editingPickupRowIdRef.current,
+            pickupContactName.trim() || null,
+          );
+          const pdItemRows = buildPDItemRows(editingPickupRowIdRef.current, editingDraftRowIdRef.current, primaryLegId);
           if (pdItemRows.length > 0) {
             const { error: iErr } = await supabase.from('dt_order_items').insert(pdItemRows);
             if (iErr) throw new Error(`P+D draft items insert failed: ${iErr.message}`);
@@ -2777,7 +2849,13 @@ export function CreateDeliveryOrderModal({
           await supabase.from('dt_orders').update({ linked_order_id: deliveryId }).eq('id', pickupId);
           // Items on BOTH legs (inventory → delivery, ad-hoc free-text
           // → both, with "PU: " prefix on the pickup leg).
-          const pdItemRows = buildPDItemRows(pickupId, deliveryId);
+          const primaryLegId = await ensurePrimaryPickupLink(
+            clientSheetId,
+            deliveryId,
+            pickupId,
+            pickupContactName.trim() || null,
+          );
+          const pdItemRows = buildPDItemRows(pickupId, deliveryId, primaryLegId);
           if (pdItemRows.length > 0) {
             const { error: iErr } = await supabase.from('dt_order_items').insert(pdItemRows);
             if (iErr) throw new Error(`P+D draft items insert failed: ${iErr.message}`);
@@ -3353,7 +3431,13 @@ export function CreateDeliveryOrderModal({
           if (delErr) throw new Error(`Convert items refresh (delete delivery items) failed: ${delErr.message}`);
         }
         {
-          const pdItemRows = buildPDItemRows(newPickupId, existingDeliveryId);
+          const primaryLegId = await ensurePrimaryPickupLink(
+            clientSheetId,
+            existingDeliveryId,
+            newPickupId,
+            pickupContactName.trim() || null,
+          );
+          const pdItemRows = buildPDItemRows(newPickupId, existingDeliveryId, primaryLegId);
           if (pdItemRows.length > 0) {
             const { error: iErr } = await supabase.from('dt_order_items').insert(pdItemRows);
             if (iErr) throw new Error(`Convert items refresh insert failed: ${iErr.message}`);
@@ -3564,7 +3648,13 @@ export function CreateDeliveryOrderModal({
           }
         }
         if (editingPickupRowIdRef.current && editingDraftRowIdRef.current) {
-          const pdItemRows = buildPDItemRows(editingPickupRowIdRef.current, editingDraftRowIdRef.current);
+          const primaryLegId = await ensurePrimaryPickupLink(
+            clientSheetId,
+            editingDraftRowIdRef.current,
+            editingPickupRowIdRef.current,
+            pickupContactName.trim() || null,
+          );
+          const pdItemRows = buildPDItemRows(editingPickupRowIdRef.current, editingDraftRowIdRef.current, primaryLegId);
           if (pdItemRows.length > 0) {
             const { error: iErr } = await supabase.from('dt_order_items').insert(pdItemRows);
             if (iErr) throw new Error(`P+D promote items insert failed: ${iErr.message}`);
@@ -4082,7 +4172,16 @@ export function CreateDeliveryOrderModal({
         // on pickup) + any warehouse inventory items on the delivery
         // leg. buildPDItemRows already encodes both halves so all P+D
         // save paths stay symmetric.
-        const pdItemRows = buildPDItemRows(pickupRow.id, deliveryRow.id);
+        // primaryLegId scopes pickup-side items to the primary
+        // dt_pickup_links row (sort_order=0) for Phase 2 per-leg
+        // stamping.
+        const primaryLegId = await ensurePrimaryPickupLink(
+          clientSheetId,
+          deliveryRow.id,
+          pickupRow.id,
+          pickupContactName.trim() || null,
+        );
+        const pdItemRows = buildPDItemRows(pickupRow.id, deliveryRow.id, primaryLegId);
         if (pdItemRows.length > 0) {
           const { error: iErr } = await supabase.from('dt_order_items').insert(pdItemRows);
           if (iErr) throw new Error(`Items insert failed: ${iErr.message}`);
