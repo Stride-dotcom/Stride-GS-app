@@ -2117,13 +2117,20 @@ export interface DtOrderForUI {
     pickupOrderId: string;
     pickupDtIdentifier: string | null;       // joined from dt_orders for display
     pickupContactName: string | null;        // joined
+    pickupContactZip: string | null;         // joined; needed for per-leg zone lookup
     pickupLabel: string | null;              // operator-editable, defaults to contact name
-    pickupNotes: string | null;              // per-leg crosstalk shown to delivery crew
+    // pickupNotes is read from the joined dt_orders.pickup_notes column
+    // (the authoritative source — same column dt-push-order reads when
+    // building the leg's DT payload). dt_pickup_links.pickup_notes is
+    // kept for legacy rows but is no longer written; the read falls
+    // back to it only when the joined column is NULL.
+    pickupNotes: string | null;
     pickupCompletionNotes: string | null;    // driver-entered notes captured after PU
     sortOrder: number;
     pickupStatusId: number | null;           // joined; drives "Pending / In Transit / Complete"
     pickupFinishedAt: string | null;         // joined; drives completion timestamp display
     pickupDriverName: string | null;         // joined
+    pickupLegFee: number | null;             // dt_pickup_links.pickup_leg_fee snapshot
   }>;
   // DT sync-back (export.xml mirror) — see SupabaseDtOrderRow for source.
   scheduledAt: string | null;
@@ -2471,10 +2478,13 @@ export async function fetchDtOrderByIdFromSupabase(
         pickup_label,
         pickup_notes,
         pickup_completion_notes,
+        pickup_leg_fee,
         sort_order,
         pickup_order:pickup_order_id (
           dt_identifier,
           contact_name,
+          contact_zip,
+          pickup_notes,
           status_id,
           finished_at,
           driver_name
@@ -2491,18 +2501,31 @@ export async function fetchDtOrderByIdFromSupabase(
 
     const linkedPickups: DtOrderForUI['linkedPickups'] = (((linkRows ?? []) as unknown) as Array<Record<string, unknown>>).map(lr => {
       const puJoin = (lr.pickup_order as Record<string, unknown> | null) ?? {};
+      // Authoritative pickup_notes lives on the joined dt_orders row
+      // (same column dt-push-order reads). Fall back to the dt_pickup_
+      // links.pickup_notes mirror only for legacy rows where the
+      // joined column is NULL but the link mirror was populated by
+      // the pre-fix AddPickupLegModal write.
+      const joinedPickupNotes = (puJoin.pickup_notes as string | null | undefined) ?? null;
+      const linkPickupNotes   = (lr.pickup_notes      as string | null | undefined) ?? null;
+      const legFeeRaw = lr.pickup_leg_fee;
+      const pickupLegFee = legFeeRaw == null || legFeeRaw === ''
+        ? null
+        : Number(legFeeRaw);
       return {
         id:                    String(lr.id ?? ''),
         pickupOrderId:         String(lr.pickup_order_id ?? ''),
         pickupDtIdentifier:    (puJoin.dt_identifier  as string | null | undefined) ?? null,
         pickupContactName:     (puJoin.contact_name   as string | null | undefined) ?? null,
+        pickupContactZip:      (puJoin.contact_zip    as string | null | undefined) ?? null,
         pickupLabel:           (lr.pickup_label       as string | null | undefined) ?? null,
-        pickupNotes:           (lr.pickup_notes       as string | null | undefined) ?? null,
+        pickupNotes:           joinedPickupNotes ?? linkPickupNotes,
         pickupCompletionNotes: (lr.pickup_completion_notes as string | null | undefined) ?? null,
         sortOrder:             Number(lr.sort_order ?? 0),
         pickupStatusId:        (puJoin.status_id      as number | null | undefined) ?? null,
         pickupFinishedAt:      (puJoin.finished_at    as string | null | undefined) ?? null,
         pickupDriverName:      (puJoin.driver_name    as string | null | undefined) ?? null,
+        pickupLegFee:          Number.isFinite(pickupLegFee as number) ? (pickupLegFee as number) : null,
       };
     });
 

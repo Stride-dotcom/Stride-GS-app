@@ -1,5 +1,26 @@
 /**
- * dt-push-order — Supabase Edge Function (Phase 2c) — v42 2026-05-29 PST
+ * dt-push-order — Supabase Edge Function (Phase 2c) — v43 2026-05-30 PST
+ *
+ * v43: Multi-pickup Phase 1.5 — N-leg fan-out via dt_pickup_links.
+ *      v42 still pushed only ONE linked pickup (the one denormalized
+ *      into dt_orders.linked_order_id), so an N-pickup delivery
+ *      required N separate manual pushes from each pickup's page to
+ *      get every leg to DT. v43 adds a Section 4.5 fan-out: after
+ *      Section 4 handles the linked_order_id pickup, the function
+ *      fetches all OTHER pickups for the same delivery from
+ *      dt_pickup_links (excluding ids already handled) and pushes
+ *      each in turn with the same date/window fallback, item dedup,
+ *      and cross-ref payload Section 4 already uses.
+ *
+ *      Fan-out failures are collected, not fatal — the response
+ *      carries `additional_pickup_failures` so the caller can warn
+ *      the operator about partial-success state. This avoids
+ *      stranding N legs in an inconsistent "some pushed, some not"
+ *      world when one DT API call hiccups.
+ *
+ *      The response gains `additional_pickup_identifiers` listing
+ *      the extra pickups pushed in this round (empty for orders with
+ *      0 or 1 pickup legs).
  *
  * v42: Multi-pickup Phase 1 — per-leg notes split + completion warning relay.
  *      Previously a single `driver_notes` column pushed to BOTH legs of a
@@ -1599,6 +1620,132 @@ Deno.serve(async (req: Request) => {
     }
   }
 
+  // ── 4.5. Fan-out to additional pickups via dt_pickup_links (v43) ──────
+  // Multi-pickup Phase 1.5: a delivery can have N pickups, not just the
+  // one denormalized into `linked_order_id`. PR #577 backfilled the join
+  // table for legacy single-pickup pairs so the row is always present.
+  // For multi-pickup orders we still want a single Push from the
+  // delivery page (or from any one pickup) to flush ALL legs to DT.
+  //
+  // Strategy: figure out which delivery this primary belongs to (either
+  // primary IS the delivery, or primary is a pickup whose join row points
+  // at one) and fetch all OTHER pickups for that delivery — skipping
+  // both the primary AND any pickup already pushed in Section 4. Each
+  // additional pickup gets the same prep (date/window fallback, item
+  // dedup, sort) and same cross-ref payload as the Section 4 pickup
+  // push so DT receives a coherent set of cards.
+  //
+  // Failure mode: one fan-out failure does NOT abort the rest. We
+  // collect failures and return them in `extra_failures` so the caller
+  // can surface a partial-success state. Aborting on first failure
+  // would leave the operator with N partially-pushed legs and no clear
+  // way to retry just the failed ones.
+  const additionalPushed: string[] = [];
+  const additionalFailures: Array<{ identifier: string; error: string }> = [];
+  // Identify the delivery row of this multi-leg order, if any.
+  const deliveryRowForFanout: DtOrderRow | null = (() => {
+    if (isPDDeliveryPrimary) return orderTyped;
+    if (isPDPickupPrimary && stashedLinkedRow) {
+      const stashedIsDelivery = String(stashedLinkedRow.order_type || '') === 'pickup_and_delivery'
+        || stashedLinkedRow.is_pickup === false;
+      return stashedIsDelivery ? stashedLinkedRow : null;
+    }
+    return null;
+  })();
+
+  if (deliveryRowForFanout) {
+    // Pickup ids we've already pushed (or will push as the primary)
+    // — exclude them from the fan-out so we never double-push the
+    // same leg.
+    const alreadyHandled = new Set<string>();
+    alreadyHandled.add(orderTyped.id);
+    if (stashedLinkedRow) alreadyHandled.add(stashedLinkedRow.id);
+
+    const { data: linkRows, error: linkRowsErr } = await supabase
+      .from('dt_pickup_links')
+      .select('pickup_order_id, sort_order')
+      .eq('delivery_order_id', deliveryRowForFanout.id)
+      .order('sort_order', { ascending: true });
+
+    if (linkRowsErr) {
+      console.warn(`[dt-push-order] dt_pickup_links fetch failed for delivery=${deliveryRowForFanout.dt_identifier}: ${linkRowsErr.message}`);
+    } else {
+      const extraPickupIds = ((linkRows ?? []) as Array<{ pickup_order_id: string }>)
+        .map(r => r.pickup_order_id)
+        .filter(pid => pid && !alreadyHandled.has(pid));
+
+      for (const pickupId of extraPickupIds) {
+        const { data: extraRow, error: extraRowErr } = await supabase
+          .from('dt_orders')
+          .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_phone2, contact_email, local_service_date, dt_scheduled_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, order_notes, driver_notes, internal_notes, pickup_notes, delivery_notes, service_time_minutes, review_status, pushed_to_dt_at, billing_method, order_total, base_delivery_fee, extra_items_count, extra_items_fee, accessorials_json, accessorials_total, coverage_option_id, coverage_charge, declared_value, billing_review_status, paid_at, paid_amount, paid_method, linked_pickup_driver_name')
+          .eq('id', pickupId)
+          .maybeSingle();
+        if (extraRowErr || !extraRow) {
+          const msg = extraRowErr?.message || 'pickup row not found';
+          console.warn(`[dt-push-order] fan-out: extra pickup fetch failed id=${pickupId}: ${msg}`);
+          additionalFailures.push({ identifier: pickupId, error: msg });
+          continue;
+        }
+        const extraTyped = extraRow as DtOrderRow;
+        // Same date/window fallback the Section 4 push applies — a
+        // multi-leg pair shares the calendar day on the DT side.
+        if (!extraTyped.local_service_date && deliveryRowForFanout.local_service_date) {
+          extraTyped.local_service_date = deliveryRowForFanout.local_service_date;
+        }
+        if (!extraTyped.dt_scheduled_date && deliveryRowForFanout.dt_scheduled_date) {
+          extraTyped.dt_scheduled_date = deliveryRowForFanout.dt_scheduled_date;
+        }
+        if (!extraTyped.window_start_local && deliveryRowForFanout.window_start_local) {
+          extraTyped.window_start_local = deliveryRowForFanout.window_start_local;
+        }
+        if (!extraTyped.window_end_local && deliveryRowForFanout.window_end_local) {
+          extraTyped.window_end_local = deliveryRowForFanout.window_end_local;
+        }
+        await pruneDuplicateOrderItems(supabase, extraTyped.id);
+        const { data: extraItems } = await supabase
+          .from('dt_order_items')
+          .select('id, inventory_id, dt_item_code, description, quantity, vendor, class_name, cubic_feet, room, extras, picked_up_at')
+          .eq('dt_order_id', extraTyped.id)
+          .is('removed_at', null);
+        const extraItemsTyped = sortItemsForPush((extraItems || []) as DtOrderItemRow[]);
+
+        // Cross-ref always points at the delivery for a pickup leg —
+        // matches the single-pickup Section 4 behaviour where the
+        // pickup's description carries "for Del <id>".
+        const extraPush = await pushSingleOrder(
+          extraTyped, extraItemsTyped, accountName, postUrl, supabase,
+          deliveryRowForFanout.dt_identifier,
+          {
+            identifier: deliveryRowForFanout.dt_identifier,
+            contactName: deliveryRowForFanout.contact_name || undefined,
+            address: deliveryRowForFanout.contact_address || undefined,
+            city: deliveryRowForFanout.contact_city || undefined,
+            state: deliveryRowForFanout.contact_state || undefined,
+            zip: deliveryRowForFanout.contact_zip || undefined,
+          },
+          changedFields,
+        );
+
+        if (!extraPush.ok) {
+          const msg = extraPush.errMsg || 'unknown DT error';
+          console.error(`[dt-push-order] fan-out: extra pickup push failed id=${extraTyped.dt_identifier}: ${msg}`);
+          additionalFailures.push({ identifier: extraTyped.dt_identifier, error: msg });
+          continue;
+        }
+
+        const extraUpdate: Record<string, unknown> = {
+          pushed_to_dt_at: new Date().toISOString(),
+          source: 'app',
+          last_synced_at: new Date().toISOString(),
+          pushed_account_was_fallback: accountWasFallback,
+        };
+        if (extraPush.dispatchId != null) extraUpdate.dt_dispatch_id = extraPush.dispatchId;
+        await supabase.from('dt_orders').update(extraUpdate).eq('id', extraTyped.id);
+        additionalPushed.push(extraTyped.dt_identifier);
+      }
+    }
+  }
+
   // ── 5. Push the primary (delivery/pickup/service) order ───────────────
   // When the primary IS the pickup leg of a P+D pair, the description
   // needs the linkedDeliveryInfo block so dispatch sees the delivery
@@ -1665,11 +1812,24 @@ Deno.serve(async (req: Request) => {
   // doesn't see the caller's email — pushing the audit insert client-side
   // keeps every dt_order audit row consistently identified.
 
-  console.log(`[dt-push-order] Success order=${orderTyped.dt_identifier}${linkedPushedIdentifier ? ` + linked=${linkedPushedIdentifier}` : ''}`);
+  const fanoutLog = additionalPushed.length > 0
+    ? ` + additional=[${additionalPushed.join(',')}]`
+    : '';
+  const fanoutErrLog = additionalFailures.length > 0
+    ? ` (fan-out failures=${additionalFailures.length})`
+    : '';
+  console.log(`[dt-push-order] Success order=${orderTyped.dt_identifier}${linkedPushedIdentifier ? ` + linked=${linkedPushedIdentifier}` : ''}${fanoutLog}${fanoutErrLog}`);
   return json({
     ok: true,
     dt_identifier: orderTyped.dt_identifier,
     linked_identifier: linkedPushedIdentifier,
+    // Multi-pickup Phase 1.5 (v43): identifiers of the additional
+    // pickups pushed via dt_pickup_links fan-out (excludes the
+    // primary AND the linked_order_id pickup which are already in
+    // the fields above). Empty array when the order has 0 or 1
+    // pickup legs.
+    additional_pickup_identifiers: additionalPushed,
+    additional_pickup_failures: additionalFailures,
   });
 
   } catch (unhandled) {

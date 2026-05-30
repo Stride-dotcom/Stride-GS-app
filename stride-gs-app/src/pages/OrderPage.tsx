@@ -1172,6 +1172,14 @@ function DetailsTab({
               const finishedDisplay = lp.pickupFinishedAt
                 ? `Picked up ${fmtDateTime(lp.pickupFinishedAt)}${lp.pickupDriverName ? ` by ${lp.pickupDriverName}` : ''}`
                 : 'Pending';
+              // Per-leg pickup fee — populated by AddPickupLegModal as
+              // each new leg is added. NULL for the primary pickup
+              // (sort_order=0) because that fee is rolled into the
+              // delivery row's base_delivery_fee at create time. Show
+              // a $— for NULL legs so it's visibly different from "$0".
+              const feeDisplay = lp.pickupLegFee != null
+                ? `$${lp.pickupLegFee.toFixed(2)}`
+                : (lp.sortOrder === 0 ? 'in base' : '$—');
               return (
                 <div key={lp.id} style={{ border: `1px solid ${theme.colors.border}`, borderRadius: 8, padding: 10, marginBottom: 6 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
@@ -1181,7 +1189,10 @@ function DetailsTab({
                         <div style={{ fontSize: 11, color: EP.textMuted, marginTop: 2, fontFamily: 'monospace' }}>{lp.pickupDtIdentifier}</div>
                       )}
                     </div>
-                    <div style={{ fontSize: 11, color: lp.pickupFinishedAt ? '#15803D' : EP.textMuted, whiteSpace: 'nowrap' }}>{finishedDisplay}</div>
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 2, whiteSpace: 'nowrap' }}>
+                      <div style={{ fontSize: 11, color: lp.pickupFinishedAt ? '#15803D' : EP.textMuted }}>{finishedDisplay}</div>
+                      <div style={{ fontSize: 11, color: EP.textMuted }}>Pickup fee: <span style={{ color: EP.textPrimary, fontWeight: 500 }}>{feeDisplay}</span></div>
+                    </div>
                   </div>
                   {lp.pickupNotes && (
                     <div style={{ fontSize: 12, color: EP.textPrimary, marginTop: 6, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{lp.pickupNotes}</div>
