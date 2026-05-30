@@ -2463,7 +2463,7 @@ export async function fetchDtOrderByIdFromSupabase(
     // without a second round-trip. Empty array when no links exist —
     // OrderPage falls back to the scalar linked_order_id path for
     // back-compat.
-    const { data: linkRows } = await supabase
+    const { data: linkRows, error: linkErr } = await supabase
       .from('dt_pickup_links')
       .select(`
         id,
@@ -2482,6 +2482,12 @@ export async function fetchDtOrderByIdFromSupabase(
       `)
       .eq('delivery_order_id', orderId)
       .order('sort_order', { ascending: true });
+    if (linkErr) {
+      // Don't break the order load — render the page with empty
+      // linkedPickups and surface the failure in the console so a
+      // schema/permission regression is visible.
+      console.warn('[fetchDtOrderByIdFromSupabase] dt_pickup_links fetch failed:', linkErr.message);
+    }
 
     const linkedPickups: DtOrderForUI['linkedPickups'] = (((linkRows ?? []) as unknown) as Array<Record<string, unknown>>).map(lr => {
       const puJoin = (lr.pickup_order as Record<string, unknown> | null) ?? {};

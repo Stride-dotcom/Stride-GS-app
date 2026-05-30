@@ -91,6 +91,26 @@ DROP POLICY IF EXISTS "dt_pickup_links_service_all" ON public.dt_pickup_links;
 CREATE POLICY "dt_pickup_links_service_all" ON public.dt_pickup_links
   FOR ALL TO service_role USING (true) WITH CHECK (true);
 
+-- Staff/admin INSERT/UPDATE policies. Without these the AddPickupLegModal
+-- (which posts directly via the user JWT, not service_role) is blocked
+-- by RLS. Mirrors the dt_orders insert/update policy shape so the same
+-- roles that can create/edit an order can manage its pickup legs.
+DROP POLICY IF EXISTS "dt_pickup_links_insert_staff" ON public.dt_pickup_links;
+CREATE POLICY "dt_pickup_links_insert_staff" ON public.dt_pickup_links
+  FOR INSERT TO authenticated
+  WITH CHECK ((auth.jwt()->'user_metadata'->>'role') IN ('admin', 'staff'));
+
+DROP POLICY IF EXISTS "dt_pickup_links_update_staff" ON public.dt_pickup_links;
+CREATE POLICY "dt_pickup_links_update_staff" ON public.dt_pickup_links
+  FOR UPDATE TO authenticated
+  USING ((auth.jwt()->'user_metadata'->>'role') IN ('admin', 'staff'))
+  WITH CHECK ((auth.jwt()->'user_metadata'->>'role') IN ('admin', 'staff'));
+
+DROP POLICY IF EXISTS "dt_pickup_links_delete_staff" ON public.dt_pickup_links;
+CREATE POLICY "dt_pickup_links_delete_staff" ON public.dt_pickup_links
+  FOR DELETE TO authenticated
+  USING ((auth.jwt()->'user_metadata'->>'role') IN ('admin', 'staff'));
+
 -- ── 3. Split notes on dt_orders ───────────────────────────────────────
 -- pickup_notes:   pushed as the DT Public <note> on the pickup leg
 -- delivery_notes: pushed as the DT Public <note> on the delivery leg

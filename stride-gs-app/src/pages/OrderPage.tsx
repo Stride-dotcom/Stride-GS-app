@@ -1195,10 +1195,22 @@ function DetailsTab({
         {editing ? (
           <>
             {/* Pickup Notes — shown on standalone pickups AND on the
-                delivery side of a P+D pair (where they push to the
-                linked pickup row on save). Hidden on standalone
-                deliveries that have no pickup leg. */}
-            {(thisIsPickupLeg || order.orderType === 'pickup_and_delivery' || !!order.linkedOrderId) && (
+                delivery side of a SINGLE-PICKUP P+D pair (where they
+                push to the linked pickup row on save). Hidden on
+                standalone deliveries that have no pickup leg.
+
+                Multi-pickup orders (linkedPickups.length > 1) hide
+                this field entirely: editing it on a multi-pickup
+                delivery would only touch the original `-P` row's
+                pickup_notes column (the cross-row write only knows
+                about `linkedOrderId`, which still points at the
+                primary pickup), silently dropping edits intended
+                for `-P2..-P9`. Operators edit per-leg notes by
+                opening each pickup's OrderPage directly until
+                Phase 2 adds inline-per-leg editing here. */}
+            {(thisIsPickupLeg
+              || (order.orderType === 'pickup_and_delivery' && order.linkedPickups.length <= 1)
+              || (!!order.linkedOrderId && order.linkedPickups.length <= 1)) && (
               <>
                 <EditField
                   label="Pickup Notes"
@@ -1212,6 +1224,11 @@ function DetailsTab({
                   Notes for the pickup crew — gate codes, parking instructions, what to grab, anything specific to the pickup site.
                 </div>
               </>
+            )}
+            {!thisIsPickupLeg && order.linkedPickups.length > 1 && (
+              <div style={{ fontSize: 11, color: EP.textMuted, marginBottom: 12, lineHeight: 1.5, fontStyle: 'italic' }}>
+                Per-pickup notes are edited on each pickup's own page. Open a linked pickup above to edit its notes.
+              </div>
             )}
 
             {/* Delivery Notes — shown on every order except standalone

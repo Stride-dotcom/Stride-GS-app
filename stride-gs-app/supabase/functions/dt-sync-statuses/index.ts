@@ -994,18 +994,25 @@ Deno.serve(async (req) => {
             : null;
           // Always write (even null) so a pickup whose driver-note was
           // deleted in DT doesn't keep a stale warning on the delivery.
+          // Skip the UPDATE when the row already holds the same value
+          // (cheap NOP suppression — stampResult.fired is true on every
+          // poll after pickup completion, and the relay would otherwise
+          // re-issue the same write each cycle forever).
           const { data: existingLink } = await supabase
             .from('dt_pickup_links')
-            .select('id')
+            .select('id, pickup_completion_notes')
             .eq('pickup_order_id', o.id)
             .maybeSingle();
           if (existingLink?.id) {
-            const { error: linkErr } = await supabase
-              .from('dt_pickup_links')
-              .update({ pickup_completion_notes: completionNotes })
-              .eq('id', existingLink.id);
-            if (linkErr) {
-              result.errors.push(`${o.dt_identifier} pickup_completion_notes: ${linkErr.message}`);
+            const existingNotes = (existingLink as { pickup_completion_notes: string | null }).pickup_completion_notes ?? null;
+            if (existingNotes !== completionNotes) {
+              const { error: linkErr } = await supabase
+                .from('dt_pickup_links')
+                .update({ pickup_completion_notes: completionNotes })
+                .eq('id', existingLink.id);
+              if (linkErr) {
+                result.errors.push(`${o.dt_identifier} pickup_completion_notes: ${linkErr.message}`);
+              }
             }
           } else if (completionNotes && o.tenant_id) {
             // Defensive: legacy P+D pair that wasn't picked up by the
