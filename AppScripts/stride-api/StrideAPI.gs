@@ -1,5 +1,7 @@
 /* ===================================================
-   StrideAPI.gs — v38.249.0 — 2026-05-29 PST — [REPAIRS] feat: handleSendRepairQuote_ now accepts payload.isRevision (boolean) and payload.skipEmail (boolean) to power the new "Edit Quote after sent" flow in RepairDetailPanel.tsx. Three behavioral changes when isRevision=true: (1) the same-lines-and-total idempotency guards at the start of the handler and inside the lock no longer short-circuit — the operator explicitly asked to resend so the persistence pass and email send always fire; (2) the customer-facing email subject is prefixed with "REVISED — " ("REVISED — Repair Quote Ready: <ITEM_ID> $<GRAND>") so the client mailbox shows the revision clearly; (3) Quote Sent Date is preserved if it was already populated (no overwrite). When skipEmail=true (Save Draft path) the email block is skipped entirely while all sheet/Supabase writes still land. Status flip logic is unchanged — a Quote Sent repair stays Quote Sent on resend; only Pending Quote → Quote Sent transitions on first send. payload.isRevision defaults to false and payload.skipEmail defaults to false so existing callers (first-time send) are unaffected. No change to invoice-counter, half-write, void-invoice SB-first, updateClient SB-primary, storage-charges transfer exclusion, auto-inspection-on-transfer, or any billing logic.
+   StrideAPI.gs — v38.250.0 — 2026-05-30 PST — [BILLING] fix: sidemark-aware storage summary + stale-report guard. Closes the Allison Lind Design 2026-05-30 storage-invoice incident (6 orphan invoices INV-020021/020025-020029 in Consolidated_Ledger + invoice_tracking with NO flipped billing rows, plus 4 LEDGER_PARTIAL_FLIP "0 of 1" rollbacks). Root cause: v38.239.0 handleCommitStorageRows_ aggregated storage into ONE blank-sidemark STOR-SUMMARY row per tenant, but separate_by_sidemark=true clients are invoiced per-sidemark by Billing.tsx — the single blank-sidemark summary could not map onto per-sidemark invoice groups, and the commit had already deleted the per-item rows the operator's open unbilled report still referenced. Three changes. (1) handleCommitStorageRows_ now reads separate_by_sidemark via new helper api_clientSeparatesBySidemark_ and, when true, sub-groups the incoming per-item rows by normalized sidemark (trim+uppercase, matching React normalizeSidemarkForMatch) and appends ONE STOR-SUMMARY row PER sidemark with the Sidemark column populated and ledger row id STOR-SUMMARY-<tenant>-<SLUG>-<startYMD>-<endYMD> (new helper api_sidemarkSlug_, alnum-only uppercase, placed BEFORE the trailing dates so api_parseStorSummaryPeriod_ and the handleCreateInvoice_ sheet-markable regex both keep matching). separate_by_sidemark=false keeps the byte-identical legacy blank-sidemark id form. The finalized-summary gate now locks per-sidemark (a finalized BLANK-sidemark summary still locks the whole tenant); the in-window Unbilled-STOR delete pass runs once for the tenant before any append so no per-sidemark summary clobbers another. (2) handleCreateInvoice_ STALE-REPORT GUARD: when React sent extraSheetLedgerRowIdsToMark (the per-item ids its >=2-STOR invoice-time summarizer collapsed) but extraMarked===0 (none flipped — rows deleted/re-summarized or already invoiced), roll back the CB insert via rollbackByInvoiceNo_ and return STOR_SUMMARY_STALE_REPORT instead of committing an orphan summary CB row. (3) New admin runner runVoidOrphanInvoices (reads Script Property VOID_ORPHAN_INVOICE_NOS) deletes orphan CB rows + invoice_tracking for invoices that never flipped a Billing_Ledger row — the case handleVoidInvoice_ cannot clean (it bails "No rows found"). No change to dollar totals for separate_by_sidemark=false clients, the v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, or any non-storage billing logic.
+
+   v38.249.0 — 2026-05-29 PST — [REPAIRS] feat: handleSendRepairQuote_ now accepts payload.isRevision (boolean) and payload.skipEmail (boolean) to power the new "Edit Quote after sent" flow in RepairDetailPanel.tsx. Three behavioral changes when isRevision=true: (1) the same-lines-and-total idempotency guards at the start of the handler and inside the lock no longer short-circuit — the operator explicitly asked to resend so the persistence pass and email send always fire; (2) the customer-facing email subject is prefixed with "REVISED — " ("REVISED — Repair Quote Ready: <ITEM_ID> $<GRAND>") so the client mailbox shows the revision clearly; (3) Quote Sent Date is preserved if it was already populated (no overwrite). When skipEmail=true (Save Draft path) the email block is skipped entirely while all sheet/Supabase writes still land. Status flip logic is unchanged — a Quote Sent repair stays Quote Sent on resend; only Pending Quote → Quote Sent transitions on first send. payload.isRevision defaults to false and payload.skipEmail defaults to false so existing callers (first-time send) are unaffected. No change to invoice-counter, half-write, void-invoice SB-first, updateClient SB-primary, storage-charges transfer exclusion, auto-inspection-on-transfer, or any billing logic.
 
    v38.248.0 — 2026-05-29 PST — [TASKS] feat: handleBatchCreateTasks_ now accepts payload.taskNotes (single string applied to every row in the batch) so the React CreateTaskModal "Advanced (optional)" section can stamp warehouse instructions at create time instead of forcing a per-task follow-up edit. payload.dueDate (already supported) and payload.priority (already supported) are unchanged; only the Task Notes column changes from a hardcoded "" to String(payload.taskNotes || "").trim(). Empty/missing taskNotes preserves the legacy blank-cell behavior so existing callers are unaffected. No change to invoice-counter, half-write, void-invoice SB-first, updateClient SB-primary, storage-charges transfer exclusion, auto-inspection-on-transfer, or any billing logic.
 
@@ -24593,6 +24595,48 @@ function handleGenerateStorageCharges_(payload) {
 // ─── Commit Storage Rows (pre-computed by Postgres) ─────────────────────────
 
 /**
+ * Read public.clients.separate_by_sidemark for one client spreadsheet_id.
+ * Returns boolean; defaults to FALSE on any read error so a Supabase outage
+ * falls back to the legacy one-summary-per-tenant behaviour rather than
+ * blocking the storage commit. Mirrors the inline read in handleCreateInvoice_.
+ */
+function api_clientSeparatesBySidemark_(spreadsheetId) {
+  if (!spreadsheetId) return false;
+  try {
+    var sbUrl = prop_("SUPABASE_URL");
+    var sbKey = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (!sbUrl || !sbKey) return false;
+    var resp = UrlFetchApp.fetch(
+      sbUrl + "/rest/v1/clients?spreadsheet_id=eq." + encodeURIComponent(spreadsheetId) +
+      "&select=separate_by_sidemark",
+      {
+        method: "GET",
+        headers: { "Authorization": "Bearer " + sbKey, "apikey": sbKey },
+        muteHttpExceptions: true
+      }
+    );
+    if (resp.getResponseCode() !== 200) return false;
+    var arr = JSON.parse(resp.getContentText());
+    return !!(arr && arr.length > 0 && arr[0].separate_by_sidemark === true);
+  } catch (e) {
+    Logger.log("api_clientSeparatesBySidemark_ read failed (defaulting false): " + e.message);
+    return false;
+  }
+}
+
+/**
+ * Slugify a sidemark for embedding in a deterministic STOR-SUMMARY ledger
+ * row id. Alphanumerics only, uppercased; blank → "" (caller emits the
+ * legacy no-sidemark id form in that case). The slug only needs to be
+ * stable + unique-per-sidemark on the sheet — the React report echoes the
+ * exact Ledger Row ID string back at invoice time, so the round-trip match
+ * is exact regardless of slugging.
+ */
+function api_sidemarkSlug_(sidemark) {
+  return String(sidemark || "").replace(/[^A-Za-z0-9]+/g, "").toUpperCase();
+}
+
+/**
  * handleCommitStorageRows_ — write phase only. Takes per-item rows already
  * computed elsewhere (the React Storage tab feeds in the result of the
  * `calculate_storage_charges` Postgres RPC) and writes ONE summary STOR
@@ -24716,11 +24760,24 @@ function handleCommitStorageRows_(payload) {
         ? blSh.getRange(2, 1, blLastRow - 1, blSh.getLastColumn()).getValues()
         : [];
 
-      // Block re-commit when a finalized STOR-SUMMARY already covers this
-      // tenant + window. Per-item dedup in _compute_storage_charges keys on
-      // item_id (blank on summary rows) so it can't catch this case — the
-      // gate has to live here at the write boundary.
-      var summaryLockedNote = null;
+      // v38.x — Sidemark-aware summarization. For separate_by_sidemark=true
+      // clients, storage MUST be summarized PER SIDEMARK (one summary row per
+      // sidemark) so each per-sidemark invoice group can pick up its own
+      // storage line. The legacy per-tenant single-blank-sidemark summary
+      // (retained for separate_by_sidemark=false) cannot map onto per-sidemark
+      // invoice groups and orphaned storage at invoice time (the Allison Lind
+      // 2026-05-30 incident: a blank-sidemark summary + per-sidemark invoice
+      // grouping produced 6 orphan CB invoices + 4 LEDGER_PARTIAL_FLIP rolls).
+      var sepBySidemark = api_clientSeparatesBySidemark_(tenantId);
+
+      // Finalized-summary gate. Collect the set of sidemarks whose window is
+      // already locked by a FINALIZED (Invoiced/Billed/Void) STOR-SUMMARY that
+      // overlaps the request window — re-committing those would double-bill.
+      // A finalized BLANK-sidemark summary represents the WHOLE tenant's
+      // storage for the window, so when one exists we lock the entire tenant
+      // (a window already billed as one line can't be safely re-split).
+      var lockedSidemarks = {};            // normalized sidemark -> locking id
+      var tenantWindowLockedNote = null;
       for (var fi = 0; fi < blAllData.length; fi++) {
         var fStatus = String(blAllData[fi][blCols.status - 1] || "").trim().toLowerCase();
         if (fStatus !== "invoiced" && fStatus !== "billed" && fStatus !== "void") continue;
@@ -24733,89 +24790,123 @@ function handleCommitStorageRows_(payload) {
         // Reject any overlap with the request window.
         if (fPeriod.end.getTime() < startDate.getTime()) continue;
         if (fPeriod.start.getTime() > endDate.getTime()) continue;
-        summaryLockedNote = fLrid;
-        break;
+        var fSm = blCols.sidemark ? String(blAllData[fi][blCols.sidemark - 1] || "").trim().toUpperCase() : "";
+        if (fSm === "") { tenantWindowLockedNote = fLrid; break; }   // blank = whole-tenant lock
+        lockedSidemarks[fSm] = fLrid;
       }
-      if (summaryLockedNote) {
-        skipped.push(clientName + " (finalized summary " + summaryLockedNote + " already covers window)");
+      if (tenantWindowLockedNote) {
+        skipped.push(clientName + " (finalized summary " + tenantWindowLockedNote + " already covers window)");
         return;
       }
 
-      // Compute the aggregate. Per-item rows from the React payload are
-      // summed here so the sheet sees ONE row per client per commit.
-      var totalCents = 0;
-      var itemIds = {};
-      var summaryDate = endDate;
-      for (var pri = 0; pri < clientRows.length; pri++) {
-        var pr = clientRows[pri];
-        var pRow = Number(pr.total);
-        if (!isFinite(pRow)) pRow = 0;
-        totalCents += Math.round(pRow * 100);
-        var pid = String(pr.itemId || "").trim();
-        if (pid) itemIds[pid] = true;
-        var pEnd = api_normalizeDateToMidnight_(pr.billableEnd);
-        if (pEnd && pEnd.getTime() > summaryDate.getTime()) summaryDate = pEnd;
-      }
-      var summaryTotal = Math.round(totalCents) / 100;
-      var itemCount = Object.keys(itemIds).length;
-      if (summaryTotal <= 0) {
-        skipped.push(clientName + " (computed summary total <= 0)");
-        return;
+      // Sub-group the incoming per-item rows. separate_by_sidemark=true →
+      // one group per normalized sidemark (uppercase+trim, matching React's
+      // normalizeSidemarkForMatch so the summary row lands in the same invoice
+      // group as that sidemark's other charges; display value keeps first-seen
+      // original casing). separate_by_sidemark=false → ONE group keyed "" so
+      // the legacy single blank-sidemark summary behaviour is preserved.
+      var bySidemark = {};   // normKey -> { display: sidemark, rows: [] }
+      for (var gi = 0; gi < clientRows.length; gi++) {
+        var gRow  = clientRows[gi];
+        var gNorm = sepBySidemark ? String(gRow.sidemark || "").trim().toUpperCase() : "";
+        if (!bySidemark[gNorm]) {
+          bySidemark[gNorm] = { display: sepBySidemark ? String(gRow.sidemark || "").trim() : "", rows: [] };
+        }
+        bySidemark[gNorm].rows.push(gRow);
       }
 
-      var summaryTaskId = "STOR-SUMMARY-" + tenantId + "-" +
-        api_formatYMD_(startDate) + "-" + api_formatYMD_(endDate);
-
-      // Delete every Unbilled STOR row in the window (per-item leftovers
-      // from older versions OR a prior summary in the same window). Also
-      // delete any Unbilled STOR whose ledger row id matches the new
-      // summary id (idempotent re-run replaces in place).
+      // Delete every Unbilled STOR row in the window ONCE for the whole tenant
+      // (per-item leftovers from older versions + any prior Unbilled summaries,
+      // all sidemarks). Finalized rows are never Unbilled so they're untouched.
+      // The per-sidemark summaries appended below replace them. Deleting all
+      // in-window Unbilled STOR up front avoids a later sidemark's delete pass
+      // clobbering an earlier sidemark's just-appended summary.
       var rowsToDelete = [];
       for (var di = blAllData.length - 1; di >= 0; di--) {
         var dStatus = String(blAllData[di][blCols.status - 1] || "").trim().toLowerCase();
         var dSvc    = String(blAllData[di][blCols.svcCode - 1] || "").trim().toUpperCase();
         if (dSvc !== "STOR") continue;
         if (dStatus !== "unbilled" && dStatus !== "") continue;
-        var dLrid = blCols.ledgerRowId ? String(blAllData[di][blCols.ledgerRowId - 1] || "").trim() : "";
-        var collides = dLrid && dLrid === summaryTaskId;
         var dDate = blCols.date ? api_normalizeDateToMidnight_(blAllData[di][blCols.date - 1]) : null;
         var inWindow = dDate && dDate.getTime() >= startDate.getTime() && dDate.getTime() <= endDate.getTime();
-        if (collides || inWindow) {
-          rowsToDelete.push(di + 2);
-        }
+        if (inWindow) rowsToDelete.push(di + 2);
       }
       for (var dri = 0; dri < rowsToDelete.length; dri++) {
         blSh.deleteRow(rowsToDelete[dri]);
       }
 
-      // Build the single summary row.
+      // Append ONE summary row per sidemark sub-group.
       var blWidth = blSh.getLastColumn();
-      var arr = new Array(blWidth).fill("");
-      if (blCols.status)     arr[blCols.status - 1]     = "Unbilled";
-      if (blCols.invoice)    arr[blCols.invoice - 1]    = "";
-      if (blCols.client)     arr[blCols.client - 1]     = clientName;
-      if (blCols.date)       arr[blCols.date - 1]       = summaryDate;
-      if (blCols.svcCode)    arr[blCols.svcCode - 1]    = "STOR";
-      if (blCols.svcName)    arr[blCols.svcName - 1]    = "Storage";
-      if (blCols.category)   arr[blCols.category - 1]   = "Storage Charges";
-      if (blCols.itemId)     arr[blCols.itemId - 1]     = "";
-      if (blCols.desc)       arr[blCols.desc - 1]       = "Monthly Storage";
-      if (blCols.klass)      arr[blCols.klass - 1]      = "";
-      if (blCols.qty)        arr[blCols.qty - 1]        = 1;
-      if (blCols.rate)       arr[blCols.rate - 1]       = "";
-      if (blCols.total)      arr[blCols.total - 1]      = summaryTotal;
-      if (blCols.taskId)     arr[blCols.taskId - 1]     = summaryTaskId;
-      if (blCols.repairId)   arr[blCols.repairId - 1]   = "";
-      if (blCols.shipNo)     arr[blCols.shipNo - 1]     = "";
-      if (blCols.notes)      arr[blCols.notes - 1]      = "Storage " +
-        api_formatMMDDYY_(startDate) + " to " + api_formatMMDDYY_(endDate) +
-        " (" + itemCount + " items)";
-      if (blCols.sidemark)   arr[blCols.sidemark - 1]   = "";
-      if (blCols.ledgerRowId) arr[blCols.ledgerRowId - 1] = summaryTaskId;
+      var sidemarkKeys = Object.keys(bySidemark);
+      for (var ski = 0; ski < sidemarkKeys.length; ski++) {
+        var smKey   = sidemarkKeys[ski];
+        var grp     = bySidemark[smKey];
+        var grpRows = grp.rows;
 
-      var insertAt = api_getLastDataRow_(blSh) + 1;
-      blSh.getRange(insertAt, 1, 1, blWidth).setValues([arr]);
-      totalCreated += 1;
+        // Skip sidemarks already finalized for this window (per-sidemark lock).
+        if (sepBySidemark && smKey !== "" && lockedSidemarks[smKey]) {
+          skipped.push(clientName + " · " + grp.display + " (finalized summary " + lockedSidemarks[smKey] + " already covers window)");
+          continue;
+        }
+
+        // Aggregate this sidemark's per-item rows.
+        var totalCents = 0;
+        var itemIds = {};
+        var summaryDate = endDate;
+        for (var pri = 0; pri < grpRows.length; pri++) {
+          var pr = grpRows[pri];
+          var pRow = Number(pr.total);
+          if (!isFinite(pRow)) pRow = 0;
+          totalCents += Math.round(pRow * 100);
+          var pid = String(pr.itemId || "").trim();
+          if (pid) itemIds[pid] = true;
+          var pEnd = api_normalizeDateToMidnight_(pr.billableEnd);
+          if (pEnd && pEnd.getTime() > summaryDate.getTime()) summaryDate = pEnd;
+        }
+        var summaryTotal = Math.round(totalCents) / 100;
+        var itemCount = Object.keys(itemIds).length;
+        if (summaryTotal <= 0) {
+          skipped.push(clientName + (grp.display ? " · " + grp.display : "") + " (computed summary total <= 0)");
+          continue;
+        }
+
+        // Deterministic id. Sidemark-separated groups embed a sidemark slug
+        // BEFORE the trailing -YYYYMMDD-YYYYMMDD so api_parseStorSummaryPeriod_
+        // AND the handleCreateInvoice_ sheet-markable regex (both key off the
+        // trailing dates) keep working unchanged. Blank-sidemark groups keep
+        // the legacy no-slug id form for backward compatibility.
+        var smSlug = api_sidemarkSlug_(grp.display);
+        var summaryTaskId = (sepBySidemark && smSlug)
+          ? "STOR-SUMMARY-" + tenantId + "-" + smSlug + "-" + api_formatYMD_(startDate) + "-" + api_formatYMD_(endDate)
+          : "STOR-SUMMARY-" + tenantId + "-" + api_formatYMD_(startDate) + "-" + api_formatYMD_(endDate);
+
+        var arr = new Array(blWidth).fill("");
+        if (blCols.status)     arr[blCols.status - 1]     = "Unbilled";
+        if (blCols.invoice)    arr[blCols.invoice - 1]    = "";
+        if (blCols.client)     arr[blCols.client - 1]     = clientName;
+        if (blCols.date)       arr[blCols.date - 1]       = summaryDate;
+        if (blCols.svcCode)    arr[blCols.svcCode - 1]    = "STOR";
+        if (blCols.svcName)    arr[blCols.svcName - 1]    = "Storage";
+        if (blCols.category)   arr[blCols.category - 1]   = "Storage Charges";
+        if (blCols.itemId)     arr[blCols.itemId - 1]     = "";
+        if (blCols.desc)       arr[blCols.desc - 1]       = "Monthly Storage";
+        if (blCols.klass)      arr[blCols.klass - 1]      = "";
+        if (blCols.qty)        arr[blCols.qty - 1]        = 1;
+        if (blCols.rate)       arr[blCols.rate - 1]       = "";
+        if (blCols.total)      arr[blCols.total - 1]      = summaryTotal;
+        if (blCols.taskId)     arr[blCols.taskId - 1]     = summaryTaskId;
+        if (blCols.repairId)   arr[blCols.repairId - 1]   = "";
+        if (blCols.shipNo)     arr[blCols.shipNo - 1]     = "";
+        if (blCols.notes)      arr[blCols.notes - 1]      = "Storage " +
+          api_formatMMDDYY_(startDate) + " to " + api_formatMMDDYY_(endDate) +
+          " (" + itemCount + " items)";
+        if (blCols.sidemark)   arr[blCols.sidemark - 1]   = grp.display || "";
+        if (blCols.ledgerRowId) arr[blCols.ledgerRowId - 1] = summaryTaskId;
+
+        var insertAt = api_getLastDataRow_(blSh) + 1;
+        blSh.getRange(insertAt, 1, 1, blWidth).setValues([arr]);
+        totalCreated += 1;
+      }
 
       invalidateClientCache_(tenantId);
     } catch (err) {
@@ -28195,6 +28286,7 @@ function handleCreateInvoice_(payload) {
   // roll back the invoice. The invoice is already committed and the
   // primary client-flip succeeded; this is a hygiene step on top.
   var extraMarked = 0;
+  var extraThrew  = false;
   if (extraSheetLedgerRowIdsToMark.length > 0) {
     try {
       extraMarked = api_markClientLedgerInvoiced_(
@@ -28206,8 +28298,38 @@ function handleCreateInvoice_(payload) {
           "). Storage-charge dedup may re-flag these rows on the next run — manual sheet update advised.");
       }
     } catch (extraErr) {
-      Logger.log("handleCreateInvoice_ extra STOR-mark threw (non-fatal): " + extraErr.message +
-        " — invoice " + invNo + " is still committed.");
+      extraThrew = true;
+      Logger.log("handleCreateInvoice_ extra STOR-mark threw: " + extraErr.message +
+        " — invoice " + invNo + " for " + client + ".");
+    }
+
+    // v38.x — STALE-REPORT GUARD. The React-side STOR summarizer (≥2 STOR
+    // rows) ships a synthetic STOR-SUMMARY-<uuid> as the customer-facing
+    // line (→ this Consolidated_Ledger row) and the original per-item ids in
+    // extraSheetLedgerRowIdsToMark for us to flip on the client sheet. That
+    // synthetic id is NOT in sheetMarkableLedgerRowIds, so the partial-flip
+    // check above passes vacuously (0 of 0). If NONE of the per-item extras
+    // flip (extraMarked === 0), the rows the summary claims to represent are
+    // gone (already deleted/summarized by handleCommitStorageRows_) or already
+    // Invoiced — the report was stale. Without this guard we commit an ORPHAN
+    // CB summary row + invoice_tracking record with no underlying flipped
+    // rows (the Allison Lind 2026-05-30 incident: 6 orphan invoices in CB but
+    // nothing in the app). Roll back and fail the group cleanly so the
+    // operator re-generates the report and retries — same contract as the
+    // LEDGER_PARTIAL_FLIP path above.
+    if (extraMarked === 0) {
+      var rb3 = rollbackByInvoiceNo_();
+      return errorResponse_(
+        "Storage summary stale-report guard: 0 of " + extraSheetLedgerRowIdsToMark.length +
+        " summarized per-item storage rows could be flipped on the client Billing_Ledger sheet" +
+        (extraThrew ? " (rows are no longer Unbilled — already invoiced/voided)" :
+                      " (rows were deleted or re-summarized since the report was generated)") + "." +
+        (rb3.ok
+          ? " Consolidated_Ledger insert was rolled back."
+          : " Consolidated_Ledger ROLLBACK ALSO FAILED (" + rb3.error + ") — orphan ledger IDs pinned to Script Property ROLLBACK_FAILED_ORPHAN_LEDGER_IDS for runRepairOrphanLedgerRows.") +
+        " Re-run Generate Unbilled Report and retry.",
+        "STOR_SUMMARY_STALE_REPORT"
+      );
     }
   }
 
@@ -47415,6 +47537,75 @@ function runRepairOrphanLedgerRows() {
     }
   }
   Logger.log("runRepairOrphanLedgerRows complete: deleted " + deleted + " of " + rowsToDelete.length + " rows.");
+}
+
+/**
+ * v38.x — runVoidOrphanInvoices: admin entry point.
+ *
+ * Void/remove orphan invoices that landed in Consolidated_Ledger (+ the
+ * invoice_tracking mirror) WITHOUT flipping any underlying Billing_Ledger
+ * rows — the failure mode handleVoidInvoice_ can't clean up because it bails
+ * with "No rows found" when no client-sheet row carries the invoice number.
+ *
+ * Built for the Allison Lind 2026-05-30 storage incident: the blank-sidemark
+ * STOR-SUMMARY commit deleted the per-item rows the operator's already-open
+ * unbilled report still referenced, so the ≥2-STOR invoice groups committed
+ * synthetic summary CB rows + invoice_tracking with nothing flipped (6
+ * orphans: INV-020021, 020025–020029). These have no public.billing rows, so
+ * voiding via the UI is a no-op.
+ *
+ * Reads the comma-separated invoice numbers from Script Property
+ * VOID_ORPHAN_INVOICE_NOS (set it, run, then clear it). For each:
+ *   1. api_deleteCbRowsByInvoiceNo_  — remove the Consolidated_Ledger rows
+ *      (the QBO/IIF export source — leaving them risks a double-push).
+ *   2. api_deleteInvoiceTrackingRow_ — drop the invoice_tracking mirror so the
+ *      Invoice Review tab stops showing the phantom invoice.
+ *
+ * Does NOT touch the master invoice counter (those numbers stay burned) and
+ * does NOT alter any Billing_Ledger / public.billing row (there are none to
+ * alter — the underlying storage rows stay Unbilled and re-bill cleanly).
+ *
+ * Idempotent: re-running after the rows are gone deletes 0 and logs it.
+ * Run from Apps Script editor → function dropdown → runVoidOrphanInvoices.
+ */
+function runVoidOrphanInvoices() {
+  var csv = String(PropertiesService.getScriptProperties().getProperty("VOID_ORPHAN_INVOICE_NOS") || "").trim();
+  if (!csv) {
+    Logger.log("runVoidOrphanInvoices: VOID_ORPHAN_INVOICE_NOS Script Property not set.\n" +
+               "  Set it to a comma-separated list of invoice numbers (e.g.\n" +
+               "  INV-020021,INV-020025,INV-020026,INV-020027,INV-020028,INV-020029),\n" +
+               "  then re-run. Clear the property afterward.");
+    return;
+  }
+  var invNos = csv.split(",")
+    .map(function(s) { return String(s || "").trim(); })
+    .filter(function(s) { return s.length > 0; });
+  if (!invNos.length) { Logger.log("runVoidOrphanInvoices: parsed list is empty"); return; }
+
+  Logger.log("runVoidOrphanInvoices: processing " + invNos.length + " invoice(s): " + invNos.join(", "));
+  var totalCbDeleted = 0;
+  invNos.forEach(function(invNo) {
+    var cbResult = { deleted: 0 };
+    try {
+      cbResult = api_deleteCbRowsByInvoiceNo_(invNo);
+    } catch (cbErr) {
+      Logger.log("  " + invNo + ": CB delete FAILED — " + (cbErr && cbErr.message ? cbErr.message : cbErr));
+    }
+    if (cbResult && cbResult.locked) {
+      Logger.log("  " + invNo + ": CB delete deferred — could not acquire commit lock. Re-run.");
+    }
+    totalCbDeleted += (cbResult && cbResult.deleted) || 0;
+    try {
+      api_deleteInvoiceTrackingRow_(invNo);
+    } catch (itErr) {
+      Logger.log("  " + invNo + ": invoice_tracking delete failed (non-fatal) — " + itErr.message);
+    }
+    Logger.log("  " + invNo + ": CB rows deleted=" + ((cbResult && cbResult.deleted) || 0) +
+               " (expected " + ((cbResult && cbResult.expected) || 0) + "), invoice_tracking dropped.");
+  });
+  Logger.log("runVoidOrphanInvoices complete: " + totalCbDeleted + " Consolidated_Ledger row(s) deleted across " +
+             invNos.length + " invoice(s). Underlying storage rows remain Unbilled and can be re-invoiced. " +
+             "Clear the VOID_ORPHAN_INVOICE_NOS Script Property now.");
 }
 
 /**
