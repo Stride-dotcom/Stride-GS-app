@@ -44,6 +44,7 @@ import { PhotosPanel, DocumentsPanel } from '../components/shared/EntityAttachme
 import { useServiceCatalog } from '../hooks/useServiceCatalog';
 import { supabase } from '../lib/supabase';
 import { CreateDeliveryOrderModal } from '../components/shared/CreateDeliveryOrderModal';
+import { AddPickupLegModal } from '../components/shared/AddPickupLegModal';
 import { DtOrderReleasePanel, type ReleasableItem } from '../components/shared/DtOrderReleasePanel';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { FloatingActionMenu, type FABAction } from '../components/shared/FloatingActionMenu';
@@ -462,6 +463,7 @@ function DetailsTab({
   releasePanelOpen,
   onCloseReleasePanel,
   performedBy,
+  onAddPickup,
 }: {
   order: DtOrderForUI;
   /** P+D pair partner. Populated on the parent so DetailsTab can show
@@ -500,6 +502,12 @@ function DetailsTab({
   /** Email of the operator firing the release — stamped on the audit
    *  entry. Null in demo / unauthenticated contexts. */
   performedBy: string | null;
+  /** Opens the Add Pickup mini-modal. Wired from OrderPageInner so
+   *  the modal state lives at the parent (alongside the other modals)
+   *  while the trigger sits contextually inside the Notes card's
+   *  Linked Pickups section. Undefined → button hidden (e.g. on a
+   *  standalone pickup or a closed order). */
+  onAddPickup?: () => void;
 }) {
   const addressLine = [order.contactAddress, order.contactCity, order.contactState, order.contactZip].filter(Boolean).join(', ');
   // Identify the P+D partner — when this row is the delivery leg of a
@@ -1136,11 +1144,26 @@ function DetailsTab({
             render one row per pickup with its label + status + per-leg
             notes. Replaces the single LinkedPickupBanner for multi-
             pickup orders (the banner still renders at the top for
-            single-pickup back-compat via linked_pickup_finished_at). */}
-        {!thisIsPickupLeg && order.linkedPickups.length > 0 && (
+            single-pickup back-compat via linked_pickup_finished_at).
+            The "+ Add Pickup" button opens AddPickupLegModal so the
+            operator can append another leg without leaving the page. */}
+        {!thisIsPickupLeg && (order.linkedPickups.length > 0 || onAddPickup) && (
           <div style={{ marginBottom: 14 }}>
-            <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: EP.textMuted, marginBottom: 6, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-              <Truck size={11} /> Linked Pickups ({order.linkedPickups.length})
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: EP.textMuted, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                <Truck size={11} /> Linked Pickups ({order.linkedPickups.length})
+              </div>
+              {onAddPickup && (
+                <button onClick={onAddPickup}
+                  style={{
+                    background: 'none', border: `1px solid ${theme.colors.border}`, borderRadius: 6,
+                    padding: '4px 10px', cursor: 'pointer', fontFamily: 'inherit',
+                    fontSize: 11, fontWeight: 600, color: EP.textSecondary,
+                    display: 'inline-flex', alignItems: 'center', gap: 4,
+                  }}>
+                  + Add Pickup
+                </button>
+              )}
             </div>
             {order.linkedPickups.map(lp => {
               const labelDisplay = lp.pickupLabel
@@ -1737,6 +1760,11 @@ export function OrderPage() {
   // mirror is a separate fire-and-forget invoke that lands in Failed
   // Operations on failure.
   const [releaseMode, setReleaseMode] = useState<'none' | 'partial'>('none');
+  // Multi-pickup Phase 1 — Add Pickup mini-modal open state. Triggered
+  // from the Linked Pickups section of the Notes card on the delivery
+  // OrderPage. Modal handles its own form state; we just refetch on
+  // success so the new join row + pickup leg appear in the list.
+  const [addPickupOpen, setAddPickupOpen] = useState(false);
   // inventoryStatuses caches the linked inventory rows' status +
   // release_date so the items table can render a Status column without
   // a separate per-row fetch, and so the "Release Items..." button can
@@ -2289,6 +2317,20 @@ export function OrderPage() {
           releasePanelOpen={releaseMode === 'partial'}
           onCloseReleasePanel={() => setReleaseMode('none')}
           performedBy={user?.email ?? null}
+          // Show + Add Pickup affordance on the delivery side of a P+D
+          // pair while the order isn't in a terminal status (matches
+          // the gate the rest of the Notes card uses). Hidden on
+          // standalone deliveries without any pickup yet — those go
+          // through the existing CreateDeliveryOrderModal convert path
+          // (PR #431) for the first pickup; subsequent pickups use
+          // this modal.
+          onAddPickup={
+            !(order.isPickup || order.orderType === 'pickup')
+            && (order.orderType === 'pickup_and_delivery' || order.linkedPickups.length > 0)
+            && !['completed', 'cancelled'].includes(order.statusCategory)
+              ? () => setAddPickupOpen(true)
+              : undefined
+          }
         />
       ),
     },
@@ -2916,6 +2958,21 @@ export function OrderPage() {
           }}
         />
       )}
+      {/* Multi-pickup Phase 1 — Add Pickup mini-modal. Renders only when
+          opened from the Linked Pickups section of the Notes card. On
+          success, refetches the order so the new leg + join row land
+          in the UI without a manual reload. */}
+      <AddPickupLegModal
+        open={addPickupOpen}
+        onClose={() => setAddPickupOpen(false)}
+        deliveryOrder={order}
+        onSuccess={async () => {
+          lastMutationAtRef.current = Date.now();
+          const fresh = await fetchDtOrderByIdFromSupabase(order.id);
+          if (fresh) setLocalOrder(fresh);
+          refetch();
+        }}
+      />
       {/* ReleaseItemsModal removed 2026-05-12 — replaced by the inline
           DtOrderReleasePanel inside DetailsTab, which uses a Supabase-
           direct write path. Supabase realtime fans the inventory
