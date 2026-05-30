@@ -1,5 +1,7 @@
 /* ===================================================
-   StrideAPI.gs — v38.251.0 — 2026-05-30 PST — [BILLING] feat: per-item storage billed-tracking via new public.storage_billing_items. Storage still summarizes to ONE ledger line per sidemark (v38.250.0), but the per-item detail that the summary erases now lives in a durable Supabase table so storage is never double-billed or missed. (1) New migration 20260530160000_storage_billing_items.sql: public.storage_billing_items (tenant/sidemark/item/period/amount/summary_ledger_row_id/status/invoice), RLS mirroring public.billing, a partial-unique integrity guard (tenant,item,period WHERE status<>'Void') that keeps the table free of double-active charges while allowing re-bill-after-void, plus the mandatory parity_dryrun mirror + reset()/row_counts/check_drift() updates. (2) handleCommitStorageRows_ now reads storage_billing_items before summarizing: items already FINALIZED for an overlapping window are skipped (never re-billed), the Unbilled working set for the window is deleted + replaced, and one per-item row per included item is inserted linked to the summary's ledger_row_id. FAIL-SAFE: any Supabase read failure disables BOTH the skip AND the write for that tenant, falling back to legacy sheet-only behaviour (the finalized-summary gate stays the primary guard) so an outage can never block or alter a storage commit. (3) handleCreateInvoice_ stamps the matching storage_billing_items rows status=Invoiced + invoice_no/date by summary_ledger_row_id after a successful commit. (4) handleVoidInvoice_ flips them to Void (re-billable); handleReissueInvoice_ resets non-Unbilled rows back to Unbilled. All Supabase writes are best-effort/non-fatal. No change to dollar totals (the per-item skip only excludes genuinely-already-finalized items; with the table empty on first deploy nothing is excluded), the v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, or any non-storage billing logic. Billing stays GAS-authoritative — this is forward-compatible substrate the future P4a SB-primary createInvoice will read directly.
+   StrideAPI.gs — v38.252.0 — 2026-05-30 PST — [BILLING] fix: orphan-aware handleVoidInvoice_ so the app's Void button can clean CB-only orphans. Pre-fix the handler bailed with NOT_FOUND whenever no client-sheet Billing_Ledger row carried the invoice # — leaving invoices that exist ONLY in Consolidated_Ledger + invoice_tracking (a storage-summary invoice whose synthetic line never wrote a sheet row — the Allison Lind 2026-05-30 incident) impossible to void from the app; they required the runVoidOrphanInvoices script. Now the CB Consolidated_Ledger cleanup (api_deleteCbRowsByInvoiceNo_) runs BEFORE the not-found bail, and the bail only fires when there is genuinely nothing anywhere (voided===0 AND skippedAlreadyVoid===0 AND cbDeleted===0 — a typo'd or already-fully-cleaned invoice number). An orphan (CB rows present, no sheet rows) falls through and gets cleaned: CB rows deleted, invoice_tracking row dropped, storage_billing_items flipped to Void. Response gains orphanVoid:boolean. Behavior for normal invoices (sheet rows present) is unchanged — voided>0 takes the same path as before, CB cleanup still runs. No change to dollar totals, the v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, or the v38.251.0 storage_billing_items writers.
+
+   v38.251.0 — 2026-05-30 PST — [BILLING] feat: per-item storage billed-tracking via new public.storage_billing_items. Storage still summarizes to ONE ledger line per sidemark (v38.250.0), but the per-item detail that the summary erases now lives in a durable Supabase table so storage is never double-billed or missed. (1) New migration 20260530160000_storage_billing_items.sql: public.storage_billing_items (tenant/sidemark/item/period/amount/summary_ledger_row_id/status/invoice), RLS mirroring public.billing, a partial-unique integrity guard (tenant,item,period WHERE status<>'Void') that keeps the table free of double-active charges while allowing re-bill-after-void, plus the mandatory parity_dryrun mirror + reset()/row_counts/check_drift() updates. (2) handleCommitStorageRows_ now reads storage_billing_items before summarizing: items already FINALIZED for an overlapping window are skipped (never re-billed), the Unbilled working set for the window is deleted + replaced, and one per-item row per included item is inserted linked to the summary's ledger_row_id. FAIL-SAFE: any Supabase read failure disables BOTH the skip AND the write for that tenant, falling back to legacy sheet-only behaviour (the finalized-summary gate stays the primary guard) so an outage can never block or alter a storage commit. (3) handleCreateInvoice_ stamps the matching storage_billing_items rows status=Invoiced + invoice_no/date by summary_ledger_row_id after a successful commit. (4) handleVoidInvoice_ flips them to Void (re-billable); handleReissueInvoice_ resets non-Unbilled rows back to Unbilled. All Supabase writes are best-effort/non-fatal. No change to dollar totals (the per-item skip only excludes genuinely-already-finalized items; with the table empty on first deploy nothing is excluded), the v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, or any non-storage billing logic. Billing stays GAS-authoritative — this is forward-compatible substrate the future P4a SB-primary createInvoice will read directly.
 
    v38.250.0 — 2026-05-30 PST — [BILLING] fix: sidemark-aware storage summary + stale-report guard. Closes the Allison Lind Design 2026-05-30 storage-invoice incident (6 orphan invoices INV-020021/020025-020029 in Consolidated_Ledger + invoice_tracking with NO flipped billing rows, plus 4 LEDGER_PARTIAL_FLIP "0 of 1" rollbacks). Root cause: v38.239.0 handleCommitStorageRows_ aggregated storage into ONE blank-sidemark STOR-SUMMARY row per tenant, but separate_by_sidemark=true clients are invoiced per-sidemark by Billing.tsx — the single blank-sidemark summary could not map onto per-sidemark invoice groups, and the commit had already deleted the per-item rows the operator's open unbilled report still referenced. Three changes. (1) handleCommitStorageRows_ now reads separate_by_sidemark via new helper api_clientSeparatesBySidemark_ and, when true, sub-groups the incoming per-item rows by normalized sidemark (trim+uppercase, matching React normalizeSidemarkForMatch) and appends ONE STOR-SUMMARY row PER sidemark with the Sidemark column populated and ledger row id STOR-SUMMARY-<tenant>-<SLUG>-<startYMD>-<endYMD> (new helper api_sidemarkSlug_, alnum-only uppercase, placed BEFORE the trailing dates so api_parseStorSummaryPeriod_ and the handleCreateInvoice_ sheet-markable regex both keep matching). separate_by_sidemark=false keeps the byte-identical legacy blank-sidemark id form. The finalized-summary gate now locks per-sidemark (a finalized BLANK-sidemark summary still locks the whole tenant); the in-window Unbilled-STOR delete pass runs once for the tenant before any append so no per-sidemark summary clobbers another. (2) handleCreateInvoice_ STALE-REPORT GUARD: when React sent extraSheetLedgerRowIdsToMark (the per-item ids its >=2-STOR invoice-time summarizer collapsed) but extraMarked===0 (none flipped — rows deleted/re-summarized or already invoiced), roll back the CB insert via rollbackByInvoiceNo_ and return STOR_SUMMARY_STALE_REPORT instead of committing an orphan summary CB row. (3) New admin runner runVoidOrphanInvoices (reads Script Property VOID_ORPHAN_INVOICE_NOS) deletes orphan CB rows + invoice_tracking for invoices that never flipped a Billing_Ledger row — the case handleVoidInvoice_ cannot clean (it bails "No rows found"). No change to dollar totals for separate_by_sidemark=false clients, the v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, or any non-storage billing logic.
 
@@ -15512,10 +15514,6 @@ function handleVoidInvoice_(clientSheetId, payload) {
       voided++;
     }
 
-    if (voided === 0 && skippedAlreadyVoid === 0) {
-      return errorResponse_("No rows found for invoice " + invoiceNo, "NOT_FOUND");
-    }
-
     // v38.193.0 (Bug #5) — Mirror the void on CB Consolidated_Ledger.
     // Pre-fix this function only flipped client-sheet rows to Void, leaving
     // CB rows tied to the now-voided invoice number stuck at Status=Invoiced.
@@ -15526,6 +15524,16 @@ function handleVoidInvoice_(clientSheetId, payload) {
     // happened above and the operator will see a reconciliation warning on
     // the next anomaly sweep (runBillingAnomalySweep) if any rows were left
     // behind.
+    //
+    // v38.x — ORPHAN-AWARE. CB cleanup now runs BEFORE the not-found bail.
+    // Pre-fix, the handler bailed with NOT_FOUND whenever no client-sheet row
+    // carried the invoice # — which made invoices that exist ONLY in
+    // Consolidated_Ledger + invoice_tracking (e.g. a storage-summary invoice
+    // whose synthetic line never wrote a sheet row — the Allison Lind
+    // 2026-05-30 incident) impossible to void from the app; they required the
+    // runVoidOrphanInvoices script. Running CB cleanup first, then gating the
+    // bail on "no sheet rows AND no CB rows deleted", lets the app's Void
+    // button clean up these CB-only orphans directly.
     var cbCleanup = { deleted: 0 };
     try {
       cbCleanup = api_deleteCbRowsByInvoiceNo_(invoiceNo);
@@ -15536,6 +15544,19 @@ function handleVoidInvoice_(clientSheetId, payload) {
       Logger.log("handleVoidInvoice_: CB cleanup failed for " + invoiceNo + ": " + cbErr.message);
       cbCleanup = { deleted: 0, error: String(cbErr.message || cbErr) };
     }
+    var cbDeleted = (cbCleanup && cbCleanup.deleted) || 0;
+
+    // Bail ONLY when there is genuinely nothing to void anywhere — no client
+    // sheet rows AND no Consolidated_Ledger rows (a typo'd / already-fully-
+    // cleaned invoice number). An orphan (CB rows present, no sheet rows) falls
+    // through and gets cleaned below.
+    if (voided === 0 && skippedAlreadyVoid === 0 && cbDeleted === 0) {
+      return errorResponse_(
+        "No rows found for invoice " + invoiceNo + " on the client sheet or in Consolidated_Ledger.",
+        "NOT_FOUND"
+      );
+    }
+    var isOrphanVoid = (voided === 0 && skippedAlreadyVoid === 0);
 
     // v38.194.0 — Drop the invoice_tracking row so the React Invoice Review
     // tab doesn't show a voided invoice with stale "pushed" state. Voided
@@ -15572,6 +15593,9 @@ function handleVoidInvoice_(clientSheetId, payload) {
       alreadyVoid: skippedAlreadyVoid,
       cbRowsDeleted: cbCleanup.deleted || 0,
       cbCleanupError: cbCleanup.error || null,
+      // v38.x — true when the invoice had no client-sheet rows and was cleaned
+      // from Consolidated_Ledger + invoice_tracking only (CB-only orphan).
+      orphanVoid: isOrphanVoid,
       sbVoided: !!sbVoidResult.ok,
       sbError: sbVoidResult.error || null
     });
