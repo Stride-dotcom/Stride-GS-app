@@ -1904,6 +1904,9 @@ export interface SupabaseDtOrderRow {
   details: string | null;
   driver_notes: string | null;
   internal_notes: string | null;
+  /** v42 — per-leg notes split. NULL on rows created pre-split (back-compat). */
+  pickup_notes: string | null;
+  delivery_notes: string | null;
   latest_note_preview: string | null;
   linked_order_id: string | null;
   // Pickup→Delivery propagation (2026-05-13). Populated by
@@ -2039,6 +2042,14 @@ export interface DtOrderForUI {
   details: string;
   driverNotes: string;
   internalNotes: string;
+  /** v42 — per-leg notes split. Falls back to driverNotes for legacy
+   *  rows. On a delivery order this is the pickup leg's notes; on a
+   *  pickup order this is its own notes. The DT push uses the same
+   *  fallback chain server-side. */
+  pickupNotes: string;
+  /** v42 — per-leg notes split for the delivery side. Empty string
+   *  on pickup-only rows. */
+  deliveryNotes: string;
   latestNotePreview: string;
   source: string;
   lastSyncedAt: string;
@@ -2097,6 +2108,23 @@ export interface DtOrderForUI {
   // row when its linked PU leg completes. Drives the "Picked up" banner.
   linkedPickupFinishedAt: string | null;
   linkedPickupDriverName: string | null;
+  // Multi-pickup Phase 1 (v42 / 2026-05-29) — populated on the delivery
+  // row from dt_pickup_links. Empty array on standalone deliveries,
+  // pickup-only orders, and orders with no linked pickup. The OrderPage
+  // renders one row per linked pickup with status + completion warning.
+  linkedPickups: Array<{
+    id: string;                              // dt_pickup_links.id
+    pickupOrderId: string;
+    pickupDtIdentifier: string | null;       // joined from dt_orders for display
+    pickupContactName: string | null;        // joined
+    pickupLabel: string | null;              // operator-editable, defaults to contact name
+    pickupNotes: string | null;              // per-leg crosstalk shown to delivery crew
+    pickupCompletionNotes: string | null;    // driver-entered notes captured after PU
+    sortOrder: number;
+    pickupStatusId: number | null;           // joined; drives "Pending / In Transit / Complete"
+    pickupFinishedAt: string | null;         // joined; drives completion timestamp display
+    pickupDriverName: string | null;         // joined
+  }>;
   // DT sync-back (export.xml mirror) — see SupabaseDtOrderRow for source.
   scheduledAt: string | null;
   startedAt: string | null;
@@ -2300,6 +2328,8 @@ export async function fetchDtOrdersFromSupabase(
         details: row.details ?? '',
         driverNotes: row.driver_notes ?? '',
         internalNotes: row.internal_notes ?? '',
+        pickupNotes: row.pickup_notes ?? '',
+        deliveryNotes: row.delivery_notes ?? '',
         serviceTimeMinutes: row.service_time_minutes != null ? Number(row.service_time_minutes) : null,
         coverageCharge: row.coverage_charge != null ? Number(row.coverage_charge) : null,
         taxAmount: row.tax_amount != null ? Number(row.tax_amount) : null,
@@ -2377,6 +2407,10 @@ export async function fetchDtOrdersFromSupabase(
         linkedOrderId: row.linked_order_id,
         linkedPickupFinishedAt: row.linked_pickup_finished_at,
         linkedPickupDriverName: row.linked_pickup_driver_name,
+        // List query intentionally returns empty linkedPickups — too
+        // expensive to JOIN for every row. OrderPage refetches the
+        // full pickups list via fetchDtOrderByIdFromSupabase.
+        linkedPickups: [],
         createdAt: row.created_at ?? '',
         // DT sync-back
         scheduledAt: row.scheduled_at,
@@ -2420,6 +2454,52 @@ export async function fetchDtOrderByIdFromSupabase(
     const row = data as SupabaseDtOrderRow;
     const status = row.status_id != null ? statusMap.get(row.status_id) : undefined;
     const isDraft = row.review_status === 'draft';
+
+    // Multi-pickup Phase 1 — fetch linked pickup join rows + the pickup
+    // dt_orders details for display. Always run the query (cheap; returns
+    // [] on standalone orders). Joins with the pickup_order side of
+    // dt_orders for identifier / contact_name / status_id / finished_at /
+    // driver_name so the OrderPage can render per-leg status badges
+    // without a second round-trip. Empty array when no links exist —
+    // OrderPage falls back to the scalar linked_order_id path for
+    // back-compat.
+    const { data: linkRows } = await supabase
+      .from('dt_pickup_links')
+      .select(`
+        id,
+        pickup_order_id,
+        pickup_label,
+        pickup_notes,
+        pickup_completion_notes,
+        sort_order,
+        pickup_order:pickup_order_id (
+          dt_identifier,
+          contact_name,
+          status_id,
+          finished_at,
+          driver_name
+        )
+      `)
+      .eq('delivery_order_id', orderId)
+      .order('sort_order', { ascending: true });
+
+    const linkedPickups: DtOrderForUI['linkedPickups'] = (((linkRows ?? []) as unknown) as Array<Record<string, unknown>>).map(lr => {
+      const puJoin = (lr.pickup_order as Record<string, unknown> | null) ?? {};
+      return {
+        id:                    String(lr.id ?? ''),
+        pickupOrderId:         String(lr.pickup_order_id ?? ''),
+        pickupDtIdentifier:    (puJoin.dt_identifier  as string | null | undefined) ?? null,
+        pickupContactName:     (puJoin.contact_name   as string | null | undefined) ?? null,
+        pickupLabel:           (lr.pickup_label       as string | null | undefined) ?? null,
+        pickupNotes:           (lr.pickup_notes       as string | null | undefined) ?? null,
+        pickupCompletionNotes: (lr.pickup_completion_notes as string | null | undefined) ?? null,
+        sortOrder:             Number(lr.sort_order ?? 0),
+        pickupStatusId:        (puJoin.status_id      as number | null | undefined) ?? null,
+        pickupFinishedAt:      (puJoin.finished_at    as string | null | undefined) ?? null,
+        pickupDriverName:      (puJoin.driver_name    as string | null | undefined) ?? null,
+      };
+    });
+
     // Same status-derivation hierarchy as the list query — see
     // fetchDtOrdersFromSupabase for the rationale.
     const hasDtStatus = !!status;
@@ -2466,6 +2546,8 @@ export async function fetchDtOrderByIdFromSupabase(
       details: row.details ?? '',
       driverNotes: row.driver_notes ?? '',
       internalNotes: row.internal_notes ?? '',
+      pickupNotes: row.pickup_notes ?? '',
+      deliveryNotes: row.delivery_notes ?? '',
       serviceTimeMinutes: row.service_time_minutes != null ? Number(row.service_time_minutes) : null,
       coverageCharge: row.coverage_charge != null ? Number(row.coverage_charge) : null,
       taxAmount: row.tax_amount != null ? Number(row.tax_amount) : null,
@@ -2539,6 +2621,7 @@ export async function fetchDtOrderByIdFromSupabase(
       linkedOrderId: row.linked_order_id,
       linkedPickupFinishedAt: row.linked_pickup_finished_at,
       linkedPickupDriverName: row.linked_pickup_driver_name,
+      linkedPickups,
       createdAt: row.created_at ?? '',
       // DT sync-back
       scheduledAt: row.scheduled_at,
