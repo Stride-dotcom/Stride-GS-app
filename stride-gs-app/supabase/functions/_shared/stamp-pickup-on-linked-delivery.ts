@@ -27,6 +27,18 @@
  * quantity) + pickup_return_codes = ['Pick Up']. Closes the silent-skip
  * class for delivery items created without a pickup-side counterpart.
  *
+ * Leg-aware (2026-05-30): when the linked delivery has more than one
+ * pickup leg (dt_pickup_links rows), the blanket pass scopes its
+ * writes to items belonging to THIS leg only — items with
+ * `pickup_leg_id` matching the completing leg's link id, OR whose
+ * `parent_pickup_item_id` points at a pickup item from this pickup
+ * order. Items without either marker stay untouched so the next
+ * leg's completion can stamp them when its turn comes. If NO items
+ * on the delivery have pickup_leg_id set (legacy orders pre-
+ * migration 20260530140000), the blanket pass falls back to the
+ * original "stamp every unstamped item" behaviour — same as
+ * single-pickup orders before the multi-leg work.
+ *
  * Order-level merge rules (so the poll path can correct the webhook
  * path without overwriting good data with NULL):
  *   linked_pickup_finished_at = COALESCE(pickup.finished_at, now())
@@ -90,6 +102,7 @@ interface PickupItemRow {
 interface DeliveryItemRow {
   id: string;
   parent_pickup_item_id: string | null;
+  pickup_leg_id: string | null;
   dt_item_code: string | null;
   quantity: number | null;
   original_quantity: number | null;
@@ -165,8 +178,11 @@ export async function stampPickupOnLinkedDelivery(
     .eq('tenant_id', p.tenant_id);
   const orderLevelStamped = !orderErr;
 
-  // ── 4. Load PU items + Delivery items in parallel ────────────────
-  const [pickupItemsRes, deliveryItemsRes] = await Promise.all([
+  // ── 4. Load PU items + Delivery items + this pickup's link row ───
+  // The link row is needed to scope the blanket pass to items
+  // belonging to THIS leg only (multi-pickup orders). Loaded in
+  // parallel with items so the round-trip cost is one RTT.
+  const [pickupItemsRes, deliveryItemsRes, linkRowRes] = await Promise.all([
     supabase
       .from('dt_order_items')
       .select('id, dt_item_code, delivered, delivered_quantity, item_note, return_codes, removed_at')
@@ -174,13 +190,19 @@ export async function stampPickupOnLinkedDelivery(
       .is('removed_at', null),
     supabase
       .from('dt_order_items')
-      .select('id, parent_pickup_item_id, dt_item_code, quantity, original_quantity, item_note, picked_up_at, pickup_item_note, pickup_return_codes, pickup_delivered_quantity')
+      .select('id, parent_pickup_item_id, pickup_leg_id, dt_item_code, quantity, original_quantity, item_note, picked_up_at, pickup_item_note, pickup_return_codes, pickup_delivered_quantity')
       .eq('dt_order_id', d.id)
       .is('removed_at', null),
+    supabase
+      .from('dt_pickup_links')
+      .select('id')
+      .eq('pickup_order_id', p.id)
+      .maybeSingle(),
   ]);
 
   const pickupItems   = (pickupItemsRes.data   ?? []) as PickupItemRow[];
   const deliveryItems = (deliveryItemsRes.data ?? []) as DeliveryItemRow[];
+  const thisLegId     = (linkRowRes.data as { id: string } | null)?.id ?? null;
 
   // Eligible PU items = delivered=true with non-empty content key
   const eligiblePickup = pickupItems.filter(r => r.delivered === true);
@@ -229,41 +251,49 @@ export async function stampPickupOnLinkedDelivery(
     itemsStamped += (data ?? []).length;
   }
 
-  // ── 5b. Blanket stamp — items with no PU match still rode the truck ──
-  // When the pickup order reaches Completed, every item on the linked
-  // delivery should reflect that pickup happened — even items with no
-  // `parent_pickup_item_id` FK and no `dt_item_code` match against an
-  // eligible PU row. Real-world reason: P+D pairs frequently have
-  // delivery items created from inventory in the modal without an
-  // explicit pickup-side counterpart (the pickup is a leg-level event,
-  // not a per-item event), and historical rows from before the FK
-  // backfill have NULL parent_pickup_item_id. Pre-fix, those items
-  // stayed picked_up_at=NULL forever, and downstream surfaces (UI badges,
-  // dt-push-order's "[✓ Picked up M/D DRIVER]" prefix, billing prompts)
-  // silently skipped them. JAS-00096-ROZE-D 2026-05-28 surfaced this:
-  // 1 of 9 delivery items stamped, the rest dark.
+  // ── 5b. Blanket stamp — leg-aware (2026-05-30) ───────────────────
   //
-  // Defaults applied (audit-column writes only — never touch the
-  // delivery's own quantity / item_note / return_codes):
-  //   • pickup_delivered_quantity ← dit.quantity
-  //       (assumes all pieces picked up; matches the leg-level
-  //        invariant — if the driver had partial PU on these items,
-  //        the operator would have edited the PU manifest, which
-  //        would have produced a parent_pickup_item_id link via the
-  //        modal or the dt-sync-statuses P+D mirror)
-  //   • pickup_return_codes       ← ['Pick Up']
-  //       (DT's generic "this was picked up" return code; the
-  //        Tier-B path above uses the actual codes from the matched
-  //        PU row when available)
-  //   • picked_up_at              ← finishedAt (same as matched paths)
+  // When the pickup order reaches Completed, items on the linked
+  // delivery that still have picked_up_at=NULL after the FK + code
+  // passes get stamped — same defaults as before (picked_up_at,
+  // pickup_delivered_quantity = dit.quantity, pickup_return_codes =
+  // ['Pick Up']). The original blanket pass landed pre-multi-pickup
+  // to fix JAS-00096-ROZE (1 of 9 items stamped). The leg-aware
+  // refinement is necessary because the same blanket pass on a
+  // multi-pickup order would stamp items belonging to a DIFFERENT
+  // pickup leg that hasn't completed yet — falsely showing them as
+  // picked up.
+  //
+  // Eligibility rule for the blanket pass:
+  //   • If this delivery has a leg-tagged item population (any item
+  //     with pickup_leg_id != NULL), only items where either:
+  //       (a) pickup_leg_id === this leg's link id, OR
+  //       (b) parent_pickup_item_id points at a pickup item from
+  //           this pickup order (covers items that were tagged via
+  //           the FK forward path before pickup_leg_id was wired in)
+  //     are eligible. Items belonging to a different leg (or warehouse
+  //     items with no leg tag) stay untouched until their leg fires.
+  //   • If NO item on the delivery has pickup_leg_id set (legacy
+  //     orders predating migration 20260530140000), the blanket pass
+  //     falls back to the original "every unstamped item" behaviour —
+  //     same coverage as today on single-pickup orders, since legacy
+  //     orders are effectively single-pickup.
   //
   // Idempotent via `.is('picked_up_at', null)` — never overwrites a
   // prior stamp, and itemsStamped only counts rows where the WHERE
   // clause matched (rows already stamped this run don't double-count).
   const matchedStampIds = new Set([...stampByFKIds, ...stampByCodeCodes]);
-  const blanketCandidates = deliveryItems.filter(dit =>
-    !dit.picked_up_at && !matchedStampIds.has(dit.id),
-  );
+  const anyLegTagged = deliveryItems.some(dit => dit.pickup_leg_id != null);
+  const pickupItemIdSet = new Set(pickupItems.map(pi => pi.id));
+  const blanketCandidates = deliveryItems.filter(dit => {
+    if (dit.picked_up_at) return false;
+    if (matchedStampIds.has(dit.id)) return false;
+    if (!anyLegTagged) return true;  // legacy fallback — stamp all
+    // Leg-aware mode: item must belong to THIS leg.
+    if (thisLegId && dit.pickup_leg_id === thisLegId) return true;
+    if (dit.parent_pickup_item_id && pickupItemIdSet.has(dit.parent_pickup_item_id)) return true;
+    return false;
+  });
   for (const dit of blanketCandidates) {
     const { data } = await supabase
       .from('dt_order_items')
