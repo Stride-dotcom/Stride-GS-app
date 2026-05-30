@@ -1,5 +1,20 @@
 /**
- * dt-sync-statuses — Supabase Edge Function — v19 2026-05-22 PST
+ * dt-sync-statuses — Supabase Edge Function — v20 2026-05-29 PST
+ *
+ * v20: Multi-pickup Phase 1 — pickup-completion notes relay. When a
+ *      pickup leg transitions to Completed (orderIsFinishedAfterPoll &&
+ *      order_type='pickup'), aggregate driver-authored notes from
+ *      parsed.notes (the fresh export.xml notes block just inserted
+ *      into dt_order_notes) and write them onto
+ *      dt_pickup_links.pickup_completion_notes for the linked join row.
+ *      The delivery's OrderPage surfaces this as a highlighted warning
+ *      section so the delivery crew sees pickup-side surprises ("rug
+ *      arrived wet", "missing hardware") before they roll out. Falls
+ *      back to a defensive INSERT against dt_pickup_links when the
+ *      backfill hasn't created a join row yet for legacy P+D pairs.
+ *      Idempotent: re-running on the same pickup overwrites with the
+ *      same (driver-sourced) text and is a no-op against UI edits since
+ *      this column is driver-only and not operator-editable.
  *
  * v19: Mirror DT's scheduled date back into dt_orders.dt_scheduled_date
  *      every poll (date-only portion of parsed.scheduled_at), and when
@@ -941,6 +956,83 @@ Deno.serve(async (req) => {
           );
         } else if (stampResult.skippedReason && stampResult.skippedReason !== 'no_linked_delivery') {
           console.log(`[dt-sync-statuses] pickup-stamp order=${o.dt_identifier} skipped: ${stampResult.skippedReason}`);
+        }
+
+        // ── v20: Pickup-completion notes relay → dt_pickup_links ─────────
+        // When the pickup completes, the driver may have left notes on
+        // the DT card (item damage, missing hardware, partial pickup
+        // explanation, etc.). parsed.notes carries the freshly-fetched
+        // export.xml notes block — filter to driver-authored entries and
+        // write the concatenated body to the join row's
+        // pickup_completion_notes column. The delivery's OrderPage
+        // surfaces this as a highlighted warning section for the
+        // delivery crew.
+        //
+        // Why filter to driver: dispatcher + app-author notes are
+        // already visible in dt_order_notes on the pickup row itself
+        // (the delivery team sees them by clicking through to the
+        // pickup). Driver notes added during the pickup are the ones
+        // the delivery crew would otherwise miss — those are surfaced
+        // inline on the delivery instead. inferAuthorType handles the
+        // classification consistently with the dt_order_notes insert
+        // above.
+        //
+        // Idempotency: re-running on the same pickup overwrites with the
+        // same driver-sourced text. No operator UI edit path exists for
+        // this column, so an UPDATE wins safely.
+        if (stampResult.fired && stampResult.linkedDeliveryId) {
+          const driverNoteBodies = parsed.notes
+            .filter(n => inferAuthorType(n.author) === 'driver')
+            .map(n => {
+              const author = (n.author || '').trim();
+              const body   = (n.body   || '').trim();
+              return author ? `${author}: ${body}` : body;
+            })
+            .filter(s => s.length > 0);
+          const completionNotes = driverNoteBodies.length > 0
+            ? driverNoteBodies.join('\n\n')
+            : null;
+          // Always write (even null) so a pickup whose driver-note was
+          // deleted in DT doesn't keep a stale warning on the delivery.
+          // Skip the UPDATE when the row already holds the same value
+          // (cheap NOP suppression — stampResult.fired is true on every
+          // poll after pickup completion, and the relay would otherwise
+          // re-issue the same write each cycle forever).
+          const { data: existingLink } = await supabase
+            .from('dt_pickup_links')
+            .select('id, pickup_completion_notes')
+            .eq('pickup_order_id', o.id)
+            .maybeSingle();
+          if (existingLink?.id) {
+            const existingNotes = (existingLink as { pickup_completion_notes: string | null }).pickup_completion_notes ?? null;
+            if (existingNotes !== completionNotes) {
+              const { error: linkErr } = await supabase
+                .from('dt_pickup_links')
+                .update({ pickup_completion_notes: completionNotes })
+                .eq('id', existingLink.id);
+              if (linkErr) {
+                result.errors.push(`${o.dt_identifier} pickup_completion_notes: ${linkErr.message}`);
+              }
+            }
+          } else if (completionNotes && o.tenant_id) {
+            // Defensive: legacy P+D pair that wasn't picked up by the
+            // migration backfill (e.g. tenant_id newly populated post-
+            // backfill). Insert a join row on-demand so the relay still
+            // lands. sort_order=0 = the original "-P" leg.
+            const { error: linkErr } = await supabase
+              .from('dt_pickup_links')
+              .insert({
+                tenant_id:               o.tenant_id,
+                delivery_order_id:       stampResult.linkedDeliveryId,
+                pickup_order_id:         o.id,
+                pickup_label:            null,
+                pickup_completion_notes: completionNotes,
+                sort_order:              0,
+              });
+            if (linkErr) {
+              result.errors.push(`${o.dt_identifier} pickup_completion_notes insert: ${linkErr.message}`);
+            }
+          }
         }
 
         // ── Push-back: re-push the linked delivery to DT ──────────────────

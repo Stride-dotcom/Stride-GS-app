@@ -1,5 +1,24 @@
 /**
- * dt-push-order — Supabase Edge Function (Phase 2c) — v41 2026-05-26 PST
+ * dt-push-order — Supabase Edge Function (Phase 2c) — v42 2026-05-29 PST
+ *
+ * v42: Multi-pickup Phase 1 — per-leg notes split + completion warning relay.
+ *      Previously a single `driver_notes` column pushed to BOTH legs of a
+ *      P+D pair, so dispatch couldn't give the pickup driver different
+ *      instructions than the delivery crew. v42 reads:
+ *        • dt_orders.pickup_notes   on the pickup leg
+ *        • dt_orders.delivery_notes on the delivery leg
+ *      Each falls back to legacy driver_notes/order_notes/details when
+ *      the per-leg column is NULL so rows created pre-split keep
+ *      producing identical DT payloads.
+ *
+ *      Delivery-leg push also fetches dt_pickup_links rows for this
+ *      delivery and prepends any pickup_completion_notes (driver-
+ *      authored notes captured by dt-sync-statuses after the pickup
+ *      finished) as a "⚠ PICKUP NOTES FROM DRIVER:" warning so the
+ *      delivery crew sees pickup-side surprises ("rug arrived wet",
+ *      "missing hardware") in their DT card. Empty/missing
+ *      pickup_completion_notes → no prefix, unchanged behavior.
+ *
  * v41: DT account verification fallback. Symptom: NIP-00127 (2026-05-26)
  *      was the first push to a brand-new tenant. The Stride map had the
  *      tenant correctly mapped to "NIP TUCK REMODELING" but DT's actual
@@ -352,6 +371,15 @@ interface DtOrderRow {
   order_notes: string | null;
   driver_notes: string | null;
   internal_notes: string | null;
+  /** v42 — per-leg notes split. Pushed as the Public DT note when
+   *  this row is the pickup leg of a P+D pair (or a standalone pickup).
+   *  Falls back to driver_notes / order_notes / details on push if
+   *  NULL so pre-v42 rows keep producing identical DT payloads. */
+  pickup_notes: string | null;
+  /** v42 — per-leg notes split for the delivery side. Pushed as the
+   *  Public DT note when this row is the delivery leg of a P+D pair
+   *  (or a standalone delivery). Same back-compat fallback chain. */
+  delivery_notes: string | null;
   service_time_minutes: number | null;
   review_status: string | null;
   pushed_to_dt_at: string | null;
@@ -771,6 +799,12 @@ function buildOrderXml(
   linkedDeliveryInfo?: { identifier: string; contactName?: string; address?: string; city?: string; state?: string; zip?: string },
   attachmentsField?: string,
   groups: Set<DtFieldGroup> | null = null,
+  // v42 — pickup-completion-notes warning prefix prepended onto the
+  // delivery-leg Public note. Caller (pushSingleOrder) fetches
+  // dt_pickup_links and concatenates pickup_completion_notes from all
+  // linked pickups; we just splice the resulting string in here. Empty
+  // string (or undefined) → no prefix, behaviour identical to pre-v42.
+  completionWarningPrefix: string = '',
 ): string {
   const include = makeIncluder(groups);
   const nameParts = (order.contact_name || '').trim().split(/\s+/);
@@ -845,21 +879,37 @@ function buildOrderXml(
     ? buildOrderDescription(order, accountName, crossRefIdent, linkedDeliveryInfo)
     : '';
 
-  // Build notes XML. Phase 1 introduces three free-text columns:
-  //   • details        → "Order Details" — operator/customer-facing
-  //                      summary, mirrored into the <description> CDATA
-  //                      block (DT dispatcher view).
-  //   • driver_notes   → on-site instructions. Pushed as a Public
-  //                      <note> so the driver app renders them in the
-  //                      notes pane. Falls back to legacy order_notes
-  //                      column for older rows that pre-date the split.
-  //                      Falls back further to `details` so any pre-
-  //                      Phase-1 row still gets driver-visible notes.
+  // Build notes XML. Per-leg split (v42):
+  //   • pickup_notes   → Public <note> for the pickup leg only.
+  //   • delivery_notes → Public <note> for the delivery leg (or
+  //                      standalone delivery). Prefixed with the
+  //                      pickup-completion warning when one is set.
+  //   • driver_notes   → legacy back-compat fallback for rows
+  //                      created pre-v42. order_notes / details
+  //                      fall back further.
   //   • internal_notes → staff-only. Pushed as a Private <note> so
   //                      DT-side staff can see the context but it does
-  //                      NOT render on the driver-app side. Empty if
-  //                      the operator left it blank.
-  const driverFacingNotes = include('notes') ? (order.driver_notes || order.order_notes || order.details || '') : '';
+  //                      NOT render on the driver-app side. Same on
+  //                      both legs (audit-only, not a routing decision).
+  //
+  // The chain stays "use per-leg → fall back to legacy" rather than
+  // "use legacy → overlay per-leg" so once the per-leg column is set
+  // (even to empty string after an operator save) it wins authoritatively.
+  // Empty-string is normalized to null upstream (OrderPage save handler
+  // trims and converts) so a deliberate "clear notes" lands as null and
+  // the chain falls to the next non-null. Good enough back-compat shim
+  // until Phase 2 drops the legacy column.
+  const perLegNotes = isPickupLeg
+    ? (order.pickup_notes ?? null)
+    : (order.delivery_notes ?? null);
+  const legNotesBody = perLegNotes ?? order.driver_notes ?? order.order_notes ?? order.details ?? '';
+  // Prepend the completion-warning prefix only for the delivery leg
+  // (it's the delivery crew that needs the warning). Pickup leg always
+  // gets clean per-leg notes.
+  const warningPrefix = !isPickupLeg && completionWarningPrefix
+    ? completionWarningPrefix + '\n\n'
+    : '';
+  const driverFacingNotes = include('notes') ? (warningPrefix + legNotesBody) : '';
   const internalFacingNotes = include('notes') ? (order.internal_notes || '') : '';
   const noteEntries: string[] = [];
   if (driverFacingNotes) {
@@ -1214,7 +1264,38 @@ async function pushSingleOrder(
   // share-row side effect would be pointless churn.
   const buildAttachments = groups === null || groups.has('custom');
   const attachmentsField = buildAttachments ? await buildAttachmentsField(supabase, order) : '';
-  const xml = buildOrderXml(order, items, accountName, crossRefIdent, linkedDeliveryInfo, attachmentsField, groups);
+
+  // v42 — pickup-completion warnings for the delivery leg. dt-sync-statuses
+  // writes pickup_completion_notes onto dt_pickup_links when a linked
+  // pickup completes; we surface them inline on the delivery's DT card
+  // so the delivery driver sees pickup-side surprises in their notes
+  // pane. Only fetched for delivery legs (orderType pickup_and_delivery
+  // or delivery) AND only when the notes group is in scope (a scoped
+  // re-push that didn't touch notes skips this entirely to avoid
+  // overwriting dispatcher annotations). Empty result → no prefix.
+  let completionWarningPrefix = '';
+  const orderTypeForLegCheck = order.order_type || (order.is_pickup ? 'pickup' : 'delivery');
+  const isDeliveryLeg = orderTypeForLegCheck !== 'pickup' && orderTypeForLegCheck !== 'service_only';
+  if (isDeliveryLeg && (groups === null || groups.has('notes'))) {
+    const { data: linkRows } = await supabase
+      .from('dt_pickup_links')
+      .select('pickup_label, pickup_completion_notes, sort_order')
+      .eq('delivery_order_id', order.id)
+      .order('sort_order', { ascending: true });
+    const warnings = ((linkRows ?? []) as Array<{ pickup_label: string | null; pickup_completion_notes: string | null; sort_order: number | null }>)
+      .filter(r => (r.pickup_completion_notes ?? '').trim().length > 0)
+      .map((r, _i, arr) => {
+        const labelPart = r.pickup_label
+          ? r.pickup_label
+          : (arr.length > 1 ? `Pickup ${(r.sort_order ?? 0) + 1}` : 'Pickup');
+        return `${labelPart}: ${(r.pickup_completion_notes ?? '').trim()}`;
+      });
+    if (warnings.length > 0) {
+      completionWarningPrefix = '⚠ PICKUP NOTES FROM DRIVER:\n' + warnings.join('\n');
+    }
+  }
+
+  const xml = buildOrderXml(order, items, accountName, crossRefIdent, linkedDeliveryInfo, attachmentsField, groups, completionWarningPrefix);
   console.log(`[dt-push-order] POST order=${order.dt_identifier} type=${order.order_type || 'delivery'} items=${items.length} account=${accountName}${crossRefIdent ? ` crossRef=${crossRefIdent}` : ''} scope=${groups === null ? 'FULL' : [...groups].join(',')}`);
   console.log(`[dt-push-order] XML payload:\n${xml.slice(0, 800)}`);
   try {
@@ -1286,7 +1367,7 @@ Deno.serve(async (req: Request) => {
   // ── 1. Fetch primary order ────────────────────────────────────────────
   const { data: order, error: orderErr } = await supabase
     .from('dt_orders')
-    .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_phone2, contact_email, local_service_date, dt_scheduled_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, order_notes, driver_notes, internal_notes, service_time_minutes, review_status, pushed_to_dt_at, billing_method, order_total, base_delivery_fee, extra_items_count, extra_items_fee, accessorials_json, accessorials_total, coverage_option_id, coverage_charge, declared_value, billing_review_status, paid_at, paid_amount, paid_method, linked_pickup_driver_name')
+    .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_phone2, contact_email, local_service_date, dt_scheduled_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, order_notes, driver_notes, internal_notes, pickup_notes, delivery_notes, service_time_minutes, review_status, pushed_to_dt_at, billing_method, order_total, base_delivery_fee, extra_items_count, extra_items_fee, accessorials_json, accessorials_total, coverage_option_id, coverage_charge, declared_value, billing_review_status, paid_at, paid_amount, paid_method, linked_pickup_driver_name')
     .eq('id', orderId)
     .maybeSingle();
 
@@ -1408,7 +1489,7 @@ Deno.serve(async (req: Request) => {
     // works the same either direction.
     const { data: linkedOrder, error: linkedErr } = await supabase
       .from('dt_orders')
-      .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_phone2, contact_email, local_service_date, dt_scheduled_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, order_notes, driver_notes, internal_notes, service_time_minutes, review_status, pushed_to_dt_at, billing_method, order_total, base_delivery_fee, extra_items_count, extra_items_fee, accessorials_json, accessorials_total, billing_review_status, paid_at, paid_amount, paid_method, linked_pickup_driver_name')
+      .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_phone2, contact_email, local_service_date, dt_scheduled_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, order_notes, driver_notes, internal_notes, pickup_notes, delivery_notes, service_time_minutes, review_status, pushed_to_dt_at, billing_method, order_total, base_delivery_fee, extra_items_count, extra_items_fee, accessorials_json, accessorials_total, billing_review_status, paid_at, paid_amount, paid_method, linked_pickup_driver_name')
       .eq('id', orderTyped.linked_order_id)
       .maybeSingle();
 

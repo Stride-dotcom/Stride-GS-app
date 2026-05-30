@@ -42,6 +42,11 @@ const COLUMN_GROUP: Readonly<Record<string, DtFieldGroup>> = {
   details: 'notes',
   driver_notes: 'notes',
   order_notes: 'notes',
+  // v42 — per-leg notes columns. Same DT XML group as legacy
+  // driver_notes since they all land in the same <notes>/<note> block;
+  // the per-leg routing happens server-side in dt-push-order.
+  pickup_notes: 'notes',
+  delivery_notes: 'notes',
   internal_notes: 'notes',
   billing_method: 'notes',
   coverage_option_id: 'notes',
@@ -87,6 +92,8 @@ const COLUMN_LABEL: Readonly<Record<string, string>> = {
   details: 'Order details',
   driver_notes: 'Driver notes',
   order_notes: 'Order notes',
+  pickup_notes: 'Pickup notes',
+  delivery_notes: 'Delivery notes',
   internal_notes: 'Internal notes',
   billing_method: 'Billing method',
   coverage_option_id: 'Coverage',
