@@ -246,7 +246,13 @@ export function AddPickupLegModal({ open, onClose, deliveryOrder, onSuccess }: P
       //    race window is negligible. legFee=0 (out-of-service zip /
       //    call-for-quote) skips the bump; operators will price those
       //    manually during the same review pass that already handles
-      //    out-of-service zips on initial create.
+      //    out-of-service zips on initial create. Rounded to 2dp on
+      //    write so successive adds don't drift the parent total into
+      //    sub-cent float noise (JS Number sum of 0.1 + 0.2 + …).
+      //    bumpFailed propagates into the final alert so the operator
+      //    learns about a missed bill instead of seeing a green
+      //    success message while the parent stays under-billed.
+      let bumpFailed: string | null = null;
       if (legFee > 0) {
         const { data: parentRow, error: parentSelErr } = await supabase
           .from('dt_orders')
@@ -254,21 +260,23 @@ export function AddPickupLegModal({ open, onClose, deliveryOrder, onSuccess }: P
           .eq('id', deliveryOrder.id)
           .maybeSingle();
         if (parentSelErr) {
-          console.warn('[AddPickupLegModal] parent delivery fetch for fee bump failed:', parentSelErr.message);
-        } else if (parentRow) {
+          bumpFailed = `fetch failed: ${parentSelErr.message}`;
+        } else if (!parentRow) {
+          bumpFailed = 'parent delivery row not found';
+        } else {
           const currentBase  = Number((parentRow as { base_delivery_fee: number | null }).base_delivery_fee ?? 0);
           const currentTotal = Number((parentRow as { order_total:        number | null }).order_total        ?? 0);
+          const roundCents = (n: number) => Math.round(n * 100) / 100;
           const { error: bumpErr } = await supabase
             .from('dt_orders')
             .update({
-              base_delivery_fee: currentBase  + legFee,
-              order_total:       currentTotal + legFee,
+              base_delivery_fee: roundCents(currentBase  + legFee),
+              order_total:       roundCents(currentTotal + legFee),
             })
             .eq('id', deliveryOrder.id);
-          if (bumpErr) {
-            console.warn('[AddPickupLegModal] parent delivery fee bump failed:', bumpErr.message);
-          }
+          if (bumpErr) bumpFailed = `update failed: ${bumpErr.message}`;
         }
+        if (bumpFailed) console.warn('[AddPickupLegModal] parent delivery fee bump failed:', bumpFailed);
       }
 
       // 6. Auto-push to DT so the operator doesn't have to remember
@@ -309,12 +317,20 @@ export function AddPickupLegModal({ open, onClose, deliveryOrder, onSuccess }: P
       onSuccess();
       onClose();
       // Native alert: matches the existing footer-button DT push UX
-      // pattern on OrderPage (no toast library in this app).
+      // pattern on OrderPage (no toast library in this app). Layered
+      // success/failure messages: each independent action (push, fee
+      // bump) reports its own state so the operator knows exactly
+      // what to fix manually.
+      const lines: string[] = [];
       if (pushOk) {
-        alert(`Pickup leg ${newPickupIdent} created and pushed to DispatchTrack.`);
+        lines.push(`Pickup leg ${newPickupIdent} created and pushed to DispatchTrack.`);
       } else {
-        alert(`Pickup leg ${newPickupIdent} created in Stride, but the DispatchTrack push failed:\n\n${pushMsg}\n\nOpen the new pickup's page and click Push to retry.`);
+        lines.push(`Pickup leg ${newPickupIdent} created in Stride, but the DispatchTrack push failed:\n${pushMsg}\nOpen the new pickup's page and click Push to retry.`);
       }
+      if (bumpFailed && legFee > 0) {
+        lines.push(`\n⚠ The parent delivery's order total was NOT incremented by $${legFee.toFixed(2)} for this leg (${bumpFailed}). Edit the delivery and add this amount manually so it bills correctly.`);
+      }
+      alert(lines.join('\n'));
     } catch (e) {
       setError((e as Error).message);
     } finally {
