@@ -95,6 +95,13 @@ interface OrderEdit {
   clientReference: string;
   details: string;
   driverNotes: string;
+  // v42 — per-leg notes split. pickupNotes goes to the linked PU
+  // leg's pickup_notes column on save (when this is the delivery leg).
+  // deliveryNotes goes to this row's delivery_notes. dt-push-order
+  // reads each leg's per-leg column when building the DT Public note,
+  // falling back to driverNotes for rows created pre-split.
+  pickupNotes: string;
+  deliveryNotes: string;
   internalNotes: string;
   orderTotal: string;
   baseDeliveryFee: string;
@@ -119,6 +126,15 @@ function orderToEdit(o: DtOrderForUI): OrderEdit {
     clientReference:  o.clientReference ?? '',
     details:          o.details ?? '',
     driverNotes:      o.driverNotes ?? '',
+    // Default the per-leg fields to the legacy driverNotes when the
+    // new column is empty, so an operator editing a pre-split row
+    // sees the legacy text in the field they're about to push on
+    // (rather than losing it visually). On save it lands in the
+    // per-leg column and the legacy column is left untouched (the
+    // back-compat fallback in dt-push-order keeps things consistent
+    // for any other consumer that hasn't been updated yet).
+    pickupNotes:      o.pickupNotes   || ((o.orderType === 'pickup') ? (o.driverNotes ?? '') : ''),
+    deliveryNotes:    o.deliveryNotes || ((o.orderType !== 'pickup') ? (o.driverNotes ?? '') : ''),
     internalNotes:    o.internalNotes ?? '',
     orderTotal:       o.orderTotal != null ? String(o.orderTotal) : '',
     baseDeliveryFee:  o.baseDeliveryFee != null ? String(o.baseDeliveryFee) : '',
@@ -1077,26 +1093,122 @@ function DetailsTab({
         </EPCard>
       )}
 
-      {/* Card 5 — Notes (Driver + Internal). Order Details lives in
-          Card 1 with the rest of the order overview. Driver Notes is
-          visible to all (icon: truck — pushed to DT as a Public note);
-          Internal Notes is staff/admin only (icon: lock — pushed as
-          DT Private, never surfaced to clients or the driver app). */}
+      {/* Card 5 — Notes. v42 split: Pickup Notes (pushed to the pickup
+          leg's DT card) + Delivery Notes (pushed to the delivery leg's
+          DT card). On a delivery's OrderPage both fields render; on a
+          standalone pickup only Pickup Notes. Internal Notes stays
+          staff-only (DT Private, audit-only).
+
+          Multi-pickup Phase 1 also surfaces:
+            • Pickup completion warnings (driver notes from a finished
+              pickup, relayed by dt-sync-statuses v20).
+            • A linked-pickups list when the delivery has multiple
+              pickup legs (sourced from dt_pickup_links). */}
       <EPCard>
         <SectionTitle>Notes</SectionTitle>
+
+        {/* Pickup-completion warning — only on the delivery side, only
+            when at least one linked pickup has driver notes from DT.
+            Highlighted so the delivery crew sees it before pushing
+            off, even if they skim the rest of the card. */}
+        {!thisIsPickupLeg && order.linkedPickups.some(lp => (lp.pickupCompletionNotes ?? '').trim().length > 0) && (
+          <div style={{ background: '#FEF3C7', border: '1px solid #FCD34D', borderRadius: 8, padding: 12, marginBottom: 14 }}>
+            <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: '#92400E', marginBottom: 6, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              ⚠ Pickup Notes from Driver
+            </div>
+            {order.linkedPickups
+              .filter(lp => (lp.pickupCompletionNotes ?? '').trim().length > 0)
+              .map(lp => {
+                const labelDisplay = lp.pickupLabel
+                  ? lp.pickupLabel
+                  : (order.linkedPickups.length > 1 ? `Pickup ${(lp.sortOrder ?? 0) + 1}` : 'Pickup');
+                return (
+                  <div key={lp.id} style={{ marginBottom: 8 }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: '#92400E', marginBottom: 2 }}>{labelDisplay}</div>
+                    <div style={{ fontSize: 13, color: EP.textPrimary, whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>{lp.pickupCompletionNotes}</div>
+                  </div>
+                );
+              })}
+          </div>
+        )}
+
+        {/* Linked-pickups list — when the delivery has any join rows,
+            render one row per pickup with its label + status + per-leg
+            notes. Replaces the single LinkedPickupBanner for multi-
+            pickup orders (the banner still renders at the top for
+            single-pickup back-compat via linked_pickup_finished_at). */}
+        {!thisIsPickupLeg && order.linkedPickups.length > 0 && (
+          <div style={{ marginBottom: 14 }}>
+            <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: EP.textMuted, marginBottom: 6, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              <Truck size={11} /> Linked Pickups ({order.linkedPickups.length})
+            </div>
+            {order.linkedPickups.map(lp => {
+              const labelDisplay = lp.pickupLabel
+                ? lp.pickupLabel
+                : (lp.pickupContactName || `Pickup ${(lp.sortOrder ?? 0) + 1}`);
+              const finishedDisplay = lp.pickupFinishedAt
+                ? `Picked up ${fmtDateTime(lp.pickupFinishedAt)}${lp.pickupDriverName ? ` by ${lp.pickupDriverName}` : ''}`
+                : 'Pending';
+              return (
+                <div key={lp.id} style={{ border: `1px solid ${theme.colors.border}`, borderRadius: 8, padding: 10, marginBottom: 6 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: EP.textPrimary }}>{labelDisplay}</div>
+                      {lp.pickupDtIdentifier && (
+                        <div style={{ fontSize: 11, color: EP.textMuted, marginTop: 2, fontFamily: 'monospace' }}>{lp.pickupDtIdentifier}</div>
+                      )}
+                    </div>
+                    <div style={{ fontSize: 11, color: lp.pickupFinishedAt ? '#15803D' : EP.textMuted, whiteSpace: 'nowrap' }}>{finishedDisplay}</div>
+                  </div>
+                  {lp.pickupNotes && (
+                    <div style={{ fontSize: 12, color: EP.textPrimary, marginTop: 6, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{lp.pickupNotes}</div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
         {editing ? (
           <>
-            <EditField
-              label="Driver Notes"
-              icon={<Truck size={11} />}
-              value={edit.driverNotes}
-              onChange={v => setField('driverNotes', v)}
-              type="textarea"
-              rows={3}
-            />
-            <div style={{ fontSize: 11, color: EP.textMuted, marginTop: -8, marginBottom: 10, lineHeight: 1.5 }}>
-              Notes for the delivery crew — parking instructions, gate codes, building access, or anything they'll need on-site.
-            </div>
+            {/* Pickup Notes — shown on standalone pickups AND on the
+                delivery side of a P+D pair (where they push to the
+                linked pickup row on save). Hidden on standalone
+                deliveries that have no pickup leg. */}
+            {(thisIsPickupLeg || order.orderType === 'pickup_and_delivery' || !!order.linkedOrderId) && (
+              <>
+                <EditField
+                  label="Pickup Notes"
+                  icon={<Truck size={11} />}
+                  value={edit.pickupNotes}
+                  onChange={v => setField('pickupNotes', v)}
+                  type="textarea"
+                  rows={3}
+                />
+                <div style={{ fontSize: 11, color: EP.textMuted, marginTop: -8, marginBottom: 10, lineHeight: 1.5 }}>
+                  Notes for the pickup crew — gate codes, parking instructions, what to grab, anything specific to the pickup site.
+                </div>
+              </>
+            )}
+
+            {/* Delivery Notes — shown on every order except standalone
+                pickups (a standalone pickup has no delivery leg). */}
+            {!thisIsPickupLeg && (
+              <>
+                <EditField
+                  label="Delivery Notes"
+                  icon={<Truck size={11} />}
+                  value={edit.deliveryNotes}
+                  onChange={v => setField('deliveryNotes', v)}
+                  type="textarea"
+                  rows={3}
+                />
+                <div style={{ fontSize: 11, color: EP.textMuted, marginTop: -8, marginBottom: 10, lineHeight: 1.5 }}>
+                  Notes for the delivery crew — building access, install requirements, anything specific to the drop site.
+                </div>
+              </>
+            )}
+
             {isStaff && (
               <>
                 <EditField
@@ -1115,27 +1227,49 @@ function DetailsTab({
           </>
         ) : (
           <>
-            {order.driverNotes && (
-              <div style={{ marginBottom: 10 }}>
-                <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: EP.textMuted, marginBottom: 4, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                  <Truck size={11} /> Driver Notes
-                </div>
-                <div style={{ fontSize: 13, color: EP.textPrimary, whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>{order.driverNotes}</div>
-              </div>
-            )}
-            {isStaff && order.internalNotes && (
-              <div style={{ background: '#FEF3C7', border: '1px solid #FCD34D', borderRadius: 8, padding: 10 }}>
-                <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: '#92400E', marginBottom: 4, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                  <Lock size={11} /> Internal Notes (staff only)
-                </div>
-                <div style={{ fontSize: 13, color: EP.textPrimary, whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>{order.internalNotes}</div>
-              </div>
-            )}
-            {!order.driverNotes && !(isStaff && order.internalNotes) && (
-              <div style={{ fontSize: 12, color: EP.textMuted, fontStyle: 'italic' }}>
-                No driver{isStaff ? ' or internal' : ''} notes on this order yet.
-              </div>
-            )}
+            {/* Read mode — display whichever per-leg field has content,
+                falling back to legacy driverNotes for pre-split rows. */}
+            {(() => {
+              const showPickup   = (thisIsPickupLeg || order.orderType === 'pickup_and_delivery' || !!order.linkedOrderId)
+                                   && (order.pickupNotes || (thisIsPickupLeg && order.driverNotes));
+              const showDelivery = !thisIsPickupLeg
+                                   && (order.deliveryNotes || (!thisIsPickupLeg && order.driverNotes));
+              const pickupBody   = order.pickupNotes   || (thisIsPickupLeg ? order.driverNotes : '');
+              const deliveryBody = order.deliveryNotes || (!thisIsPickupLeg ? order.driverNotes : '');
+              return (
+                <>
+                  {showPickup && (
+                    <div style={{ marginBottom: 10 }}>
+                      <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: EP.textMuted, marginBottom: 4, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                        <Truck size={11} /> Pickup Notes
+                      </div>
+                      <div style={{ fontSize: 13, color: EP.textPrimary, whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>{pickupBody}</div>
+                    </div>
+                  )}
+                  {showDelivery && (
+                    <div style={{ marginBottom: 10 }}>
+                      <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: EP.textMuted, marginBottom: 4, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                        <Truck size={11} /> Delivery Notes
+                      </div>
+                      <div style={{ fontSize: 13, color: EP.textPrimary, whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>{deliveryBody}</div>
+                    </div>
+                  )}
+                  {isStaff && order.internalNotes && (
+                    <div style={{ background: '#FEF3C7', border: '1px solid #FCD34D', borderRadius: 8, padding: 10 }}>
+                      <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: '#92400E', marginBottom: 4, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                        <Lock size={11} /> Internal Notes (staff only)
+                      </div>
+                      <div style={{ fontSize: 13, color: EP.textPrimary, whiteSpace: 'pre-wrap', lineHeight: 1.5 }}>{order.internalNotes}</div>
+                    </div>
+                  )}
+                  {!showPickup && !showDelivery && !(isStaff && order.internalNotes) && (
+                    <div style={{ fontSize: 12, color: EP.textMuted, fontStyle: 'italic' }}>
+                      No pickup, delivery, or internal notes on this order yet.
+                    </div>
+                  )}
+                </>
+              );
+            })()}
           </>
         )}
       </EPCard>
@@ -1798,6 +1932,8 @@ export function OrderPage() {
       clientReference:   edit.clientReference.trim(),
       details:           edit.details.trim(),
       driverNotes:       edit.driverNotes.trim(),
+      pickupNotes:       edit.pickupNotes.trim(),
+      deliveryNotes:     edit.deliveryNotes.trim(),
       internalNotes:     edit.internalNotes.trim(),
       reviewStatus:      edit.reviewStatus,
       reviewNotes:       edit.reviewNotes.trim(),
@@ -1823,6 +1959,14 @@ export function OrderPage() {
         client_reference:   edit.clientReference.trim() || null,
         details:            edit.details.trim()         || null,
         driver_notes:       edit.driverNotes.trim()     || null,
+        // v42 — per-leg notes. On a delivery row, delivery_notes
+        // belongs here; pickup_notes is written to the linked pickup
+        // row below (see linked-pickup write block) so the DT pickup
+        // push picks it up from its own row. On a pickup-only row,
+        // both columns can land here (delivery_notes is harmless
+        // when no delivery leg exists).
+        pickup_notes:       (edit.pickupNotes.trim()    || null),
+        delivery_notes:     (edit.deliveryNotes.trim()  || null),
         internal_notes:     edit.internalNotes.trim()   || null,
         review_status:      edit.reviewStatus,
         review_notes:       edit.reviewNotes.trim()     || null,
@@ -1848,6 +1992,32 @@ export function OrderPage() {
       const { error: err } = await supabase.from('dt_orders').update(patch).eq('id', order.id);
       if (err) throw err;
 
+      // v42 — cross-write Pickup Notes to the linked pickup row.
+      // On a delivery's OrderPage the operator types pickup_notes for
+      // the pickup leg; we mirror that onto the linked pickup row's
+      // own pickup_notes column so dt-push-order picks it up when
+      // building the pickup leg's DT payload (it reads each row's
+      // own pickup_notes). Only fires when this is the delivery side
+      // of a P+D pair AND the value actually changed (avoids touching
+      // the pickup row when an operator only edited delivery_notes).
+      const pickupNotesChanged = edit.pickupNotes !== (order.pickupNotes ?? '');
+      const isPickupLegLocal = order.isPickup === true || order.orderType === 'pickup';
+      if (!isPickupLegLocal && order.linkedOrderId && pickupNotesChanged) {
+        const { error: linkedErr } = await supabase
+          .from('dt_orders')
+          .update({ pickup_notes: edit.pickupNotes.trim() || null })
+          .eq('id', order.linkedOrderId);
+        if (linkedErr) {
+          // Don't abort the save — the delivery-side write already
+          // landed and the pickup notes will still display on the
+          // delivery page from the join-table fetch. Surface as
+          // toast-equivalent (logging here keeps the failure visible
+          // in the FailedOperationsDrawer audit trail without
+          // collapsing the save UX).
+          console.warn(`[OrderPage] failed to mirror pickup_notes to linked pickup ${order.linkedOrderId}: ${linkedErr.message}`);
+        }
+      }
+
       // Audit: inline edit save. Best-effort. Diff is coarse (which
       // top-level fields changed); the patch object is the canonical
       // record of what got written.
@@ -1867,6 +2037,8 @@ export function OrderPage() {
       if (edit.clientReference !== (order.clientReference ?? '')) changedFields.push('clientReference');
       if (edit.details         !== (order.details         ?? '')) changedFields.push('details');
       if (edit.driverNotes     !== (order.driverNotes     ?? '')) changedFields.push('driverNotes');
+      if (edit.pickupNotes     !== (order.pickupNotes     ?? '')) changedFields.push('pickupNotes');
+      if (edit.deliveryNotes   !== (order.deliveryNotes   ?? '')) changedFields.push('deliveryNotes');
       if (edit.internalNotes   !== (order.internalNotes   ?? '')) changedFields.push('internalNotes');
       if (edit.reviewStatus    !== order.reviewStatus)             changedFields.push('reviewStatus');
       if (edit.reviewNotes     !== (order.reviewNotes     ?? '')) changedFields.push('reviewNotes');
@@ -2000,6 +2172,7 @@ export function OrderPage() {
       window_start_local: w5(order.windowStartLocal),
       window_end_local: w5(order.windowEndLocal),
       details: order.details, driver_notes: order.driverNotes,
+      pickup_notes: order.pickupNotes, delivery_notes: order.deliveryNotes,
       internal_notes: order.internalNotes, sidemark: order.sidemark,
       client_reference: order.clientReference,
       // po_number — added 2026-05-20 alongside dt-push-order v36
@@ -2021,6 +2194,7 @@ export function OrderPage() {
       window_start_local: w5(edit.windowStartLocal),
       window_end_local: w5(edit.windowEndLocal),
       details: edit.details.trim(), driver_notes: edit.driverNotes.trim(),
+      pickup_notes: edit.pickupNotes.trim(), delivery_notes: edit.deliveryNotes.trim(),
       internal_notes: edit.internalNotes.trim(), sidemark: edit.sidemark.trim(),
       client_reference: edit.clientReference.trim(),
       po_number: edit.poNumber.trim(),
