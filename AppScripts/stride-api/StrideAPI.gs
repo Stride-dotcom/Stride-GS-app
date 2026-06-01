@@ -1,4 +1,5 @@
 /* ===================================================
+   StrideAPI.gs — v38.254.0 — 2026-06-01 PST — [BILLING] fix: storage-summary rows now carry their sidemark into public.billing (recurrence fix for the Allison Lind 2026-06-01 storage-invoicing failure). Root cause: handleCommitStorageRows_ writes ONE STOR-SUMMARY row per sidemark for separate_by_sidemark clients, but most client Billing_Ledger sheets have NO Sidemark column (v38.78.0 note), so the summary's sidemark — which otherwise lives only in the ledger_row_id slug + grp.display — was never written to a sheet cell. The router's post-commit api_fullClientSync_(tid,["billing"]) (case "commitStorageRows", ~line 9985) resolves each billing row's sidemark from billRows[l]["Sidemark"] with an Inventory-by-Item-ID fallback (~line 9155); a summary row has a BLANK Item ID so both lookups miss → public.billing.sidemark="". React's Billing report reads public.billing and groups by normalizeSidemarkForMatch(sidemark), so all-blank summaries collapsed into one group and per-sidemark invoicing failed the consistency/flip guards (10 invoices failed for Allison Lind). Fix: handleCommitStorageRows_ now api_ensureColumn_(blSh,"Sidemark") for separate_by_sidemark clients before appending summaries, so the existing `if (blCols.sidemark) arr[...]=grp.display` write actually lands. BOTH api_fullClientSync_ AND handleGenerateUnbilledReport_ already read the "Sidemark" column when present, so they pick it up for free — no change needed there. Column is appended at the end (header-mapped readers unaffected); api_ensureColumn_ is a no-op when present. Forward-looking only — existing summary rows were data-backfilled separately. No dollar-total change, no change to v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, or the v38.251.0 storage_billing_items writers.
    StrideAPI.gs — v38.253.0 — 2026-06-01 PST — [BILLING] fix: case-insensitive sidemark guard in handleCreateInvoice_. Symptom: creating an invoice for a separate_by_sidemark=true client (Michelle Dirkse Interiors) whose selected rows carry the SAME logical sidemark in different casing ("FRANCL" + "Francl") failed with SIDEMARK_VIOLATION. Root cause: the v38.193.0 server-side sidemark-consistency guard (~line 27310) keyed its distinct-sidemark set on the raw trimmed string and compared payload-vs-row sidemark with case-sensitive !==, while the React side (Billing.tsx normalizeSidemarkForMatch = trim+toUpperCase) had ALREADY grouped the mixed-case rows into ONE invoice. So React sends a valid single-project payload with mixed row casing + a first-seen-casing payload header, and the GAS guard false-positived it as "2 distinct sidemarks" / "payload doesn't match row". Fix: new inline normSidemark_(s)=trim().toUpperCase() applied (a) when building the rowSidemarks distinct-set and (b) on both sides of the payload-vs-row equality check. The guard STILL catches a genuine content mismatch (two truly different projects in one separate-by-sidemark invoice); only pure case differences are now tolerated, matching React. Pure validation-guard change — does NOT alter what sidemark gets stamped on the invoice/PDF/email/Consolidated_Ledger (still the payload-level value preserving display casing). No schema change, no migration, no React change. No change to v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, or any billing dollar total.
    StrideAPI.gs — v38.252.0 — 2026-05-30 PST — [BILLING] fix: orphan-aware handleVoidInvoice_ so the app's Void button can clean CB-only orphans. Pre-fix the handler bailed with NOT_FOUND whenever no client-sheet Billing_Ledger row carried the invoice # — leaving invoices that exist ONLY in Consolidated_Ledger + invoice_tracking (a storage-summary invoice whose synthetic line never wrote a sheet row — the Allison Lind 2026-05-30 incident) impossible to void from the app; they required the runVoidOrphanInvoices script. Now the CB Consolidated_Ledger cleanup (api_deleteCbRowsByInvoiceNo_) runs BEFORE the not-found bail, and the bail only fires when there is genuinely nothing anywhere (voided===0 AND skippedAlreadyVoid===0 AND cbDeleted===0 — a typo'd or already-fully-cleaned invoice number). An orphan (CB rows present, no sheet rows) falls through and gets cleaned: CB rows deleted, invoice_tracking row dropped, storage_billing_items flipped to Void. Response gains orphanVoid:boolean. Behavior for normal invoices (sheet rows present) is unchanged — voided>0 takes the same path as before, CB cleanup still runs. No change to dollar totals, the v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, or the v38.251.0 storage_billing_items writers.
 
@@ -24942,6 +24943,31 @@ function handleCommitStorageRows_(payload) {
       }
       for (var dri = 0; dri < rowsToDelete.length; dri++) {
         blSh.deleteRow(rowsToDelete[dri]);
+      }
+
+      // v38.254.0 (2026-06-01) — ensure the Billing_Ledger carries a Sidemark
+      // column for separate_by_sidemark clients BEFORE appending the
+      // per-sidemark summary rows. Root cause of the Allison Lind 2026-06-01
+      // storage-invoicing failure: most client Billing_Ledger sheets have NO
+      // Sidemark column (v38.78.0 note at api_fullClientSync_), so the summary
+      // row's sidemark — which otherwise lives only in the ledger_row_id slug
+      // + grp.display — was never written to a sheet cell. api_fullClientSync_'s
+      // billing case (the path that mirrors this sheet → public.billing right
+      // after commit, router case "commitStorageRows") resolves sidemark from
+      // billRows[l]["Sidemark"] with an Inventory-by-Item-ID fallback; a
+      // summary row has a BLANK Item ID, so both lookups miss and public.billing
+      // gets sidemark="". The React Billing report reads public.billing and
+      // groups by normalizeSidemarkForMatch(sidemark) — all-blank summaries
+      // collapse into one group and per-sidemark invoicing breaks. Adding the
+      // column + writing grp.display below makes the sidemark durable: BOTH
+      // api_fullClientSync_ (line ~9155) AND handleGenerateUnbilledReport_
+      // (line ~26895) already read the "Sidemark" column when present, so no
+      // change is needed there — they pick it up for free. api_ensureColumn_ is
+      // a no-op when the column already exists, and is appended at the end so
+      // header-mapped readers are unaffected (mirrors the self-heal pattern in
+      // api_markClientLedgerInvoiced_ for Invoice # / Invoice Date / Invoice URL).
+      if (sepBySidemark && !blCols.sidemark) {
+        blCols.sidemark = api_ensureColumn_(blSh, "Sidemark");
       }
 
       // Append ONE summary row per sidemark sub-group.
