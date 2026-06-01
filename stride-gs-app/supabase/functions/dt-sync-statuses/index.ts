@@ -1,5 +1,25 @@
 /**
- * dt-sync-statuses — Supabase Edge Function — v20 2026-05-29 PST
+ * dt-sync-statuses — Supabase Edge Function — v21 2026-05-31 PST
+ *
+ * v21: pu_propagate failure messages now carry the actual dt-push-order
+ *      response body. Pre-v21 the pu_propagate handler caught the supabase-js
+ *      FunctionsHttpError and wrote `err.message` to gs_sync_events, which
+ *      is the generic SDK string "Edge Function returned a non-2xx status
+ *      code" — useless for diagnosing what DT or dt-push-order actually
+ *      complained about. Operators hitting a real failure (no items / DT
+ *      API 5xx / credentials missing / unverified tenant / etc.) had to
+ *      re-run the push by hand to learn what went wrong. v21 reads
+ *      `err.context` (the underlying Response carried by the SDK error)
+ *      and appends the body to the gs_sync_events.error_message so the
+ *      Failed Operations drawer surfaces the actual JSON {ok:false,
+ *      error:"…"} dt-push-order returned. Body read wrapped in try/catch
+ *      so an extraction failure (consumed stream, missing context, etc.)
+ *      degrades to msg-only rather than throwing into the .catch handler
+ *      below and losing the row entirely. 1000-char body cap before the
+ *      500-char total error_message cap so the SDK prefix + a meaningful
+ *      tail of the body both fit. Triggered by the 2026-05-30 incident
+ *      where 3 sync_failed rows had identical generic messages and the
+ *      actual cause had to be hand-investigated.
  *
  * v20: Multi-pickup Phase 1 — pickup-completion notes relay. When a
  *      pickup leg transitions to Completed (orderIsFinishedAfterPoll &&
@@ -1086,7 +1106,32 @@ Deno.serve(async (req) => {
             const err = resp.error;
             if (err) {
               const msg = err.message || String(err);
-              console.warn(`[dt-sync-statuses] dt-push-order invoke error for delivery=${linkedDeliveryId}: ${msg}`);
+              // Pull the actual response body out of the supabase-js
+              // FunctionsHttpError. The SDK's err.message is the generic
+              // "Edge Function returned a non-2xx status code" string;
+              // err.context is the underlying Response, which carries
+              // dt-push-order's actual JSON {ok:false, error:"..."} body
+              // (or the raw error text from any 5xx). Without this, every
+              // sync_failed row in gs_sync_events looked identical and an
+              // operator hitting a real DT-side problem (no items / DT API
+              // 502 / credentials missing / etc.) had no way to know what
+              // the actual cause was — see 2026-05-30 incident where 3
+              // failures had to be re-investigated by hand because the
+              // error_message gave us nothing actionable. Read is wrapped
+              // in try/catch so a body-extraction failure (consumed stream,
+              // missing context) degrades to msg-only instead of throwing
+              // into the catch handler below and losing the row entirely.
+              let bodyText = '';
+              try {
+                const ctx = (err as { context?: { text?: () => Promise<string> } }).context;
+                if (ctx && typeof ctx.text === 'function') {
+                  bodyText = (await ctx.text()).slice(0, 1000);
+                }
+              } catch (bodyErr) {
+                console.warn(`[dt-sync-statuses] could not read response body for delivery=${linkedDeliveryId}:`, bodyErr);
+              }
+              const combined = bodyText ? `${msg} — body: ${bodyText}` : msg;
+              console.warn(`[dt-sync-statuses] dt-push-order invoke error for delivery=${linkedDeliveryId}: ${combined}`);
               await supabase.from('gs_sync_events').insert({
                 tenant_id:     o.tenant_id,
                 entity_type:   'dt_order',
@@ -1096,7 +1141,7 @@ Deno.serve(async (req) => {
                 requested_by:  'dt-sync-statuses:pu_propagate',
                 request_id:    crypto.randomUUID(),
                 payload:       { items_propagated: propagatedCount },
-                error_message: `invoke failed: ${msg.slice(0, 500)}`,
+                error_message: `invoke failed: ${combined.slice(0, 500)}`,
               });
             } else if (data && data.ok === false) {
               console.warn(`[dt-sync-statuses] dt-push-order returned ok:false for delivery=${linkedDeliveryId}: ${data.error}`);
