@@ -4079,6 +4079,70 @@ export async function fetchStoragePreviewFromSupabase(args: {
   }
 }
 
+/**
+ * A per-item already-invoiced storage charge from `storage_billing_items`.
+ * This is the itemized breakdown behind a STOR-SUMMARY invoice line — the
+ * Storage tab's "Invoiced" view reads these so an operator can pull up the
+ * per-item detail the collapsed summary row hides.
+ */
+export interface InvoicedStorageRow {
+  tenantId: string;
+  itemId: string;
+  sidemark: string;
+  description: string;
+  periodStart: string;
+  periodEnd: string;
+  billableDays: number | null;
+  rate: number;
+  amount: number;
+  status: string;
+  invoiceNo: string;
+  invoiceDate: string | null;
+}
+
+/**
+ * Read FINALIZED (Invoiced/Billed) per-item storage from storage_billing_items
+ * for the (tenant?, sidemark?, period) triple. Period match is overlap-based
+ * (period_start <= end AND period_end >= start) so a charge whose window
+ * straddles the requested range is still returned. Admin/staff can read all
+ * tenants via the sbi_select_staff RLS policy; clients see only their own.
+ */
+export async function fetchInvoicedStorageItems(args: {
+  tenantId?: string | null;
+  sidemark?: string | null;
+  periodStart: string;
+  periodEnd: string;
+}): Promise<InvoicedStorageRow[] | null> {
+  try {
+    let q = supabase
+      .from('storage_billing_items')
+      .select('tenant_id,item_id,sidemark,description,period_start,period_end,billable_days,rate,amount,status,invoice_no,invoice_date')
+      .in('status', ['Invoiced', 'Billed'])
+      .lte('period_start', args.periodEnd)
+      .gte('period_end', args.periodStart);
+    if (args.tenantId) q = q.eq('tenant_id', args.tenantId);
+    if (args.sidemark) q = q.eq('sidemark', args.sidemark);
+    const { data, error } = await q;
+    if (error || !data) return null;
+    return (data as Array<Record<string, unknown>>).map(r => ({
+      tenantId:     String(r.tenant_id ?? ''),
+      itemId:       String(r.item_id ?? ''),
+      sidemark:     String(r.sidemark ?? ''),
+      description:  String(r.description ?? ''),
+      periodStart:  String(r.period_start ?? ''),
+      periodEnd:    String(r.period_end ?? ''),
+      billableDays: r.billable_days == null ? null : Number(r.billable_days),
+      rate:         Number(r.rate ?? 0),
+      amount:       Number(r.amount ?? 0),
+      status:       String(r.status ?? ''),
+      invoiceNo:    String(r.invoice_no ?? ''),
+      invoiceDate:  r.invoice_date == null ? null : String(r.invoice_date),
+    }));
+  } catch {
+    return null;
+  }
+}
+
 export interface StorageGenerateResult {
   totalCreated: number;
   totalAmount: number;

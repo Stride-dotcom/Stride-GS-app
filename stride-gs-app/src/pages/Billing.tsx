@@ -47,8 +47,9 @@ import {
   fetchBillingSidemarksFromSupabase,
   isSupabaseCacheAvailable,
   fetchStoragePreviewFromSupabase,
+  fetchInvoicedStorageItems,
 } from '../lib/supabaseQueries';
-import type { ClientNameMap, StoragePreviewRow } from '../lib/supabaseQueries';
+import type { ClientNameMap, StoragePreviewRow, InvoicedStorageRow } from '../lib/supabaseQueries';
 import { useBilling } from '../hooks/useBilling';
 import { useClients } from '../hooks/useClients';
 import { useServiceCatalog } from '../hooks/useServiceCatalog';
@@ -847,6 +848,17 @@ export function Billing() {
   const [commitLoading, setCommitLoading] = useState(false);
   const [commitResult, setCommitResult] = useState<GenerateStorageChargesResponse | null>(null);
 
+  // Storage tab status view. 'unbilled' = the live projection (calculate_storage_
+  // charges, which now excludes already-invoiced periods); 'invoiced' = a
+  // read-only itemized view of already-billed storage from storage_billing_items
+  // (the per-item detail behind a collapsed STOR-SUMMARY invoice line). The
+  // invoiced view is intentionally NOT wired to the commit/invoice machinery.
+  const [storView, setStorView] = useState<'unbilled' | 'invoiced'>('unbilled');
+  const [invStorRows, setInvStorRows] = useState<InvoicedStorageRow[]>([]);
+  const [invStorLoading, setInvStorLoading] = useState(false);
+  const [invStorLoaded, setInvStorLoaded] = useState(false);
+  const [invStorError, setInvStorError] = useState('');
+
   // Storage tab known clients/sidemarks
   const [storKnownClients, setStorKnownClients] = useState<string[]>([]);
   const [storKnownSidemarks, setStorKnownSidemarks] = useState<string[]>([]);
@@ -878,6 +890,14 @@ export function Billing() {
     const fromData = [...new Set(previewRows.map(r => r.sidemark).filter(Boolean) as string[])].sort();
     return [...new Set([...storKnownSidemarks, ...fromData])].sort();
   }, [previewRows, storKnownSidemarks]);
+
+  // tenantId -> client name, for labelling the read-only Invoiced storage view.
+  const storTenantName = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const c of apiClients) if (c.spreadsheetId) m.set(c.spreadsheetId, c.name);
+    return m;
+  }, [apiClients]);
+  const invStorTotal = useMemo(() => invStorRows.reduce((s, r) => s + (Number(r.amount) || 0), 0), [invStorRows]);
 
   // Populate initial client options from billing hook.
   // 2026-05-03 fix: previously this also seeded `knownSidemarks` /
@@ -1024,6 +1044,49 @@ export function Billing() {
     }
     setPreviewLoading(false);
   }, [storStartDate, storEndDate, storClientFilter, storSidemarkFilter, apiClients, currentStorKey]);
+
+  // Load already-invoiced itemized storage for the current filters. Read-only —
+  // these rows are not wired to the commit/invoice path. Mirrors the preview's
+  // single-vs-multi filter resolution (the query narrows on a single client/
+  // sidemark; multi-select is filtered client-side).
+  const handleLoadInvoicedStorage = useCallback(async () => {
+    setInvStorLoading(true);
+    setInvStorError('');
+    try {
+      const onlyTenant = storClientFilter.length === 1
+        ? apiClients.find(c => c.name === storClientFilter[0])?.spreadsheetId ?? null
+        : null;
+      const onlySidemark = storSidemarkFilter.length === 1 ? storSidemarkFilter[0] : null;
+
+      const rows = await fetchInvoicedStorageItems({
+        tenantId: onlyTenant,
+        sidemark: onlySidemark,
+        periodStart: storStartDate,
+        periodEnd: storEndDate,
+      });
+      if (rows === null) {
+        setInvStorError('Failed to load invoiced storage (Supabase unavailable)');
+        setInvStorLoading(false);
+        return;
+      }
+
+      const idToName = new Map<string, string>();
+      for (const c of apiClients) if (c.spreadsheetId) idToName.set(c.spreadsheetId, c.name);
+      const clientNameSet = new Set(storClientFilter);
+      const sidemarkSet = new Set(storSidemarkFilter);
+      const filtered = rows.filter(r => {
+        if (storClientFilter.length > 1 && !clientNameSet.has(idToName.get(r.tenantId) || '')) return false;
+        if (storSidemarkFilter.length > 1 && !sidemarkSet.has(r.sidemark)) return false;
+        return true;
+      });
+
+      setInvStorRows(filtered);
+      setInvStorLoaded(true);
+    } catch (err) {
+      setInvStorError(`Load error: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    setInvStorLoading(false);
+  }, [storStartDate, storEndDate, storClientFilter, storSidemarkFilter, apiClients]);
 
   const handleCommitPreview = useCallback(async () => {
     setCommitLoading(true);
@@ -2886,7 +2949,20 @@ export function Billing() {
           <button onClick={() => setShowCols(v => !v)} style={{ padding: '7px 12px', fontSize: 12, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: theme.colors.textSecondary }}><Settings2 size={14} /> Columns</button>
           {showCols && <div style={{ position: 'absolute', top: '100%', right: 0, marginTop: 4, background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 10, padding: 8, zIndex: 50, boxShadow: '0 4px 20px rgba(0,0,0,0.1)', minWidth: 180 }}>{TOGGLEABLE.map(id => <label key={id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px', fontSize: 12, cursor: 'pointer' }}><input type="checkbox" checked={colVis[id] !== false} onChange={() => setColVis(v => ({ ...v, [id]: v[id] === false }))} style={{ accentColor: theme.colors.orange }} />{COL_LABELS[id]}</label>)}</div>}
         </div>
-        <button onClick={() => toCSV(isStorageTab ? previewRows : reportData, isStorageTab ? 'stride-storage-preview.csv' : 'stride-billing-report.csv')} style={{ padding: '7px 12px', fontSize: 12, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: theme.colors.textSecondary }}><Download size={14} /> Export xlsx</button>
+        <button onClick={() => {
+          if (isStorageTab && storView === 'invoiced') {
+            toCSV(invStorRows.map(r => ({
+              ledgerRowId: '', status: r.status, invoiceNo: r.invoiceNo,
+              client: storTenantName.get(r.tenantId) || r.tenantId,
+              date: `${r.periodStart}..${r.periodEnd}`, svcCode: 'STOR', svcName: 'Storage',
+              itemId: r.itemId, description: r.description, itemClass: '',
+              qty: r.billableDays ?? 0, rate: r.rate, total: r.amount,
+              taskId: '', repairId: '', shipmentNo: '', notes: '', sidemark: r.sidemark,
+            })), 'stride-invoiced-storage.csv');
+          } else {
+            toCSV(isStorageTab ? previewRows : reportData, isStorageTab ? 'stride-storage-preview.csv' : 'stride-billing-report.csv');
+          }
+        }} style={{ padding: '7px 12px', fontSize: 12, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: theme.colors.textSecondary }}><Download size={14} /> Export xlsx</button>
         <button onClick={() => window.open(IIF_FOLDER_URL, '_blank')} title="Open exports folder in Google Drive" style={{ padding: '7px 12px', fontSize: 12, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: theme.colors.textSecondary }}><ExternalLink size={14} /> IIF Folder</button>
         {isReportTab && <button onClick={async () => {
           const sel = resolveSelectedRows();
@@ -3372,6 +3448,35 @@ export function Billing() {
           {/* Filter Panel */}
           <div style={{ ...filterPanelStyle, borderColor: previewLoaded ? '#F59E0B' : theme.colors.border }}>
             <div style={filterGridStyle}>
+              <div>
+                <span style={{ ...dateLabelStyle, display: 'block' }}>View</span>
+                <div style={{ display: 'inline-flex', border: `1px solid ${theme.colors.border}`, borderRadius: 8, overflow: 'hidden' }}>
+                  {(['unbilled', 'invoiced'] as const).map(v => (
+                    <button
+                      key={v}
+                      onClick={() => {
+                        if (v === storView) return;
+                        setStorView(v);
+                        // Clear the other view's state so stale rows never linger.
+                        if (v === 'invoiced') {
+                          setPreviewLoaded(false); setPreviewRows([]); setRowSel({});
+                          setCommitResult(null); setPreviewError('');
+                        } else {
+                          setInvStorLoaded(false); setInvStorRows([]); setInvStorError('');
+                        }
+                      }}
+                      style={{
+                        padding: '7px 14px', fontSize: 12, fontWeight: 600, border: 'none',
+                        cursor: 'pointer', fontFamily: 'inherit',
+                        background: storView === v ? '#E85D2D' : '#fff',
+                        color: storView === v ? '#fff' : theme.colors.textSecondary,
+                      }}
+                    >
+                      {v === 'unbilled' ? 'Unbilled' : 'Invoiced'}
+                    </button>
+                  ))}
+                </div>
+              </div>
               <MultiSelectFilter label="Client" options={storageClients} selected={storClientFilter} onChange={setStorClientFilter} placeholder="All Clients" />
               <MultiSelectFilter label="Sidemark" options={storageSidemarks} selected={storSidemarkFilter} onChange={setStorSidemarkFilter} placeholder="All Sidemarks" />
               <div>
@@ -3389,20 +3494,30 @@ export function Billing() {
                 <input type="date" value={storEndDate} onChange={e => setStorEndDate(e.target.value)} disabled={previewLoading} style={dateInputStyle} />
               </div>
               <div style={{ display: 'flex', gap: 8, alignItems: 'end', paddingBottom: 1, flexWrap: 'wrap' }}>
-                <WriteButton
-                  label={previewLoading ? 'Calculating...' : storFiltersChanged ? 'Preview (Filters Changed)' : 'Preview Storage Charges'}
-                  variant="primary"
-                  icon={previewLoading ? <Loader2 size={14} className="animate-spin" /> : <Eye size={14} />}
-                  disabled={previewLoading || !storStartDate || !storEndDate || !apiConfigured}
-                  onClick={handlePreviewStorage}
-                  style={storFiltersChanged ? { background: '#F59E0B' } : undefined}
-                />
+                {storView === 'unbilled' ? (
+                  <WriteButton
+                    label={previewLoading ? 'Calculating...' : storFiltersChanged ? 'Preview (Filters Changed)' : 'Preview Storage Charges'}
+                    variant="primary"
+                    icon={previewLoading ? <Loader2 size={14} className="animate-spin" /> : <Eye size={14} />}
+                    disabled={previewLoading || !storStartDate || !storEndDate || !apiConfigured}
+                    onClick={handlePreviewStorage}
+                    style={storFiltersChanged ? { background: '#F59E0B' } : undefined}
+                  />
+                ) : (
+                  <WriteButton
+                    label={invStorLoading ? 'Loading...' : 'Load Invoiced Storage'}
+                    variant="primary"
+                    icon={invStorLoading ? <Loader2 size={14} className="animate-spin" /> : <Eye size={14} />}
+                    disabled={invStorLoading || !storStartDate || !storEndDate}
+                    onClick={handleLoadInvoicedStorage}
+                  />
+                )}
               </div>
             </div>
-            {previewError && (
+            {(storView === 'unbilled' ? previewError : invStorError) && (
               <div style={{ marginTop: 12, background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 8, padding: '10px 12px', display: 'flex', gap: 8, alignItems: 'flex-start' }}>
                 <AlertTriangle size={15} color="#dc2626" style={{ flexShrink: 0, marginTop: 1 }} />
-                <span style={{ fontSize: 13, color: '#dc2626' }}>{previewError}</span>
+                <span style={{ fontSize: 13, color: '#dc2626' }}>{storView === 'unbilled' ? previewError : invStorError}</span>
               </div>
             )}
           </div>
@@ -3480,7 +3595,75 @@ export function Billing() {
             </div>
           )}
 
-          {renderTable(previewLoaded ? '#F59E0B' : theme.colors.border, 'No storage preview loaded yet')}
+          {storView === 'unbilled' ? (
+            renderTable(previewLoaded ? '#F59E0B' : theme.colors.border, 'No storage preview loaded yet')
+          ) : (
+            <>
+              {invStorLoading && (
+                <div style={{ padding: '28px 24px', background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
+                  <Loader2 size={18} className="animate-spin" color={theme.colors.textSecondary} />
+                  <span style={{ fontSize: 14, color: theme.colors.textSecondary }}>Loading invoiced storage…</span>
+                </div>
+              )}
+
+              {invStorLoaded && !invStorLoading && (
+                <>
+                  <div style={{ padding: '12px 18px', background: '#F0FDF4', border: '1.5px solid #BBF7D0', borderRadius: 12, marginBottom: 16, display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <CheckCircle size={18} color="#15803D" />
+                    <div>
+                      <div style={{ fontSize: 14, fontWeight: 700, color: '#15803D' }}>Invoiced Storage (itemized, read-only)</div>
+                      <div style={{ fontSize: 12, color: '#166534' }}>
+                        {storClientFilter.length ? storClientFilter.join(', ') : 'All Clients'} &middot; {storStartDate} to {storEndDate} &middot; {invStorRows.length} items &middot; ${invStorTotal.toFixed(2)}
+                        {' '} &middot; <strong>already billed — shown for reference</strong>
+                      </div>
+                    </div>
+                  </div>
+
+                  {invStorRows.length === 0 ? (
+                    <div style={{ padding: '40px 24px', background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 16, textAlign: 'center', color: theme.colors.textSecondary, fontSize: 14 }}>
+                      No invoiced storage found for this period.
+                    </div>
+                  ) : (
+                    <div style={{ background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 16, overflow: 'hidden' }}>
+                      <div style={{ overflowX: 'auto' }}>
+                        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                          <thead>
+                            <tr style={{ background: '#F8FAFC', textAlign: 'left' }}>
+                              {['Client', 'Sidemark', 'Item ID', 'Description', 'Period', 'Days', 'Rate', 'Amount', 'Invoice #', 'Invoice Date'].map((h, i) => (
+                                <th key={h} style={{ padding: '10px 12px', fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px', color: theme.colors.textSecondary, whiteSpace: 'nowrap', textAlign: (i === 5 || i === 6 || i === 7) ? 'right' : 'left', borderBottom: `1px solid ${theme.colors.border}` }}>{h}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {invStorRows.map((r, idx) => (
+                              <tr key={`${r.tenantId}-${r.itemId}-${r.periodStart}-${r.periodEnd}-${idx}`} style={{ borderBottom: '1px solid #F1F5F9' }}>
+                                <td style={{ padding: '9px 12px', whiteSpace: 'nowrap' }}>{storTenantName.get(r.tenantId) || r.tenantId}</td>
+                                <td style={{ padding: '9px 12px', whiteSpace: 'nowrap' }}>{r.sidemark || '—'}</td>
+                                <td style={{ padding: '9px 12px', whiteSpace: 'nowrap' }}>{r.itemId || '—'}</td>
+                                <td style={{ padding: '9px 12px', maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.description}>{r.description || '—'}</td>
+                                <td style={{ padding: '9px 12px', whiteSpace: 'nowrap' }}>{r.periodStart} → {r.periodEnd}</td>
+                                <td style={{ padding: '9px 12px', textAlign: 'right' }}>{r.billableDays ?? '—'}</td>
+                                <td style={{ padding: '9px 12px', textAlign: 'right' }}>${r.rate.toFixed(2)}</td>
+                                <td style={{ padding: '9px 12px', textAlign: 'right', fontWeight: 600 }}>${r.amount.toFixed(2)}</td>
+                                <td style={{ padding: '9px 12px', whiteSpace: 'nowrap' }}>{r.invoiceNo || '—'}</td>
+                                <td style={{ padding: '9px 12px', whiteSpace: 'nowrap' }}>{r.invoiceDate || '—'}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+
+              {!invStorLoaded && !invStorLoading && (
+                <div style={{ padding: '40px 24px', background: '#fff', border: `1px dashed ${theme.colors.border}`, borderRadius: 16, textAlign: 'center', color: theme.colors.textSecondary, fontSize: 14 }}>
+                  Pick a period (and optionally a client/sidemark), then click <strong>Load Invoiced Storage</strong> to see the itemized charges behind your storage invoices.
+                </div>
+              )}
+            </>
+          )}
         </>
       )}
 
