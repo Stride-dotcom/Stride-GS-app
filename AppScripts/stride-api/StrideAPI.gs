@@ -1,4 +1,5 @@
 /* ===================================================
+   StrideAPI.gs — v38.253.0 — 2026-06-01 PST — [BILLING] fix: case-insensitive sidemark guard in handleCreateInvoice_. Symptom: creating an invoice for a separate_by_sidemark=true client (Michelle Dirkse Interiors) whose selected rows carry the SAME logical sidemark in different casing ("FRANCL" + "Francl") failed with SIDEMARK_VIOLATION. Root cause: the v38.193.0 server-side sidemark-consistency guard (~line 27310) keyed its distinct-sidemark set on the raw trimmed string and compared payload-vs-row sidemark with case-sensitive !==, while the React side (Billing.tsx normalizeSidemarkForMatch = trim+toUpperCase) had ALREADY grouped the mixed-case rows into ONE invoice. So React sends a valid single-project payload with mixed row casing + a first-seen-casing payload header, and the GAS guard false-positived it as "2 distinct sidemarks" / "payload doesn't match row". Fix: new inline normSidemark_(s)=trim().toUpperCase() applied (a) when building the rowSidemarks distinct-set and (b) on both sides of the payload-vs-row equality check. The guard STILL catches a genuine content mismatch (two truly different projects in one separate-by-sidemark invoice); only pure case differences are now tolerated, matching React. Pure validation-guard change — does NOT alter what sidemark gets stamped on the invoice/PDF/email/Consolidated_Ledger (still the payload-level value preserving display casing). No schema change, no migration, no React change. No change to v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, or any billing dollar total.
    StrideAPI.gs — v38.252.0 — 2026-05-30 PST — [BILLING] fix: orphan-aware handleVoidInvoice_ so the app's Void button can clean CB-only orphans. Pre-fix the handler bailed with NOT_FOUND whenever no client-sheet Billing_Ledger row carried the invoice # — leaving invoices that exist ONLY in Consolidated_Ledger + invoice_tracking (a storage-summary invoice whose synthetic line never wrote a sheet row — the Allison Lind 2026-05-30 incident) impossible to void from the app; they required the runVoidOrphanInvoices script. Now the CB Consolidated_Ledger cleanup (api_deleteCbRowsByInvoiceNo_) runs BEFORE the not-found bail, and the bail only fires when there is genuinely nothing anywhere (voided===0 AND skippedAlreadyVoid===0 AND cbDeleted===0 — a typo'd or already-fully-cleaned invoice number). An orphan (CB rows present, no sheet rows) falls through and gets cleaned: CB rows deleted, invoice_tracking row dropped, storage_billing_items flipped to Void. Response gains orphanVoid:boolean. Behavior for normal invoices (sheet rows present) is unchanged — voided>0 takes the same path as before, CB cleanup still runs. No change to dollar totals, the v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, or the v38.251.0 storage_billing_items writers.
 
    v38.251.0 — 2026-05-30 PST — [BILLING] feat: per-item storage billed-tracking via new public.storage_billing_items. Storage still summarizes to ONE ledger line per sidemark (v38.250.0), but the per-item detail that the summary erases now lives in a durable Supabase table so storage is never double-billed or missed. (1) New migration 20260530160000_storage_billing_items.sql: public.storage_billing_items (tenant/sidemark/item/period/amount/summary_ledger_row_id/status/invoice), RLS mirroring public.billing, a partial-unique integrity guard (tenant,item,period WHERE status<>'Void') that keeps the table free of double-active charges while allowing re-bill-after-void, plus the mandatory parity_dryrun mirror + reset()/row_counts/check_drift() updates. (2) handleCommitStorageRows_ now reads storage_billing_items before summarizing: items already FINALIZED for an overlapping window are skipped (never re-billed), the Unbilled working set for the window is deleted + replaced, and one per-item row per included item is inserted linked to the summary's ledger_row_id. FAIL-SAFE: any Supabase read failure disables BOTH the skip AND the write for that tenant, falling back to legacy sheet-only behaviour (the finalized-summary gate stays the primary guard) so an outage can never block or alter a storage commit. (3) handleCreateInvoice_ stamps the matching storage_billing_items rows status=Invoiced + invoice_no/date by summary_ledger_row_id after a successful commit. (4) handleVoidInvoice_ flips them to Void (re-billable); handleReissueInvoice_ resets non-Unbilled rows back to Unbilled. All Supabase writes are best-effort/non-fatal. No change to dollar totals (the per-item skip only excludes genuinely-already-finalized items; with the table empty on first deploy nothing is excluded), the v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, or any non-storage billing logic. Billing stays GAS-authoritative — this is forward-compatible substrate the future P4a SB-primary createInvoice will read directly.
@@ -27786,9 +27787,27 @@ function handleCreateInvoice_(payload) {
         var clientArr = JSON.parse(clientResp.getContentText());
         if (clientArr && clientArr.length > 0 && clientArr[0].separate_by_sidemark === true) {
           // Flag is TRUE — all rows must share the same sidemark.
+          //
+          // v38.253.0 (2026-06-01) — case-insensitive sidemark comparison.
+          // Sidemarks are free-text and clients enter the same project as
+          // "FRANCL", "Francl", "francl" interchangeably. The React side
+          // already groups these into ONE invoice via normalizeSidemarkForMatch
+          // (Billing.tsx — trim + toUpperCase), so a single invoice payload
+          // legitimately carries rows with mixed casing of the SAME logical
+          // sidemark. Pre-fix this guard keyed on the raw trimmed string, so
+          // "FRANCL" + "Francl" registered as 2 distinct sidemarks and threw
+          // SIDEMARK_VIOLATION on a perfectly valid Michelle Dirkse Interiors
+          // invoice. Normalizing here (trim + toUpperCase) mirrors React so
+          // server + client agree on what "one sidemark" means. The guard
+          // still catches a GENUINE content mismatch (two different projects
+          // in one separate-by-sidemark invoice) — only case differences are
+          // now tolerated. Display casing is unaffected: the payload-level
+          // `sidemark` (preserving first-seen original casing) is what lands
+          // on the PDF / email / Consolidated_Ledger, not the normalized form.
+          var normSidemark_ = function (s) { return String(s == null ? "" : s).trim().toUpperCase(); };
           var rowSidemarks = {};
           for (var si = 0; si < rows.length; si++) {
-            var rsm = String(rows[si].sidemark || "").trim();
+            var rsm = normSidemark_(rows[si].sidemark);
             rowSidemarks[rsm] = true;
           }
           var distinctSidemarks = Object.keys(rowSidemarks);
@@ -27804,9 +27823,11 @@ function handleCreateInvoice_(payload) {
           // Single distinct sidemark in the row set — verify it matches the
           // payload-level sidemark stamped on the invoice header. A drift
           // here would land the wrong sidemark string on the PDF / email
-          // / Consolidated_Ledger row.
+          // / Consolidated_Ledger row. Compared on the normalized form so a
+          // pure case difference (rows "Francl" vs payload "FRANCL") is NOT a
+          // violation — only a real content drift is.
           var rowSm = distinctSidemarks[0] || "";
-          if (rowSm && sidemark && rowSm !== sidemark) {
+          if (rowSm && sidemark && rowSm !== normSidemark_(sidemark)) {
             return errorResponse_(
               "SIDEMARK_VIOLATION: client " + client + " has separate_by_sidemark=true but the " +
               "payload-level sidemark (" + JSON.stringify(sidemark) + ") doesn't match the row " +
