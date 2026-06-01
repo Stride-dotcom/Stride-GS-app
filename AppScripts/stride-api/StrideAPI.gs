@@ -47810,6 +47810,17 @@ function runRepairOrphanLedgerRows() {
  * row: a single tenant's failure is logged (handleWriteThroughReverse_ writes
  * gs_sync_events on failure for FailedOperationsDrawer pickup) and the loop
  * continues. Returns a summary {scanned, mirrored, skipped, failed, failures}.
+ *
+ * Void caveat: the shared writer __writeThroughReverseBilling_ skips Invoiced
+ * sheet rows but deliberately UN-voids a Void row (its re-completion contract
+ * for manual/repair charges). So if an operator manually sets an Unbilled
+ * insurance sheet row to Void WITHOUT it also being Void in public.billing,
+ * the next run would flip it back to Unbilled. This is narrow and self-healing
+ * — INSURANCE state originates from the cron, and a manual sheet Void mirrors
+ * back to public.billing on the next full-client-sync, after which this job's
+ * status=Unbilled filter excludes it. Hardening the shared writer to also skip
+ * Void belongs in a separate PR (it would change manual/repair un-void
+ * semantics) and is tracked with the proration/anniversary follow-up.
  */
 function runMirrorInsuranceChargesToSheets() {
   // Pull every Unbilled INSURANCE row. Once a row is invoiced its status
