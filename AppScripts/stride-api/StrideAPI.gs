@@ -24793,7 +24793,7 @@ function handleCommitStorageRows_(payload) {
   var totalCreated = 0;
   var failed  = [];
   var skipped = [];
-  // v38.x — the actual summary rows this commit wrote, returned to the
+  // v38.256.0 — the actual summary rows this commit wrote, returned to the
   // caller so the Storage-tab "Create Invoice" one-click flow invoices
   // THESE committed summaries (one per sidemark) instead of the stale
   // per-item preview rows. Pre-fix the React storage-mode invoice loop
@@ -25158,7 +25158,7 @@ function handleCommitStorageRows_(payload) {
     clientsProcessed:   tenantIds.length,
     skippedItems:       skipped.length > 0 ? skipped : undefined,
     failedClients:      failed.length  > 0 ? failed  : undefined,
-    // v38.x — the summary rows actually written, for the Storage-tab
+    // v38.256.0 — the summary rows actually written, for the Storage-tab
     // one-click invoice to bill THESE instead of the per-item preview.
     committedSummaries: committedSummaries
   });
