@@ -140,6 +140,55 @@ export function useFailedOperations(): UseFailedOperationsResult {
    * On failure: returns the error so the drawer can display it.
    */
   const retry = useCallback(async (event: SyncEvent): Promise<{ ok: boolean; error: string | null }> => {
+    // ── EF-direct retry path ────────────────────────────────────────────
+    // Some failed operations originated from a server-to-server call to
+    // a Supabase Edge Function — not from React's apiPost → GAS router.
+    // GAS doesn't know these actions ("Unknown POST action:
+    // dtPushOrderAfterPuSync"), so the legacy GAS retry below cannot
+    // resurrect them. Each entry tells the retry handler which EF to
+    // invoke and how to rebuild the body from the gs_sync_events row
+    // (typically: entity_id + a fixed shape). Add new entries here
+    // whenever a new EF starts writing sync_failed rows the operator
+    // should be able to retry from the drawer.
+    const EF_RETRY_MAP: Record<string, { fn: string; body: (e: SyncEvent) => Record<string, unknown> }> = {
+      // Mirrors dt-sync-statuses v21's pu_propagate invocation shape
+      // (dt-sync-statuses/index.ts:1082). entity_id IS the linked
+      // delivery's orderId. changedFields=['items'] scopes the push so
+      // DT's dispatcher-assigned date/contact survive the retry —
+      // matches the safety the original cron call has.
+      dt_push_order_after_pu_sync: {
+        fn:   'dt-push-order',
+        body: (e) => ({ orderId: e.entity_id, changedFields: ['items'] }),
+      },
+    };
+
+    const efRetry = EF_RETRY_MAP[event.action_type];
+    if (efRetry) {
+      const { data, error } = await supabase.functions.invoke(efRetry.fn, { body: efRetry.body(event) });
+      if (error) {
+        // Same body-extraction trick dt-sync-statuses v21 uses — the
+        // supabase-js FunctionsHttpError's `context` is the underlying
+        // Response, which carries the EF's actual {ok:false, error:"…"}
+        // body. Without this the operator sees the generic "Edge Function
+        // returned a non-2xx status code" wrapper and learns nothing.
+        let bodyText = '';
+        try {
+          const ctx = (error as { context?: { text?: () => Promise<string> } }).context;
+          if (ctx?.text) bodyText = (await ctx.text()).slice(0, 1000);
+        } catch (_) { /* degrade to msg-only */ }
+        const msg = (error as Error).message || String(error);
+        return { ok: false, error: bodyText ? `${msg} — ${bodyText}` : msg };
+      }
+      const efData = data as { ok?: boolean; error?: string } | null;
+      if (efData && efData.ok === false) {
+        return { ok: false, error: efData.error || `${efRetry.fn} returned ok:false` };
+      }
+      setFailures(prev => prev.filter(f => f.id !== event.id));
+      await resolveSyncEvent(event.id);
+      return { ok: true, error: null };
+    }
+
+    // ── GAS-routed retry path (legacy default) ──────────────────────────
     // Build payload with fresh request_id
     const retryPayload = { ...event.payload, requestId: crypto.randomUUID() };
 
