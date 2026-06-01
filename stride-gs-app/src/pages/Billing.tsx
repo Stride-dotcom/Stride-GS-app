@@ -2189,7 +2189,7 @@ export function Billing() {
     // has → "0 of N flipped" / STOR_SUMMARY_STALE_REPORT (the recurring
     // Allison Lind storage-invoice failures). selRows stays the per-item set
     // ONLY for building the commit payload below.
-    let rowsToInvoice: UnbilledReportRow[] = selRows;
+    let rowsToInvoice: BillingRow[] = selRows;
 
     // v38.185.0 — Atomic gate: flip the ref synchronously before any await.
     // If a second click hits before the first reaches its await, the second
@@ -2283,6 +2283,8 @@ export function Billing() {
           return;
         }
         rowsToInvoice = summaries.map(s => ({
+          status:        'Unbilled',
+          invoiceNo:     '',
           client:        String(s.client || ''),
           sidemark:      String(s.sidemark || ''),
           date:          String(s.date || ''),
