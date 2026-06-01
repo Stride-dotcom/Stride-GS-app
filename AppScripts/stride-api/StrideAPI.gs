@@ -24945,7 +24945,7 @@ function handleCommitStorageRows_(payload) {
         blSh.deleteRow(rowsToDelete[dri]);
       }
 
-      // v38.x (2026-06-01) — ensure the Billing_Ledger carries a Sidemark
+      // v38.254.0 (2026-06-01) — ensure the Billing_Ledger carries a Sidemark
       // column for separate_by_sidemark clients BEFORE appending the
       // per-sidemark summary rows. Root cause of the Allison Lind 2026-06-01
       // storage-invoicing failure: most client Billing_Ledger sheets have NO
