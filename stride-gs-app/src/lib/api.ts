@@ -2190,6 +2190,11 @@ export interface GenerateStorageChargesResponse {
   failedClients?: string[];
   message?: string;
   error?: string;
+  // v38.256.0 — the summary rows this commit actually wrote (one per
+  // sidemark group). The Storage-tab "Create Invoice" one-click flow
+  // invoices THESE instead of the per-item preview rows, so the flip
+  // targets the committed summary ledger ids that exist on the sheet.
+  committedSummaries?: UnbilledReportRow[];
 }
 
 export function postGenerateStorageCharges(

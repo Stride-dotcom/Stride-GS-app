@@ -2180,6 +2180,17 @@ export function Billing() {
     const selRows = resolveSelectedRows();
     if (!selRows.length) return;
 
+    // v38.256.0 — the rows actually invoiced. In 'report' mode these are the
+    // selected report rows. In 'storage' mode they're REPLACED below, after
+    // the commit, with the committed SUMMARY rows the commit returns — because
+    // postCommitStorageRows collapses the per-item preview into one summary
+    // row per sidemark on the sheet (v38.239), so invoicing the original
+    // per-item preview rows would send per-item ledger ids the sheet no longer
+    // has → "0 of N flipped" / STOR_SUMMARY_STALE_REPORT (the recurring
+    // Allison Lind storage-invoice failures). selRows stays the per-item set
+    // ONLY for building the commit payload below.
+    let rowsToInvoice: BillingRow[] = selRows;
+
     // v38.185.0 — Atomic gate: flip the ref synchronously before any await.
     // If a second click hits before the first reaches its await, the second
     // bails immediately with the same error message the React-state guard
@@ -2255,6 +2266,44 @@ export function Billing() {
         // committed" after the modal closes (matches the legacy two-step
         // affordance).
         setCommitResult(commitRes.data);
+
+        // v38.256.0 — invoice the COMMITTED SUMMARY rows the commit just
+        // wrote (one per sidemark), not the per-item preview rows. The
+        // commit collapsed the per-item rows into summaries on the sheet,
+        // so only the summary ledger ids exist there now; billing those is
+        // what makes the flip succeed. Numeric coercion because GAS sends
+        // qty/rate/total as the cell values (rate is "" on summary rows).
+        const summaries = Array.isArray(commitRes.data.committedSummaries)
+          ? commitRes.data.committedSummaries
+          : [];
+        if (!summaries.length) {
+          setInvoiceError('Commit succeeded but returned no summary rows to invoice — re-run Preview Storage and try again.');
+          setInvoiceLoading(false);
+          submitLockRef.current = false;
+          return;
+        }
+        rowsToInvoice = summaries.map(s => ({
+          status:        'Unbilled',
+          invoiceNo:     '',
+          client:        String(s.client || ''),
+          sidemark:      String(s.sidemark || ''),
+          date:          String(s.date || ''),
+          svcCode:       String(s.svcCode || 'STOR'),
+          svcName:       String(s.svcName || 'Storage'),
+          itemId:        String(s.itemId || ''),
+          description:   String(s.description || 'Monthly Storage'),
+          itemClass:     String(s.itemClass || ''),
+          qty:           Number(s.qty) || 1,
+          rate:          Number(s.rate) || 0,
+          total:         Number(s.total) || 0,
+          notes:         String(s.notes || ''),
+          taskId:        String(s.taskId || ''),
+          repairId:      String(s.repairId || ''),
+          shipmentNo:    String(s.shipmentNo || ''),
+          category:      String(s.category || 'Storage Charges'),
+          ledgerRowId:   String(s.ledgerRowId || ''),
+          sourceSheetId: String(s.sourceSheetId || ''),
+        }));
         if (commitRes.data?.failedClients?.length) {
           // Non-fatal — commit went through for other clients; surface the
           // partial-failure list in the modal so the operator can retry just
@@ -2276,7 +2325,7 @@ export function Billing() {
     // Per-group success/failure reconciliation happens below after runBatchLoop.
     const selectedIdsByGroup: Record<string, string[]> = {};
     const allHiddenIds: string[] = [];
-    for (const r of selRows) {
+    for (const r of rowsToInvoice) {
       const key = invoiceGroupKey(r);
       if (!selectedIdsByGroup[key]) selectedIdsByGroup[key] = [];
       selectedIdsByGroup[key].push(r.ledgerRowId);
@@ -2294,7 +2343,7 @@ export function Billing() {
     // table.getSelectedRowModel() in selection-iteration order, which produced
     // PDFs and QBO line items in a scrambled order vs. the report — operators
     // had to mentally re-sort when reconciling.
-    const sortedSelRows = [...selRows].sort((a, b) => {
+    const sortedSelRows = [...rowsToInvoice].sort((a, b) => {
       const ad = String(a.date || '');
       const bd = String(b.date || '');
       if (ad !== bd) return ad < bd ? -1 : 1;
@@ -2770,8 +2819,12 @@ export function Billing() {
       // Small delay to ensure Consolidated_Ledger writes are committed
       await new Promise(resolve => setTimeout(resolve, 1500));
 
-      // Collect ledger row IDs from the rows that were just invoiced
-      const invoicedLedgerIds = selRows.map(r => r.ledgerRowId).filter(Boolean);
+      // Collect ledger row IDs from the rows that were just invoiced.
+      // v38.256.0 — rowsToInvoice (not selRows): in storage mode these are
+      // the committed SUMMARY rows that actually landed on the invoice, so
+      // the QBO push references the right ledger ids (the per-item preview
+      // rows were never invoiced).
+      const invoicedLedgerIds = rowsToInvoice.map(r => r.ledgerRowId).filter(Boolean);
 
       if (invOptQbo && invoicedLedgerIds.length) {
         // v38.197.0 — QBO push runs through the persistent QboPushJobsContext
