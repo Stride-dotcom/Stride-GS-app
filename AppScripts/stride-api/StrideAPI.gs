@@ -1,4 +1,5 @@
 /* ===================================================
+   StrideAPI.gs — v38.255.0 — 2026-06-01 PST — [BILLING] feat: mirror auto-generated Stride Coverage (INSURANCE) charges from public.billing → client Billing_Ledger sheets so they're invoiceable. The insurance_bill_due() pg_cron (08:00 UTC daily) inserts one INSURANCE row per covered client per month into public.billing, but a Postgres job can't write the per-tenant Google Sheet — so the charges showed in the React Billing report (reads public.billing) yet couldn't be INVOICED (the invoice flip api_markClientLedgerInvoiced_ matches rows on the SHEET; finding none → "0 of N ledger rows" half-write guard, same failure class as the Allison Lind storage incident). None had surfaced yet only because the 5 covered clients' first charges aren't due until 2026-06-03+. Fix (GAS-only; calc/automation stay in SB per operator directive — this is purely the SB→sheet push): new runMirrorInsuranceChargesToSheets() reads every Unbilled svc_code=INSURANCE row from public.billing and mirrors it onto the owning client's Billing_Ledger sheet via the existing reverse-writethrough (handleWriteThroughReverse_ → __writeThroughReverseBilling_), idempotent by Ledger Row ID (updates in place / appends / skips Invoiced — can't un-invoice or double-write). installInsuranceMirrorTrigger_() installs a daily time-driven trigger at 09:00 PT (after the 08:00 UTC cron); idempotently removes any prior trigger for the handler. New doPost cases "mirrorInsuranceCharges" (manual run / verify) + "installInsuranceMirror" (one-time setup), API_TOKEN-gated. NOT YET ADDRESSED (separate reviewed follow-up): proration of first/last month + calendar-anniversary cadence + bundling with the storage billing cycle — the cron currently bills full-price every 30 days from inception with no proration. No dollar-total change, no schema/migration, no change to v38.182 atomic invoice counter, half-write detection, or storage_billing_items.
    StrideAPI.gs — v38.254.0 — 2026-06-01 PST — [BILLING] fix: storage-summary rows now carry their sidemark into public.billing (recurrence fix for the Allison Lind 2026-06-01 storage-invoicing failure). Root cause: handleCommitStorageRows_ writes ONE STOR-SUMMARY row per sidemark for separate_by_sidemark clients, but most client Billing_Ledger sheets have NO Sidemark column (v38.78.0 note), so the summary's sidemark — which otherwise lives only in the ledger_row_id slug + grp.display — was never written to a sheet cell. The router's post-commit api_fullClientSync_(tid,["billing"]) (case "commitStorageRows", ~line 9985) resolves each billing row's sidemark from billRows[l]["Sidemark"] with an Inventory-by-Item-ID fallback (~line 9155); a summary row has a BLANK Item ID so both lookups miss → public.billing.sidemark="". React's Billing report reads public.billing and groups by normalizeSidemarkForMatch(sidemark), so all-blank summaries collapsed into one group and per-sidemark invoicing failed the consistency/flip guards (10 invoices failed for Allison Lind). Fix: handleCommitStorageRows_ now api_ensureColumn_(blSh,"Sidemark") for separate_by_sidemark clients before appending summaries, so the existing `if (blCols.sidemark) arr[...]=grp.display` write actually lands. BOTH api_fullClientSync_ AND handleGenerateUnbilledReport_ already read the "Sidemark" column when present, so they pick it up for free — no change needed there. Column is appended at the end (header-mapped readers unaffected); api_ensureColumn_ is a no-op when present. Forward-looking only — existing summary rows were data-backfilled separately. No dollar-total change, no change to v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, or the v38.251.0 storage_billing_items writers.
    StrideAPI.gs — v38.253.0 — 2026-06-01 PST — [BILLING] fix: case-insensitive sidemark guard in handleCreateInvoice_. Symptom: creating an invoice for a separate_by_sidemark=true client (Michelle Dirkse Interiors) whose selected rows carry the SAME logical sidemark in different casing ("FRANCL" + "Francl") failed with SIDEMARK_VIOLATION. Root cause: the v38.193.0 server-side sidemark-consistency guard (~line 27310) keyed its distinct-sidemark set on the raw trimmed string and compared payload-vs-row sidemark with case-sensitive !==, while the React side (Billing.tsx normalizeSidemarkForMatch = trim+toUpperCase) had ALREADY grouped the mixed-case rows into ONE invoice. So React sends a valid single-project payload with mixed row casing + a first-seen-casing payload header, and the GAS guard false-positived it as "2 distinct sidemarks" / "payload doesn't match row". Fix: new inline normSidemark_(s)=trim().toUpperCase() applied (a) when building the rowSidemarks distinct-set and (b) on both sides of the payload-vs-row equality check. The guard STILL catches a genuine content mismatch (two truly different projects in one separate-by-sidemark invoice); only pure case differences are now tolerated, matching React. Pure validation-guard change — does NOT alter what sidemark gets stamped on the invoice/PDF/email/Consolidated_Ledger (still the payload-level value preserving display casing). No schema change, no migration, no React change. No change to v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, or any billing dollar total.
    StrideAPI.gs — v38.252.0 — 2026-05-30 PST — [BILLING] fix: orphan-aware handleVoidInvoice_ so the app's Void button can clean CB-only orphans. Pre-fix the handler bailed with NOT_FOUND whenever no client-sheet Billing_Ledger row carried the invoice # — leaving invoices that exist ONLY in Consolidated_Ledger + invoice_tracking (a storage-summary invoice whose synthetic line never wrote a sheet row — the Allison Lind 2026-05-30 incident) impossible to void from the app; they required the runVoidOrphanInvoices script. Now the CB Consolidated_Ledger cleanup (api_deleteCbRowsByInvoiceNo_) runs BEFORE the not-found bail, and the bail only fires when there is genuinely nothing anywhere (voided===0 AND skippedAlreadyVoid===0 AND cbDeleted===0 — a typo'd or already-fully-cleaned invoice number). An orphan (CB rows present, no sheet rows) falls through and gets cleaned: CB rows deleted, invoice_tracking row dropped, storage_billing_items flipped to Void. Response gains orphanVoid:boolean. Behavior for normal invoices (sheet rows present) is unchanged — voided>0 takes the same path as before, CB cleanup still runs. No change to dollar totals, the v38.182 atomic invoice counter, half-write detection, void-invoice SB-first path, or the v38.251.0 storage_billing_items writers.
@@ -10910,6 +10911,20 @@ function doPost(e) {
       case "fixClassValidation20260526":
         var fixClassResult = fixClassValidation_20260526_();
         return jsonResponse_({ success: true, action: "fixClassValidation20260526", result: fixClassResult });
+
+      // v38.255.0 — Mirror auto-generated Stride Coverage (INSURANCE) billing
+      // rows from public.billing onto the client Billing_Ledger sheets so they
+      // become invoiceable. The insurance_bill_due() Postgres cron can't write
+      // sheets; this is the SB→sheet push step. Idempotent, API_TOKEN-gated,
+      // safe to run repeatedly. Also runs daily via installInsuranceMirror.
+      case "mirrorInsuranceCharges":
+        return jsonResponse_({ success: true, action: "mirrorInsuranceCharges", result: runMirrorInsuranceChargesToSheets() });
+
+      // v38.255.0 — One-time installer for the daily time-driven trigger that
+      // runs runMirrorInsuranceChargesToSheets. Idempotent (removes any
+      // existing trigger for that handler first). Run once after deploy.
+      case "installInsuranceMirror":
+        return jsonResponse_({ success: true, action: "installInsuranceMirror", result: installInsuranceMirrorTrigger_() });
 
       // v38.242.0 — One-shot repair for Olson Kundig INV-001127 half-write
       // state (CB has 4 rows, client sheet only 2 flipped to Invoiced).
@@ -47765,6 +47780,108 @@ function runRepairOrphanLedgerRows() {
     }
   }
   Logger.log("runRepairOrphanLedgerRows complete: deleted " + deleted + " of " + rowsToDelete.length + " rows.");
+}
+
+/**
+ * v38.255.0 — runMirrorInsuranceChargesToSheets: daily SB→sheet mirror for
+ * auto-generated Stride Coverage (INSURANCE) billing rows.
+ *
+ * The insurance_bill_due() Postgres cron (pg_cron, 08:00 UTC daily) inserts one
+ * INSURANCE row per covered client per month into public.billing — but a
+ * Postgres job CANNOT write the per-tenant Billing_Ledger Google Sheet. Without
+ * this mirror those rows live only in the SB cache, so they show in the React
+ * Billing report (which reads public.billing) but can't be INVOICED — the
+ * invoice flip (api_markClientLedgerInvoiced_) matches rows on the SHEET, finds
+ * none, and fails with the "0 of N ledger rows" half-write guard (the same
+ * failure class as the Allison Lind storage incident).
+ *
+ * This job reads every Unbilled INSURANCE row from public.billing and mirrors
+ * it onto the owning client's Billing_Ledger sheet via the existing
+ * reverse-writethrough (handleWriteThroughReverse_ → __writeThroughReverseBilling_),
+ * which is idempotent by Ledger Row ID: it updates an existing row in place,
+ * appends a missing one, and SKIPS rows already Invoiced (so it can never
+ * un-invoice or double-write). Calc + automation stay in Supabase (the cron);
+ * this is purely the SB→sheet push step the operator asked for — GAS is the
+ * only thing that can write the sheet.
+ *
+ * Runs daily ~09:00 PT (after the 08:00 UTC cron) via the time-driven trigger
+ * installed by installInsuranceMirrorTrigger_. Also exposed as doPost action
+ * "mirrorInsuranceCharges" for manual runs / verification. Best-effort per
+ * row: a single tenant's failure is logged (handleWriteThroughReverse_ writes
+ * gs_sync_events on failure for FailedOperationsDrawer pickup) and the loop
+ * continues. Returns a summary {scanned, mirrored, skipped, failed, failures}.
+ */
+function runMirrorInsuranceChargesToSheets() {
+  // Pull every Unbilled INSURANCE row. Once a row is invoiced its status
+  // flips to Invoiced (sheet → public.billing sync), so it drops out of this
+  // set — and the reverse-writethrough skips Invoiced sheet rows anyway.
+  var sel = supabaseSelect_("billing", "status=eq.Unbilled&svc_code=eq.INSURANCE", "*");
+  if (!sel.ok) {
+    Logger.log("runMirrorInsuranceChargesToSheets: public.billing read failed — aborting (no rows mirrored).");
+    return { ok: false, error: "public.billing read failed", scanned: 0, mirrored: 0, skipped: 0, failed: 0 };
+  }
+  var rows = sel.rows || [];
+  var mirrored = 0, skipped = 0, failed = 0;
+  var failures = [];
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i] || {};
+    var tenantId = String(r.tenant_id || "").trim();
+    var lid = String(r.ledger_row_id || "").trim();
+    if (!tenantId || !lid) { skipped++; continue; }
+    try {
+      var resp = handleWriteThroughReverse_({
+        tenantId:  tenantId,
+        table:     "billing",
+        op:        "insert",   // idempotent upsert-by-ledger-id on the GAS side
+        rowId:     lid,
+        row:       r,
+        requestId: "insurance-mirror-" + lid
+      }, "cron:insurance-mirror");
+      var parsed = JSON.parse(resp.getContent());
+      if (parsed && parsed.success) {
+        if (parsed.result && parsed.result.skipped) skipped++;
+        else mirrored++;
+      } else {
+        failed++;
+        failures.push(lid + ": " + (parsed && parsed.error ? parsed.error : "unknown"));
+      }
+    } catch (e) {
+      failed++;
+      failures.push(lid + ": " + (e && e.message ? e.message : String(e)));
+    }
+  }
+  var summary = { ok: true, scanned: rows.length, mirrored: mirrored, skipped: skipped, failed: failed, failures: failures };
+  Logger.log("runMirrorInsuranceChargesToSheets: " + JSON.stringify(summary));
+  return summary;
+}
+
+/**
+ * v38.255.0 — installInsuranceMirrorTrigger_: install (idempotently) the daily
+ * time-driven trigger that runs runMirrorInsuranceChargesToSheets. Removes any
+ * existing trigger for that handler first so re-running never stacks duplicate
+ * triggers. Scheduled at 09:00 (script timezone = America/Los_Angeles), which
+ * is ~16:00–17:00 UTC — comfortably AFTER the 08:00 UTC insurance_bill_due()
+ * cron, so a charge generated in the morning is mirrored the same day. Run once
+ * after deploy via the Apps Script editor OR the doPost action
+ * "installInsuranceMirror".
+ */
+function installInsuranceMirrorTrigger_() {
+  var removed = 0;
+  var existing = ScriptApp.getProjectTriggers();
+  for (var i = 0; i < existing.length; i++) {
+    if (existing[i].getHandlerFunction() === "runMirrorInsuranceChargesToSheets") {
+      ScriptApp.deleteTrigger(existing[i]);
+      removed++;
+    }
+  }
+  ScriptApp.newTrigger("runMirrorInsuranceChargesToSheets")
+    .timeBased()
+    .everyDays(1)
+    .atHour(9)
+    .create();
+  var msg = "Installed daily insurance-mirror trigger at 09:00 PT (removed " + removed + " prior).";
+  Logger.log("installInsuranceMirrorTrigger_: " + msg);
+  return { ok: true, removedExisting: removed, message: msg };
 }
 
 /**
