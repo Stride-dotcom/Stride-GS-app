@@ -872,12 +872,40 @@ export function Dashboard() {
     });
   }, [typeFilterKey]);
   const [showTypeDropdown, setShowTypeDropdown] = useState(false);
+  // v2026-06-01 — the type-filter dropdown is rendered position:fixed off
+  // the Tasks pill's bounding rect (captured here on open) instead of
+  // position:absolute. On mobile the tab-bar row is overflowX:auto so the
+  // browser also clips overflow-y (CSS: one axis auto → the other computes
+  // to auto), which was clipping an absolutely-positioned dropdown that
+  // sits below the row — the menu opened but was invisible. A fixed layer
+  // anchored to the rect escapes every overflow ancestor.
+  const [typeDropRect, setTypeDropRect] = useState<DOMRect | null>(null);
   const typeDropdownRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const h = (e: MouseEvent) => { if (typeDropdownRef.current && !typeDropdownRef.current.contains(e.target as Node)) setShowTypeDropdown(false); };
-    document.addEventListener('mousedown', h);
-    return () => document.removeEventListener('mousedown', h);
+  const openTypeDropdown = useCallback(() => {
+    if (typeDropdownRef.current) setTypeDropRect(typeDropdownRef.current.getBoundingClientRect());
+    setShowTypeDropdown(v => !v);
   }, []);
+  useEffect(() => {
+    // Close on outside tap. The dropdown stays a DOM descendant of
+    // typeDropdownRef even though it paints fixed, so .contains() still
+    // correctly treats taps inside the menu as "inside". touchstart is
+    // added alongside mousedown for reliable mobile dismissal.
+    const h = (e: Event) => { if (typeDropdownRef.current && !typeDropdownRef.current.contains(e.target as Node)) setShowTypeDropdown(false); };
+    document.addEventListener('mousedown', h);
+    document.addEventListener('touchstart', h);
+    return () => { document.removeEventListener('mousedown', h); document.removeEventListener('touchstart', h); };
+  }, []);
+  // While open, a fixed-position menu won't follow the pill if the page or
+  // the horizontally-scrollable tab bar scrolls — close it on scroll/resize
+  // rather than leave a misaligned floating menu. Capture phase catches the
+  // inner tab-bar scroller too.
+  useEffect(() => {
+    if (!showTypeDropdown) return;
+    const close = () => setShowTypeDropdown(false);
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => { window.removeEventListener('scroll', close, true); window.removeEventListener('resize', close); };
+  }, [showTypeDropdown]);
 
   // Explicit-list semantics — always filter through includes(). Empty
   // array → no tasks shown (matches "Select All unchecked" expectation).
@@ -1007,7 +1035,20 @@ export function Dashboard() {
             };
             return (
               <div key={tab.id} style={{ position: 'relative' }} ref={isTasksTab ? typeDropdownRef : undefined}>
-                <button onClick={() => handleTabChange(tab.id)} style={tabStyle}>
+                <button
+                  onClick={() => {
+                    // v2026-06-01 — whole-pill tap target for the type filter.
+                    // The 12px chevron alone was an unhittable target on touch,
+                    // so taps landed on the button body and just re-ran
+                    // handleTabChange (a no-op when already on Tasks) — the
+                    // operator perceived "the filter won't open". Now: if the
+                    // Tasks tab is already active, tapping anywhere on the pill
+                    // toggles the dropdown; otherwise it activates the tab.
+                    if (isTasksTab && active) openTypeDropdown();
+                    else handleTabChange(tab.id);
+                  }}
+                  style={tabStyle}
+                >
                   {tab.label}
                   <span style={{
                     fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 100,
@@ -1018,15 +1059,33 @@ export function Dashboard() {
                     {tab.count}
                   </span>
                   {isTasksTab && (
-                    <ChevronDown size={12} onClick={e => { e.stopPropagation(); setShowTypeDropdown(v => !v); }} style={{ marginLeft: -2, opacity: 0.7 }} />
+                    // Enlarged touch target — padding gives the chevron a
+                    // ~28px hit area on mobile without changing the visual
+                    // glyph size much. stopPropagation so the chevron toggles
+                    // the dropdown directly even when the tab isn't active yet.
+                    <span
+                      onClick={e => { e.stopPropagation(); if (!active) handleTabChange(tab.id); openTypeDropdown(); }}
+                      style={{ display: 'inline-flex', alignItems: 'center', padding: isMobile ? 6 : 2, margin: isMobile ? '-6px -2px -6px -4px' : '0 0 0 -2px', cursor: 'pointer' }}
+                      aria-label="Filter tasks by type"
+                    >
+                      <ChevronDown size={isMobile ? 16 : 12} style={{ opacity: 0.7 }} />
+                    </span>
                   )}
                 </button>
-                {/* Task type dropdown */}
+                {/* Task type dropdown — position:fixed off the captured pill
+                    rect so it escapes the mobile tab-bar's overflow clip
+                    (see typeDropRect note above). Falls back to the pill's
+                    live rect if state is somehow empty. Stays a DOM child of
+                    typeDropdownRef so the outside-tap handler still works. */}
                 {isTasksTab && showTypeDropdown && (
                   <div style={{
-                    position: 'absolute', top: '100%', left: 0, marginTop: 8, background: '#fff',
+                    position: 'fixed',
+                    top: (typeDropRect?.bottom ?? 0) + 8,
+                    left: typeDropRect?.left ?? 0,
+                    background: '#fff',
                     borderRadius: 12, padding: 8,
                     zIndex: 50, boxShadow: '0 8px 24px rgba(0,0,0,0.12)', minWidth: 200,
+                    maxHeight: 'calc(100vh - 120px)', overflowY: 'auto',
                   }}>
                     <label style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', fontSize: 12, cursor: 'pointer', fontWeight: 600, borderBottom: `1px solid rgba(0,0,0,0.06)`, marginBottom: 4, paddingBottom: 10 }}>
                       <input type="checkbox" checked={isAllSelected} onChange={toggleSelectAll} style={{ accentColor: '#E8692A' }} />
