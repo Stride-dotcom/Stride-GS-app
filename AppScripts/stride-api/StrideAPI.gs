@@ -44541,7 +44541,7 @@ function qbo_buildInvoicePayload_(invoiceData, customerQboId, itemMap, token, re
     var mapping = itemMap[item.svcCode] || {};
     var itemRef = qbo_resolveItemRef_(mapping.qbItemName || "Services", token, realmId, itemIdCache);
 
-    // v38.x — QBO REJECTS a line (HTTP 400 "Amount is not equal to
+    // v38.257.0 — QBO REJECTS a line (HTTP 400 "Amount is not equal to
     // UnitPrice * Qty") whenever Amount !== round(UnitPrice * Qty). Most
     // billing rows satisfy this (rate × qty = total), but AGGREGATE rows —
     // notably the storage "Monthly Storage" summary (qty 1, total = the
