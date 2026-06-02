@@ -125,6 +125,15 @@ export interface PendingIntakeOverride {
    *  TaxExemptBlock as "Cert from intake — will be saved on Save & Sync".
    *  Actual copy + URL stamp happens in the parent's onSubmit handler. */
   resaleCertPath?: string | null;
+  /** Intake-elected insurance choice. Drives InsuranceBlock's pre-fill
+   *  when the client doesn't yet have a client_insurance row. 'eis_coverage'
+   *  is the legacy alias for 'stride_coverage' per session 77 rename. */
+  insuranceChoice?: 'own_policy' | 'stride_coverage' | 'eis_coverage' | null;
+  /** Intake-elected declared value (dollars). Pre-fills the empty-state
+   *  input in InsuranceBlock so the operator doesn't have to retype the
+   *  amount the client already submitted. Only meaningful when
+   *  insuranceChoice is 'stride_coverage' or 'eis_coverage'. */
+  insuranceDeclaredValue?: number | null;
 }
 
 // Simulated phase sequence shown during the 30-60s onboarding call. Advances on a
@@ -767,7 +776,13 @@ export function OnboardClientModal({ mode = 'create', existingClient = null, all
                   Auto-billed monthly from client_insurance
                 </span>
               </div>
-              <InsuranceBlock tenantId={data.spreadsheetId} clientName={data.clientName} />
+              <InsuranceBlock
+                tenantId={data.spreadsheetId}
+                clientName={data.clientName}
+                pendingIntakeInsurance={pendingIntake && (pendingIntake.insuranceChoice === 'stride_coverage' || pendingIntake.insuranceChoice === 'eis_coverage') && (pendingIntake.insuranceDeclaredValue ?? 0) > 0
+                  ? { declaredValue: pendingIntake.insuranceDeclaredValue ?? 0, submittedAt: pendingIntake.submittedAt }
+                  : null}
+              />
             </div>
           )}
 
@@ -1108,7 +1123,17 @@ function ClientDocumentsBlock({ clientSheetId }: { clientSheetId: string }) {
  * (pre-session-77 accounts) there's a "Set up insurance" button that
  * creates the row with a user-entered declared value.
  */
-function InsuranceBlock({ tenantId, clientName }: { tenantId: string; clientName: string }) {
+interface InsuranceBlockProps {
+  tenantId: string;
+  clientName: string;
+  /** When set + no `client_insurance` row exists yet, the empty-state
+   *  input pre-fills with the intake's declared value so the operator
+   *  doesn't have to retype the amount the client already submitted.
+   *  Suppressed entirely once a `client_insurance` row exists. */
+  pendingIntakeInsurance?: { declaredValue: number; submittedAt: string } | null;
+}
+
+function InsuranceBlock({ tenantId, clientName, pendingIntakeInsurance }: InsuranceBlockProps) {
   const { row, history, loading, error, seed, updateDeclaredValue, setActive, cancel } = useClientInsurance(tenantId);
   const [editing, setEditing] = useState(false);
   const [draftDeclared, setDraftDeclared] = useState('');
@@ -1120,6 +1145,21 @@ function InsuranceBlock({ tenantId, clientName }: { tenantId: string; clientName
   useEffect(() => {
     if (row) setDraftDeclared(String(row.declaredValue));
   }, [row]);
+  // Pre-fill the seed input from the intake's elected declared value when
+  // there's no client_insurance row yet AND the operator hasn't typed
+  // anything. Two guards make this safe to re-run:
+  //   1. only when `!row` (existing rows manage their own draftDeclared
+  //      via the effect above)
+  //   2. only when seedDraft is currently empty (don't clobber an in-
+  //      progress edit if the row state somehow flips back to null)
+  useEffect(() => {
+    if (row) return;
+    const intakeVal = pendingIntakeInsurance?.declaredValue ?? 0;
+    if (intakeVal > 0 && seedDraft === '') {
+      setSeedDraft(String(intakeVal));
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [row, pendingIntakeInsurance?.declaredValue]);
 
   const monthly = row ? Math.max(30, Math.round((row.declaredValue / 10000) * row.monthlyRatePer10k * 100) / 100) : 0;
 
@@ -1158,12 +1198,26 @@ function InsuranceBlock({ tenantId, clientName }: { tenantId: string; clientName
   }
 
   if (!row) {
-    // No row yet — this is a pre-intake client or an own-policy intake.
-    // Offer a one-shot seed if the admin wants to add Stride coverage.
+    // No row yet — this is a pre-intake client, an own-policy intake,
+    // or a refresh intake whose insurance hasn't been propagated yet
+    // (the case the user hit on AubreyMaxwell / Weidner — refresh
+    // intakes submitted pre-2026-06-02 ran the EF before the insurance
+    // propagation block was added, so client_insurance is empty until
+    // the operator clicks Save & Sync).
+    //
+    // When `pendingIntakeInsurance` is set we know the client just
+    // elected stride coverage with a non-zero declared value via the
+    // refresh intake — show a hint that the input is pre-filled from
+    // their submission so the operator doesn't think they're entering
+    // it from scratch.
+    const fromIntake = pendingIntakeInsurance && pendingIntakeInsurance.declaredValue > 0;
+    const hintText = fromIntake
+      ? `Client elected Stride coverage on ${pendingIntakeInsurance!.submittedAt.slice(0, 10)} with a declared value of $${pendingIntakeInsurance!.declaredValue.toLocaleString()}. Click "Set up insurance" to confirm — Save & Sync at the bottom also creates it automatically.`
+      : 'No active Stride coverage for this client. If the client wants to be added to Stride\'s storage policy, enter a declared value below and set up insurance auto-billing.';
     return (
       <div style={{ background: theme.colors.bgSubtle, borderRadius: 10, padding: 14 }}>
         <div style={{ fontSize: 12, color: theme.colors.textSecondary, marginBottom: 10 }}>
-          No active Stride coverage for this client. If the client wants to be added to Stride's storage policy, enter a declared value below and set up insurance auto-billing.
+          {hintText}
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <span style={{ fontSize: 13 }}>$</span>
