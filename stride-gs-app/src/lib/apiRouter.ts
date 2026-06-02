@@ -131,10 +131,18 @@ const GROUPED_TASK_BATCH_OPS = [
   'batchCancelTasks', 'batchCancelRepairs',
 ] as const;
 
+// `commitStorageRows`, `syncClientBilling`, and `voidUnbilledRows` were
+// previously in this list but each has its own SB-primary EF
+// (commit-storage-charges-sb, sync-client-billing-sb, void-unbilled-rows-sb)
+// gated by its own feature_flag (commitStorageCharges, syncClientBilling,
+// voidUnbilledRows). The grouped spread at the bottom of GAS_TO_SB_MAP was
+// silently overriding the direct entries (object-literal "last key wins"),
+// proxying these actions back to GAS via billing-extras-sb instead of
+// using the individual SB handlers. Removing them here lets the direct
+// entries (lines below) stick — same fix pattern as updateClient before.
 const GROUPED_BILLING_EXTRAS = [
   'markBillingActivityResolved', 'resendInvoiceEmail',
-  'previewStorageCharges', 'commitStorageRows', 'syncClientBilling',
-  'voidUnbilledRows',
+  'previewStorageCharges',
 ] as const;
 
 const GROUPED_LOCATION_ACTIONS = [
