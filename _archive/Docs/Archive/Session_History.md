@@ -68,6 +68,10 @@
 
 **2026-03-31 session 26:** Role-based access + per-user table persistence. 3-tier nav: admin=full, staff=7 items, client=7 items. `RoleGuard` in App.tsx. Settings admin-only. `useTablePreferences` keyed by user.email. Column drag-to-reorder on ALL 8 TanStack Table pages.
 
+## 2026-06
+
+**2026-06-02 Intake insurance propagated to client_insurance (PR [#593](https://github.com/Stride-dotcom/Stride-GS-app/pull/593), `fix/intake/propagate-insurance-to-client`):** Reported by Justin — refresh intakes had insurance_choice + insurance_declared_value captured but neither the auto-apply EF nor the manual Apply Refresh handler wrote them to client_insurance, so InsuranceBlock showed $0 and the auto-billing cron either skipped or billed $0 for affected tenants. Both code paths now upsert client_insurance after the clients UPDATE (stride_coverage → upsert with rate from service_catalog.INSURANCE; own_policy → deactivate existing row; eis_coverage treated as legacy alias for stride_coverage). UPDATE path preserves inception_date/next_billing_date/monthly_rate_per_10k so in-flight cycles aren't reset. Audit identified 2 already-activated tenants needing backfill (Arkitektura & B&B Italia SF + COUCH Seattle, both $10K stride_coverage) — backfilled via direct INSERT. EF deployed via Supabase CLI; React via canonical.
+
 ## 2026-05
 
 **2026-05-31 Failed Operations Retry for EF-direct actions (PR [#583](https://github.com/Stride-dotcom/Stride-GS-app/pull/583), `fix/delivery/retry-ef-direct-actions`):** Direct follow-up to PR #582. Operator clicked Retry on a dt_push_order_after_pu_sync row and got "Unknown POST action: dtPushOrderAfterPuSync" because the retry handler hardcoded everything through apiPost → GAS, but that action_type is written by an Edge Function (dt-sync-statuses) and has no GAS handler. New EF_RETRY_MAP at top of retry() dispatches specific action_types directly to supabase.functions.invoke() with the right body shape (matches original dt-sync-statuses v21 call). Error path uses the same err.context.text() body-extraction from v21. Adding new EF-direct retry paths is now a one-entry map change.
