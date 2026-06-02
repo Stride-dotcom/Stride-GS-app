@@ -89,6 +89,7 @@ Deno.serve(async (req: Request) => {
     shipment_number: '',
     item_notes:      notes,
     sidemark,
+    reference:       '',
     created_at:      nowIso,
     updated_at:      nowIso,
   };
