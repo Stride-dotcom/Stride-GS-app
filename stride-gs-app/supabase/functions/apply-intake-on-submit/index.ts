@@ -170,6 +170,113 @@ Deno.serve(async (req: Request) => {
       return json({ success: false, error: `clients update failed: ${upErr.message}` }, 500);
     }
 
+    // 5b. Propagate insurance choice + declared value to client_insurance.
+    //
+    // The `clients` row has no columns for insurance — the canonical store
+    // is `client_insurance` (one row per tenant, drives the daily auto-
+    // billing cron at 20260420160001_insurance_auto_billing_cron.sql).
+    // Pre-2026-06-02 this propagation was missing, so refresh intakes
+    // that elected stride_coverage with a declared value never landed in
+    // client_insurance — operators clicked "Apply Refresh to Client" and
+    // saw $0 in the InsuranceBlock even though the intake had $20K. The
+    // auto-billing cron then either skipped or billed $0 for affected
+    // tenants. Reported by Justin on the Weidner Apartment Homes /
+    // Complete Design intake.
+    //
+    // Logic:
+    //   stride_coverage + value > 0 → upsert client_insurance with
+    //     coverage_type='stride_coverage', declared_value, active=true.
+    //     On INSERT: stamp inception_date=today + next_billing_date=
+    //     today+30 + monthly_rate_per_10k from service_catalog.INSURANCE
+    //     (matches useClientInsurance.seed). On EXISTING row: update
+    //     declared_value + coverage_type + reactivate, but PRESERVE
+    //     inception/next_billing so an existing billing cycle isn't
+    //     reset. monthly_rate_per_10k also preserved on existing rows so
+    //     a service_catalog rate change doesn't retro-apply.
+    //   own_policy → if an existing client_insurance row exists, flip
+    //     it to coverage_type='own_policy', active=false, cancelled_at=
+    //     now() so the cron stops billing. No new row created — the
+    //     client doesn't want coverage.
+    //   anything else (null / unrecognized choice) → no-op.
+    const insuranceChoiceRaw = String(intake.insurance_choice ?? '').trim().toLowerCase();
+    // eis_coverage is the legacy alias for stride_coverage (session 77
+    // rename). Old intakes may still carry the original value; new ones
+    // write stride_coverage. Treat them as identical for billing purposes.
+    const insuranceChoice = insuranceChoiceRaw === 'eis_coverage' ? 'stride_coverage' : insuranceChoiceRaw;
+    const declaredValue   = Number(intake.insurance_declared_value ?? 0) || 0;
+    let insuranceSync: string | null = null;
+    try {
+      if (insuranceChoice === 'stride_coverage' && declaredValue > 0) {
+        const { data: existing } = await supabase
+          .from('client_insurance')
+          .select('id')
+          .eq('tenant_id', clientSpreadsheetId)
+          .maybeSingle();
+        if (existing) {
+          const { error: updErr } = await supabase.from('client_insurance').update({
+            declared_value: declaredValue,
+            coverage_type:  'stride_coverage',
+            active:         true,
+            cancelled_at:   null,
+            client_name:    intake.business_name || undefined,
+          }).eq('tenant_id', clientSpreadsheetId);
+          if (updErr) insuranceSync = `update failed: ${updErr.message}`;
+          else        insuranceSync = `updated declared_value=${declaredValue} stride_coverage active=true`;
+        } else {
+          const { data: svc } = await supabase
+            .from('service_catalog')
+            .select('flat_rate')
+            .eq('code', 'INSURANCE')
+            .maybeSingle();
+          const rate = svc && typeof svc.flat_rate === 'number' ? svc.flat_rate : null;
+          if (rate == null) {
+            insuranceSync = 'skipped: no INSURANCE rate in service_catalog (admin must set rate in Settings → Pricing first)';
+          } else {
+            const today = new Date();
+            const next  = new Date(today);
+            next.setDate(next.getDate() + 30);
+            const toDateStr = (d: Date) => d.toISOString().slice(0, 10);
+            const { error: insErr } = await supabase.from('client_insurance').insert({
+              tenant_id:            clientSpreadsheetId,
+              client_name:          intake.business_name || '',
+              coverage_type:        'stride_coverage',
+              declared_value:       declaredValue,
+              monthly_rate_per_10k: rate,
+              inception_date:       toDateStr(today),
+              next_billing_date:    toDateStr(next),
+              active:               true,
+            });
+            if (insErr) insuranceSync = `insert failed: ${insErr.message}`;
+            else        insuranceSync = `created declared_value=${declaredValue} stride_coverage rate=${rate}/$10K`;
+          }
+        }
+      } else if (insuranceChoice === 'own_policy') {
+        const { data: existing } = await supabase
+          .from('client_insurance')
+          .select('id, active')
+          .eq('tenant_id', clientSpreadsheetId)
+          .maybeSingle();
+        if (existing) {
+          const { error: updErr } = await supabase.from('client_insurance').update({
+            coverage_type: 'own_policy',
+            active:        false,
+            cancelled_at:  new Date().toISOString(),
+          }).eq('tenant_id', clientSpreadsheetId);
+          if (updErr) insuranceSync = `own_policy deactivate failed: ${updErr.message}`;
+          else        insuranceSync = 'deactivated existing coverage (own_policy elected)';
+        } else {
+          insuranceSync = 'skipped: own_policy elected, no existing coverage row to deactivate';
+        }
+      }
+    } catch (e) {
+      // Never fatal — clients update already committed, intake is still
+      // valid. Operator can fix manually in the InsuranceBlock card.
+      insuranceSync = `unexpected: ${e instanceof Error ? e.message : String(e)}`;
+    }
+    if (insuranceSync) {
+      console.log(`[apply-intake-on-submit] insurance sync for ${clientSpreadsheetId}: ${insuranceSync}`);
+    }
+
     // 6. Resale cert: copy from intake bucket → resale-certs bucket + signed URL.
     // Mirrors IntakesPanel.tsx lines 129-156 exactly.
     const certWarnings: string[] = [];
@@ -262,6 +369,7 @@ Deno.serve(async (req: Request) => {
       certWarnings,
       sheetMirrorOk,
       ...(sheetMirrorError ? { sheetMirrorError } : {}),
+      ...(insuranceSync ? { insuranceSync } : {}),
     });
   } catch (e) {
     console.error('[apply-intake-on-submit] unhandled error:', e);
