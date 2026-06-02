@@ -328,10 +328,18 @@ export const SHADOW_REGISTRY: Record<string, ShadowSpec> = {
   completeShipment: {
     flagKey: 'receiveShipment',
     ef:      'receive-shipment-shadow',
-    toAuditShape: (p) => ({
-      itemCount: Array.isArray(p.items) ? p.items.length : 0,
-      carrier:   String(p.carrier ?? ''),
-    }),
+    // Mirror GAS at StrideAPI.gs:9598 byte-for-byte:
+    //   { itemCount: (payload.items || []).length, carrier: payload.carrier || "" }
+    // `||` collapses every falsy value to "". `String(x ?? '')` diverges
+    // for 0/false/non-string-typed carriers — see receive-shipment-shadow's
+    // header for the full reasoning. EF + this override must derive
+    // identically from the same payload or every call hash_diff's.
+    toAuditShape: (p) => {
+      const itemsRaw = (p.items as unknown) || [];
+      const itemCount = Array.isArray(itemsRaw) ? itemsRaw.length : 0;
+      const carrier = (p.carrier as string | null | undefined) || '';
+      return { itemCount, carrier };
+    },
     toCallId: (p) => firstId(p, 'idempotencyKey', 'requestId'),
     toSummary: (p) => {
       const items = Array.isArray(p.items) ? p.items.length : '?';

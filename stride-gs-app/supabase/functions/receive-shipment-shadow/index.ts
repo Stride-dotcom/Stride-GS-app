@@ -41,17 +41,24 @@ type Payload = Record<string, unknown>;
 interface ShadowResult { ok: boolean; changes?: Record<string, unknown>; error?: string; errorCode?: string }
 
 export function runReceiveShipmentShadow(payload: Payload): ShadowResult {
-  // Mirror the GAS coercion at StrideAPI.gs:9533:
+  // Mirror GAS at StrideAPI.gs:9598 byte-for-byte:
   //   { itemCount: (payload.items || []).length, carrier: payload.carrier || "" }
-  // Using the same `String(... ?? '')` shape on both sides (here + the
-  // shadowRegistry override) avoids per-payload drift on null/undefined.
-  const items = Array.isArray(payload?.items) ? payload.items : [];
+  //
+  // Use the `||` operator (NOT `??` + String()): GAS's `||` collapses every
+  // falsy value (`""`, null, undefined, 0, false, NaN) to `""`. `String(x ?? '')`
+  // diverges from that for the 0/false/NaN/number-typed-carrier cases —
+  // realistic payloads always pass strings so the bug never bit in production,
+  // but a single non-string carrier in a future payload (webhook ingest, retry
+  // queue, anything not going through the trimmed React input) would surface
+  // as a hash_diff mismatch that nobody could explain. The same `||` form runs
+  // in shadowRegistry.ts so the EF and the synthetic GAS audit shape derive
+  // identically from the same payload.
+  const itemsRaw = (payload?.items as unknown) || [];
+  const itemCount = Array.isArray(itemsRaw) ? itemsRaw.length : 0;
+  const carrier = (payload?.carrier as string | null | undefined) || '';
   return {
     ok: true,
-    changes: {
-      itemCount: items.length,
-      carrier:   String(payload?.carrier ?? ''),
-    },
+    changes: { itemCount, carrier },
   };
 }
 
