@@ -173,6 +173,91 @@ export function IntakesPanel() {
         }
         warnings.push(`Updated existing client "${formData.clientName}" from refresh intake.`);
 
+        // Propagate insurance choice + declared value to client_insurance.
+        // The `clients` row has no insurance columns — the canonical store
+        // is `client_insurance` (one row per tenant, drives the daily
+        // auto-billing cron). Mirrors the same block in apply-intake-on-
+        // submit Edge Function (the auto-apply path). Both paths exist:
+        // the EF runs on submit, this runs on the manual Apply Refresh
+        // admin click — either may execute first, and both must seed the
+        // same row consistently so the InsuranceBlock displays the right
+        // declared value the next time the operator opens this client.
+        //
+        // Pre-2026-06-02 this propagation was missing in BOTH paths, so
+        // the InsuranceBlock showed $0 even when the intake had $20K —
+        // reported by Justin on Weidner Apartment Homes / Complete Design.
+        const insuranceChoiceRaw = String(selected.insuranceChoice ?? '').trim().toLowerCase();
+        // eis_coverage is the legacy alias for stride_coverage (session 77
+        // rename — old intakes may carry it). Treat both as identical.
+        const insuranceChoice = insuranceChoiceRaw === 'eis_coverage' ? 'stride_coverage' : insuranceChoiceRaw;
+        const declaredValue   = Number(selected.insuranceDeclaredValue ?? 0) || 0;
+        try {
+          if (insuranceChoice === 'stride_coverage' && declaredValue > 0) {
+            const { data: existing } = await supabase
+              .from('client_insurance')
+              .select('id')
+              .eq('tenant_id', refreshSheetId)
+              .maybeSingle();
+            if (existing) {
+              const { error: insUpdErr } = await supabase.from('client_insurance').update({
+                declared_value: declaredValue,
+                coverage_type:  'stride_coverage',
+                active:         true,
+                cancelled_at:   null,
+                client_name:    formData.clientName || undefined,
+              }).eq('tenant_id', refreshSheetId);
+              if (insUpdErr) warnings.push(`Insurance update failed: ${insUpdErr.message}`);
+              else warnings.push(`Insurance updated to $${declaredValue.toLocaleString()} stride_coverage (active).`);
+            } else {
+              const { data: svc } = await supabase
+                .from('service_catalog')
+                .select('flat_rate')
+                .eq('code', 'INSURANCE')
+                .maybeSingle();
+              const rate = svc && typeof svc.flat_rate === 'number' ? svc.flat_rate : null;
+              if (rate == null) {
+                warnings.push('Insurance NOT seeded — no INSURANCE rate in service_catalog. Set rate in Settings → Pricing, then re-apply.');
+              } else {
+                const today = new Date();
+                const next  = new Date(today);
+                next.setDate(next.getDate() + 30);
+                const toDateStr = (d: Date) => d.toISOString().slice(0, 10);
+                const { error: insInsErr } = await supabase.from('client_insurance').insert({
+                  tenant_id:            refreshSheetId,
+                  client_name:          formData.clientName || '',
+                  coverage_type:        'stride_coverage',
+                  declared_value:       declaredValue,
+                  monthly_rate_per_10k: rate,
+                  inception_date:       toDateStr(today),
+                  next_billing_date:    toDateStr(next),
+                  active:               true,
+                });
+                if (insInsErr) warnings.push(`Insurance seed failed: ${insInsErr.message}`);
+                else warnings.push(`Insurance seeded: $${declaredValue.toLocaleString()} stride_coverage @ $${rate}/$10K monthly.`);
+              }
+            }
+          } else if (insuranceChoice === 'own_policy') {
+            const { data: existing } = await supabase
+              .from('client_insurance')
+              .select('id')
+              .eq('tenant_id', refreshSheetId)
+              .maybeSingle();
+            if (existing) {
+              const { error: insUpdErr } = await supabase.from('client_insurance').update({
+                coverage_type: 'own_policy',
+                active:        false,
+                cancelled_at:  new Date().toISOString(),
+              }).eq('tenant_id', refreshSheetId);
+              if (insUpdErr) warnings.push(`Insurance deactivation failed: ${insUpdErr.message}`);
+              else warnings.push('Insurance deactivated (own_policy elected).');
+            }
+            // No existing row + own_policy → no-op; don't create a row
+            // for a client who explicitly opted out of stride coverage.
+          }
+        } catch (e) {
+          warnings.push(`Insurance sync error: ${e instanceof Error ? e.message : String(e)}`);
+        }
+
         // Resale cert: same copy-to-resale-certs path as the new-client
         // activation flow below.
         if (selected.taxExempt !== false && selected.resaleCertPath) {
