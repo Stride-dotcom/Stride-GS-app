@@ -308,7 +308,99 @@ async function handle(req: Request): Promise<Response> {
 
   const total = updated.reduce((acc, r) => acc + Number(r.total ?? 0), 0);
 
-  // ── 4. Audit log (best-effort) ─────────────────────────────────────
+  // ── 4. Stamp public.invoice_tracking ───────────────────────────────
+  // Mirrors GAS handleCreateInvoice_ (StrideAPI.gs:28694-28764, v38.194.0).
+  // Without this row, SB-created invoices are invisible to the React
+  // Invoice Review tab until QBO/Stax push fills push-state columns —
+  // the migration's blind spot for the #1 highest-traffic handler.
+  //
+  // auto_charge is snapshotted from public.clients at create time so a
+  // later config flip doesn't retroactively change which historical
+  // invoices were "auto-charge clients" (the Stax push-status filter
+  // depends on this snapshot).
+  //
+  // Idempotency: invoice_no is PK. We upsert (ON CONFLICT (invoice_no) DO
+  // UPDATE) to match GAS's `Prefer: resolution=merge-duplicates` so a
+  // retry path hitting the same invoice_no refreshes total/line_count
+  // rather than 409-ing — same shape as the v38.157 half-write recovery.
+  //
+  // Best-effort: failure logs a warning but does not fail the invoice.
+  // The 30-day anomaly sweep on the GAS side would surface any rows
+  // missed during a Supabase outage.
+  try {
+    let autoChargeSnap = false;
+    try {
+      const { data: clientRow } = await sb
+        .from('clients')
+        .select('auto_charge')
+        .eq('spreadsheet_id', tenantId)
+        .maybeSingle();
+      if (clientRow && clientRow.auto_charge === true) autoChargeSnap = true;
+    } catch (_) { /* best-effort */ }
+
+    const trackingPayload = {
+      invoice_no:   invoiceNo,
+      tenant_id:    tenantId,
+      client_name:  client,
+      invoice_date: mmddyyyyToIso(invoiceDateStr),
+      total:        Number((total || 0).toFixed(2)),
+      line_count:   updated.length,
+      auto_charge:  autoChargeSnap,
+      created_at:   nowIso,
+    };
+    const { error: itErr } = await sb
+      .from('invoice_tracking')
+      .upsert(trackingPayload, { onConflict: 'invoice_no' });
+    if (itErr) {
+      console.error('[create-invoice-sb] invoice_tracking upsert failed:', itErr.message);
+      warnings.push(`invoice_tracking upsert failed: ${itErr.message}`);
+    }
+  } catch (itEx) {
+    const msg = itEx instanceof Error ? itEx.message : String(itEx);
+    console.error('[create-invoice-sb] invoice_tracking upsert threw:', msg);
+    warnings.push(`invoice_tracking upsert threw: ${msg}`);
+  }
+
+  // ── 5. Stamp storage_billing_items for STOR-SUMMARY lines ─────────
+  // Mirrors GAS handleCreateInvoice_ (StrideAPI.gs:28597-28621). When
+  // an invoice contains a STOR-SUMMARY-* ledger id (the synthetic line
+  // produced by the React storage summarizer for 2+ STOR rows), the
+  // constituent per-item storage_billing_items rows linked via
+  // summary_ledger_row_id need to flip Unbilled → Invoiced and carry
+  // the invoice_no/invoice_date. Without this, the next storage commit's
+  // dedup read (handleCommitStorageRows_) won't see them as billed and
+  // will re-bill the same item-days.
+  //
+  // status=eq.Unbilled in the WHERE makes this idempotent — a retry
+  // hitting the same invoice_no won't re-stamp rows already Invoiced.
+  // Best-effort: per-summary failures log + warn but never fail the
+  // invoice (matches GAS — invoice is already committed at this point).
+  const summaryIds = updated
+    .map(r => String(r.ledger_row_id ?? ''))
+    .filter(id => id.indexOf('STOR-SUMMARY-') === 0);
+  if (summaryIds.length > 0) {
+    const sbiInvIso = mmddyyyyToIso(invoiceDateStr);
+    for (const sumId of summaryIds) {
+      try {
+        const { error: sbiErr } = await sb
+          .from('storage_billing_items')
+          .update({ status: 'Invoiced', invoice_no: invoiceNo, invoice_date: sbiInvIso })
+          .eq('tenant_id', tenantId)
+          .eq('summary_ledger_row_id', sumId)
+          .eq('status', 'Unbilled');
+        if (sbiErr) {
+          console.error('[create-invoice-sb] storage_billing_items stamp failed for', sumId, ':', sbiErr.message);
+          warnings.push(`storage_billing_items stamp failed for ${sumId}: ${sbiErr.message}`);
+        }
+      } catch (sbiEx) {
+        const msg = sbiEx instanceof Error ? sbiEx.message : String(sbiEx);
+        console.error('[create-invoice-sb] storage_billing_items stamp threw for', sumId, ':', msg);
+        warnings.push(`storage_billing_items stamp threw for ${sumId}: ${msg}`);
+      }
+    }
+  }
+
+  // ── 6. Audit log (best-effort) ─────────────────────────────────────
   // PostgrestBuilder resolves to {data, error} instead of rejecting on
   // schema/permission failures — the prior `.then(ok, err)` form let
   // every audit_log error slip past silently. Destructure + log + warn.
@@ -339,7 +431,7 @@ async function handle(req: Request): Promise<Response> {
     warnings.push(`Audit log insert threw: ${msg}`);
   }
 
-  // ── 5. Reverse-writethrough each row to per-tenant Billing_Ledger ──
+  // ── 7. Reverse-writethrough each row to per-tenant Billing_Ledger ──
   // GAS handleWriteThroughReverse_ only supports insert/update/delete
   // ops (no bulk variant), so we fan out per-row. MIG-016 explicitly
   // permits this latency for canary tenant; full-sync cron picks up
@@ -413,6 +505,23 @@ function json(body: unknown, status = 200): Response {
     status,
     headers: { ...corsHeaders, 'Content-Type': 'application/json' },
   });
+}
+
+// Convert MM/dd/yyyy → yyyy-MM-dd for Postgres `date` columns. Falls back
+// to today (PST) on a malformed input. Mirrors GAS handleCreateInvoice_'s
+// invDateStr → invDateIso branch at StrideAPI.gs:28727-28735.
+function mmddyyyyToIso(mdy: string): string | null {
+  const s = String(mdy ?? '').trim();
+  const m = s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (m) return `${m[3]}-${m[1]}-${m[2]}`;
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Los_Angeles',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(new Date());
+  const y = parts.find(p => p.type === 'year')?.value;
+  const mo = parts.find(p => p.type === 'month')?.value;
+  const d = parts.find(p => p.type === 'day')?.value;
+  return y && mo && d ? `${y}-${mo}-${d}` : null;
 }
 
 // Format date as MM/dd/yyyy in America/Los_Angeles. Mirrors GAS

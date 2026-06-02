@@ -151,26 +151,101 @@ Deno.serve(async (req: Request) => {
   }
 
   // ── 3. Audit log (best-effort) — matches GAS shape ─────────────────
-  await sb.from('entity_audit_log').insert({
-    entity_type:   'billing',
-    entity_id:     invoiceNo,
-    tenant_id:     tenantId,
-    action:        'reissue_invoice',
-    changes:       {
-      invoiceNo,
-      rowsReissued: reissued.length,
-      ledgerRowIds: reissued.map(r => r.ledger_row_id),
-      reason,
-      alreadyUnbilledSkipped: alreadyUnbilled,
-    },
-    performed_by:  callerEmail || 'reissue-invoice-sb',
-    source:        'supabase',
-  }).then(() => {}, (e: unknown) => {
-    console.error('[reissue-invoice-sb] audit-log insert failed:', e);
-    warnings.push(`Audit log insert failed: ${e instanceof Error ? e.message : String(e)}`);
-  });
+  // PostgrestBuilder resolves to {data, error} instead of rejecting on
+  // schema/permission failures — the prior `.then(ok, err)` form let
+  // every audit_log error slip past silently. Destructure + log + warn.
+  try {
+    const { error: auditErr } = await sb.from('entity_audit_log').insert({
+      entity_type:   'billing',
+      entity_id:     invoiceNo,
+      tenant_id:     tenantId,
+      action:        'reissue_invoice',
+      changes:       {
+        invoiceNo,
+        rowsReissued: reissued.length,
+        ledgerRowIds: reissued.map(r => r.ledger_row_id),
+        reason,
+        alreadyUnbilledSkipped: alreadyUnbilled,
+      },
+      performed_by:  callerEmail || 'reissue-invoice-sb',
+      source:        'supabase',
+    });
+    if (auditErr) {
+      console.error('[reissue-invoice-sb] audit-log insert failed:', auditErr.message);
+      warnings.push(`Audit log insert failed: ${auditErr.message}`);
+    }
+  } catch (auditEx) {
+    const msg = auditEx instanceof Error ? auditEx.message : String(auditEx);
+    console.error('[reissue-invoice-sb] audit-log insert threw:', msg);
+    warnings.push(`Audit log insert threw: ${msg}`);
+  }
 
-  // ── 4. Reverse-writethrough per-row to Billing_Ledger ──────────────
+  // ── 4. Reset storage_billing_items rows tied to this invoice ──────
+  // Mirrors GAS handleReissueInvoice_ (StrideAPI.gs:15776-15786). The
+  // per-item storage_billing_items rows that rolled into this invoice's
+  // STOR-SUMMARY line need to flip back to Unbilled so the next Create
+  // Invoices run re-bills + re-stamps them. Without this, reissuing a
+  // storage invoice silently leaves the per-item rows stuck in Invoiced
+  // (or Void from an earlier void path), and the dedup guard in
+  // handleCommitStorageRows_ would block the re-bill.
+  //
+  // Filter status=neq.Unbilled (not status=eq.Invoiced) catches BOTH
+  // Invoiced rows AND rows already Voided before this reissue. The sheet
+  // reissue path flips Void→Unbilled too (StrideAPI.gs:15637-15639) —
+  // matching only Invoiced would leave voided-then-reissued items as
+  // permanent Void orphans.
+  //
+  // Best-effort: matches by (tenant_id, invoice_no); a failure leaves
+  // the rows mid-state but does not fail the reissue. Logged as a
+  // warning for operator follow-up.
+  try {
+    const { error: sbiErr } = await sb
+      .from('storage_billing_items')
+      .update({ status: 'Unbilled', invoice_no: null, invoice_date: null })
+      .eq('tenant_id', tenantId)
+      .eq('invoice_no', invoiceNo)
+      .neq('status', 'Unbilled');
+    if (sbiErr) {
+      console.error('[reissue-invoice-sb] storage_billing_items reset failed:', sbiErr.message);
+      warnings.push(`storage_billing_items reset failed: ${sbiErr.message}`);
+    }
+  } catch (sbiEx) {
+    const msg = sbiEx instanceof Error ? sbiEx.message : String(sbiEx);
+    console.error('[reissue-invoice-sb] storage_billing_items reset threw:', msg);
+    warnings.push(`storage_billing_items reset threw: ${msg}`);
+  }
+
+  // ── 5. Delete invoice_tracking row for this invoice ───────────────
+  // Mirrors GAS handleReissueInvoice_ (StrideAPI.gs:15757-15766, v38.194.0)
+  // and the schema's documented invariant (20260505000001_invoice_tracking.sql:20-21):
+  //
+  //   "the Re-issue handler and voidInvoice both DELETE the invoice_tracking
+  //    row to avoid showing stale state"
+  //
+  // The released rows will produce a NEW invoice (with a fresh invoice_no) on
+  // the next Create Invoices run, which will INSERT a fresh invoice_tracking
+  // row. Leaving the old row behind would show the operator a stale
+  // "pushed to QBO/Stax" green check on the Invoice Review tab for an
+  // invoice number that no longer maps to active billing rows.
+  //
+  // Best-effort: failure leaves the orphan visible but does not fail the
+  // reissue. The 30-day anomaly sweep on the GAS side would surface it.
+  try {
+    const { error: itDelErr } = await sb
+      .from('invoice_tracking')
+      .delete()
+      .eq('invoice_no', invoiceNo);
+    if (itDelErr) {
+      console.error('[reissue-invoice-sb] invoice_tracking delete failed:', itDelErr.message);
+      warnings.push(`invoice_tracking delete failed: ${itDelErr.message}`);
+    }
+  } catch (itDelEx) {
+    const msg = itDelEx instanceof Error ? itDelEx.message : String(itDelEx);
+    console.error('[reissue-invoice-sb] invoice_tracking delete threw:', msg);
+    warnings.push(`invoice_tracking delete threw: ${msg}`);
+  }
+
+  // ── 6. Reverse-writethrough per-row to Billing_Ledger ──────────────
   // Flip Status='Unbilled', clear Invoice #. Note: the GAS billing
   // writer (__writeThroughReverseBilling_) guards against overwriting
   // rows whose sheet-side Status is 'Invoiced' — but the unwind
@@ -210,7 +285,7 @@ Deno.serve(async (req: Request) => {
         if (!res.ok || !parsed.success) {
           const errMsg = parsed.error ?? `HTTP ${res.status}`;
           warnings.push(`Sheet mirror failed for ${r.ledger_row_id}: ${errMsg}`);
-          await sb.from('gs_sync_events').insert({
+          const { error: syncErr } = await sb.from('gs_sync_events').insert({
             tenant_id:     tenantId,
             entity_type:   'billing',
             entity_id:     r.ledger_row_id,
@@ -220,7 +295,8 @@ Deno.serve(async (req: Request) => {
             request_id:    `${requestId}:${r.ledger_row_id}`,
             payload,
             error_message: String(errMsg).slice(0, 1000),
-          }).then(() => {}, () => {});
+          });
+          if (syncErr) console.error('[reissue-invoice-sb] gs_sync_events insert failed:', syncErr.message);
         } else {
           mirroredCount++;
         }
