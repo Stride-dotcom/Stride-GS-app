@@ -611,6 +611,16 @@ export function IntakesPanel() {
             taxExemptReason: selected.taxExemptReason,
             resaleCertExpires: selected.resaleCertExpires,
             resaleCertPath: selected.resaleCertPath,
+            // Pass the intake's insurance election to the modal so
+            // InsuranceBlock can pre-fill its empty-state input from the
+            // declared value the client already submitted. Pair with the
+            // Save & Sync handler above (which now writes client_insurance
+            // on submit, the canonical store). Without the pre-fill the
+            // operator sees an empty "$" input even though the intake
+            // header card shows e.g. "Stride policy · $100,000 declared"
+            // — reported by Justin on AubreyMaxwell.
+            insuranceChoice: selected.insuranceChoice,
+            insuranceDeclaredValue: selected.insuranceDeclaredValue,
           };
           return (
             <OnboardClientModal
