@@ -1,5 +1,26 @@
 /**
- * dt-sync-statuses — Supabase Edge Function — v21 2026-05-31 PST
+ * dt-sync-statuses — Supabase Edge Function — v22 2026-06-03 PST
+ *
+ * v22: Swap-detection review note. When a DispatchTrack-side user changes
+ *      an item's ID to ANOTHER valid inventory ID (warehouse swapped the
+ *      physical piece and corrected DT), the item sync-back can't match it
+ *      to the order's existing items and inserts it as a DT-introduced
+ *      line. A LIVE before-insert trigger (dt_order_items_resolve_inventory_id_trg,
+ *      migration 20260512230000) then auto-stamps inventory_id from
+ *      (tenant_id, dt_item_code) — so the swapped-in piece DOES release on
+ *      completion via release-on-dt-finished. That already works; the gap
+ *      was that the re-link is SILENT — no operator ever learns a DT-side
+ *      ID change occurred. v22 reads inventory_id back from the inserted
+ *      row (post-trigger value) and, on a delivery-side order, posts an
+ *      idempotent entity_notes review note (postIdRematchNote_) so staff
+ *      verify the swap was intentional and the right piece released. This
+ *      is purely additive visibility — NO change to the inventory link
+ *      (the trigger owns that) or the release path. Pickups are excluded
+ *      (they legitimately gain DT-added lines via the P+D flow). Companion
+ *      migration 20260603180000 widens the entity_notes.note_type CHECK to
+ *      permit the 'dt_id_rematch:%' key (and fixes the same latent
+ *      constraint violation in release-on-dt-finished's
+ *      'auto_release_skipped:%' note). Order-level status sync unchanged.
  *
  * v21: pu_propagate failure messages now carry the actual dt-push-order
  *      response body. Pre-v21 the pu_propagate handler caught the supabase-js
@@ -746,6 +767,19 @@ Deno.serve(async (req) => {
             // with no delivery counterpart — the driver discovered a piece
             // we didn't know about, but the delivery manifest still doesn't
             // know to load it.
+            // v22 — select inventory_id back too. A live BEFORE-INSERT
+            // trigger (dt_order_items_resolve_inventory_id_trg, migration
+            // 20260512230000) auto-stamps inventory_id from
+            // (parent tenant_id, dt_item_code) when the caller leaves it
+            // NULL. So when a DT-side user changes an item's ID to ANOTHER
+            // valid inventory ID (warehouse swapped the physical piece and
+            // corrected DT), this DT-introduced line gets auto-linked to
+            // that inventory row by the trigger — and will release on
+            // completion via release-on-dt-finished. That auto-link is
+            // otherwise SILENT (no operator ever knows a swap happened).
+            // We read inventory_id back from the inserted row (it reflects
+            // the post-trigger value) and post a review note when it
+            // populated, so staff can verify the swap was intentional.
             const insRes = await supabase.from('dt_order_items').insert({
               dt_order_id:        o.id,
               dt_item_code:       it.item_id,
@@ -760,24 +794,36 @@ Deno.serve(async (req) => {
               return_codes:       it.return_codes,
               extras:             { added_by: 'dt_sync', added_at: new Date().toISOString() },
               last_synced_at:     new Date().toISOString(),
-            }).select('id').single();
+            }).select('id, inventory_id').single();
             if (insRes.error) {
               result.errors.push(`${o.dt_identifier} item insert ${it.item_id}: ${insRes.error.message}`);
-            } else if (insRes.data && o.order_type === 'pickup' && o.linked_order_id) {
-              // P+D mirror — driver added a line to the PU manifest in DT
-              // that didn't exist when the pair was created. Insert a
-              // matching delivery line linked back to this PU item via
-              // parent_pickup_item_id so:
-              //   (a) the delivery manifest will carry the line when
-              //       dt-push-order republishes the delivery,
-              //   (b) Tier-B propagation at end of loop will stamp
-              //       picked_up_at + audit columns on the new delivery
-              //       item (if the PU item is already delivered=true).
-              // Retry path: if this mirror INSERT fails, the next sync
-              // run will hit the UPDATE branch above (the PU item now
-              // exists locally) and will back-fill the mirror via the
-              // existing-counterpart check.
-              await createMirrorOnDelivery((insRes.data as { id: string }).id, it);
+            } else {
+              const inserted = insRes.data as { id: string; inventory_id: string | null } | null;
+              // v22 — swap-detection review note. Fires only on a
+              // DELIVERY-side order (pickups legitimately gain DT-added
+              // lines via the P+D flow below — expected, not a swap) when
+              // the trigger auto-linked this previously-unknown DT item to
+              // an inventory row. Idempotent (dedup by note_type), best-
+              // effort (never breaks the sync).
+              if (inserted?.inventory_id && o.order_type !== 'pickup' && o.tenant_id) {
+                await postIdRematchNote_(supabase, o.id, o.tenant_id, String(it.item_id), o.dt_identifier);
+              }
+              if (inserted && o.order_type === 'pickup' && o.linked_order_id) {
+                // P+D mirror — driver added a line to the PU manifest in DT
+                // that didn't exist when the pair was created. Insert a
+                // matching delivery line linked back to this PU item via
+                // parent_pickup_item_id so:
+                //   (a) the delivery manifest will carry the line when
+                //       dt-push-order republishes the delivery,
+                //   (b) Tier-B propagation at end of loop will stamp
+                //       picked_up_at + audit columns on the new delivery
+                //       item (if the PU item is already delivered=true).
+                // Retry path: if this mirror INSERT fails, the next sync
+                // run will hit the UPDATE branch above (the PU item now
+                // exists locally) and will back-fill the mirror via the
+                // existing-counterpart check.
+                await createMirrorOnDelivery(inserted.id, it);
+              }
             }
           }
         }
@@ -1562,4 +1608,56 @@ function json(body: unknown, status = 200): Response {
     status,
     headers: { 'Content-Type': 'application/json', ...corsHeaders() },
   });
+}
+
+/**
+ * v22 — post an idempotent review note when a previously-unknown DT item
+ * was auto-linked to an inventory row by the resolve-inventory-id trigger
+ * (the "DT user changed the item's ID to another valid inventory ID" /
+ * warehouse-swap case). The trigger does the linking silently; this note
+ * is the operator-visible signal so staff can confirm the swap was
+ * intentional and the correct physical piece will release on completion.
+ *
+ * Idempotent by note_type = `dt_id_rematch:<itemId>` (allowed by migration
+ * 20260603180000) so repeated syncs never stack duplicates. Mirrors the
+ * entity_notes shape used by release-on-dt-finished's postSkippedNote.
+ * Best-effort: any failure is swallowed — a missing review note must never
+ * break the sync or the (already-completed) inventory auto-link.
+ */
+// deno-lint-ignore no-explicit-any
+async function postIdRematchNote_(supabase: any, orderId: string, tenantId: string, itemId: string, dtIdentifier: string | null): Promise<void> {
+  try {
+    const noteKey = `dt_id_rematch:${itemId}`;
+    const { data: existing } = await supabase
+      .from('entity_notes')
+      .select('id')
+      .eq('entity_type', 'dt_order')
+      .eq('entity_id', orderId)
+      .eq('note_type', noteKey)
+      .limit(1)
+      .maybeSingle();
+    if (existing) return;
+
+    const body = [
+      `DT item ID "${itemId}" was not on this order originally, but matches an inventory item for this client — so it was auto-linked.`,
+      '',
+      `This usually means a warehouse swap was corrected in DispatchTrack (a different physical piece was loaded and the ID updated DT-side). If that inventory item is Active, it will release when the order completes; the original item it replaced stays Active (DT did not confirm its delivery).`,
+      '',
+      `Please verify "${itemId}" is the piece that was actually delivered on ${dtIdentifier || 'this order'}.`,
+    ].join('\n');
+
+    await supabase.from('entity_notes').insert({
+      entity_type: 'dt_order',
+      entity_id:   orderId,
+      tenant_id:   tenantId,
+      body,
+      note_type:   noteKey,
+      visibility:  'internal',
+      author_role: 'system',
+      author_name: 'auto:dt_sync_id_rematch',
+      is_system:   true,
+    });
+  } catch (e) {
+    console.warn(`[dt-sync-statuses] postIdRematchNote_ failed for ${orderId}/${itemId}:`, e);
+  }
 }
