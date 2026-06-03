@@ -148,7 +148,7 @@ Match-rate column is the rolling 7-day match rate from `parity_results`. **Parit
 | `completeTask` | gas | 146 | **100%** (146/0) | 0 | n/a | **handler_drafted** (shadow live PR #447; one of only two functions firing shadows live from the React app) | 2026-05-19 |
 | `completeRepair` | gas | 1 | **100%** (1/0) | 0 | n/a | **handler_drafted** | 2026-05-19 (shipped PR #419; parity-clean) |
 | `processWcRelease` | gas | 13 | **100%** (13/0) | 0 | Justin Demo (pending operator flag-flip — MIG-016) | **handler_drafted** (`process-wc-release-sb` real handler built, awaiting deploy; partial-release child-WC creation deferred) | 2026-05-21 |
-| `commitStorageCharges` | gas | 0 | n/a | 0 | n/a | **handler_drafted** (`commit-storage-charges-shadow` deployed 5/19) | 2026-05-19 |
+| `commitStorageCharges` | gas | 0 | n/a | 0 | n/a | **handler_drafted** (`commit-storage-charges-shadow` deployed 5/19). ⚠️ **CUTOVER BLOCKER (2026-06-03):** the SB path (`commit-storage-charges-sb` → `generate_storage_charges` RPC) writes only `public.billing` — it does NOT write `public.storage_billing_items` at all. Flipping this flag to `supabase` would (a) lose the per-item billed-tracking that powers the Storage-tab Invoiced view + double-bill dedup, and (b) reintroduce the NULL `billable_days` regression just fixed for the GAS path (v38.259.0). Port the `storage_billing_items` write — including `billable_days` (= preview qty, else round(amount/rate)) — into the EF BEFORE the flag-flip. | 2026-05-19 |
 | `generateStorageCharges` | gas | 0 | n/a | 0 | n/a | **handler_drafted** (canonical alias of `commitStorageCharges`; shadow live) | 2026-05-19 |
 | `createInvoice` | gas | 0 | n/a | 0 | n/a | not_started | — |
 | `voidInvoice` | gas | 0 | n/a | 0 | n/a | not_started | — |

@@ -25058,8 +25058,8 @@ function handleCommitStorageRows_(payload) {
             // for clients. Prefer the preview's qty (the real computed day
             // count); fall back to amount/rate (exact for storage, since
             // amount = daily_rate × days) when a caller omits qty. Null only
-            // when rate is 0 (a $0 line has no meaningful day count). Pre-fix
-            // this column was always NULL → the Invoiced view rendered "—".
+            // when rate is 0 or non-numeric (a $0 line has no meaningful day
+            // count). Pre-fix this column was always NULL → Invoiced view "—".
             var pQty = Number(pr.qty);
             var pBillableDays = (isFinite(pQty) && pQty > 0)
               ? Math.round(pQty)
