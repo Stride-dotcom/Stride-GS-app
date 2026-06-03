@@ -88,6 +88,16 @@
 
 ---
 
+## Recent Changes (2026-06-02/03, SB task-completion incident + forward fix — flag revert + PR #596)
+
+- **Incident (2026-06-02):** on the evening of 2026-06-01 PT, 9 migration `feature_flags` (`completeTask`, `startTask`, `transferItems`, `releaseItems`, `updateItem`, `updateTask`, `createWillCall`, `processWcRelease`, `releaseWillCall`) were flipped fleet-wide to Supabase by **nulling `tenant_scope`** — overriding the documented "canary = Justin Demo only" intent. Real tenants (Michelle Dirkse, Seva Home, Lisa Sherry, Cohesively Curated) hit the in-progress SB task path, which had two defects: (1) `complete-task` was a **dry-run** that never sent the INSP_EMAIL/TASK_COMPLETE alert; (2) inspection completions **reverted to In Progress** (~47% of SB completions) because `start-task`'s fire-and-forget GAS `action=startTask` write-back re-asserts `status='In Progress'` via `api_notifySupabase_` and lands after a quick `complete-task`.
+- **Mitigation:** all 9 flags reverted to canary scope (`tenant_scope=['1-nF3…' Justin Demo]`), restoring the GAS path (emails + no revert) for every real tenant. Incident note appended to each flag's `notes`.
+- **Forward fix (PR #596 — edge-function-only, currently canary-only):**
+  - `supabase/functions/complete-task/index.ts` — now SENDS the completion email via `send-email` (mirrors `complete-repair-sb`), gated on `clients.enable_notifications` (null/unset ⇒ no-send, matching GAS `toBool_`). Adds SVC_NAME/SHIPMENT_NO/REPAIR_NOTE tokens. Deduped on `task-complete:{taskId}:{result}`. Shadow-safe (parity uses `complete-task-shadow`). → **complete-task v2**.
+  - `supabase/functions/start-task/index.ts` — GAS sheet sync switched from `action=startTask` (full handler, re-asserts via notify) to the cell-level `action=writeThroughReverse` (`table:'tasks'`); writes only Status/Started At/Assigned To cells, never writes back to `public.tasks`, so it can't clobber a later completion. → **start-task v3**.
+  - `src/lib/api.ts` — additive `emailSent`/`emailError`/`emailSkipped` on `CompleteTaskSbResponse`.
+- **Re-cutover rule:** the SB path is now standalone-correct, but re-enable it by **deliberately re-scoping the flags (+ updating `notes`), NEVER by nulling `tenant_scope`.** 6 inspections stuck In Progress from the incident still need re-completion (safe via UI — GAS bills idempotently on the same `{svc}-TASK-{id}` ledger id). See memory `project_task_completion_flag_landmine`.
+
 ## Recent Changes (2026-05-29, build preflight: fail if Supabase env vars missing — fix/build/env-preflight, PR #571)
 
 - **Problem:** Session 72 incident — a deploy from a fresh worktree that hadn't copied `.env` produced a bundle with `VITE_SUPABASE_URL = undefined` inlined. `vite build` succeeded; the deployed bundle then crashed at module load with `Uncaught Error: supabaseUrl is required`. The build silently shipped a broken bundle. The CLAUDE.md "Worktrees for parallel builders" section now calls this out, but a procedural reminder is not the same as a build-time gate.
