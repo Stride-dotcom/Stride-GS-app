@@ -1546,11 +1546,11 @@ export function postCompleteTask(
 // [MIGRATION-P4a] SB-primary entry for completeTask. Atomic via
 // complete_task_atomic RPC: tasks.status='Completed' + completed_at +
 // result + task_notes + custom_price + billing row ({SVCCODE}-TASK-{id})
-// + addon flush + GAS-shape audit log. Email is DRY-RUN on the SB side
-// (payload computed + returned, not sent — live mail stays on GAS while
-// the flag is gas). Routed only when useFeatureFlag('completeTask')
-// resolves to 'supabase'; ships gas-default so this never runs live
-// until the MIG-007 three-layer gate passes.
+// + addon flush + GAS-shape audit log. The handler also sends the
+// completion email (INSP_EMAIL/TASK_COMPLETE) via send-email, gated on
+// clients.enable_notifications — it owns the email because GAS
+// handleCompleteTask_ doesn't run when this path is active. Routed only
+// when useFeatureFlag('completeTask') resolves to 'supabase'.
 export interface CompleteTaskSbPayload {
   tenantId: string;
   taskId: string;
@@ -1573,6 +1573,13 @@ export interface CompleteTaskSbResponse {
   mirroredCount?: number;
   mirrorOk?: boolean;
   mirrorError?: string;
+  /** Completion email (INSP_EMAIL/TASK_COMPLETE) now sent by the SB
+   *  handler. emailSkipped is set (e.g. 'notifications_disabled') when the
+   *  send was intentionally not attempted. emailDryRun retains the exact
+   *  payload handed to send-email for parity inspection / debugging. */
+  emailSent?: boolean;
+  emailError?: string;
+  emailSkipped?: string;
   emailDryRun?: { templateKey: string; tokens: Record<string, string> } | null;
   error?: string;
   errorCode?: string;

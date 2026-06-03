@@ -6,31 +6,25 @@
  * old function slug stays deployed until manually retired; nothing
  * references it after this PR).
  *
- * ── Why GAS write-back ─────────────────────────────────────────────
+ * ── Why a GAS sheet write-back ─────────────────────────────────────
  * `api_fullClientSync_` (the periodic GAS→SB sync that backs the React
  * read cache) calls `supabaseDeleteStaleRows_`, which truncates SB
  * rows the sheet doesn't carry. An SB-only write to `public.tasks`
  * would survive only until the next sync, then revert (column writes
- * overwritten by sheet values; missing-from-sheet rows would even get
- * deleted).
+ * overwritten by sheet values).
  *
- * Until the legacy sheet readers (CB invoice generation, full client
- * sync) migrate to SB as their source of truth — or until we add a
- * `tasks` writer to the `writeThroughReverse` framework so the sheet
- * mirror only updates the touched cells — the pragmatic bridge is:
- * write SB first (instant for the user, idempotent counter bumps,
- * audit row in entity_audit_log), then fire the legacy GAS startTask
- * endpoint in background so the sheet catches up.
- *
- * Side-effect duplication during the transition: the GAS endpoint
- * fires its own api_auditLog_ and api_notifySupabase_ calls. So the
- * audit log gains a second row for each click while parity_enabled is
- * on; the SB notify is a duplicate of the GAS notify. Both are
- * additive (no deletes / mutations) so the audit trail remains
- * readable. Acceptable for the transition window. When we flip to
- * `active_backend='supabase'` AND retire the GAS write-back (after
- * adding a tasks writer to writeThroughReverse), the duplication
- * goes away.
+ * So after writing SB we mirror the touched cells to the sheet via the
+ * cell-level `writeThroughReverse` `tasks` writer
+ * (__writeThroughReverseTasks_, StrideAPI.gs). We deliberately do NOT
+ * call the full `action=startTask` handler: that re-runs the start flow
+ * and calls api_notifySupabase_, which re-asserts status='In Progress'
+ * back onto public.tasks. Being fire-and-forget + Drive-heavy (several
+ * seconds), that re-assert could land AFTER a quick subsequent
+ * complete-task and stamp the row back to In Progress — the 2026-06-02
+ * completion-revert incident. writeThroughReverse only sets the
+ * Status / Started At / Assigned To cells on the sheet and never writes
+ * back to public.tasks, so it cannot clobber a later completion. Mirror
+ * of complete-task step 3.
  *
  * ── Behavior (mirror of handleStartTask_ at StrideAPI.gs:28439) ──
  *   • Idempotency: `started_at` already populated → noOp:true
@@ -155,49 +149,44 @@ Deno.serve(async (req: Request) => {
     // ── 5. Audit log ──────────────────────────────────────────────────
     await insertAuditLog(supabase, { taskId, tenantId, callerEmail });
 
-    // ── 6. Best-effort GAS write-back ─────────────────────────────────
-    // Non-blocking from the user's perspective: we fire the GAS call
-    // but don't await it. Returning the SB result is what the React
-    // caller actually needs for the UI; the GAS call just keeps the
-    // sheet in sync for the next fullClientSync pass.
+    // ── 6. Best-effort GAS sheet sync via writeThroughReverse ─────────
+    // Non-blocking: fire-and-forget so the React caller gets the SB
+    // result instantly. This only keeps the per-tenant Tasks sheet in
+    // step so the next api_fullClientSync_ doesn't revert the SB write.
     //
-    // Why action=startTask (the full handler) rather than a sheet-
-    // only writer: tasks aren't yet in the writeThroughReverse
-    // framework (P1.4 only covers inventory / will_calls / repairs /
-    // billing). Adding a tasks writer would mean a GAS-side StrideAPI
-    // bump + redeploy in the same PR. For the transition window the
-    // full handler is acceptable — the audit duplicate is documented
-    // in the file header.
+    // Cell-level writeThroughReverse (NOT action=startTask): the full
+    // start handler calls api_notifySupabase_, which would re-assert
+    // status='In Progress' back onto public.tasks and — landing late,
+    // after a quick complete-task — revert the completion (see header +
+    // the 2026-06-02 incident). __writeThroughReverseTasks_ only writes
+    // the Status / Started At / Assigned To sheet cells; it never writes
+    // back to public.tasks, so it cannot clobber a later completion.
     const gasUrl   = Deno.env.get('GAS_API_URL')   ?? '';
     const gasToken = Deno.env.get('GAS_API_TOKEN') ?? '';
     let gasWriteBack: 'fired' | 'skipped' | 'failed' = 'skipped';
     if (gasUrl && gasToken) {
       gasWriteBack = 'fired';
-      // Fire-and-forget. Wrapped in a void IIFE so the awaited
-      // chain runs detached from the response path. Any failure is
-      // logged to gs_sync_events for monitoring without blocking
-      // the SB-side result.
+      // Mirror exactly the fields we wrote to public.tasks in §4 so the
+      // sheet matches: started_at always; status only on first start
+      // (Open → In Progress); assigned_to only when we (re)assigned it.
+      const sheetRow: Record<string, unknown> = { started_at: startedAtNow };
+      if (previousStatus === 'Open') sheetRow.status = 'In Progress';
+      if (assignedTo && (!existingAssignee || forceOverride)) sheetRow.assigned_to = assignedTo;
+      // Fire-and-forget. Failures land in gs_sync_events for monitoring
+      // without blocking the SB-side result.
       void (async () => {
         try {
-          // callerEmail is REQUIRED on the query string — StrideAPI's
-          // withClientIsolation_ guard rejects with AUTH_ERROR when it's
-          // missing. We pass the verified caller (from the operator's
-          // JWT) so the GAS-side audit row attributes correctly and the
-          // request is not rejected. Caught at code-review B1.
-          const writeBackUrl = `${gasUrl}?action=startTask`
-            + `&token=${encodeURIComponent(gasToken)}`
-            + `&clientSheetId=${encodeURIComponent(tenantId)}`
-            + `&callerEmail=${encodeURIComponent(callerEmail)}`;
-          const res = await fetch(writeBackUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              taskId,
-              assignedTo: assignedTo || undefined,
-              forceOverride: forceOverride || undefined,
-              requestId,
-            }),
-          });
+          const res = await fetch(
+            `${gasUrl}?action=writeThroughReverse&token=${encodeURIComponent(gasToken)}`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                tenantId, table: 'tasks', op: 'update',
+                rowId: taskId, row: sheetRow, requestId,
+              }),
+            },
+          );
           const text = await res.text();
           let parsed: { success?: boolean; error?: string } = {};
           try { parsed = JSON.parse(text); } catch { parsed = { error: `non-JSON: ${text.slice(0, 200)}` }; }
@@ -210,7 +199,7 @@ Deno.serve(async (req: Request) => {
               sync_status:   'sync_failed',
               requested_by:  `start-task:${callerEmail}`,
               request_id:    requestId,
-              payload:       { taskId, assignedTo: assignedTo || null, forceOverride },
+              payload:       { table: 'tasks', op: 'update', rowId: taskId, row: sheetRow },
               error_message: (parsed.error ?? `HTTP ${res.status}`).slice(0, 1000),
             }).then(() => {}, () => {});
           }
@@ -223,7 +212,7 @@ Deno.serve(async (req: Request) => {
             sync_status:   'sync_failed',
             requested_by:  `start-task:${callerEmail}`,
             request_id:    requestId,
-            payload:       { taskId, assignedTo: assignedTo || null, forceOverride },
+            payload:       { table: 'tasks', op: 'update', rowId: taskId },
             error_message: (err instanceof Error ? err.message : String(err)).slice(0, 1000),
           }).then(() => {}, () => {});
         }
