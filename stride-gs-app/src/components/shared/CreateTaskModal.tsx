@@ -61,7 +61,11 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
     }
     return map;
   }, [serviceCatalog]);
-  const [selectedCodes, setSelectedCodes] = useState<Set<string>>(new Set(['INSP']));
+  // Start with NO task type pre-selected. Previously this defaulted to
+  // {'INSP'}, which caused accidental Inspection tasks when an operator
+  // didn't notice it was already checked. The operator must now actively
+  // pick at least one type; the Create button stays disabled until they do.
+  const [selectedCodes, setSelectedCodes] = useState<Set<string>>(new Set());
 
   // 2026-05-29 — Advanced section state. All three fields are optional:
   // dueDateOverride empty means "use the auto-calculated SLA from the
@@ -570,7 +574,7 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
               >
                 {loading
                   ? <><Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> Creating…</>
-                  : <>Create {Array.from(selectedCodes).join(' + ')} Tasks</>
+                  : <>{selectedCodes.size ? `Create ${Array.from(selectedCodes).join(' + ')} Tasks` : 'Create Tasks'}</>
                 }
               </button>
             </>
