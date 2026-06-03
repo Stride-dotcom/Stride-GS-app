@@ -82,16 +82,43 @@ export function PhotoGallery({
   // When a rollup context is supplied, the read view comes from the rollup
   // hook; mutations always go through the host hook so the (entity_type,
   // entity_id, item_id) stamping rules in usePhotos.uploadPhoto stay
-  // authoritative. Realtime in the rollup hook picks the change up.
-  // The host hook is disabled in rollup mode — its mutation functions still
-  // work (they don't depend on `enabled`), but its read query and realtime
-  // subscription are skipped to avoid duplicate channels and wasted reads.
+  // authoritative. The host hook is disabled in rollup mode — its mutation
+  // functions still work (they don't depend on `enabled`), but its read
+  // query and realtime subscription are skipped to avoid duplicate channels
+  // and wasted reads.
+  //
+  // NOTE: in rollup mode, hostHook.refetch() is a no-op (disabled), and the
+  // rollup hook's Realtime subscription is unreliable for flag mutations
+  // (the UPDATE only carries the row ID, not the tenant filter used by the
+  // channel). After any mutation we explicitly call rollupHook.refetch() so
+  // the display updates immediately without waiting for a Realtime event or
+  // a manual browser refresh.
   const hostHook = usePhotos({ entityType, entityId, tenantId, itemId, enabled: !useRollup });
   const rollupHook = usePhotoGraphRollup(rollupCtx ?? { tenantId, itemIds: [], scopes: [], enabled: false });
   const photos = useRollup ? rollupHook.photos : hostHook.photos;
   const loading = useRollup ? rollupHook.loading : hostHook.loading;
   const error = (useRollup ? rollupHook.error : null) ?? hostHook.error;
-  const { uploadPhoto, toggleNeedsAttention, toggleRepair, deletePhoto } = hostHook;
+  const { uploadPhoto, toggleNeedsAttention: _toggleNeedsAttention, toggleRepair: _toggleRepair, deletePhoto: _deletePhoto } = hostHook;
+
+  // In rollup mode, wrap each mutation to also trigger a rollup refetch so
+  // the displayed photos update immediately instead of waiting for Realtime.
+  const toggleNeedsAttention = useCallback(async (photoId: string, needsAttention: boolean): Promise<boolean> => {
+    const ok = await _toggleNeedsAttention(photoId, needsAttention);
+    if (ok && useRollup) void rollupHook.refetch();
+    return ok;
+  }, [_toggleNeedsAttention, useRollup, rollupHook]);
+
+  const toggleRepair = useCallback(async (photoId: string, isRepair: boolean): Promise<boolean> => {
+    const ok = await _toggleRepair(photoId, isRepair);
+    if (ok && useRollup) void rollupHook.refetch();
+    return ok;
+  }, [_toggleRepair, useRollup, rollupHook]);
+
+  const deletePhoto = useCallback(async (photoId: string): Promise<boolean> => {
+    const ok = await _deletePhoto(photoId);
+    if (ok && useRollup) void rollupHook.refetch();
+    return ok;
+  }, [_deletePhoto, useRollup, rollupHook]);
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
