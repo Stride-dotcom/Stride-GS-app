@@ -185,6 +185,16 @@ const TODAY_DASH = new Intl.DateTimeFormat('en-CA', {
 const TASK_DEFAULT_ORDER = ['taskId', 'taskType', 'taskStatus', 'taskPriority', 'taskDueDate', 'taskItem', 'taskDesc', 'taskLocation', 'taskVendor', 'taskAssigned', 'taskClient', 'taskSidemark', 'taskCreated', 'taskFolder'];
 const TASK_COL_LABELS: Record<string, string> = { taskId: 'Task ID', taskType: 'Type', taskStatus: 'Status', taskPriority: 'Priority', taskDueDate: 'Due Date', taskItem: 'Item', taskDesc: 'Description', taskLocation: 'Location', taskVendor: 'Vendor', taskAssigned: 'Assigned', taskClient: 'Client', taskSidemark: 'Sidemark', taskCreated: 'Created', taskFolder: 'Folder' };
 
+// Tablets / touchscreens fire `onClick` on a tap but can't reliably produce a
+// native `dblclick`, so the double-click-to-open row interaction never works
+// there (Justin: works on PC, not on a tablet). When the primary pointer is
+// coarse (touch), open the task on a SINGLE tap instead. Mouse users keep
+// single-click-to-select + double-click-to-open. Evaluated once — pointer
+// type doesn't change within a session.
+const OPEN_ROW_ON_TAP = typeof window !== 'undefined'
+  && typeof window.matchMedia === 'function'
+  && window.matchMedia('(pointer: coarse)').matches;
+
 function TasksTab({ tasks, onNavigate, indicators, canEditPriority }: { tasks: SummaryTask[]; onNavigate: (task: SummaryTask) => void; indicators?: { inspOpenItems: Set<string>; inspDoneItems: Set<string>; inspFailedItems: Set<string>; asmOpenItems: Set<string>; asmDoneItems: Set<string>; repairOpenItems: Set<string>; repairDoneItems: Set<string>; wcOpenItems: Set<string>; wcDoneItems: Set<string> }; canEditPriority: boolean }) {
   const colT = createColumnHelper<SummaryTask>();
   // Service-label resolution from the live Master Price List service_catalog.
@@ -509,9 +519,9 @@ function TasksTab({ tasks, onNavigate, indicators, canEditPriority }: { tasks: S
                 return (
                   <tr
                     key={row.id}
-                    onClick={() => setSelectedTaskId(t.taskId)}
+                    onClick={() => OPEN_ROW_ON_TAP ? onNavigate(row.original) : setSelectedTaskId(t.taskId)}
                     onDoubleClick={() => onNavigate(row.original)}
-                    title="Double-click to open"
+                    title={OPEN_ROW_ON_TAP ? 'Tap to open' : 'Double-click to open'}
                     style={{
                       cursor: 'pointer',
                       transition: 'background 0.1s',
