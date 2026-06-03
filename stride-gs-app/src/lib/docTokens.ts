@@ -46,6 +46,7 @@ export interface RepairWorkOrderInput {
   description?: string;
   sidemark?: string;
   room?: string;
+  location?: string;
   qty?: number | string;
   notes?: string;
   repairNotes?: string;
@@ -271,6 +272,7 @@ export function buildRepairTokens(repair: RepairWorkOrderInput): Record<string, 
     '{{ITEM_DESC}}': esc(repair.description || ''),
     '{{ITEM_SIDEMARK}}': esc(sidemark),
     '{{ITEM_ROOM}}': esc(repair.room || ''),
+    '{{ITEM_LOCATION}}': esc(repair.location || ''),
     '{{RESULT_OPTIONS_HTML}}': REPAIR_RESULT_OPTIONS_HTML,
   };
 }
