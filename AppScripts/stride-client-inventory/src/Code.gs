@@ -1,5 +1,14 @@
 /* ===================================================
-   Code.gs — v4.7.0 — 2026-04-26 PST — Add Cleanup Item Photo Folders menu items
+   Code.gs — v4.8.0 — 2026-06-03 PST — Repair Work Order items table gains a Location column
+   v4.8.0: DOC_REPAIR_WORK_ORDER items table now shows the item's warehouse
+           Location (after Room). Client-script renderers fill the new
+           {{ITEM_LOCATION}} token: SH_generateRepairWorkOrderPdf_ (Triggers.gs,
+           SHARED_HANDLER_VERSION → 1.2.0) and generateRepairWorkOrderPdf_
+           (Repairs.gs), both from the inventory item's Location. Hardcoded
+           fallbacks (Triggers SH_getDefaultRepairWorkOrderHtml_ + Emails
+           getDefaultDocHtml_) carry the column too. Pairs with the Supabase-side
+           change (StrideAPI.gs v38.261.0, React docTokens.ts) + the sheet/Supabase
+           template edits. Requires the MPL Email_Templates sheet template push.
    v4.7.0: Stride Admin menu: added "Cleanup Item Photo Folders (dry run)"
            and "(execute)" entries. Backed by StrideCleanupItemPhotoFolders_
            in Utils.gs — trashes empty per-item Drive folders that were
