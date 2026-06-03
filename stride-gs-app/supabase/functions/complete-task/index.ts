@@ -12,13 +12,18 @@
  *   • Billing math is task-flavored (svcCode = tasks.type; service_catalog
  *     rate + bill_if_pass/bill_if_fail gate; client discount; inline
  *     custom-price override). All of it lives in the RPC for atomicity.
- *   • EMAIL IS DRY-RUN. Per the build spec we COMPUTE the TASK_COMPLETE
- *     (or INSP_EMAIL) token payload and return it on the response —
- *     we do NOT call send-email. Shadow/parity-only handler; the live
- *     email keeps flowing through GAS while active_backend='gas'.
+ *   • EMAIL: when this handler runs it IS the primary completion path
+ *     (the parity shadow uses the separate complete-task-shadow EF, not
+ *     this one), so GAS handleCompleteTask_ does not run and cannot send
+ *     the completion email. This handler therefore OWNS the email — it
+ *     sends TASK_COMPLETE / INSP_EMAIL via the send-email EF, gated on
+ *     clients.enable_notifications (mirror of GAS's ENABLE_NOTIFICATIONS
+ *     gate). No double-send risk: GAS only emails when IT completes, and
+ *     it never completes a task this handler completed.
  *
  * Idempotency: RPC `skipped=true` when status already Completed/Cancelled
- * → return ok, skip mirror + email payload.
+ * → return ok, skip mirror + email. send-email is also deduped on
+ * `task-complete:{taskId}:{result}` so a retried POST won't double-send.
  *
  * Auth: JWT signature verified via supabase.auth.getUser(token) against
  * the anon-keyed client (NOT atob decode — the cancelRepair review
@@ -33,6 +38,7 @@
  * Response: { ok, taskId, result, skipped?, skipReason?,
  *             billingCount?, addonCount?, ledgerRowIds?, missingRate?,
  *             mirrorOk, mirrorError?, mirroredCount?,
+ *             emailSent, emailError?, emailSkipped?,
  *             emailDryRun: { templateKey, tokens } | null }
  */
 
@@ -214,24 +220,36 @@ Deno.serve(async (req: Request) => {
       mirrorError = (mirrorError ? mirrorError + '; ' : '') + 'tasks mirror: ' + (e instanceof Error ? e.message : String(e));
     }
 
-    // ── 4. Compute completion email payload (DRY-RUN — not sent) ────
-    // GAS picks INSP_EMAIL when svcCode/type contains 'insp', else
-    // TASK_COMPLETE (StrideAPI.gs:17319). We compute the same token
-    // bundle and return it for parity inspection. We do NOT invoke
-    // send-email — live mail stays on GAS while active_backend='gas'.
-    let emailDryRun: { templateKey: string; tokens: Record<string, string> } | null = null;
+    // ── 4. Send the completion email (INSP_EMAIL / TASK_COMPLETE) ───
+    // This handler is the primary completion path, so it owns the email
+    // (GAS handleCompleteTask_ doesn't run). Mirror of complete-repair-sb:
+    // POST to send-email (Resend), which resolves recipients from the
+    // template's `recipients` column ({{STAFF_EMAILS}},{{CLIENT_EMAIL}}
+    // for INSP) using tenantId. GAS picks INSP_EMAIL when type contains
+    // 'insp', else TASK_COMPLETE (StrideAPI.gs:19231). Gated on
+    // clients.enable_notifications to match GAS's ENABLE_NOTIFICATIONS
+    // check (StrideAPI.gs:19225). Non-fatal: completion already committed,
+    // so any email failure is logged to gs_sync_events, not surfaced as a
+    // call failure.
+    let emailSent = false;
+    let emailError: string | undefined;
+    let emailSkipped: string | undefined;
+    let emailPayload: { templateKey: string; tokens: Record<string, string> } | null = null;
     try {
       const { data: clientRow } = await supabase
-        .from('clients').select('name').eq('tenant_id', tenantId).maybeSingle();
+        .from('clients').select('name, enable_notifications')
+        .eq('tenant_id', tenantId).maybeSingle();
       const clientName = (clientRow as { name?: string } | null)?.name?.trim() || 'Client';
+      const enableNotifications = (clientRow as { enable_notifications?: boolean } | null)?.enable_notifications;
 
       const { data: taskRow2 } = await supabase
         .from('tasks')
-        .select('type, item_id, task_notes')
+        .select('type, item_id, task_notes, shipment_number')
         .eq('tenant_id', tenantId).eq('task_id', taskId).maybeSingle();
       const taskType = String((taskRow2 as { type?: string } | null)?.type ?? '').trim();
       const itemId   = String((taskRow2 as { item_id?: string } | null)?.item_id ?? '').trim();
       const notes    = String((taskRow2 as { task_notes?: string } | null)?.task_notes ?? '');
+      const shipNo   = String((taskRow2 as { shipment_number?: string } | null)?.shipment_number ?? '').trim();
 
       interface InvRow { description: string | null; vendor: string | null; sidemark: string | null; location: string | null; }
       const { data: invRow } = itemId
@@ -241,36 +259,90 @@ Deno.serve(async (req: Request) => {
         : { data: null };
       const inv = invRow as InvRow | null;
 
+      // SVC_NAME — service_catalog display name (TASK_COMPLETE uses it in
+      // its subject + body). service_catalog is global (not tenant-scoped),
+      // keyed by code; fall back to the raw type when no row matches.
+      let svcName = taskType;
+      if (taskType) {
+        const { data: svcRows } = await supabase
+          .from('service_catalog').select('name').ilike('code', taskType).limit(1);
+        const nm = Array.isArray(svcRows) && svcRows[0]
+          ? String((svcRows[0] as { name?: string }).name ?? '').trim() : '';
+        if (nm) svcName = nm;
+      }
+
       const isInsp = taskType.toLowerCase().includes('insp');
       const templateKey = isInsp ? 'INSP_EMAIL' : 'TASK_COMPLETE';
       const appDeepLink = `${APP_URL}/#/tasks?open=${encodeURIComponent(taskId)}&client=${encodeURIComponent(tenantId)}`;
 
-      emailDryRun = {
-        templateKey,
-        tokens: {
-          CLIENT_NAME:   clientName,
-          TASK_ID:       taskId,
-          ITEM_ID:       itemId,
-          TASK_TYPE:     taskType,
-          RESULT:        result,
-          RESULT_COLOR:  result === 'Pass' ? '#16A34A' : '#DC2626',
-          TASK_NOTES:    notes || '-',
-          ITEM_TABLE_HTML: renderItemTable(itemId, inv),
-          APP_URL,
-          APP_DEEP_LINK: appDeepLink,
-        },
+      // Tokens cover both templates: INSP_EMAIL needs SHIPMENT_NO +
+      // REPAIR_NOTE; TASK_COMPLETE needs SVC_NAME (incl. its subject) +
+      // SHIPMENT_NO. REPAIR_NOTE is blank here (mirrors GAS).
+      const tokens: Record<string, string> = {
+        CLIENT_NAME:     clientName,
+        TASK_ID:         taskId,
+        ITEM_ID:         itemId,
+        TASK_TYPE:       taskType,
+        SVC_NAME:        svcName,
+        RESULT:          result,
+        RESULT_COLOR:    result === 'Pass' ? '#16A34A' : '#DC2626',
+        TASK_NOTES:      notes || '-',
+        SHIPMENT_NO:     shipNo || '-',
+        REPAIR_NOTE:     '',
+        ITEM_TABLE_HTML: renderItemTable(itemId, inv),
+        APP_URL,
+        APP_DEEP_LINK:   appDeepLink,
       };
+      emailPayload = { templateKey, tokens };
+
+      if (enableNotifications === false) {
+        emailSkipped = 'notifications_disabled';
+      } else {
+        const sendRes = await fetch(`${supabaseUrl}/functions/v1/send-email`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${serviceKey}`,
+            'apikey':         serviceKey,
+            'Content-Type':   'application/json',
+          },
+          body: JSON.stringify({
+            templateKey,
+            tokens,
+            // Dedupe per (task, result) so a retried completion POST — or
+            // the user double-clicking Pass — sends at most one email.
+            idempotencyKey:    `task-complete:${taskId}:${result}`,
+            relatedEntityType: 'task',
+            relatedEntityId:   taskId,
+            tenantId,
+          }),
+        });
+        const sendJson = await sendRes.json().catch(() => ({})) as Record<string, unknown>;
+        if (sendJson.ok) emailSent = true;
+        else emailError = String(sendJson.error ?? `HTTP ${sendRes.status}`);
+      }
     } catch (e) {
-      // Non-fatal: completion already committed. Surface the compute
-      // failure on the response without failing the call.
-      emailDryRun = { templateKey: 'ERROR', tokens: { error: e instanceof Error ? e.message : String(e) } };
+      emailError = e instanceof Error ? e.message : String(e);
+    }
+    if (emailError) {
+      console.error('[complete-task] completion email failed:', emailError);
+      await supabase.from('gs_sync_events').insert({
+        tenant_id: tenantId, entity_type: 'task', entity_id: taskId,
+        action_type: 'send_task_complete_email', sync_status: 'sync_failed',
+        requested_by: `complete-task:${callerEmail}`, request_id: requestId,
+        payload: { templateKey: emailPayload?.templateKey ?? '', result },
+        error_message: emailError.slice(0, 1000),
+      }).then(() => {}, () => {});
     }
 
     return json({
       ok: true, taskId, result,
       billingCount, addonCount, ledgerRowIds, missingRate,
       mirrorOk, mirrorError, mirroredCount,
-      emailDryRun,
+      emailSent, emailError, emailSkipped,
+      // Retained for parity inspection / debugging — the exact payload
+      // handed to send-email (was the `emailDryRun` field while this
+      // handler was shadow-only and did not send).
+      emailDryRun: emailPayload,
     });
 
   } catch (err) {
