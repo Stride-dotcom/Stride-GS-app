@@ -264,8 +264,12 @@ Deno.serve(async (req: Request) => {
       // keyed by code; fall back to the raw type when no row matches.
       let svcName = taskType;
       if (taskType) {
+        // Exact code match — NOT ilike: several codes contain '_'
+        // (FAB_RUG, NO_ID, MULTI_INS) which ilike treats as a wildcard.
+        // tasks.type and service_catalog.code share casing (both set from
+        // the canonical svc code); fall back to the raw code on no match.
         const { data: svcRows } = await supabase
-          .from('service_catalog').select('name').ilike('code', taskType).limit(1);
+          .from('service_catalog').select('name').eq('code', taskType).limit(1);
         const nm = Array.isArray(svcRows) && svcRows[0]
           ? String((svcRows[0] as { name?: string }).name ?? '').trim() : '';
         if (nm) svcName = nm;
