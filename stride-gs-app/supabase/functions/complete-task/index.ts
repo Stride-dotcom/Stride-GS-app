@@ -299,7 +299,11 @@ Deno.serve(async (req: Request) => {
       };
       emailPayload = { templateKey, tokens };
 
-      if (enableNotifications === false) {
+      // Match GAS's toBool_(ENABLE_NOTIFICATIONS) exactly: null / unset is
+      // falsy → no send. clients.enable_notifications defaults to false and
+      // is mirrored from the per-tenant setting, so only an explicit true
+      // sends. (Fail-safe: an unsynced/null row never spams the client.)
+      if (!enableNotifications) {
         emailSkipped = 'notifications_disabled';
       } else {
         const sendRes = await fetch(`${supabaseUrl}/functions/v1/send-email`, {
