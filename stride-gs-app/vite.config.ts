@@ -41,20 +41,23 @@ const BUILD_TIME = new Date().toISOString()
 
 // https://vite.dev/config/
 export default defineConfig(({ command, mode }) => {
-  // Build-time preflight: fail loudly if Supabase env vars are missing.
-  // Without this, vite silently inlines `undefined` and the deployed bundle
-  // crashes at module load with `supabaseUrl is required` (session 72 incident).
+  // Build-time preflight: fail loudly if any required env var is missing.
+  // Without this, vite silently inlines `undefined` and ships a broken bundle:
+  //   • missing Supabase → crashes at module load (`supabaseUrl is required`,
+  //     session 72 incident)
+  //   • missing API URL/token → getApiUrl()/getApiToken() return '' so
+  //     isApiConfigured() is false and EVERY page falls into "demo / API URL
+  //     not configured" with no data. 2026-06-03 outage: a deploy built from a
+  //     .env missing VITE_API_URL/VITE_API_TOKEN took the whole app down (the
+  //     production app relies on these being baked into the bundle).
   if (command === 'build') {
     const env = loadEnv(mode, process.cwd(), '')
-    const url = env.VITE_SUPABASE_URL || process.env.VITE_SUPABASE_URL
-    const key = env.VITE_SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY
-    if (!url || !key) {
-      const missing = [
-        !url && 'VITE_SUPABASE_URL',
-        !key && 'VITE_SUPABASE_ANON_KEY',
-      ].filter(Boolean).join(', ')
+    const get = (k: string) => env[k] || process.env[k]
+    const required = ['VITE_SUPABASE_URL', 'VITE_SUPABASE_ANON_KEY', 'VITE_API_URL', 'VITE_API_TOKEN']
+    const missing = required.filter(k => !get(k))
+    if (missing.length > 0) {
       throw new Error(
-        `FATAL: ${missing} must be set in .env. Build aborted to prevent shipping a broken bundle.`
+        `FATAL: ${missing.join(', ')} must be set in .env. Build aborted to prevent shipping a broken bundle.`
       )
     }
   }
