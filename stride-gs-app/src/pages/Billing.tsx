@@ -50,6 +50,7 @@ import {
   fetchInvoicedStorageItems,
 } from '../lib/supabaseQueries';
 import type { ClientNameMap, StoragePreviewRow, InvoicedStorageRow } from '../lib/supabaseQueries';
+import { downloadRowsAsExcel } from '../lib/exportExcel';
 import { useBilling } from '../hooks/useBilling';
 import { useClients } from '../hooks/useClients';
 import { useServiceCatalog } from '../hooks/useServiceCatalog';
@@ -322,12 +323,6 @@ mf.autoRemove = (v: string[]) => !v || !v.length;
 
 const fmt = fmtDate;
 function Badge({ t, c }: { t: string; c?: { bg: string; text: string } }) { const s = c || { bg: '#F3F4F6', text: '#6B7280' }; return <span style={{ display: 'inline-block', padding: '2px 10px', borderRadius: 12, fontSize: 11, fontWeight: 600, background: s.bg, color: s.text, whiteSpace: 'nowrap' }}>{t}</span>; }
-
-function toCSV(rows: BillingRow[], fn: string) {
-  const h = Object.values(COL_LABELS).join(',');
-  const b = rows.map(r => [r.ledgerRowId, r.status, r.invoiceNo, r.client, r.sidemark || '', r.reference || '', r.date, r.svcCode, r.svcName, r.itemId, r.description, r.itemClass, r.qty, r.rate, r.total, r.taskId, r.repairId, r.shipmentNo, r.notes].map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
-  const bl = new Blob([h + '\n' + b], { type: 'text/csv' }); const a = document.createElement('a'); a.href = URL.createObjectURL(bl); a.download = fn; a.click();
-}
 
 // Billable days for an invoiced storage row: prefer the stored count, else
 // derive from amount/rate (exact for storage — amount = daily_rate × days).
@@ -2959,25 +2954,61 @@ export function Billing() {
           {showCols && <div style={{ position: 'absolute', top: '100%', right: 0, marginTop: 4, background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 10, padding: 8, zIndex: 50, boxShadow: '0 4px 20px rgba(0,0,0,0.1)', minWidth: 180 }}>{TOGGLEABLE.map(id => <label key={id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px', fontSize: 12, cursor: 'pointer' }}><input type="checkbox" checked={colVis[id] !== false} onChange={() => setColVis(v => ({ ...v, [id]: v[id] === false }))} style={{ accentColor: theme.colors.orange }} />{COL_LABELS[id]}</label>)}</div>}
         </div>
         <button onClick={() => {
+          // Real .xlsx (SheetJS) for whichever report is in view. Numbers stay
+          // numeric so Excel can sort/sum them; clients get a clean spreadsheet.
           if (isStorageTab && storView === 'invoiced') {
-            // Dedicated client-proof export for invoiced storage: one row per
-            // item with the billable-day count, so a client can confirm exactly
-            // how many days each item was charged in the period.
-            const headers = ['Client', 'Sidemark', 'Item ID', 'Description', 'Period Start', 'Period End', 'Billable Days', 'Daily Rate', 'Amount', 'Invoice #', 'Invoice Date'];
-            const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-            const body = invStorRows.map(r => {
-              const days = invoicedStorageDays(r);
-              return [
-                storTenantName.get(r.tenantId) || r.tenantId, r.sidemark, r.itemId, r.description,
-                r.periodStart, r.periodEnd, days ?? '', r.rate.toFixed(2), r.amount.toFixed(2),
-                r.invoiceNo, r.invoiceDate ?? '',
-              ].map(esc).join(',');
-            }).join('\n');
-            const bl = new Blob([headers.join(',') + '\n' + body], { type: 'text/csv' });
-            const a = document.createElement('a'); a.href = URL.createObjectURL(bl);
-            a.download = 'stride-invoiced-storage.csv'; a.click();
+            // Client-proof: one row per item with its billable-day count.
+            const rows = invStorRows.map(r => ({
+              'Client': storTenantName.get(r.tenantId) || r.tenantId,
+              'Sidemark': r.sidemark,
+              'Item ID': r.itemId,
+              'Description': r.description,
+              'Period Start': r.periodStart,
+              'Period End': r.periodEnd,
+              'Billable Days': invoicedStorageDays(r) ?? '',
+              'Daily Rate': r.rate,
+              'Amount': r.amount,
+              'Invoice #': r.invoiceNo,
+              'Invoice Date': r.invoiceDate ?? '',
+            }));
+            downloadRowsAsExcel(rows, 'Invoiced Storage', 'stride-invoiced-storage.xlsx');
+          } else if (isStorageTab) {
+            // Unbilled storage preview (per-item projection for the period).
+            const rows = previewRows.map(r => ({
+              'Client': r.client,
+              'Sidemark': r.sidemark ?? '',
+              'Item ID': r.itemId,
+              'Description': r.description,
+              'Class': r.itemClass,
+              'Period Start': storStartDate,
+              'Period End': storEndDate,
+              'Billable Days': r.qty,
+              'Daily Rate': r.rate,
+              'Amount': r.total,
+            }));
+            downloadRowsAsExcel(rows, 'Storage Preview', 'stride-storage-preview.xlsx');
           } else {
-            toCSV(isStorageTab ? previewRows : reportData, isStorageTab ? 'stride-storage-preview.csv' : 'stride-billing-report.csv');
+            // Billing report — the on-screen business columns (internal ledger/
+            // task/repair IDs omitted; they're visible in the table if needed).
+            const rows = reportData.map(r => ({
+              [COL_LABELS.status]: r.status,
+              [COL_LABELS.invoiceNo]: r.invoiceNo,
+              [COL_LABELS.client]: r.client,
+              [COL_LABELS.sidemark]: r.sidemark ?? '',
+              [COL_LABELS.reference]: r.reference ?? '',
+              [COL_LABELS.date]: r.date,
+              [COL_LABELS.svcCode]: r.svcCode,
+              [COL_LABELS.svcName]: r.svcName,
+              [COL_LABELS.itemId]: r.itemId,
+              [COL_LABELS.description]: r.description,
+              [COL_LABELS.itemClass]: r.itemClass,
+              [COL_LABELS.qty]: r.qty,
+              [COL_LABELS.rate]: r.rate,
+              [COL_LABELS.total]: r.total,
+              [COL_LABELS.shipmentNo]: r.shipmentNo,
+              [COL_LABELS.notes]: r.notes,
+            }));
+            downloadRowsAsExcel(rows, 'Billing Report', 'stride-billing-report.xlsx');
           }
         }} style={{ padding: '7px 12px', fontSize: 12, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: theme.colors.textSecondary }}><Download size={14} /> Export xlsx</button>
         <button onClick={() => window.open(IIF_FOLDER_URL, '_blank')} title="Open exports folder in Google Drive" style={{ padding: '7px 12px', fontSize: 12, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: theme.colors.textSecondary }}><ExternalLink size={14} /> IIF Folder</button>
