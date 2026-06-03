@@ -53,13 +53,17 @@ cd /c/dev/stride-<topic>/AppScripts/stride-client-inventory && npm install --no-
 
 npm's cache is shared across worktrees, so the second install in any worktree usually finishes in <10 seconds. `package-lock.json` is tracked, so the install is deterministic.
 
-If you'll touch the React app, also copy `.env` from the canonical clone (it's gitignored, so `git worktree add` doesn't carry it):
+If you'll touch the React app, also copy the **complete** `.env` from the canonical clone (it's gitignored, so `git worktree add` doesn't carry it):
 
 ```bash
 cp /c/dev/Stride-GS-app/stride-gs-app/.env /c/dev/stride-<topic>/stride-gs-app/.env
 ```
 
-Without this, the production bundle silently inlines `VITE_SUPABASE_URL = undefined` and crashes at module load with `Uncaught Error: supabaseUrl is required.` (Caught in session 72 by a live-site error — the build itself doesn't fail.)
+The `.env` must carry **all four** `VITE_` vars — `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `VITE_API_URL`, `VITE_API_TOKEN` — because `vite build` **inlines them into the bundle** at build time. A missing or partial `.env` silently bakes in `undefined`:
+- missing Supabase → bundle crashes at module load (`Uncaught Error: supabaseUrl is required`, session 72).
+- missing `VITE_API_URL` / `VITE_API_TOKEN` → `isApiConfigured()` is false, so **every page** shows "demo / API URL not configured" with no data (2026-06-03 site-wide outage — a deploy built from a partial `.env`).
+
+A worktree is for **build/test only** — run actual deploys from the canonical clone (see Deploy Reference). The build preflight now aborts if any of the four is missing, so a partial `.env` fails loudly instead of shipping a broken bundle.
 
 ### Ending a session
 
@@ -151,6 +155,7 @@ Dropbox\Apps\GS Inventory\credentials\.sync-config.json  →  AppScripts\stride-
 - **Never use `getLastRow()` for insert positions** — use `getLastDataRow_()`.
 - **React never calculates billing.** All billing logic stays server-side in Apps Script.
 - **Never deploy from a worktree without merging to source first.** Silent reverts have broken the live app twice.
+- **Deploy React ONLY from the canonical clone, never with a partial `.env`.** `npm run deploy` must run from `C:\dev\Stride-GS-app\stride-gs-app` (the only checkout guaranteed to hold the complete `.env`). The bundle bakes in all four `VITE_` vars at build time; a missing `VITE_API_URL` / `VITE_API_TOKEN` ships a config-less bundle and takes the **whole app down** — "API URL not configured" on every page (the 2026-06-03 outage, from a deploy built in a worktree/clone with an incomplete `.env`). The `vite.config.ts` preflight now aborts on any missing var; if a deploy FATALs with `… must be set in .env`, fix the `.env` (copy it from the canonical clone) — **never** reach for `npm run build:raw` to get past it.
 - **Never edit `dist/` by hand.** Only `npm run build` writes there.
 - **Never edit the Master Price List sheet directly.** Use Price List page → inline edit → Sync to Sheet.
 - **Never commit `.env`, `.credentials.json`, or any secrets.**
@@ -284,7 +289,7 @@ Never deploy from a worktree.
 | Email/doc templates | Edit in app (Settings → Templates) | instant |
 | Service rates/catalog | Price List page → inline edit | instant |
 
-**React build safeguards:** `npm run build` routes through `scripts/build.js` (verify-entry → tsc → vite → sanity checks). `npm run build:raw` disables guards — emergency only.
+**React build safeguards:** `npm run build` routes through `scripts/build.js` (verify-entry → tsc → vite → sanity checks). The `vite.config.ts` preflight **aborts the build** (`FATAL: … must be set in .env. Build aborted to prevent shipping a broken bundle.`) if any of the four required vars — `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `VITE_API_URL`, `VITE_API_TOKEN` — is missing, so an incomplete `.env` can't ship a config-less bundle (2026-06-03 outage prevention). `npm run build:raw` disables guards — emergency only; never use it to bypass a missing-env FATAL.
 
 **Windows schannel TLS retry:** `scripts/deploy.js`'s `pushWithRetry` helper auto-retries any failing `git push` with `-c http.postBuffer=524288000 -c http.version=HTTP/1.1` — the recurring `SEC_E_MESSAGE_ALTERED (0x8009030f)` failure on the ~3MB bundle push has been reproducible enough that retry is built in. If you ever need to push manually (e.g. a recovery from a partial deploy), use the same flags.
 
