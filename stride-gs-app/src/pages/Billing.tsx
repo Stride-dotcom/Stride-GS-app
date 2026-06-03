@@ -329,6 +329,15 @@ function toCSV(rows: BillingRow[], fn: string) {
   const bl = new Blob([h + '\n' + b], { type: 'text/csv' }); const a = document.createElement('a'); a.href = URL.createObjectURL(bl); a.download = fn; a.click();
 }
 
+// Billable days for an invoiced storage row: prefer the stored count, else
+// derive from amount/rate (exact for storage — amount = daily_rate × days).
+// Covers any straggler row written before the commit started persisting
+// billable_days. Null only when rate is 0 (a $0 line has no day count).
+function invoicedStorageDays(r: InvoicedStorageRow): number | null {
+  if (r.billableDays != null) return r.billableDays;
+  return r.rate > 0 ? Math.round(r.amount / r.rate) : null;
+}
+
 // ─── Inline Editable Cell ───────────────────────────────────────────────────
 
 /**
@@ -2951,14 +2960,22 @@ export function Billing() {
         </div>
         <button onClick={() => {
           if (isStorageTab && storView === 'invoiced') {
-            toCSV(invStorRows.map(r => ({
-              ledgerRowId: '', status: r.status, invoiceNo: r.invoiceNo,
-              client: storTenantName.get(r.tenantId) || r.tenantId,
-              date: `${r.periodStart}..${r.periodEnd}`, svcCode: 'STOR', svcName: 'Storage',
-              itemId: r.itemId, description: r.description, itemClass: '',
-              qty: r.billableDays ?? 0, rate: r.rate, total: r.amount,
-              taskId: '', repairId: '', shipmentNo: '', notes: '', sidemark: r.sidemark,
-            })), 'stride-invoiced-storage.csv');
+            // Dedicated client-proof export for invoiced storage: one row per
+            // item with the billable-day count, so a client can confirm exactly
+            // how many days each item was charged in the period.
+            const headers = ['Client', 'Sidemark', 'Item ID', 'Description', 'Period Start', 'Period End', 'Billable Days', 'Daily Rate', 'Amount', 'Invoice #', 'Invoice Date'];
+            const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+            const body = invStorRows.map(r => {
+              const days = invoicedStorageDays(r);
+              return [
+                storTenantName.get(r.tenantId) || r.tenantId, r.sidemark, r.itemId, r.description,
+                r.periodStart, r.periodEnd, days ?? '', r.rate.toFixed(2), r.amount.toFixed(2),
+                r.invoiceNo, r.invoiceDate ?? '',
+              ].map(esc).join(',');
+            }).join('\n');
+            const bl = new Blob([headers.join(',') + '\n' + body], { type: 'text/csv' });
+            const a = document.createElement('a'); a.href = URL.createObjectURL(bl);
+            a.download = 'stride-invoiced-storage.csv'; a.click();
           } else {
             toCSV(isStorageTab ? previewRows : reportData, isStorageTab ? 'stride-storage-preview.csv' : 'stride-billing-report.csv');
           }
@@ -3642,7 +3659,7 @@ export function Billing() {
                                 <td style={{ padding: '9px 12px', whiteSpace: 'nowrap' }}>{r.itemId || '—'}</td>
                                 <td style={{ padding: '9px 12px', maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.description}>{r.description || '—'}</td>
                                 <td style={{ padding: '9px 12px', whiteSpace: 'nowrap' }}>{r.periodStart} → {r.periodEnd}</td>
-                                <td style={{ padding: '9px 12px', textAlign: 'right' }}>{r.billableDays ?? '—'}</td>
+                                <td style={{ padding: '9px 12px', textAlign: 'right' }}>{invoicedStorageDays(r) ?? '—'}</td>
                                 <td style={{ padding: '9px 12px', textAlign: 'right' }}>${r.rate.toFixed(2)}</td>
                                 <td style={{ padding: '9px 12px', textAlign: 'right', fontWeight: 600 }}>${r.amount.toFixed(2)}</td>
                                 <td style={{ padding: '9px 12px', whiteSpace: 'nowrap' }}>{r.invoiceNo || '—'}</td>
