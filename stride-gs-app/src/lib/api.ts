@@ -1573,6 +1573,13 @@ export interface CompleteTaskSbResponse {
   mirroredCount?: number;
   mirrorOk?: boolean;
   mirrorError?: string;
+  /** Completion email (INSP_EMAIL/TASK_COMPLETE) now sent by the SB
+   *  handler. emailSkipped is set (e.g. 'notifications_disabled') when the
+   *  send was intentionally not attempted. emailDryRun retains the exact
+   *  payload handed to send-email for parity inspection / debugging. */
+  emailSent?: boolean;
+  emailError?: string;
+  emailSkipped?: string;
   emailDryRun?: { templateKey: string; tokens: Record<string, string> } | null;
   error?: string;
   errorCode?: string;
