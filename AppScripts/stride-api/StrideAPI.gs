@@ -1,4 +1,5 @@
 /* ===================================================
+   StrideAPI.gs — v38.259.0 — 2026-06-03 PST — [BILLING] fix: handleCommitStorageRows_ now persists per-item billable_days into storage_billing_items. The commit wrote each per-item row's amount + rate but never the day count, so storage_billing_items.billable_days was ALWAYS NULL — the Storage-tab Invoiced view rendered "—" under DAYS and the client-proof export carried no per-day count (operator needs "this item was billed N days in this period" for client disputes). Fix: grpSbiRows now sets billable_days = the preview's qty (the real computed day count) when present, else round(amount/rate) (exact for storage, since amount = daily_rate × days), null only when rate is 0. Existing 2456 NULL rows were backfilled separately via migration 20260603120000_backfill_storage_billable_days.sql (round(amount/rate); verified every rate>0 and every ratio integer). No dollar-total change, no change to the v38.182 atomic invoice counter, half-write detection, the storage summary amounts, or the v38.258.0 transfer-backfill delete guard.
    StrideAPI.gs — v38.258.0 — 2026-06-01 PST — [BILLING] fix: storage commit/regen delete-passes never delete the transfer backfill. handleCommitStorageRows_ AND handleGenerateStorageCharges_ both deleted EVERY in-window Unbilled STOR row before writing the per-sidemark summary / regenerated rows, keyed only on svc_code=STOR + status Unbilled + date-in-window. That assumes every such row is a per-item leftover the summary replaces — true for STOR-{item}-... rows, FALSE for the transfer backfill (STOR-TRANSFER-{item}-{receive}-{transfer-1}), which bills the PRE-transfer holding window that the transfer_date-forward summary/preview never represents. So committing a month's storage while that month's backfill was still Unbilled would silently DELETE the backfill without billing it (revenue loss; the sheet delete mirrors to public.billing too). Fix: both delete loops now skip rows whose Ledger Row ID starts with "STOR-TRANSFER-", leaving the backfill on the Unbilled report until invoiced there (operator directive: backfills live on the unbilled report so they're never missed). No double-bill risk introduced: the storage cutover (v_eff_recv := transfer_date) keeps the backfill days (receive→transfer-1) disjoint from monthly storage (transfer→end), and once the backfill is Invoiced the preview dedup also subtracts its range. Dormant at deploy (0 Unbilled STOR-TRANSFER rows currently exist). No change to dollar totals, the v38.182 atomic invoice counter, half-write detection, or storage_billing_items.
    StrideAPI.gs — v38.257.0 — 2026-06-01 PST — [BILLING] fix: QBO push derives UnitPrice from Amount on aggregate lines so storage-summary invoices stop bouncing with HTTP 400 "Amount is not equal to UnitPrice * Qty". After v38.256.0 made the Storage-tab "Create Invoice" actually CREATE the per-sidemark storage invoices (INV-020125–020134 for Allison Lind), the QBO push then 400'd on every one: qbo_buildInvoicePayload_ (~line 44548) sent SalesItemLineDetail.UnitPrice = item.rate, but the "Monthly Storage" summary row carries qty 1 + total = the summed amount + a BLANK rate (there's no single unit price for an N-item aggregate), so QBO saw Amount=403 vs UnitPrice(0)*Qty(1)=0 and rejected. Fix: in qbo_buildInvoicePayload_, compute a QBO-consistent UnitPrice — keep item.rate when round(rate*qty)==total (the normal per-unit row), otherwise derive UnitPrice = round(total/qty, 2) (qty defaults to 1, so a storage summary resolves to UnitPrice = total exactly, no rounding residue). Amount/Qty unchanged. This unblocks the QBO push for the already-created storage invoices (operator just retries the push) and any future aggregate line. No change to Stride invoice creation, the v38.182 atomic invoice counter, half-write detection, dollar totals, or the IIF/Stax export paths.
    StrideAPI.gs — v38.256.0 — 2026-06-01 PST — [BILLING] fix: handleCommitStorageRows_ now returns committedSummaries (the summary rows it wrote) so the React Storage-tab "Create Invoice" one-click flow can invoice THOSE instead of the stale per-item preview rows. Root cause of the recurring Allison Lind storage-invoice failures: the Storage-tab "Create Invoice" button (Billing.tsx handleCreateInvoices, invoiceMode='storage') committed the per-item preview rows (postCommitStorageRows → which since v38.239 collapses them into ONE summary row per sidemark on the sheet, deleting the per-item rows), then ran the per-group invoice loop STILL using the per-item preview rows — sending their per-item ledger IDs as extraSheetLedgerRowIdsToMark. But the sheet now held summaries, not per-item, so api_markClientLedgerInvoiced_ matched 0 → STOR_SUMMARY_STALE_REPORT / "0 of N ledger rows" on every storage invoice, no matter how many times the operator retried. Before v38.239 the commit wrote per-item rows that matched the preview, so the flip worked; commit-time summarization silently broke this combined one-click flow. GAS side of the fix: collect each appended summary row into committedSummaries[] (shaped as a React UnbilledReportRow: ledger_row_id = the deterministic STOR-SUMMARY-<tenant>-<slug>-<dates>, one per sidemark, svcCode STOR, qty 1, total = summaryTotal) and return it. Companion Billing.tsx change makes the storage-mode invoice loop bill committedSummaries (1 row per group → summarizeStorageRowsForInvoice does NOT re-collapse → flip targets the summary ledger id that IS on the sheet). No dollar-total change (totals are the same summary amounts), no schema/migration, no change to v38.182 atomic invoice counter, half-write detection, or storage_billing_items.
@@ -25052,16 +25053,28 @@ function handleCommitStorageRows_(payload) {
           if (pEnd && pEnd.getTime() > summaryDate.getTime()) summaryDate = pEnd;
           if (sbiActive) {
             var pRate = Number(pr.rate);
+            // v38.259.0 — persist the per-item billable day count so the
+            // Storage-tab Invoiced view + its export show "billed N days" proof
+            // for clients. Prefer the preview's qty (the real computed day
+            // count); fall back to amount/rate (exact for storage, since
+            // amount = daily_rate × days) when a caller omits qty. Null only
+            // when rate is 0 or non-numeric (a $0 line has no meaningful day
+            // count). Pre-fix this column was always NULL → Invoiced view "—".
+            var pQty = Number(pr.qty);
+            var pBillableDays = (isFinite(pQty) && pQty > 0)
+              ? Math.round(pQty)
+              : ((isFinite(pRate) && pRate > 0) ? Math.round((Number(pRow) || 0) / pRate) : null);
             grpSbiRows.push({
-              tenant_id:    tenantId,
-              sidemark:     grp.display || "",
-              item_id:      pid,
-              description:  String(pr.description || ""),
-              period_start: periodStartStr,
-              period_end:   periodEndStr,
-              rate:         isFinite(pRate) ? pRate : null,
-              amount:       pRow,
-              status:       "Unbilled"
+              tenant_id:     tenantId,
+              sidemark:      grp.display || "",
+              item_id:       pid,
+              description:   String(pr.description || ""),
+              period_start:  periodStartStr,
+              period_end:    periodEndStr,
+              billable_days: pBillableDays,
+              rate:          isFinite(pRate) ? pRate : null,
+              amount:        pRow,
+              status:        "Unbilled"
               // summary_ledger_row_id backfilled after summaryTaskId below
             });
           }
