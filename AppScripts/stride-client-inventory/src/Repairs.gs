@@ -82,6 +82,7 @@ function generateRepairWorkOrderPdf_(ss, repairRowData, repairMap, folderUrl) {
     var itemVendor = inv ? (inv.vendor || "") : "";
     var itemDesc   = inv ? (inv.description || "") : "";
     var itemRoom   = inv ? (inv.room || "") : "";
+    var itemLoc    = inv ? (inv.location || "") : "";
 
     var dateStr;
     if (createdDate instanceof Date) {
@@ -115,6 +116,7 @@ function generateRepairWorkOrderPdf_(ss, repairRowData, repairMap, folderUrl) {
       "{{ITEM_DESC}}": e(itemDesc),
       "{{ITEM_SIDEMARK}}": e(sidemark),
       "{{ITEM_ROOM}}": e(itemRoom),
+      "{{ITEM_LOCATION}}": e(itemLoc),
       "{{RESULT_OPTIONS_HTML}}": '<span style="display:inline-block;margin-right:16px;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Complete</span>' +
         '<span style="display:inline-block;margin-right:16px;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Partial</span>' +
         '<span style="display:inline-block;margin-right:16px;font-size:11px;"><span style="display:inline-block;width:14px;height:14px;border:1.5px solid #94A3B8;border-radius:3px;vertical-align:middle;margin-right:4px;"></span> Unable to Repair</span>' +
