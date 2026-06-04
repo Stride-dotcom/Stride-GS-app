@@ -425,8 +425,11 @@ export async function submitIntake(payload: IntakeSubmitPayload): Promise<{ id: 
   // (which called MailApp via api_sendTemplateEmail_) onto the Supabase
   // `send-email` edge function. We pass NO `to` field — the edge
   // function reads INTAKE_SUBMITTED's `recipients` column from
-  // email_templates ('{{STAFF_EMAILS}}') and resolves it against
-  // public.profiles WHERE role IN ('admin','staff') AND is_active. The
+  // email_templates ('info@stridenw.com', the office inbox) and uses it
+  // directly (literal addresses are kept as-is by resolveRecipients). The
+  // recipients column is admin-editable from Settings → Email Templates.
+  // (Was '{{STAFF_EMAILS}}' until 2026-06-04 — that expanded to the full
+  // 14-person warehouse roster; an intake alert is an office concern only.) The
   // entire token-derivation that used to live in handleNotifyIntakeSubmitted_
   // (declared-value formatting, payment-authorized Y/N mapping, review-link
   // construction) now happens here in React.
