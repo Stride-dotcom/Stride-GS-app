@@ -605,6 +605,15 @@ export function Billing() {
   // invoiced-groups list to invoices whose auto_charge snapshot in
   // invoice_tracking is true (i.e. the Stax-eligible subset). Off by default.
   const [rptAutoPayOnly, setRptAutoPayOnly] = useState(false);
+  // 2026-06-04 — Invoices-section table controls (search / client / date
+  // range). Client-side over the already-loaded invoicedGroups, scoped to
+  // the Invoices list only (the top toolbar search drives the Unbilled
+  // table; these drive the invoiced summary table below it). Sorting is
+  // handled by invoicedTable's own header clicks (default invoiceDate DESC).
+  const [invQuery, setInvQuery] = useState('');
+  const [invClientFilter, setInvClientFilter] = useState<string[]>([]);
+  const [invFromDate, setInvFromDate] = useState('');
+  const [invToDate, setInvToDate] = useState('');
 
   // 2026-05-06 — Invoice push-state lookup for the Billing Report's Invoiced
   // section. Reads from public.invoice_tracking (per-invoice tracking ledger
@@ -2031,8 +2040,19 @@ export function Billing() {
   // though the user can clearly see the description / sidemark / reference
   // they remember. Pre-filter the groups by walking each lineItem's text
   // fields here so search behaves the same on Invoiced as on Unbilled.
+  // Distinct client names present in the invoiced list — options for the
+  // Invoices-section Client multi-select filter.
+  const invoiceClientOptions = useMemo(
+    () => [...new Set(billingSections.invoicedGroups.map(g => g.client).filter(Boolean))]
+      .sort((a, b) => a.localeCompare(b)),
+    [billingSections.invoicedGroups],
+  );
+
   const filteredInvoicedGroups = useMemo(() => {
-    const q = (globalFilter || '').trim().toLowerCase();
+    const q = (invQuery || '').trim().toLowerCase();
+    const clientSet = invClientFilter.length ? new Set(invClientFilter) : null;
+    const from = invFromDate || '';
+    const to   = invToDate || '';
     // 2026-05-06 — Auto Pay filter. When the toolbar toggle is on, restrict
     // the invoiced list to invoices whose auto_charge snapshot in
     // invoice_tracking is true. Falls back to the per-group autoCharge field
@@ -2043,12 +2063,11 @@ export function Billing() {
       if (tracked) return tracked.autoCharge;
       return g.autoCharge ?? false;
     };
-    const baseFiltered = rptAutoPayOnly
-      ? billingSections.invoicedGroups.filter(autoPayed)
-      : billingSections.invoicedGroups;
-    if (!q) return baseFiltered;
-    return baseFiltered.filter(g => {
-      // Group-level fields first (cheap path).
+    // Match the rich line-item text search (what staff search by: item ID /
+    // description / sidemark / reference / notes / svc / task / repair /
+    // shipment) plus group-level fields.
+    const matchesQuery = (g: InvoiceGroup): boolean => {
+      if (!q) return true;
       if (
         (g.invoiceNo && g.invoiceNo.toLowerCase().includes(q)) ||
         (g.client && g.client.toLowerCase().includes(q)) ||
@@ -2056,9 +2075,6 @@ export function Billing() {
         (g.invoiceDate && g.invoiceDate.toLowerCase().includes(q)) ||
         (g.qboInvoiceId && g.qboInvoiceId.toLowerCase().includes(q))
       ) return true;
-      // Walk every line-item text field — what staff actually search by
-      // (item ID / description / sidemark / reference / notes / svc /
-      // task / repair / shipment).
       for (const li of g.lineItems) {
         if (
           (li.ledgerRowId && li.ledgerRowId.toLowerCase().includes(q)) ||
@@ -2076,14 +2092,28 @@ export function Billing() {
         ) return true;
       }
       return false;
+    };
+    return billingSections.invoicedGroups.filter(g => {
+      if (rptAutoPayOnly && !autoPayed(g)) return false;
+      if (clientSet && !clientSet.has(g.client)) return false;
+      if (from || to) {
+        const d = (g.invoiceDate || '').slice(0, 10);
+        if (!d) return false;                 // no date → can't be in range
+        if (from && d < from) return false;
+        if (to && d > to) return false;
+      }
+      return matchesQuery(g);
     });
-  }, [billingSections.invoicedGroups, globalFilter, rptAutoPayOnly, pushStatusByInvoice]);
+  }, [billingSections.invoicedGroups, invQuery, invClientFilter, invFromDate, invToDate, rptAutoPayOnly, pushStatusByInvoice]);
 
   const invoicedTable = useReactTable({
     data: filteredInvoicedGroups,
     columns: invoiceSummaryColumns,
     state: { rowSelection: invoicedRowSel },
     onRowSelectionChange: setInvoicedRowSel,
+    // Default: newest invoices first (by invoice_date DESC). Uncontrolled
+    // sorting state — header clicks toggle/multi-sort from here.
+    initialState: { sorting: [{ id: 'invoiceDate', desc: true }] },
     getRowId: row => row.invoiceNo,
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),
@@ -3172,6 +3202,49 @@ export function Billing() {
               </span>
             )}
           </div>
+          {/* 2026-06-04 — Invoices-list table controls: search (incl. line
+              items), Client multi-select, and invoice-date range. Click any
+              column header to sort (default: newest first). */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '0 0 10px', flexWrap: 'wrap' }}>
+            <div style={{ position: 'relative', flex: '1 1 240px', maxWidth: 360 }}>
+              <Search size={15} color={theme.colors.textMuted} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)' }} />
+              <input
+                value={invQuery}
+                onChange={e => setInvQuery(e.target.value)}
+                placeholder="Search invoice #, client, item ID, sidemark…"
+                aria-label="Search invoices"
+                style={{ width: '100%', padding: '7px 10px 7px 32px', fontSize: 13, border: `1px solid ${theme.colors.border}`, borderRadius: 8, outline: 'none', background: theme.colors.bgSubtle, fontFamily: 'inherit', boxSizing: 'border-box' }}
+              />
+            </div>
+            <MultiSelectFilter
+              label="Client"
+              options={invoiceClientOptions}
+              selected={invClientFilter}
+              onChange={setInvClientFilter}
+              placeholder="All Clients"
+            />
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: 10, fontWeight: 600, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '1px' }}>Invoice Date</span>
+              <input type="date" aria-label="Invoice date from" value={invFromDate} max={invToDate || undefined} onChange={e => setInvFromDate(e.target.value)} style={{ ...dateInputStyle, width: 140 }} />
+              <span style={{ fontSize: 12, color: theme.colors.textMuted }}>–</span>
+              <input type="date" aria-label="Invoice date to" value={invToDate} min={invFromDate || undefined} onChange={e => setInvToDate(e.target.value)} style={{ ...dateInputStyle, width: 140 }} />
+            </div>
+            {(invQuery || invClientFilter.length > 0 || invFromDate || invToDate) && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => { setInvQuery(''); setInvClientFilter([]); setInvFromDate(''); setInvToDate(''); }}
+                  title="Clear invoice filters"
+                  style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '6px 10px', borderRadius: 8, border: `1px solid ${theme.colors.border}`, background: '#fff', cursor: 'pointer', fontSize: 11, color: theme.colors.textSecondary, fontFamily: 'inherit', whiteSpace: 'nowrap' }}
+                >
+                  <X size={12} /> Clear
+                </button>
+                <span style={{ fontSize: 11, color: theme.colors.textMuted }}>
+                  {filteredInvoicedGroups.length} of {billingSections.invoicedGroups.length}
+                </span>
+              </>
+            )}
+          </div>
           <div style={{ border: `1px solid ${borderColor}`, borderRadius: isMobile ? 8 : 12, overflow: 'hidden', background: '#fff' }}>
             <div style={{ overflowY: 'auto', overflowX: 'auto', maxHeight: isMobile ? 'calc(60dvh)' : 'calc(70dvh)', WebkitOverflowScrolling: 'touch' }}>
               <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: isMobile ? 700 : undefined }}>
@@ -3254,7 +3327,9 @@ export function Billing() {
               </table>
             </div>
             <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', padding: '8px 16px', borderTop: `1px solid ${theme.colors.borderLight}`, fontSize: 12, color: theme.colors.textMuted }}>
-              {billingSections.invoicedGroups.length} invoice{billingSections.invoicedGroups.length !== 1 ? 's' : ''}
+              {filteredInvoicedGroups.length === billingSections.invoicedGroups.length
+                ? <>{billingSections.invoicedGroups.length} invoice{billingSections.invoicedGroups.length !== 1 ? 's' : ''}</>
+                : <>{filteredInvoicedGroups.length} of {billingSections.invoicedGroups.length} invoice{billingSections.invoicedGroups.length !== 1 ? 's' : ''}</>}
             </div>
           </div>
         </section>
