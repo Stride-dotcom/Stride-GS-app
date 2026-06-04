@@ -447,8 +447,8 @@ export async function submitIntake(payload: IntakeSubmitPayload): Promise<{ id: 
 
     void sendEmail({
       templateKey: 'INTAKE_SUBMITTED',
-      // No `to` — the edge function expands template.recipients
-      // ('{{STAFF_EMAILS}}') from public.profiles.
+      // No `to` — the edge function reads template.recipients
+      // ('info@stridenw.com', the office inbox) directly.
       tokens: {
         BUSINESS_NAME:      row.business_name      || 'unnamed business',
         CONTACT_NAME:       row.contact_name       || 'unknown contact',
