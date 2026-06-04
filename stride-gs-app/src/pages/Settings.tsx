@@ -1001,6 +1001,9 @@ export function Settings() {
   const [newUserClientNames, setNewUserClientNames] = useState<string[]>([]);
   const [newUserClientIds, setNewUserClientIds] = useState<string[]>([]);
   const [newUserAddClientDropdown, setNewUserAddClientDropdown] = useState(false);
+  // Default new users to Active=ON so they can log in immediately — staff kept
+  // forgetting to flip this after creating the account, locking the user out.
+  const [newUserActive, setNewUserActive] = useState(true);
   const [addUserLoading, setAddUserLoading] = useState(false);
   const [addUserError, setAddUserError] = useState('');
   const [impersonatingEmail, setImpersonatingEmail] = useState<string | null>(null);
@@ -1398,7 +1401,8 @@ export function Settings() {
       newUserEmail.trim().toLowerCase(),
       newUserRole,
       newUserClientNames.length ? newUserClientNames.join(', ') : undefined,
-      newUserClientIds.length ? newUserClientIds.join(', ') : undefined
+      newUserClientIds.length ? newUserClientIds.join(', ') : undefined,
+      newUserActive
     );
     setAddUserLoading(false);
     if (result.success) {
@@ -1406,7 +1410,7 @@ export function Settings() {
       setAddUserOpen(false);
       setNewUserEmail(''); setNewUserRole('staff');
       setNewUserClientNames([]); setNewUserClientIds([]);
-      setNewUserAddClientDropdown(false);
+      setNewUserAddClientDropdown(false); setNewUserActive(true);
       if (result.tempPassword) {
         setCreatedTempPassword({ email: emailCreated, password: result.tempPassword });
       } else {
@@ -3325,6 +3329,16 @@ export function Settings() {
                       )}
                     </div>
                   )}
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, cursor: addUserLoading ? 'not-allowed' : 'pointer', fontSize: 12, color: theme.colors.textSecondary }}>
+                    <input
+                      type="checkbox"
+                      checked={newUserActive}
+                      onChange={e => setNewUserActive(e.target.checked)}
+                      disabled={addUserLoading}
+                      style={{ cursor: addUserLoading ? 'not-allowed' : 'pointer' }}
+                    />
+                    <span>Active — user can log in immediately. Leave on unless you want to create a deactivated account.</span>
+                  </label>
                   {addUserError && (
                     <div style={{ padding: '7px 10px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 7, fontSize: 12, color: '#DC2626', marginBottom: 10 }}>
                       {addUserError}
@@ -3340,7 +3354,7 @@ export function Settings() {
                       {addUserLoading ? 'Adding…' : 'Add User'}
                     </button>
                     <button
-                      onClick={() => { setAddUserOpen(false); setNewUserEmail(''); setNewUserRole('staff'); setNewUserClientNames([]); setNewUserClientIds([]); setNewUserAddClientDropdown(false); setAddUserError(''); }}
+                      onClick={() => { setAddUserOpen(false); setNewUserEmail(''); setNewUserRole('staff'); setNewUserClientNames([]); setNewUserClientIds([]); setNewUserAddClientDropdown(false); setNewUserActive(true); setAddUserError(''); }}
                       style={{ padding: '8px 14px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}
                     >
                       Cancel
