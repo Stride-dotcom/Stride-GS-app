@@ -37,6 +37,12 @@ BEGIN
   SELECT body LIKE '%{{ITEM_ROWS}}%' AND body NOT LIKE '%{{ITEM_ID}}%'
     INTO ok
   FROM email_templates WHERE template_key = 'DOC_REPAIR_WORK_ORDER';
+  -- No row at all → the template was never seeded; fail loudly rather than
+  -- pass silently (IF NOT NULL is not true, so the row-absent case needs its
+  -- own guard).
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'DOC_REPAIR_WORK_ORDER template row not found in email_templates';
+  END IF;
   IF NOT ok THEN
     RAISE EXCEPTION 'DOC_REPAIR_WORK_ORDER multi-item {{ITEM_ROWS}} swap did not apply (single-row {{ITEM_ID}} token still present or {{ITEM_ROWS}} missing)';
   END IF;
