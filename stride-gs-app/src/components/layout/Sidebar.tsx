@@ -21,6 +21,7 @@ import {
   Mail,
   Calendar,
   Receipt,
+  FileText,
   MessageSquare,
   KeyRound,
   GitCompare,
@@ -81,6 +82,7 @@ const CLIENT_NAV = [
   { id: 'willcalls', label: 'Will Calls', path: '/will-calls', icon: Truck },
   { id: 'claims', label: 'Claims', path: '/claims', icon: Shield },
   { id: 'orders', label: 'Delivery', path: '/orders', icon: Calendar },
+  { id: 'invoices', label: 'Invoices', path: '/invoices', icon: FileText },
 ];
 
 // Role display labels

@@ -45,6 +45,15 @@ export interface InvoicePdfInput {
   client: InvoicePdfClient;
 }
 
+/**
+ * Deterministic storage object path for an invoice PDF in the `invoices`
+ * bucket. Single source of truth shared by the uploader, the
+ * invoice_tracking patch, and the client portal's signed-URL minting.
+ */
+export function invoiceStoragePath(tenantId: string, invoiceNo: string): string {
+  return `${tenantId}/${invoiceNo}.pdf`;
+}
+
 const STRIDE_ORANGE: [number, number, number] = [232, 105, 42]; // #E8692A
 const TEXT_DARK:     [number, number, number] = [31, 41, 55];   // #1F2937
 const TEXT_MUTED:    [number, number, number] = [107, 114, 128]; // #6B7280
@@ -324,6 +333,31 @@ export async function patchInvoiceUrl(
     .eq('invoice_no', invoiceNo);
   if (error) {
     console.warn('[invoicePdf] patch invoice_url failed', invoiceNo, error.message);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Record the archived PDF's storage path on the invoice_tracking row so the
+ * client invoice portal (/invoices) can resolve a View/Download link without
+ * touching the per-line billing rows. Stores the stable object PATH (not a
+ * signed URL) — the portal mints an RLS-scoped signed URL on demand.
+ *
+ * Best-effort: returns false on any failure (RLS scopes writes to
+ * staff/admin + service_role; the operator who just created the invoice).
+ */
+export async function patchInvoiceTrackingPdf(
+  invoiceNo: string,
+  pdfPath: string,
+): Promise<boolean> {
+  if (!invoiceNo || !pdfPath) return false;
+  const { error } = await supabase
+    .from('invoice_tracking')
+    .update({ pdf_path: pdfPath })
+    .eq('invoice_no', invoiceNo);
+  if (error) {
+    console.warn('[invoicePdf] patch invoice_tracking.pdf_path failed', invoiceNo, error.message);
     return false;
   }
   return true;
