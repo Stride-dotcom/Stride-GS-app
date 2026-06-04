@@ -12,20 +12,34 @@
  *   • `handleCommitStorageRows_`      (StrideAPI.gs:23223) — commit a
  *     pre-computed set of rows (operator may have edited the preview).
  *
- * SB approach: lean on `public.generate_storage_charges(tenant_id, sidemark,
- * period_start, period_end)` RPC. As of migration 20260528120000 the RPC
- * aggregates per-item charges into ONE public.billing row per tenant per
- * commit (ledger_row_id = STOR-SUMMARY-<tenantId>-<YYYYMMDD>-<YYYYMMDD>),
- * description = "Monthly Storage", total = SUM. The per-item dedup pass +
- * delete-stale-Unbilled pass + finalized-summary fence are all inside the
- * Postgres transaction. This handler stays as a thin orchestrator: validate
- * input, call RPC, read back the new summary row(s), mirror to per-tenant
- * sheets, audit-log. The read-back returns 1 row per affected tenant
- * (was N per tenant), so the mirror fan-out is now bounded by tenant
- * count rather than item count.
+ * TWO paths, chosen by whether the body carries a `rows[]` array:
+ *
+ *   1. COMMIT (commitStorageRows) — body has `rows[]`. This is the operator's
+ *      EDITED preview: ONLY the checked rows, with inline rate/qty edits. The
+ *      commit MUST write exactly these rows; it must NOT re-derive from
+ *      inventory (that would re-bill rows the operator unchecked, e.g. comped
+ *      storage — the billing-checkbox bug). Proxies to GAS
+ *      handleCommitStorageRows_, the canonical commit (per-tenant +
+ *      per-sidemark summarization, finalized-summary fence,
+ *      storage_billing_items dedup, transfer-backfill protection, sheet +
+ *      public.billing write-through, multi-tenant fan-out). Byte-identical to
+ *      the GAS path real clients run on.
+ *
+ *   2. RECOMPUTE (generateStorageCharges) — no `rows[]`. Single-tenant sweep
+ *      that derives the full storage set from inventory via
+ *      `public.generate_storage_charges(tenant_id, sidemark, period_start,
+ *      period_end)` RPC. As of migration 20260528120000 the RPC aggregates
+ *      per-item charges into ONE public.billing row per tenant per commit
+ *      (ledger_row_id = STOR-SUMMARY-<tenantId>-<YYYYMMDD>-<YYYYMMDD>),
+ *      description = "Monthly Storage", total = SUM. The per-item dedup pass +
+ *      delete-stale-Unbilled pass + finalized-summary fence are all inside the
+ *      Postgres transaction. This handler stays a thin orchestrator: validate
+ *      input, call RPC, read back the new summary row(s), mirror to per-tenant
+ *      sheets, audit-log.
  *
  * Inputs:
- *   { tenantId, callerEmail, requestId?, billingMonth?, startDate?, endDate?, sidemark? }
+ *   COMMIT:    { rows[], periodStart, periodEnd, callerEmail }
+ *   RECOMPUTE: { tenantId, callerEmail, requestId?, billingMonth?, startDate?, endDate?, sidemark? }
  *
  *   - `billingMonth` (YYYY-MM): convenience — expands to
  *     startDate=first-of-month, endDate=last-of-month. If not provided,
@@ -41,6 +55,7 @@
  */
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { gasProxy } from '../_shared/gas-proxy.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -55,6 +70,14 @@ interface CommitStorageBody {
   startDate?: string;      // YYYY-MM-DD
   endDate?: string;        // YYYY-MM-DD
   sidemark?: string;
+  // ── commitStorageRows path ──────────────────────────────────────────
+  // The React commit (`commitStorageRows`) POSTs the operator's EDITED
+  // preview: periodStart/periodEnd + a `rows[]` array of ONLY the checked
+  // rows (with any inline rate/qty edits). This is a COMMIT, not a
+  // recompute — see the commit branch in Deno.serve.
+  periodStart?: string;    // YYYY-MM-DD (commitStorageRows)
+  periodEnd?: string;      // YYYY-MM-DD (commitStorageRows)
+  rows?: unknown[];        // operator-selected per-item rows (commitStorageRows)
 }
 
 interface BillingRow {
@@ -83,6 +106,56 @@ Deno.serve(async (req: Request) => {
     return json({ error: `Invalid JSON: ${e instanceof Error ? e.message : String(e)}`, code: 'INVALID_JSON' }, 400);
   }
 
+  // ── COMMIT path (commitStorageRows) ──────────────────────────────────
+  // When the caller sends a `rows[]` array it is the React commit handler
+  // shipping the operator's EDITED preview: ONLY the checked rows, with any
+  // inline rate/qty edits. Committing MUST write exactly these rows — it must
+  // NEVER re-derive the full storage set from inventory (the recompute path
+  // below), because re-deriving silently re-bills rows the operator unchecked
+  // (e.g. comped storage) and folds them into the monthly summary. That is the
+  // billing-checkbox bug this EF was on the wrong side of: the recompute path
+  // throws the operator's selection away.
+  //
+  // The canonical commit logic — per-tenant + per-sidemark summarization, the
+  // finalized-summary fence, storage_billing_items dedup, transfer-backfill
+  // protection, and the Billing_Ledger sheet + public.billing write-through —
+  // lives in GAS handleCommitStorageRows_. Proxy to it so the SB-routed commit
+  // is byte-identical to the GAS path real clients run on, and so GAS owns the
+  // multi-tenant fan-out (the recompute path below is single-tenant only). GAS
+  // mirrors each committed summary to public.billing, so the React
+  // Supabase-read report reflects the commit.
+  if (Array.isArray(body.rows)) {
+    const periodStart = String(body.periodStart ?? '').trim();
+    const periodEnd   = String(body.periodEnd   ?? '').trim();
+    const commitRows  = body.rows;
+    if (commitRows.length === 0) {
+      return json({ success: true, totalCreated: 0, clientsProcessed: 0, message: 'No rows to commit' });
+    }
+    if (!periodStart || !periodEnd) {
+      return json({ error: 'periodStart and periodEnd are required for commitStorageRows', code: 'INVALID_PARAMS' }, 400);
+    }
+    const callerEmailForProxy = String(body.callerEmail ?? '').trim();
+    const proxied = await gasProxy<Record<string, unknown>>('commitStorageRows', {
+      periodStart,
+      periodEnd,
+      rows: commitRows,
+      ...(callerEmailForProxy ? { callerEmail: callerEmailForProxy } : {}),
+    });
+    if (!proxied.ok) {
+      // Surface GAS's own envelope when present (carries the operator-facing
+      // error message); otherwise the proxy-level transport error.
+      const gasBody = proxied.data as Record<string, unknown> | undefined;
+      if (gasBody && typeof gasBody === 'object') {
+        return json(gasBody, proxied.httpStatus ?? 502);
+      }
+      return json({ error: proxied.error ?? 'GAS commitStorageRows failed', code: 'GAS_PROXY_FAILED' }, 502);
+    }
+    return json(proxied.data ?? { success: true });
+  }
+
+  // ── RECOMPUTE path (generateStorageCharges) ──────────────────────────
+  // No rows[] supplied: derive the full storage set for one tenant from
+  // inventory via the generate_storage_charges RPC (preview/sweep).
   const tenantId    = String(body.tenantId    ?? '').trim();
   const callerEmail = String(body.callerEmail ?? '').trim();
   const requestId   = String(body.requestId   ?? '').trim() || crypto.randomUUID();

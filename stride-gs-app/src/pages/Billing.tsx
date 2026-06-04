@@ -1112,11 +1112,24 @@ export function Billing() {
         return;
       }
 
+      // Honor the operator's checkbox selection. If a subset of preview
+      // rows is checked, commit ONLY those — the unchecked rows (e.g.
+      // comped storage) must NOT be committed and stay available for the
+      // next billing cycle (they were never written to any ledger, so
+      // simply omitting them from the payload leaves them out). If nothing
+      // is checked, commit all preview rows (the long-standing default,
+      // matching the "Create Invoice" button's select-all-when-empty
+      // behavior). Read selection via the table API so it tracks the
+      // current sort/filter view; getRowId (set on the table) keeps the
+      // selection pinned to ledger rows across refetch/reorder.
+      const selectedPreview = table.getSelectedRowModel().rows.map(r => r.original);
+      const rowsToCommit = selectedPreview.length > 0 ? selectedPreview : previewRows;
+
       // Hand the pre-computed rows to GAS so the GS-side Billing_Ledger
       // gets the same writes (and triggers Supabase write-through). The
       // commit endpoint skips the slow read+compute phase that used to
       // time out on big clients.
-      const payloadRows = previewRows.map(r => ({
+      const payloadRows = rowsToCommit.map(r => ({
         tenantId: r.sourceSheetId || r.clientSheetId || '',
         clientName: r.client || r.clientName || '',
         itemId: r.itemId,
@@ -1153,6 +1166,12 @@ export function Billing() {
       setPreviewError(`Commit error: ${err instanceof Error ? err.message : String(err)}`);
     }
     setCommitLoading(false);
+    // `table` is intentionally omitted from the deps array: it is declared
+    // further down the component body, so referencing it here would hit the
+    // const TDZ during the render-time deps evaluation. useReactTable returns
+    // a stable instance, and the closure resolves `table` live at click time,
+    // so reading the current selection inside the body is correct.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [storStartDate, storEndDate, previewRows, refetchBilling]);
 
   // QB Export state
@@ -1686,6 +1705,21 @@ export function Billing() {
 
   const table = useReactTable({
     data: tableData, columns,
+    // Stable per-row identity for selection. WITHOUT this, TanStack keys
+    // row selection by array index, so any refetch / Supabase-realtime
+    // update / optimistic hide / re-sort that reorders `tableData` silently
+    // remaps the checked boxes onto DIFFERENT ledger rows. That desync was
+    // the billing-checkbox bug: unchecked rows (e.g. comped storage) got
+    // billed and checked rows got dropped — rows "disappeared" because the
+    // commit/invoice acted on whatever now sat at the previously-checked
+    // index (Modern Design Sofa + Digs Furniture, 2026-06). The id must be
+    // globally unique across the multi-tenant report, so it pairs the tenant
+    // sheet id with the ledger row id (taskId for storage-preview rows).
+    // Falls back to index only for the (never-expected) blank-ledger-id row.
+    getRowId: (row, index) => {
+      const tenant = row.clientSheetId || row.sourceSheetId || '';
+      return row.ledgerRowId ? `${tenant}::${row.ledgerRowId}` : `idx-${index}`;
+    },
     state: { sorting, columnFilters, globalFilter, columnVisibility: colVis, rowSelection: rowSel, columnOrder: columnOrder.length ? columnOrder : DEFAULT_COL_ORDER },
     onSortingChange: setSorting, onColumnFiltersChange: setColumnFilters, onGlobalFilterChange: setGlobalFilter, onColumnVisibilityChange: setColVis, onRowSelectionChange: setRowSel,
     onColumnOrderChange: (updater) => setColumnOrder(typeof updater === 'function' ? updater(columnOrder.length ? columnOrder : DEFAULT_COL_ORDER) : updater),
