@@ -250,10 +250,13 @@ export const GAS_TO_SB_MAP: Record<string, RouteEntry> = {
   // P6 — payments
   qboCreateInvoice:    { ef: 'qbo-create-invoice-sb',  flagKey: 'qboCreateInvoice' },
   // qbo-reconcile-payments is SB-primary (no GAS proxy) — pulls QBO
-  // payment status back onto invoice_tracking. Flag seeded at 'supabase'
-  // in 20260604120000_qbo_reconcile_payments_route.sql (the EF doesn't
-  // mutate billing dollars, only verification columns, so no MIG-016
-  // deploy-order gate vs. a GAS writethrough).
+  // payment status back onto invoice_tracking. EF deployed + ready, but
+  // the flag is HELD on 'gas' in 20260604120000_qbo_reconcile_payments_route.sql
+  // until the 4 QBO OAuth secrets are mirrored from GAS Script Properties
+  // onto the Supabase project (they don't exist there yet). Operator flips
+  // qboReconcile→'supabase' to go live; until then this routes to the
+  // still-working GAS handler. The EF mutates only verification columns
+  // (no billing dollars), so no MIG-016 writethrough gate applies.
   qboReconcileInvoices:{ ef: 'qbo-reconcile-payments', flagKey: 'qboReconcile' },
   createStaxInvoices:  { ef: 'create-stax-invoices-sb',flagKey: 'createStaxInvoices' },
   runStaxCharges:      { ef: 'run-stax-charges-sb',    flagKey: 'runStaxCharges' },
