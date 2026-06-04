@@ -1,0 +1,47 @@
+-- 2026-06-04 — Daily pg_cron sweep for QBO payment-status reconciliation.
+--
+-- Keeps invoice_tracking payment status fresh without an operator having
+-- to click "Reconcile with QBO". Once a day it invokes the
+-- qbo-reconcile-payments Edge Function with an empty scope ({}), which
+-- reconciles every pushed-but-unverified invoice (oldest verified_at
+-- first, capped at limit=500/run — Stride has ~229 pushed invoices today,
+-- comfortably one pass).
+--
+-- Pattern follows 20260513134114_dt_sync_statuses_cron_schedule.sql and
+-- 20260504250000_intake_reminder_cron_schedule.sql: this migration only
+-- ensures pg_cron + pg_net are installed. The actual cron.schedule() call
+-- is run separately via the SQL editor (or the management API) because it
+-- embeds the project URL + service-role JWT, both environment-specific and
+-- not appropriate for source control.
+--
+-- AUTH NOTE: the EF accepts a service-role bearer as a system/cron caller
+-- (bypasses the admin-user-JWT check). So the cron job authenticates with
+-- the project's service-role key below.
+--
+-- After this migration runs, set up the schedule with this SQL (replace
+-- <project-ref> + <service-role-key> for the env):
+--
+--     SELECT cron.schedule(
+--       'qbo-reconcile-payments-daily',
+--       '17 9 * * *',                       -- 09:17 UTC daily (~quiet hour)
+--       $$
+--       SELECT net.http_post(
+--         url := 'https://<project-ref>.supabase.co/functions/v1/qbo-reconcile-payments',
+--         headers := jsonb_build_object(
+--           'Authorization', 'Bearer <service-role-key>',
+--           'Content-Type',  'application/json'
+--         ),
+--         body := '{}'::jsonb,
+--         timeout_milliseconds := 55000
+--       );
+--       $$
+--     );
+--
+-- Verify:        SELECT * FROM cron.job WHERE jobname = 'qbo-reconcile-payments-daily';
+-- Run history:   SELECT * FROM cron.job_run_details WHERE jobid = (SELECT jobid FROM cron.job WHERE jobname = 'qbo-reconcile-payments-daily') ORDER BY start_time DESC LIMIT 20;
+-- Manual fire:   POST {} to /functions/v1/qbo-reconcile-payments with the service-role bearer.
+-- Pause:         SELECT cron.alter_job((SELECT jobid FROM cron.job WHERE jobname = 'qbo-reconcile-payments-daily'), active := false);
+-- Remove:        SELECT cron.unschedule('qbo-reconcile-payments-daily');
+
+CREATE EXTENSION IF NOT EXISTS pg_cron;
+CREATE EXTENSION IF NOT EXISTS pg_net;

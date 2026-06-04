@@ -3093,24 +3093,29 @@ export function Billing() {
       {/* ─── Invoice Summary Section (report tab only, when invoiced rows exist) ── */}
       {isReportTab && billingSections.invoicedGroups.length > 0 && (
         <section style={{ marginBottom: billingSections.unbilledRows.length > 0 ? 20 : 0 }}>
-          {/* v38.242.0 — Reconcile against QBO. Fires the GAS handler
-              against the currently-visible invoice list, then refreshes
-              the realtime-backed pushStatusByInvoice map. */}
+          {/* v38.242.0 — Reconcile against QBO. Now SB-primary: fires the
+              qbo-reconcile-payments Edge Function (no GAS) which pulls QBO
+              Balance back onto invoice_tracking. The realtime subscription
+              on invoice_tracking refreshes the Paid/Unpaid badges
+              automatically once the EF writes. Admin-only (matches the
+              EF's admin-JWT gate + the GAS withAdminGuard_ it replaces). */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, margin: '4px 0 8px', flexWrap: 'wrap' }}>
             {billingSections.unbilledRows.length > 0 && (
               <h3 style={{ fontSize: 13, fontWeight: 600, margin: 0, color: theme.colors.textSecondary, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
                 Invoices ({billingSections.invoicedGroups.length})
               </h3>
             )}
+            {user?.role === 'admin' && (
             <button
               onClick={async () => {
                 setQboReconciling(true);
                 setQboReconcileResult(null);
                 try {
-                  const invoiceNos = billingSections.invoicedGroups
-                    .map(g => g.invoiceNo)
-                    .filter(Boolean);
-                  const res = await postQboReconcileInvoices({ invoiceNos });
+                  // Empty scope = sweep every pushed-but-unverified invoice
+                  // (oldest verified_at first, capped at 500/run server-side)
+                  // so one click syncs the whole pushed backlog, not just the
+                  // rows currently visible in the report.
+                  const res = await postQboReconcileInvoices({});
                   if (!res.ok || !res.data?.success) {
                     setQboReconcileResult({ success: false, error: res.error || res.data?.error || 'Reconcile failed' });
                   } else {
@@ -3131,7 +3136,7 @@ export function Billing() {
                 }
               }}
               disabled={qboReconciling}
-              title="Query QBO for every visible invoice and pull back payment status (Balance / paid). Flags any invoice QBO doesn't have as push failed."
+              title="Query QBO for every pushed invoice and pull back payment status (Balance / paid). Flags any invoice QBO doesn't have as push failed. Runs automatically once a day."
               style={{
                 padding: '6px 12px', fontSize: 11, fontWeight: 600,
                 border: `1px solid ${theme.colors.border}`, borderRadius: 6,
@@ -3142,9 +3147,10 @@ export function Billing() {
               }}
             >
               {qboReconciling
-                ? <><Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> Reconciling…</>
-                : <><RefreshCw size={12} /> Reconcile with QBO</>}
+                ? <><Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> Syncing…</>
+                : <><RefreshCw size={12} /> Sync Payment Status</>}
             </button>
+            )}
             {qboReconcileResult && qboReconcileResult.success && (
               <span style={{ fontSize: 11, color: theme.colors.textSecondary, display: 'inline-flex', alignItems: 'center', gap: 8 }}>
                 Scanned {qboReconcileResult.scanned}, verified {qboReconcileResult.verified}
