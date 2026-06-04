@@ -108,6 +108,21 @@
 
 ---
 
+## Recent Changes (2026-06-04, insurance auto-billing proration — fix/billing/insurance-proration)
+
+- **The daily insurance auto-billing cron (`insurance_bill_due()`) now PRORATES instead of always charging a flat 30-day rate.** Three cases, all day-for-day (per 30):
+  1. **First-month** — a mid-month signup's first charge covers only inception_date → next_billing_date. Realized by anchoring the first `next_billing_date` to the 1st of next month (all 4 seed sites + the EF); the cron prorates any sub-30-day first period generically. The $30 monthly floor is intentionally NOT applied to partial first/final periods.
+  2. **Cancellation (last month)** — a cancelled row (`active=false` + `cancelled_at` set) gets one final prorated charge for the days from the in-progress period start to `cancelled_at`, idempotent via a new `client_insurance.final_billed_at` column (always stamped, even on a $0/zero-day cancel). **Paused** rows (`active=false`, `cancelled_at` NULL) are NOT final-billed.
+  3. **Mid-period coverage change** — a declared-value change splits the charge (old value before the change date, new value after). A new `coverage_changes` audit table records every change automatically (via the `log_coverage_change` trigger on `client_insurance`); the billing run consumes in-period changes and stamps `billed_at`.
+- **Idempotency tag YYYYMM → YYYYMMDD.** The 30-day cadence can land two bills in one calendar month (e.g. Jul 1 + Jul 31); a YYYYMM `ledger_row_id` collapsed them, no-op'd the 2nd insert, and never advanced `next_billing_date` (silent stop-billing). YYYYMMDD makes each period's key distinct. Preserves the `GET DIAGNOSTICS row_count` guard + index-inference `ON CONFLICT (ledger_row_id) WHERE svc_code='INSURANCE' …`.
+- **Captured a prod/git drift:** the on-disk `20260501` migration still carried the broken `ON CONFLICT ON CONSTRAINT billing_insurance_ledger_unique` form (the dedup target is a unique INDEX, not a named constraint → runtime error); prod had been hotfixed but never had a committed migration. `20260604190000` is now the git source of truth for the function.
+- **Validated against prod in a fully-rolled-back transaction** (migration + 7 synthetic clients + run + inspect + `RAISE` to abort) before applying: first-month 60.00 / full 150.00 / mid-period split 94.00 / cancellation 100.00 / floor 30 / paused-not-billed / trigger-fires — all matched expected. **Migration applied directly to prod** (`20260604190000`); EF `apply-intake-on-submit` redeployed (v4, `verify_jwt=false` preserved). Cron schedule `0 8 * * *` intact.
+- **React:** `useClientInsurance` reads/exposes `pendingChanges` + subscribes to `coverage_changes`; `InsuranceBlock` (`OnboardClientModal.tsx`) replaces the old "not prorated" disclaimer with a proration explanation, lists pending coverage changes, and fixes the declared-value history column (`qty` is per-$10K → ×10000, was ×100000). New helper `src/lib/insuranceBilling.ts` `firstBillingAnchor`.
+- **Files:** `supabase/migrations/20260604190000_insurance_billing_proration.sql`, `src/lib/insuranceBilling.ts`, `src/hooks/useClientInsurance.ts`, `src/hooks/useIntakeAdmin.ts`, `src/components/settings/IntakesPanel.tsx`, `src/components/shared/OnboardClientModal.tsx`, `supabase/functions/apply-intake-on-submit/index.ts`.
+- **Pending user action:** deploy React (`npm run deploy` from canonical after merge) so the calendar-anchor seeds + proration-aware UI go live; the migration + EF are already live.
+
+---
+
 ## Recent Changes (2026-06-04, billing checkbox honored on commit/invoice — fix/billing/honor-row-selection)
 
 - **Unchecking rows before committing storage charges or creating an invoice did NOT exclude them — they got billed anyway and "disappeared" (not Unbilled, not Invoiced).** Reported on real client billing (Modern Design Sofa, Digs Furniture). **Root cause:** the Billing report / storage-preview TanStack `table` (`pages/Billing.tsx`) had **no `getRowId`**, so row selection was keyed by **array index**. Billing has Supabase realtime on, so any refetch / re-sort / optimistic hide that reordered `tableData` silently remapped the checked boxes onto **different** ledger rows — the commit/invoice then acted on whatever now sat at the checked index, billing unchecked rows and dropping checked ones. Fixes:
