@@ -3132,7 +3132,9 @@ export function Billing() {
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, margin: '4px 0 8px', flexWrap: 'wrap' }}>
             {billingSections.unbilledRows.length > 0 && (
               <h3 style={{ fontSize: 13, fontWeight: 600, margin: 0, color: theme.colors.textSecondary, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                Invoices ({billingSections.invoicedGroups.length})
+                Invoices ({filteredInvoicedGroups.length === billingSections.invoicedGroups.length
+                  ? billingSections.invoicedGroups.length
+                  : `${filteredInvoicedGroups.length} of ${billingSections.invoicedGroups.length}`})
               </h3>
             )}
             {user?.role === 'admin' && (
