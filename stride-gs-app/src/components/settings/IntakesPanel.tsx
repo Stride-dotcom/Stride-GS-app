@@ -14,6 +14,7 @@ import { Copy, CheckCircle2, Link2, Plus, Trash2, FileText, UserPlus, Eye, X, Al
 import { theme } from '../../styles/theme';
 import { fmtDate, fmtDateTime } from '../../lib/constants';
 import { useIntakeAdmin, copyIntakeDocsToClient, seedClientInsuranceFromIntake, type IntakeRow, type IntakeLinkRow } from '../../hooks/useIntakeAdmin';
+import { firstBillingAnchor } from '../../lib/insuranceBilling';
 // Reference for future wiring — keep the helper in the import graph
 // without tripping noUnusedLocals.
 void copyIntakeDocsToClient;
@@ -219,8 +220,6 @@ export function IntakesPanel() {
                 warnings.push('Insurance NOT seeded — no INSURANCE rate in service_catalog. Set rate in Settings → Pricing, then re-apply.');
               } else {
                 const today = new Date();
-                const next  = new Date(today);
-                next.setDate(next.getDate() + 30);
                 const toDateStr = (d: Date) => d.toISOString().slice(0, 10);
                 const { error: insInsErr } = await supabase.from('client_insurance').insert({
                   tenant_id:            refreshSheetId,
@@ -229,7 +228,8 @@ export function IntakesPanel() {
                   declared_value:       declaredValue,
                   monthly_rate_per_10k: rate,
                   inception_date:       toDateStr(today),
-                  next_billing_date:    toDateStr(next),
+                  // 1st of next month — first charge prorates the partial signup month.
+                  next_billing_date:    firstBillingAnchor(today),
                   active:               true,
                 });
                 if (insInsErr) warnings.push(`Insurance seed failed: ${insInsErr.message}`);
@@ -389,7 +389,8 @@ export function IntakesPanel() {
           }
         }
         // Seed the client_insurance row so the daily billing cron picks
-        // the new client up on its next run (+30 days from today).
+        // the new client up (next_billing_date = 1st of next month; the
+        // first charge is prorated for the partial signup month).
         try {
           const seedRes = await seedClientInsuranceFromIntake(selected, newClientSheetId, formData.clientName);
           if (seedRes.seeded) {

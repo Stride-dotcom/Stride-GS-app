@@ -18,6 +18,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
+import { firstBillingAnchor } from '../lib/insuranceBilling';
 
 export interface ClientInsuranceRow {
   id: string;
@@ -44,6 +45,17 @@ export interface InsuranceBillingHistoryRow {
   total: number;                // same as rate for a 1-line INSURANCE row
   invoiceNumber: string | null;
   invoiceUrl: string | null;
+}
+
+/** A pending (not-yet-billed) declared-value change. The daily cron
+ *  splits the in-progress period's charge across these and stamps
+ *  billed_at when the period is billed. */
+export interface CoverageChangeRow {
+  id: string;
+  oldDeclaredValue: number;
+  newDeclaredValue: number;
+  effectiveDate: string;        // YYYY-MM-DD
+  changedAt: string;            // ISO timestamp
 }
 
 interface InsuranceDbRow {
@@ -83,6 +95,9 @@ function rowToInsurance(r: InsuranceDbRow): ClientInsuranceRow {
 export interface UseClientInsuranceResult {
   row: ClientInsuranceRow | null;
   history: InsuranceBillingHistoryRow[];
+  /** Declared-value changes not yet folded into a bill — these prorate
+   *  the next charge day-for-day. */
+  pendingChanges: CoverageChangeRow[];
   loading: boolean;
   error: string | null;
   refetch: () => Promise<void>;
@@ -101,6 +116,7 @@ export interface UseClientInsuranceResult {
 export function useClientInsurance(tenantId: string | undefined | null): UseClientInsuranceResult {
   const [row, setRow] = useState<ClientInsuranceRow | null>(null);
   const [history, setHistory] = useState<InsuranceBillingHistoryRow[]>([]);
+  const [pendingChanges, setPendingChanges] = useState<CoverageChangeRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const mountedRef = useRef(true);
@@ -111,11 +127,11 @@ export function useClientInsurance(tenantId: string | undefined | null): UseClie
 
   const refetch = useCallback(async () => {
     if (!tenantId) {
-      setRow(null); setHistory([]); setLoading(false); setError(null);
+      setRow(null); setHistory([]); setPendingChanges([]); setLoading(false); setError(null);
       return;
     }
     setLoading(true); setError(null);
-    const [iRes, bRes] = await Promise.all([
+    const [iRes, bRes, cRes] = await Promise.all([
       supabase.from('client_insurance')
         .select('*')
         .eq('tenant_id', tenantId)
@@ -126,10 +142,24 @@ export function useClientInsurance(tenantId: string | undefined | null): UseClie
         .eq('svc_code', 'INSURANCE')
         .order('date', { ascending: false })
         .limit(50),
+      supabase.from('coverage_changes')
+        .select('id,old_declared_value,new_declared_value,effective_date,changed_at')
+        .eq('tenant_id', tenantId)
+        .is('billed_at', null)
+        .order('effective_date', { ascending: true }),
     ]);
     if (!mountedRef.current) return;
     if (iRes.error) { setError(iRes.error.message); setRow(null); }
     else setRow(iRes.data ? rowToInsurance(iRes.data as InsuranceDbRow) : null);
+    if (!cRes.error && Array.isArray(cRes.data)) {
+      setPendingChanges(cRes.data.map(c => ({
+        id:               String(c.id),
+        oldDeclaredValue: Number(c.old_declared_value ?? 0) || 0,
+        newDeclaredValue: Number(c.new_declared_value ?? 0) || 0,
+        effectiveDate:    String(c.effective_date ?? ''),
+        changedAt:        String(c.changed_at ?? ''),
+      })));
+    }
     if (!bRes.error && Array.isArray(bRes.data)) {
       setHistory(bRes.data.map(b => ({
         ledgerRowId:   (b.ledger_row_id as string | null) ?? null,
@@ -149,10 +179,16 @@ export function useClientInsurance(tenantId: string | undefined | null): UseClie
 
   useEffect(() => {
     if (!tenantId) return;
+    // Subscribe to both the insurance row and its coverage_changes so the
+    // card converges live — declared-value edits, and the cron stamping
+    // billed_at when it consumes a pending change, both push a refetch.
     const ch = supabase
       .channel(`client_insurance_${tenantId}_${Math.random().toString(36).slice(2, 8)}`)
       .on('postgres_changes',
         { event: '*', schema: 'public', table: 'client_insurance', filter: `tenant_id=eq.${tenantId}` },
+        () => { void refetch(); })
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'coverage_changes', filter: `tenant_id=eq.${tenantId}` },
         () => { void refetch(); })
       .subscribe();
     return () => { void supabase.removeChannel(ch); };
@@ -177,13 +213,12 @@ export function useClientInsurance(tenantId: string | undefined | null): UseClie
     }
 
     const today = new Date();
-    const next = new Date(today);
-    next.setDate(next.getDate() + 30);
     const toDateStr = (d: Date) => d.toISOString().slice(0, 10);
 
-    // Caller should update client_name via a follow-up supabase call if
-    // they have a better value; this path is only hit when row is null
-    // (the early-return above guarantees it).
+    // First billing date anchors to the 1st of next month so the first
+    // charge is prorated for the partial signup month (the daily cron
+    // prorates inception → next_billing_date day-for-day). Subsequent
+    // periods advance a flat 30 days.
     const { error: err } = await supabase.from('client_insurance').upsert({
       tenant_id:             tenantId,
       client_name:           '',
@@ -191,7 +226,7 @@ export function useClientInsurance(tenantId: string | undefined | null): UseClie
       declared_value:        opts.declaredValue,
       monthly_rate_per_10k: rate,
       inception_date:        toDateStr(today),
-      next_billing_date:     toDateStr(next),
+      next_billing_date:     firstBillingAnchor(today),
       active:                true,
     }, { onConflict: 'tenant_id' });
     if (err) { setError(err.message); return false; }
@@ -230,6 +265,6 @@ export function useClientInsurance(tenantId: string | undefined | null): UseClie
   }, [tenantId, row, refetch]);
 
   return useMemo(() => ({
-    row, history, loading, error, refetch, seed, updateDeclaredValue, setActive, cancel,
-  }), [row, history, loading, error, refetch, seed, updateDeclaredValue, setActive, cancel]);
+    row, history, pendingChanges, loading, error, refetch, seed, updateDeclaredValue, setActive, cancel,
+  }), [row, history, pendingChanges, loading, error, refetch, seed, updateDeclaredValue, setActive, cancel]);
 }

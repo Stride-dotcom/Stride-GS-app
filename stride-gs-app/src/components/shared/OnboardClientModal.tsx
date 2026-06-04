@@ -1134,7 +1134,7 @@ interface InsuranceBlockProps {
 }
 
 function InsuranceBlock({ tenantId, clientName, pendingIntakeInsurance }: InsuranceBlockProps) {
-  const { row, history, loading, error, seed, updateDeclaredValue, setActive, cancel } = useClientInsurance(tenantId);
+  const { row, history, pendingChanges, loading, error, seed, updateDeclaredValue, setActive, cancel } = useClientInsurance(tenantId);
   const [editing, setEditing] = useState(false);
   const [draftDeclared, setDraftDeclared] = useState('');
   const [saving, setSaving] = useState(false);
@@ -1307,15 +1307,35 @@ function InsuranceBlock({ tenantId, clientName, pendingIntakeInsurance }: Insura
         </div>
       </div>
 
-      {/* Billing-cycle disclaimer — clarifies the no-proration rule so
-          staff know what to tell the client. */}
+      {/* Billing-cycle disclaimer — explains how proration works so staff
+          know what to tell the client. */}
       <div style={{
         marginBottom: 10, padding: '8px 10px',
         background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: 8,
         fontSize: 11, color: '#92400E', lineHeight: 1.4,
       }}>
-        <strong>Heads up:</strong> Changes to declared value take effect on the next 30-day billing anniversary, not immediately. Mid-cycle edits are not prorated — the new rate first applies on <strong>{fmtDate(row.nextBillingDate)}</strong>.
+        <strong>Proration:</strong> The charge on <strong>{fmtDate(row.nextBillingDate)}</strong> covers the current period. A mid-cycle declared-value change is split day-for-day (old rate before the change, new rate after); the signup month and a mid-cycle cancellation are prorated the same way.
       </div>
+
+      {/* Pending (not-yet-billed) declared-value changes — these split the
+          next charge. Surfaced so staff can see why the upcoming amount
+          differs from a flat monthly rate. */}
+      {pendingChanges.length > 0 && (
+        <div style={{
+          marginBottom: 10, padding: '8px 10px',
+          background: '#EFF6FF', border: '1px solid #BFDBFE', borderRadius: 8,
+          fontSize: 11, color: '#1E40AF', lineHeight: 1.5,
+        }}>
+          <strong>Pending coverage change{pendingChanges.length > 1 ? 's' : ''} (prorated on next bill):</strong>
+          <ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>
+            {pendingChanges.map(c => (
+              <li key={c.id}>
+                {fmtDate(c.effectiveDate)}: ${c.oldDeclaredValue.toLocaleString()} → ${c.newDeclaredValue.toLocaleString()} declared
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {/* Action row */}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -1431,7 +1451,7 @@ function InsuranceBlock({ tenantId, clientName, pendingIntakeInsurance }: Insura
                 {history.map((h, i) => (
                   <tr key={h.ledgerRowId ?? i} style={{ borderBottom: `1px solid ${theme.colors.border}` }}>
                     <td style={{ padding: '6px 8px' }}>{h.date}</td>
-                    <td style={{ padding: '6px 8px' }}>${(h.qty * 100000).toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
+                    <td style={{ padding: '6px 8px' }}>${(h.qty * 10000).toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
                     <td style={{ padding: '6px 8px', fontWeight: 600 }}>${h.total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
                     <td style={{ padding: '6px 8px' }}>{h.status}</td>
                     <td style={{ padding: '6px 8px' }}>

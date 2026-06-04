@@ -16,6 +16,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
+import { firstBillingAnchor } from '../lib/insuranceBilling';
 
 export interface IntakeRow {
   id: string;
@@ -428,8 +429,8 @@ export async function copyIntakeDocsToClient(
  *
  * Rate is snapshotted from the current service_catalog INSURANCE row at
  * activation time; historical clients are insulated from future rate
- * changes that way. Inception = today, next_billing_date = today + 30d
- * (first month is full-price, per T&C §2.B).
+ * changes that way. Inception = today, next_billing_date = 1st of next
+ * month so the daily cron prorates the partial first month.
  *
  * Only 'stride_coverage' / 'eis_coverage' intakes create a row — 'own_policy'
  * intakes are skipped (nothing to bill). Returns true on insert/upsert,
@@ -470,8 +471,6 @@ export async function seedClientInsuranceFromIntake(
   }
 
   const today = new Date();
-  const nextBilling = new Date(today);
-  nextBilling.setDate(nextBilling.getDate() + 30);
   const toDateStr = (d: Date) => d.toISOString().slice(0, 10);
 
   const { error: err } = await supabase
@@ -483,7 +482,8 @@ export async function seedClientInsuranceFromIntake(
       declared_value:        declared,
       monthly_rate_per_10k: monthlyRate,
       inception_date:        toDateStr(today),
-      next_billing_date:     toDateStr(nextBilling),
+      // 1st of next month — first charge prorates the partial signup month.
+      next_billing_date:     firstBillingAnchor(today),
       active:                true,
     }, { onConflict: 'tenant_id' });
 
