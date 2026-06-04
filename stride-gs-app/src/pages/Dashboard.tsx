@@ -139,6 +139,24 @@ const tdStyle: React.CSSProperties = {
   padding: '14px 16px', borderBottom: `1px solid rgba(0,0,0,0.05)`, fontSize: 13, whiteSpace: 'nowrap',
 };
 
+// Scroll-container sizing for the three Dashboard tables. The fixed
+// `100dvh - 380px` offset is tuned for DESKTOP chrome above the table (page
+// header + Calendar/Overview pill + stat cards + tab bar + status toolbar).
+// On tablet / mobile the viewport is much shorter, so subtracting a desktop-
+// sized 380px collapsed the container to only a few visible rows — and on a
+// landscape phone the result went toward zero. Shrink the offset on smaller
+// screens (their chrome is more compact too) and add a `minHeight` floor so
+// the table always shows a useful number of rows; on a genuinely short
+// viewport `minHeight` wins over `maxHeight` and the page scrolls instead of
+// the table degenerating to two rows. Returned as a style fragment so all
+// three tabs (Tasks / Repairs / Will Calls) stay in lockstep.
+function useTableScrollSize(): React.CSSProperties {
+  const { isMobile, isTablet } = useIsMobile();
+  if (isMobile) return { maxHeight: 'calc(100dvh - 270px)', minHeight: 380 };
+  if (isTablet) return { maxHeight: 'calc(100dvh - 300px)', minHeight: 420 };
+  return { maxHeight: 'calc(100dvh - 380px)' };
+}
+
 function chip(active: boolean): React.CSSProperties {
   return {
     padding: '6px 14px', borderRadius: 100, fontSize: 11, fontWeight: 600, cursor: 'pointer',
@@ -447,6 +465,7 @@ function TasksTab({ tasks, onNavigate, indicators, canEditPriority }: { tasks: S
   });
 
   const { containerRef, virtualRows, rows: allRows, totalHeight } = useVirtualRows(table);
+  const scrollSize = useTableScrollSize();
 
   const toggleStatus = (s: string) => setStatusFilters(prev => prev.includes(s) ? prev.filter(x => x !== s) : [...prev, s]);
 
@@ -484,7 +503,7 @@ function TasksTab({ tasks, onNavigate, indicators, canEditPriority }: { tasks: S
 
       {/* Table */}
       <div style={{ borderRadius: 12, overflow: 'hidden', background: '#fff' }}>
-        <div ref={containerRef} style={{ overflowY: 'auto', overflowX: 'auto', maxHeight: 'calc(100dvh - 380px)', WebkitOverflowScrolling: 'touch' }}>
+        <div ref={containerRef} style={{ overflowY: 'auto', overflowX: 'auto', ...scrollSize, WebkitOverflowScrolling: 'touch' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
               {table.getHeaderGroups().map(hg => (
@@ -612,6 +631,7 @@ function RepairsTab({ repairs, onNavigate, userRole, indicators }: { repairs: Su
   });
 
   const { containerRef, virtualRows, rows: allRows, totalHeight } = useVirtualRows(table);
+  const scrollSize = useTableScrollSize();
   const toggleStatus = (s: string) => setStatusFilters(prev => prev.includes(s) ? prev.filter(x => x !== s) : [...prev, s]);
 
   return (
@@ -643,7 +663,7 @@ function RepairsTab({ repairs, onNavigate, userRole, indicators }: { repairs: Su
         </div>
       </div>
       <div style={{ borderRadius: 12, overflow: 'hidden', background: '#fff' }}>
-        <div ref={containerRef} style={{ overflowY: 'auto', overflowX: 'auto', maxHeight: 'calc(100dvh - 380px)', WebkitOverflowScrolling: 'touch' }}>
+        <div ref={containerRef} style={{ overflowY: 'auto', overflowX: 'auto', ...scrollSize, WebkitOverflowScrolling: 'touch' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>{table.getHeaderGroups().map(hg => <tr key={hg.id}>{hg.headers.map(h => <DragHeader key={h.id} h={h} dragColId={dragColId} dragOverColId={dragOverColId} onDragStart={() => setDragColId(h.id)} onDragOver={() => setDragOverColId(h.id)} onDragEnd={() => { if (dragColId && dragOverColId && dragColId !== dragOverColId) { const cur = columnOrder.length ? [...columnOrder] : [...REPAIR_DEFAULT_ORDER]; const from = cur.indexOf(dragColId); const to = cur.indexOf(dragOverColId); if (from !== -1 && to !== -1) { cur.splice(from, 1); cur.splice(to, 0, dragColId); setColumnOrder(cur); } } setDragColId(null); setDragOverColId(null); }} sorted={h.column.getIsSorted()} />)}</tr>)}</thead>
             <tbody>
@@ -699,6 +719,7 @@ function WillCallsTab({ willCalls, onNavigate }: { willCalls: SummaryWillCall[];
   });
 
   const { containerRef, virtualRows, rows: allRows, totalHeight } = useVirtualRows(table);
+  const scrollSize = useTableScrollSize();
   const toggleStatus = (s: string) => setStatusFilters(prev => prev.includes(s) ? prev.filter(x => x !== s) : [...prev, s]);
 
   return (
@@ -730,7 +751,7 @@ function WillCallsTab({ willCalls, onNavigate }: { willCalls: SummaryWillCall[];
         </div>
       </div>
       <div style={{ borderRadius: 12, overflow: 'hidden', background: '#fff' }}>
-        <div ref={containerRef} style={{ overflowY: 'auto', overflowX: 'auto', maxHeight: 'calc(100dvh - 380px)', WebkitOverflowScrolling: 'touch' }}>
+        <div ref={containerRef} style={{ overflowY: 'auto', overflowX: 'auto', ...scrollSize, WebkitOverflowScrolling: 'touch' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>{table.getHeaderGroups().map(hg => <tr key={hg.id}>{hg.headers.map(h => <DragHeader key={h.id} h={h} dragColId={dragColId} dragOverColId={dragOverColId} onDragStart={() => setDragColId(h.id)} onDragOver={() => setDragOverColId(h.id)} onDragEnd={() => { if (dragColId && dragOverColId && dragColId !== dragOverColId) { const cur = columnOrder.length ? [...columnOrder] : [...WC_DEFAULT_ORDER]; const from = cur.indexOf(dragColId); const to = cur.indexOf(dragOverColId); if (from !== -1 && to !== -1) { cur.splice(from, 1); cur.splice(to, 0, dragColId); setColumnOrder(cur); } } setDragColId(null); setDragOverColId(null); }} sorted={h.column.getIsSorted()} />)}</tr>)}</thead>
             <tbody>
