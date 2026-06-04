@@ -51,3 +51,14 @@ CREATE POLICY invoice_tracking_client_select ON public.invoice_tracking
     ((auth.jwt() -> 'user_metadata' ->> 'role') = 'client')
     AND public.user_has_tenant_access(tenant_id)
   );
+
+-- 4. REPLICA IDENTITY FULL — required for the client invoice portal's realtime
+--    subscriber (useInvoices). The client RLS policy above keys on tenant_id;
+--    for UPDATE/DELETE postgres_changes events, Supabase evaluates that policy
+--    against the OLD row image, which under default (PK-only) replica identity
+--    carries only invoice_no — not tenant_id — so a client would silently never
+--    receive update events (e.g. a paid-status flip). FULL puts the whole old
+--    row in the WAL so the per-subscriber RLS check can pass. Matches the
+--    convention on every other client-visible realtime table (clients, claims,
+--    stax_invoices, billing). Idempotent.
+ALTER TABLE public.invoice_tracking REPLICA IDENTITY FULL;

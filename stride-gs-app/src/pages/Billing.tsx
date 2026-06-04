@@ -2815,6 +2815,7 @@ export function Billing() {
               // Record the archived PDF's storage path on invoice_tracking so
               // the client invoice portal can resolve a View/Download link.
               await patchInvoiceTrackingPdf(
+                item.tenantId,
                 item.invoiceNo,
                 invoiceStoragePath(item.tenantId, item.invoiceNo),
               );

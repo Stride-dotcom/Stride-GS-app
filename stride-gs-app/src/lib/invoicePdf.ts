@@ -348,13 +348,15 @@ export async function patchInvoiceUrl(
  * staff/admin + service_role; the operator who just created the invoice).
  */
 export async function patchInvoiceTrackingPdf(
+  tenantId: string,
   invoiceNo: string,
   pdfPath: string,
 ): Promise<boolean> {
-  if (!invoiceNo || !pdfPath) return false;
+  if (!tenantId || !invoiceNo || !pdfPath) return false;
   const { error } = await supabase
     .from('invoice_tracking')
     .update({ pdf_path: pdfPath })
+    .eq('tenant_id', tenantId)
     .eq('invoice_no', invoiceNo);
   if (error) {
     console.warn('[invoicePdf] patch invoice_tracking.pdf_path failed', invoiceNo, error.message);

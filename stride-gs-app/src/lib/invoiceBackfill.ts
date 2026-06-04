@@ -163,6 +163,7 @@ export async function backfillInvoicePdfs(
         if (!url) throw new Error('storage upload failed');
         await patchInvoiceUrl(row.tenant_id, row.invoice_no, url);
         const patched = await patchInvoiceTrackingPdf(
+          row.tenant_id,
           row.invoice_no,
           invoiceStoragePath(row.tenant_id, row.invoice_no),
         );
