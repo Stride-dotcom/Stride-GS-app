@@ -95,7 +95,6 @@ interface ItRow {
   invoice_no: string;
   tenant_id: string | null;
   client_name: string | null;
-  total: number | null;
   qbo_invoice_id: string | null;
   qbo_doc_number: string | null;
   qbo_pushed_at: string | null;
@@ -183,7 +182,7 @@ Deno.serve(async (req: Request) => {
   const includeUnpushed = body.includeUnpushed === true;
   const limit = Math.max(1, Math.min(2000, Number(body.limit) || 500));
 
-  const COLS = 'invoice_no,tenant_id,client_name,total,qbo_invoice_id,qbo_doc_number,qbo_pushed_at,qbo_last_verified_at';
+  const COLS = 'invoice_no,tenant_id,client_name,qbo_invoice_id,qbo_doc_number,qbo_pushed_at,qbo_last_verified_at';
   let query = sb.from('invoice_tracking').select(COLS);
   if (explicitInvoiceNos && explicitInvoiceNos.length > 0) {
     query = query.in('invoice_no', explicitInvoiceNos);
@@ -368,19 +367,30 @@ Deno.serve(async (req: Request) => {
       if (upErr) console.error(`[qbo-reconcile-payments] missing-stamp ${invNo} failed:`, upErr.message);
       // Surface the discrepancy in the Billing Activity feed (same table
       // + action the GAS handler wrote via api_logBillingActivity_).
-      await logBillingActivity(sb, {
-        tenant_id:      String(srcRow.tenant_id ?? ''),
-        client_name:    srcRow.client_name ?? null,
-        action:         'qbo_push_failed',
-        status:         'failure',
-        invoice_no:     invNo,
-        qbo_invoice_id: r.qboInvoiceId,
-        qbo_doc_number: r.qboDocNumber,
-        summary:        `QBO reconcile: invoice ${invNo} marked pushed in Stride but QBO has no record`,
-        error_message:  r.errorMessage || 'QBO has no matching invoice',
-        details:        { source: 'qboReconcileInvoices', verifiedAt: nowIso },
-        performed_by:   callerEmail || 'qbo-reconcile-payments',
-      });
+      // billing_activity_log.tenant_id is NOT NULL and the feed is
+      // tenant-scoped, so — like GAS's api_logBillingActivity_, which
+      // returns early on a falsy tenantId — we skip the log for any
+      // legacy/historical row that has no tenant_id rather than writing an
+      // orphaned empty-tenant row. The verified_at stamp above still drops
+      // the row out of the next pass's "never verified" bucket.
+      const missingTenant = String(srcRow.tenant_id ?? '').trim();
+      if (missingTenant) {
+        await logBillingActivity(sb, {
+          tenant_id:      missingTenant,
+          client_name:    srcRow.client_name ?? null,
+          action:         'qbo_push_failed',
+          status:         'failure',
+          invoice_no:     invNo,
+          qbo_invoice_id: r.qboInvoiceId,
+          qbo_doc_number: r.qboDocNumber,
+          summary:        `QBO reconcile: invoice ${invNo} marked pushed in Stride but QBO has no record`,
+          error_message:  r.errorMessage || 'QBO has no matching invoice',
+          details:        { source: 'qboReconcileInvoices', verifiedAt: nowIso },
+          performed_by:   callerEmail || 'qbo-reconcile-payments',
+        });
+      } else {
+        console.warn(`[qbo-reconcile-payments] missing invoice ${invNo} has no tenant_id — skipping billing_activity_log (parity with GAS)`);
+      }
     } else {
       errorCount++;
     }
