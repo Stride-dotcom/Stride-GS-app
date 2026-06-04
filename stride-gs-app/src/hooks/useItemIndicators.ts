@@ -122,7 +122,19 @@ export function useItemIndicators(clientSheetIds?: string | string[]): ItemIndic
       }
 
       // Fetch repair indicators with status for open/done split.
-      let rq = supabase.from('repairs').select('item_id, status');
+      // A repair can carry MANY items (repair_items join table, mirroring
+      // will_calls/will_call_items). The repairs row only holds the primary
+      // item_id, so stamping just that one left every other item on a batch
+      // repair badge-less. We build repair_id → status here, then expand
+      // repair_items below so EVERY linked item gets the R badge.
+      const repairStatusById = new Map<string, string>(); // repair_id → status
+      const stampRepair = (itemId: string, status: string) => {
+        if (REPAIR_CANCELLED.has(status)) return; // no badge for cancelled repairs
+        const done = REPAIR_DONE.has(status);
+        if (done) { if (!repOpen.has(itemId)) repDone.add(itemId); }
+        else { repOpen.add(itemId); repDone.delete(itemId); } // open wins over done
+      };
+      let rq = supabase.from('repairs').select('repair_id, item_id, status');
       if (Array.isArray(clientSheetIds) && clientSheetIds.length > 0) {
         rq = rq.in('tenant_id', clientSheetIds);
       } else if (typeof clientSheetIds === 'string') {
@@ -130,12 +142,32 @@ export function useItemIndicators(clientSheetIds?: string | string[]): ItemIndic
       }
       const { data: repairs } = await rq.range(0, 49999);
       if (repairs && !ctx.cancelled) {
-        for (const r of repairs as { item_id: string | null; status: string | null }[]) {
-          if (!r.item_id) continue;
-          if (REPAIR_CANCELLED.has(r.status ?? '')) continue; // no badge for cancelled repairs
-          const done = REPAIR_DONE.has(r.status ?? '');
-          if (done) { if (!repOpen.has(r.item_id)) repDone.add(r.item_id); }
-          else { repOpen.add(r.item_id); repDone.delete(r.item_id); }
+        for (const r of repairs as { repair_id: string | null; item_id: string | null; status: string | null }[]) {
+          const status = r.status ?? '';
+          if (r.repair_id) repairStatusById.set(r.repair_id, status);
+          // Legacy single-item stamp — keeps the primary item badged even if
+          // a repair has no repair_items rows yet (deploy-order independent).
+          if (r.item_id) stampRepair(r.item_id, status);
+        }
+      }
+
+      // Expand the repair_items join so every item on a batch repair — not
+      // just the primary — gets the R badge. item_result/qty are ignored:
+      // badge state follows the PARENT repair status (informational per-item
+      // result doesn't change whether there's an active repair on the item).
+      let riq = supabase.from('repair_items').select('repair_id, item_id');
+      if (Array.isArray(clientSheetIds) && clientSheetIds.length > 0) {
+        riq = riq.in('tenant_id', clientSheetIds);
+      } else if (typeof clientSheetIds === 'string') {
+        riq = riq.eq('tenant_id', clientSheetIds);
+      }
+      const { data: repairItems } = await riq.range(0, 49999);
+      if (repairItems && !ctx.cancelled) {
+        for (const ri of repairItems as { repair_id: string | null; item_id: string | null }[]) {
+          if (!ri.item_id || !ri.repair_id) continue;
+          const status = repairStatusById.get(ri.repair_id);
+          if (status === undefined) continue; // orphan / parent not in this tenant scope
+          stampRepair(ri.item_id, status);
         }
       }
 
