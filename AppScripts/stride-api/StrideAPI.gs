@@ -1,4 +1,5 @@
 /* ===================================================
+   StrideAPI.gs — v38.262.0 — 2026-06-04 PST — [USERS] fix: createUser now defaults Active=TRUE so new accounts can log in immediately. handleCreateUser_ previously wrote Active=FALSE for every manually-created user (Settings → Users → Add User), requiring an admin to remember to flip the toggle afterward — staff routinely forgot, locking the new user out of login and the whole app. The default is now TRUE (line ~12065: active = forceActive==="FALSE" ? "FALSE" : "TRUE"), matching the onboarding path api_upsertClientUser_ which has always created client users Active=TRUE. Callers can still create a deactivated account by explicitly passing active="FALSE". Companion React changes: the Add User modal (Settings.tsx) gains an "Active" checkbox defaulting to ON, useUsers.addUser + createApiUser thread the active flag through as params.active, and the profiles.is_active column default is made explicit via migration 20260604160000_profiles_is_active_default_true.sql (the live DB already had DEFAULT true — this version-controls it). No schema/billing change, no change to the v38.182 atomic invoice counter, half-write detection, or any billing logic.
    StrideAPI.gs — v38.261.0 — 2026-06-03 PST — [DOCS] feat: Repair Work Order items table gains a Location column. The DOC_REPAIR_WORK_ORDER items table showed Item ID/Qty/Vendor/Description/Sidemark/Room but not the item's warehouse Location, so staff working a repair couldn't see where to pull it from. Both GAS renderers of this doc now fill {{ITEM_LOCATION}} = api_esc_(itemLoc || "") (the same item-location var already used for the header {{LOCATION}} token): handleStartRepair_ (~line 21490) and handleRespondToRepairQuote_ (~line 20838). Companion React change (docTokens.ts buildRepairTokens fills {{ITEM_LOCATION}} from repair.location) + migration 20260603140000_repair_work_order_location_column.sql (adds the Location header + {{ITEM_LOCATION}} monospace cell after Room). Migration applied AFTER both renderers deploy so the token is never left unrendered. No data/schema change beyond the template, no billing logic touched.
    StrideAPI.gs — v38.260.0 — 2026-06-03 PST — [CLIENTS] fix: __writeThroughReverseClients_ now writes CLIENT_NAME to the per-tenant Settings tab. Renaming a client in the app routes through update-client-sb → writeThroughReverse → __writeThroughReverseClients_, which mirrored the changed row to CB Clients (cbHeader) + SB but NOT the per-tenant Settings tab CLIENT_NAME key. Reason: CLIENT_FIELDS_.clientName has cbHeader + supabaseColumn but no clientSettingsKey, so the schema loop that writes per-tenant Settings skipped it (same as clientEmail/contactName/phone — which were ALREADY handled by explicit writeSetting_ lines for CLIENT_EMAIL/CONTACT_NAME/PHONE). CLIENT_NAME had no such explicit line, so it never propagated. Symptom (Justin, 2026-06-03): renamed Arkitektura Forty → Arkitektura in the app; SB clients.name + CB Clients updated, but inspection-report emails (handleCompleteTask_ reads settings["CLIENT_NAME"] via api_getSettings_) still said "Arkitektura Forty" because the per-tenant Settings tab kept the onboarding-time value. Fix: added `if (row.hasOwnProperty("name")) writeSetting_("CLIENT_NAME", ...)` alongside the existing CLIENT_EMAIL/CONTACT_NAME/PHONE writes so all four identity fields propagate to the per-tenant Settings tab on every SB-primary client update. The legacy GAS path (api_writeClientSettings_ line ~30678) already wrote CLIENT_NAME explicitly — this brings the SB-primary mirror to parity. No schema change, no CB/SB change, no billing logic touched. Arkitektura's stale Settings.CLIENT_NAME backfilled once after deploy via a writeThroughReverse re-fire.
    v38.259.0 — 2026-06-03 PST — [BILLING] fix: handleCommitStorageRows_ now persists per-item billable_days into storage_billing_items. The commit wrote each per-item row's amount + rate but never the day count, so storage_billing_items.billable_days was ALWAYS NULL — the Storage-tab Invoiced view rendered "—" under DAYS and the client-proof export carried no per-day count (operator needs "this item was billed N days in this period" for client disputes). Fix: grpSbiRows now sets billable_days = the preview's qty (the real computed day count) when present, else round(amount/rate) (exact for storage, since amount = daily_rate × days), null only when rate is 0. Existing 2456 NULL rows were backfilled separately via migration 20260603120000_backfill_storage_billable_days.sql (round(amount/rate); verified every rate>0 and every ratio integer). No dollar-total change, no change to the v38.182 atomic invoice counter, half-write detection, the storage summary amounts, or the v38.258.0 transfer-backfill delete guard.
@@ -12025,7 +12026,9 @@ function handleGetUsers_(callerEmail) {
 
 /**
  * createUser — Create a new user row. Staff/admin only.
- * Active defaults to FALSE (manual activation required).
+ * Active defaults to TRUE so a newly created user can log in immediately
+ * (matches the onboarding path api_upsertClientUser_ which already sets TRUE).
+ * Pass params.active="FALSE" to explicitly create a deactivated account.
  */
 function handleCreateUser_(params, callerEmail) {
   if (!callerEmail) return errorResponse_("callerEmail is required", "AUTH_ERROR");
@@ -12061,15 +12064,17 @@ function handleCreateUser_(params, callerEmail) {
   if (!sheet) return errorResponse_("Users tab not found in CB", "NOT_FOUND");
 
   var now = new Date();
-  // Active defaults to FALSE unless explicitly overridden
-  var active = (forceActive === "TRUE") ? "TRUE" : "FALSE";
+  // Active defaults to TRUE unless the caller explicitly passes active="FALSE".
+  // Staff kept forgetting to manually toggle new accounts on, locking out the
+  // new user; an account created on purpose should be usable on purpose.
+  var active = (forceActive === "FALSE") ? "FALSE" : "TRUE";
 
   var newRow = [
     email,          // Email
     role,           // Role
     clientName,     // Client Name
     clientSheetId,  // Client Spreadsheet ID
-    active,         // Active (default FALSE)
+    active,         // Active (default TRUE)
     now,            // Created
     "",             // Last Login
     "",             // Last Login Source

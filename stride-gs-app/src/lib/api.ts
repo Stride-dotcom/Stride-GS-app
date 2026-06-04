@@ -1120,7 +1120,8 @@ export function fetchUsers(callerEmail: string, signal?: AbortSignal) {
 }
 
 /**
- * Create a new user. Defaults Active=FALSE.
+ * Create a new user. Defaults Active=TRUE so the new account can log in
+ * immediately; pass active=false to create a deactivated account.
  */
 export function createApiUser(
   callerEmail: string,
@@ -1128,11 +1129,13 @@ export function createApiUser(
   role: string,
   clientName?: string,
   clientSheetId?: string,
+  active: boolean = true,
   signal?: AbortSignal
 ) {
   const params: Record<string, string> = { callerEmail, email, role };
   if (clientName) params.clientName = clientName;
   if (clientSheetId) params.clientSheetId = clientSheetId;
+  params.active = active ? 'TRUE' : 'FALSE';
   return apiFetch<CreateUserResponse>('createUser', params, { signal });
 }
 
