@@ -84,7 +84,10 @@ CREATE TABLE IF NOT EXISTS public.coverage_changes (
   created_at            timestamptz NOT NULL DEFAULT now()
 );
 
--- Hot path for the billing run + the UI's "pending changes" read.
+COMMENT ON TABLE public.coverage_changes IS
+  'Audit log of client_insurance declared-value changes, written automatically by the log_coverage_change trigger. insurance_bill_due() reads unbilled rows whose effective_date falls inside the period being billed to split the charge day-for-day, then stamps billed_at + billing_ledger_row_id.';
+
+-- Hot path for the billing run + the UI''s "pending changes" read.
 CREATE INDEX IF NOT EXISTS idx_coverage_changes_tenant_unbilled
   ON public.coverage_changes(tenant_id, effective_date)
   WHERE billed_at IS NULL;

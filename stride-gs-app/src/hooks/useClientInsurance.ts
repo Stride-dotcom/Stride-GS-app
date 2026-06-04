@@ -179,10 +179,16 @@ export function useClientInsurance(tenantId: string | undefined | null): UseClie
 
   useEffect(() => {
     if (!tenantId) return;
+    // Subscribe to both the insurance row and its coverage_changes so the
+    // card converges live — declared-value edits, and the cron stamping
+    // billed_at when it consumes a pending change, both push a refetch.
     const ch = supabase
       .channel(`client_insurance_${tenantId}_${Math.random().toString(36).slice(2, 8)}`)
       .on('postgres_changes',
         { event: '*', schema: 'public', table: 'client_insurance', filter: `tenant_id=eq.${tenantId}` },
+        () => { void refetch(); })
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'coverage_changes', filter: `tenant_id=eq.${tenantId}` },
         () => { void refetch(); })
       .subscribe();
     return () => { void supabase.removeChannel(ch); };
