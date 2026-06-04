@@ -186,9 +186,10 @@ Deno.serve(async (req: Request) => {
     // Logic:
     //   stride_coverage + value > 0 → upsert client_insurance with
     //     coverage_type='stride_coverage', declared_value, active=true.
-    //     On INSERT: stamp inception_date=today + next_billing_date=
-    //     today+30 + monthly_rate_per_10k from service_catalog.INSURANCE
-    //     (matches useClientInsurance.seed). On EXISTING row: update
+    //     On INSERT: stamp inception_date=today + next_billing_date=1st
+    //     of next month (first charge prorated) + monthly_rate_per_10k
+    //     from service_catalog.INSURANCE (matches useClientInsurance.seed
+    //     / firstBillingAnchor). On EXISTING row: update
     //     declared_value + coverage_type + reactivate, but PRESERVE
     //     inception/next_billing so an existing billing cycle isn't
     //     reset. monthly_rate_per_10k also preserved on existing rows so
@@ -233,9 +234,18 @@ Deno.serve(async (req: Request) => {
             insuranceSync = 'skipped: no INSURANCE rate in service_catalog (admin must set rate in Settings → Pricing first)';
           } else {
             const today = new Date();
-            const next  = new Date(today);
-            next.setDate(next.getDate() + 30);
             const toDateStr = (d: Date) => d.toISOString().slice(0, 10);
+            // First billing date = 1st of next month so the daily cron
+            // prorates the partial signup month (mirror of
+            // src/lib/insuranceBilling.ts firstBillingAnchor; EFs can't
+            // import from src/).
+            const firstBillingAnchor = (from: Date): string => {
+              const y = from.getFullYear();
+              const m = from.getMonth();
+              const ny = m === 11 ? y + 1 : y;
+              const nm = m === 11 ? 0 : m + 1;
+              return `${ny}-${String(nm + 1).padStart(2, '0')}-01`;
+            };
             const { error: insErr } = await supabase.from('client_insurance').insert({
               tenant_id:            clientSpreadsheetId,
               client_name:          intake.business_name || '',
@@ -243,7 +253,7 @@ Deno.serve(async (req: Request) => {
               declared_value:       declaredValue,
               monthly_rate_per_10k: rate,
               inception_date:       toDateStr(today),
-              next_billing_date:    toDateStr(next),
+              next_billing_date:    firstBillingAnchor(today),
               active:               true,
             });
             if (insErr) insuranceSync = `insert failed: ${insErr.message}`;
