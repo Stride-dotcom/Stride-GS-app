@@ -1,0 +1,1 @@
+import{r as e}from"./index-BF4vLKeC.js";export{e as renderDocUpload};
