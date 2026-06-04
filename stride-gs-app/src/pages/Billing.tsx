@@ -70,6 +70,8 @@ import {
   generateInvoicePdfBlob,
   uploadInvoicePdf,
   patchInvoiceUrl,
+  patchInvoiceTrackingPdf,
+  invoiceStoragePath,
   type InvoicePdfClient,
 } from '../lib/invoicePdf';
 
@@ -2808,7 +2810,16 @@ export function Billing() {
               })),
             });
             const url = await uploadInvoicePdf(item.tenantId, item.invoiceNo, blob);
-            if (url) await patchInvoiceUrl(item.tenantId, item.invoiceNo, url);
+            if (url) {
+              await patchInvoiceUrl(item.tenantId, item.invoiceNo, url);
+              // Record the archived PDF's storage path on invoice_tracking so
+              // the client invoice portal can resolve a View/Download link.
+              await patchInvoiceTrackingPdf(
+                item.tenantId,
+                item.invoiceNo,
+                invoiceStoragePath(item.tenantId, item.invoiceNo),
+              );
+            }
           } catch (err) {
             console.warn('[invoice-pdf] failed for', item.invoiceNo, err);
           }
