@@ -1,6 +1,30 @@
 /**
  * dt-push-order — Supabase Edge Function (Phase 2c) — v43 2026-05-30 PST
  *
+ * ⚠️ DEPLOY WITH verify_jwt=false (`supabase functions deploy dt-push-order
+ *    --no-verify-jwt`). NOT a code setting — it's a per-deploy gateway flag
+ *    and there is no supabase/config.toml persisting it, so every redeploy
+ *    MUST pass --no-verify-jwt or the fix silently reverts.
+ *
+ *    Why: dt-sync-statuses calls this function server-to-server
+ *    (pu_propagate → supabase.functions.invoke('dt-push-order', …)) using
+ *    the service-role key as the Bearer token. With verify_jwt=true the
+ *    Supabase gateway tries to JWT-validate that Bearer and rejects it
+ *    (UNAUTHORIZED_INVALID_JWT_FORMAT — the service-role key is not in the
+ *    legacy JWT shape the gateway expects), so the call 401s before any
+ *    code here runs and the linked delivery never gets its post-pickup
+ *    manifest refresh. This bit us intermittently 2026-05-15 → 06-04;
+ *    switching the caller from raw fetch to functions.invoke (2026-05-21)
+ *    did NOT fix it because both hit the same gateway. The real fix is
+ *    verify_jwt=false here — identical to the documented send-email case
+ *    ("the gateway's verify_jwt=true silently rejects service-role JWTs
+ *    from other Edge Functions"). React callers (OrderPage Push/Republish)
+ *    are unaffected: they send the user's real session JWT, which validated
+ *    fine before and passes through a verify_jwt=false gateway too.
+ *    Permission gate is unchanged in practice — the anon key is already
+ *    public in the browser bundle, so verify_jwt was never a real lock;
+ *    this function only re-pushes an existing order by id.
+ *
  * v43: Multi-pickup Phase 1.5 — N-leg fan-out via dt_pickup_links.
  *      v42 still pushed only ONE linked pickup (the one denormalized
  *      into dt_orders.linked_order_id), so an N-pickup delivery

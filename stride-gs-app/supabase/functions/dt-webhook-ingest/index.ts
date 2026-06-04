@@ -1,6 +1,22 @@
 /**
  * dt-webhook-ingest — Supabase Edge Function
  *
+ * ⚠️ DEPLOY WITH verify_jwt=false (`supabase functions deploy
+ *    dt-webhook-ingest --no-verify-jwt`). Per-deploy gateway flag, not a
+ *    code setting; no supabase/config.toml persists it, so every redeploy
+ *    MUST pass --no-verify-jwt.
+ *
+ *    Why: DispatchTrack POSTs here with a shared-secret ?token=<secret> and
+ *    NO Supabase JWT. With verify_jwt=true the gateway 401s every DT
+ *    webhook before this function runs (observed as a steady stream of
+ *    "POST | 401 | dt-webhook-ingest?token=…" in the function logs), which
+ *    silently disabled real-time DT status updates — the system fell back
+ *    to the dt-sync-statuses 5-min poll (functional but lagged). The real
+ *    auth gate is the in-body shared-secret check below (returns 401 on
+ *    token mismatch against dt_credentials.webhook_secret), so
+ *    verify_jwt=false does NOT weaken security — it just lets DT's
+ *    tokened POST reach the token check. 2026-06-04.
+ *
  * Version: v8 (2026-05-13 PST)
  *   v8: dt-sync-statuses dispatch now fires for ALL Service_Route_Finished
  *       events, not just non-pickups. The pickup-stamp helper (in
