@@ -472,7 +472,7 @@ function TasksTab({ tasks, onNavigate, indicators, canEditPriority }: { tasks: S
   return (
     <div>
       {/* Toolbar */}
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
+      <div className="dash-toolbar" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
         <div style={{ fontSize: 12, color: theme.colors.textMuted, fontWeight: 500 }}>Status:</div>
         {allStatuses.map(s => (
           <button key={s} onClick={() => toggleStatus(s)} style={chip(statusFilters.includes(s))}>{s}</button>
@@ -504,7 +504,7 @@ function TasksTab({ tasks, onNavigate, indicators, canEditPriority }: { tasks: S
       {/* Table */}
       <div style={{ borderRadius: 12, overflow: 'hidden', background: '#fff' }}>
         <div ref={containerRef} style={{ overflowY: 'auto', overflowX: 'auto', ...scrollSize, WebkitOverflowScrolling: 'touch' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <table className="dash-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
               {table.getHeaderGroups().map(hg => (
                 <tr key={hg.id}>
@@ -636,7 +636,7 @@ function RepairsTab({ repairs, onNavigate, userRole, indicators }: { repairs: Su
 
   return (
     <div>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
+      <div className="dash-toolbar" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
         <div style={{ fontSize: 12, color: theme.colors.textMuted, fontWeight: 500 }}>Status:</div>
         {allStatuses.map(s => <button key={s} onClick={() => toggleStatus(s)} style={chip(statusFilters.includes(s))}>{s}</button>)}
         {statusFilters.length > 0 && (
@@ -664,7 +664,7 @@ function RepairsTab({ repairs, onNavigate, userRole, indicators }: { repairs: Su
       </div>
       <div style={{ borderRadius: 12, overflow: 'hidden', background: '#fff' }}>
         <div ref={containerRef} style={{ overflowY: 'auto', overflowX: 'auto', ...scrollSize, WebkitOverflowScrolling: 'touch' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <table className="dash-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>{table.getHeaderGroups().map(hg => <tr key={hg.id}>{hg.headers.map(h => <DragHeader key={h.id} h={h} dragColId={dragColId} dragOverColId={dragOverColId} onDragStart={() => setDragColId(h.id)} onDragOver={() => setDragOverColId(h.id)} onDragEnd={() => { if (dragColId && dragOverColId && dragColId !== dragOverColId) { const cur = columnOrder.length ? [...columnOrder] : [...REPAIR_DEFAULT_ORDER]; const from = cur.indexOf(dragColId); const to = cur.indexOf(dragOverColId); if (from !== -1 && to !== -1) { cur.splice(from, 1); cur.splice(to, 0, dragColId); setColumnOrder(cur); } } setDragColId(null); setDragOverColId(null); }} sorted={h.column.getIsSorted()} />)}</tr>)}</thead>
             <tbody>
               {virtualRows.length > 0 && <tr style={{ height: virtualRows[0].start }}><td colSpan={table.getVisibleFlatColumns().length} /></tr>}
@@ -724,7 +724,7 @@ function WillCallsTab({ willCalls, onNavigate }: { willCalls: SummaryWillCall[];
 
   return (
     <div>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
+      <div className="dash-toolbar" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
         <div style={{ fontSize: 12, color: theme.colors.textMuted, fontWeight: 500 }}>Status:</div>
         {allStatuses.map(s => <button key={s} onClick={() => toggleStatus(s)} style={chip(statusFilters.includes(s))}>{s}</button>)}
         {statusFilters.length > 0 && (
@@ -752,7 +752,7 @@ function WillCallsTab({ willCalls, onNavigate }: { willCalls: SummaryWillCall[];
       </div>
       <div style={{ borderRadius: 12, overflow: 'hidden', background: '#fff' }}>
         <div ref={containerRef} style={{ overflowY: 'auto', overflowX: 'auto', ...scrollSize, WebkitOverflowScrolling: 'touch' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <table className="dash-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>{table.getHeaderGroups().map(hg => <tr key={hg.id}>{hg.headers.map(h => <DragHeader key={h.id} h={h} dragColId={dragColId} dragOverColId={dragOverColId} onDragStart={() => setDragColId(h.id)} onDragOver={() => setDragOverColId(h.id)} onDragEnd={() => { if (dragColId && dragOverColId && dragColId !== dragOverColId) { const cur = columnOrder.length ? [...columnOrder] : [...WC_DEFAULT_ORDER]; const from = cur.indexOf(dragColId); const to = cur.indexOf(dragOverColId); if (from !== -1 && to !== -1) { cur.splice(from, 1); cur.splice(to, 0, dragColId); setColumnOrder(cur); } } setDragColId(null); setDragOverColId(null); }} sorted={h.column.getIsSorted()} />)}</tr>)}</thead>
             <tbody>
               {virtualRows.length > 0 && <tr style={{ height: virtualRows[0].start }}><td colSpan={table.getVisibleFlatColumns().length} /></tr>}
@@ -772,7 +772,7 @@ function WillCallsTab({ willCalls, onNavigate }: { willCalls: SummaryWillCall[];
 
 /** ⚠️  FRAGILE HOOK ORDER — see Inventory.tsx for full warning. Do not reorder/add/remove hooks. */
 export function Dashboard() {
-  const { isMobile } = useIsMobile();
+  const { isMobile, isTablet } = useIsMobile();
   const apiConfigured = isApiConfigured();
 
   // Top-level tab: Calendar (default) or Overview (the task/repair/will-call
@@ -979,7 +979,28 @@ export function Dashboard() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 24, margin: '-28px -32px', padding: '28px 32px', minHeight: '100%', background: '#F5F2EE' }}>
-      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+      <style>{`
+        @keyframes spin { to { transform: rotate(360deg); } }
+        /* Tablet/mobile density for the three Dashboard overview tables.
+           The desktop header/cell padding (14px 16px) plus the 2px header
+           letter-spacing makes the column headers very wide, so on the
+           narrow tablet/mobile viewport only a few of the ~14 columns fit
+           and the header row reads as cramped/overlapping (the symptom
+           reported after #617 finally made the table tall enough to use on
+           tablet). Tighten padding + letter-spacing below 1024px so more
+           columns fit per scroll-width and the header breathes. Inline
+           styles win unless we use !important. Desktop (>=1024px) keeps the
+           original spacing. */
+        @media (max-width: 1023px) {
+          .dash-table thead th { padding: 10px 12px !important; letter-spacing: 1px !important; }
+          .dash-table td { padding: 10px 12px !important; }
+          .dash-toolbar { gap: 6px !important; }
+        }
+        @media (max-width: 767px) {
+          .dash-table thead th { padding: 9px 10px !important; letter-spacing: 0.5px !important; }
+          .dash-table td { padding: 9px 10px !important; font-size: 12px !important; }
+        }
+      `}</style>
 
       {/* Header — v2 small inline branding */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
@@ -1046,7 +1067,7 @@ export function Dashboard() {
       </div>
 
       {/* Content card — wraps tabs + table */}
-      <div style={{ background: '#EDE9E3', borderRadius: isMobile ? 14 : 20, padding: isMobile ? '14px 12px' : '28px 32px' }}>
+      <div style={{ background: '#EDE9E3', borderRadius: isMobile ? 14 : 20, padding: isMobile ? '14px 12px' : isTablet ? '18px 16px' : '28px 32px' }}>
         {/* Tab bar — segmented pill style. On mobile the outer row scrolls
             horizontally instead of wrapping so the Tasks/Repairs/Will Calls
             pills stay on one line even on narrow screens. */}
