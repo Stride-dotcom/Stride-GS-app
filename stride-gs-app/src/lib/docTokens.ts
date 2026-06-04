@@ -37,6 +37,22 @@ export interface TaskWorkOrderInput {
   createdAt?: string;
 }
 
+/**
+ * One row in a multi-item repair's ITEM DETAILS table. Structurally a
+ * subset of `ApiRepairItem` (api.ts) so `buildRepairTokens(repair)` can
+ * pass the full `repair.items` array straight through. Legacy single-item
+ * repairs carry exactly one of these; bulk-created repairs carry N.
+ */
+export interface RepairWorkOrderItemInput {
+  itemId?: string;
+  qty?: number | string;
+  vendor?: string;
+  description?: string;
+  sidemark?: string;
+  room?: string;
+  location?: string;
+}
+
 export interface RepairWorkOrderInput {
   repairId: string;
   itemId?: string;
@@ -55,6 +71,11 @@ export interface RepairWorkOrderInput {
   createdDate?: string;
   approvedDate?: string;
   approved?: boolean;
+  // Multi-item repairs (2026-05-13). Populated from public.repair_items
+  // overlaid with inventory fields. When present (>=1 row), the work
+  // order's ITEM DETAILS table renders one row per item; otherwise it
+  // falls back to the single-item fields above. See buildRepairTokens.
+  items?: RepairWorkOrderItemInput[];
 }
 
 export interface WillCallItemInput {
@@ -185,6 +206,31 @@ function wcItemRowHtml(it: WillCallItemInput, idx: number): string {
   );
 }
 
+/**
+ * One <tr> for the DOC_REPAIR_WORK_ORDER ITEM DETAILS table. Cell styling
+ * mirrors the single-item row that used to be hardcoded in the template
+ * (Item ID / Qty / Vendor / Description / Sidemark / Room / Location), so
+ * a multi-item table prints identically to the legacy single-item one.
+ * `sidemarkFallback` is the repair-level sidemark, used when an item's own
+ * inventory-overlay sidemark is blank (legacy single-item parity).
+ */
+function repairItemRowHtml(it: RepairWorkOrderItemInput, sidemarkFallback: string): string {
+  const cell = 'padding:6px;font-size:11px;border-bottom:1px solid #E2E8F0;';
+  const qty = it.qty == null || it.qty === '' ? 1 : it.qty;
+  const itemSidemark = (it.sidemark || '').trim() || sidemarkFallback;
+  return (
+    '<tr>' +
+    `<td style="${cell}font-weight:bold;">${esc(it.itemId || '')}</td>` +
+    `<td style="${cell}text-align:center;">${esc(String(qty))}</td>` +
+    `<td style="${cell}">${esc(it.vendor || '')}</td>` +
+    `<td style="${cell}">${esc(it.description || '')}</td>` +
+    `<td style="${cell}">${esc(itemSidemark)}</td>` +
+    `<td style="${cell}">${esc(it.room || '')}</td>` +
+    `<td style="${cell}font-family:monospace;">${esc(it.location || '')}</td>` +
+    '</tr>'
+  );
+}
+
 function codBannerHtml(cod: boolean, amount: number | string | null | undefined): string {
   if (!cod) return '';
   let amt = '';
@@ -249,6 +295,32 @@ export function buildRepairTokens(repair: RepairWorkOrderInput): Record<string, 
   // (`{{REPAIR_TYPE}}: e(itemDesc)`).
   const repairType = repair.description || '';
 
+  // ITEM DETAILS table rows. Multi-item repairs carry every item in
+  // `repair.items` (from public.repair_items + inventory overlay); legacy
+  // single-item repairs have either a one-row items[] or none, in which
+  // case we synthesize a single row from the repair's own fields. The
+  // bug this fixes: the template hardcoded ONE data row, so multi-item
+  // work orders only ever printed the primary item.
+  const itemList: RepairWorkOrderItemInput[] =
+    repair.items && repair.items.length > 0
+      ? repair.items
+      : [{
+          itemId: repair.itemId,
+          qty: repair.qty,
+          vendor: repair.vendor,
+          description: repair.description,
+          sidemark,
+          room: repair.room,
+          location: repair.location,
+        }];
+  const itemRows = itemList.map((it) => repairItemRowHtml(it, sidemark)).join('');
+
+  // The first item also fills the legacy single-row `{{ITEM_*}}` tokens.
+  // These stay in case the live template hasn't been migrated to
+  // `{{ITEM_ROWS}}` yet — both token sets are emitted so neither template
+  // version renders a literal placeholder (deploy-order independent).
+  const primary = itemList[0] || {};
+
   return {
     '{{LOGO_URL}}': esc(DEFAULT_LOGO_URL),
     '{{REPAIR_ID}}': esc(repair.repairId),
@@ -266,13 +338,16 @@ export function buildRepairTokens(repair: RepairWorkOrderInput): Record<string, 
           `<a href="${esc(photosUrl)}" style="color:#E85D2D;text-decoration:underline;">View Photos</a>`,
         )
       : '',
-    '{{ITEM_ID}}': esc(repair.itemId || ''),
-    '{{ITEM_QTY}}': esc(repair.qty != null ? String(repair.qty) : '1'),
-    '{{ITEM_VENDOR}}': esc(repair.vendor || ''),
-    '{{ITEM_DESC}}': esc(repair.description || ''),
-    '{{ITEM_SIDEMARK}}': esc(sidemark),
-    '{{ITEM_ROOM}}': esc(repair.room || ''),
-    '{{ITEM_LOCATION}}': esc(repair.location || ''),
+    // Multi-item table body — one <tr> per repair item.
+    '{{ITEM_ROWS}}': itemRows,
+    // Legacy single-row tokens (primary item) — see note above.
+    '{{ITEM_ID}}': esc(primary.itemId || ''),
+    '{{ITEM_QTY}}': esc(primary.qty != null ? String(primary.qty) : '1'),
+    '{{ITEM_VENDOR}}': esc(primary.vendor || ''),
+    '{{ITEM_DESC}}': esc(primary.description || ''),
+    '{{ITEM_SIDEMARK}}': esc((primary.sidemark || '').trim() || sidemark),
+    '{{ITEM_ROOM}}': esc(primary.room || ''),
+    '{{ITEM_LOCATION}}': esc(primary.location || ''),
     '{{RESULT_OPTIONS_HTML}}': REPAIR_RESULT_OPTIONS_HTML,
   };
 }

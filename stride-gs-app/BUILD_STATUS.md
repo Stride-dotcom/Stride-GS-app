@@ -100,6 +100,10 @@
 
 ---
 
+## Recent Changes (2026-06-04, repair work order prints ALL items — fix/repairs/work-order-all-items)
+
+- **Multi-item repair work orders only printed ONE line item (React print path).** Justin: printing a repair Work Order for a multi-item repair showed just the primary item, not every item in the repair. Root cause: the `DOC_REPAIR_WORK_ORDER` template (Supabase `email_templates`) hardcoded a SINGLE item `<tr>` filled by `{{ITEM_ID}}`/`{{ITEM_QTY}}`/… and `src/lib/docTokens.ts` `buildRepairTokens` only emitted that one primary item — the multi-item `repair.items[]` (from `public.repair_items` + inventory overlay) was never rendered. The whole work-order doc predates multi-item repairs (PR #397) and was never wired for them. Fix (2 files): (1) `docTokens.ts` — new `RepairWorkOrderItemInput` interface + `items?` on `RepairWorkOrderInput`, a `repairItemRowHtml()` helper (cell styling byte-identical to the template's original row, all fields `esc()`'d), and a new `{{ITEM_ROWS}}` token built one-`<tr>`-per-item from `repair.items[]` (falls back to a synthesized single row from the legacy single-item fields). Legacy single `{{ITEM_*}}` tokens still emitted so the React change is deploy-order independent vs the template migration. (2) migration `20260604120000_repair_work_order_multi_item_rows.sql` — swaps the hardcoded `<tr>` for `{{ITEM_ROWS}}` in the Supabase `email_templates` body (idempotent + `DO $$` verification, fails loudly if the row is absent or the swap didn't take). Both GAS renderers of this doc (`handleStartRepair_` / `handleRespondToRepairQuote_`) are commented out (PR #507 — React DocRenderer is the only live renderer), so no GAS change. The separate MPL sheet-template store (`Doc Templates/DOC_REPAIR_WORK_ORDER.txt`, Triggers.gs/task-board in-sheet onEdit renderers) is intentionally untouched and still single-item — out of scope for the React print bug. Opus code-review clean (hardened the migration's no-row guard). tsc + `npm run build` clean. **Migration apply is operator-pending — see Pending User Actions.**
+
 ## Recent Changes (2026-06-04, Client Invoice Portal — feat/billing/client-invoice-portal)
 
 - **New feature: client-facing invoice portal at `#/invoices`.** Clients now have an "Invoices" sidebar item (client-only) that lists *their own* invoices (invoice #, date, total, paid/unpaid status), sortable by date and filterable by status, with a per-row **View / Download** that opens the archived PDF. Admin/staff keep using the Billing page; the `/invoices` route is gated `['admin','client']` so admins can preview + run the backfill, but no admin sidebar item was added.
@@ -1857,6 +1861,8 @@ Late-day session that started as a single production fire (release-items timing 
 ---
 
 ## Pending User Actions
+
+- [ ] **[fix/repairs/work-order-all-items — operator apply] Apply migration `20260604120000_repair_work_order_multi_item_rows.sql`** so the repair Work Order prints all items. Builder env has no Supabase MCP / `SUPABASE_ACCESS_TOKEN`. Apply via MCP `apply_migration(project_id='uqplppugeickmamycpuz', name='repair_work_order_multi_item_rows', query=<file contents>)` or `npx supabase db push`. The migration is idempotent and self-verifies (raises if the template row is missing or the `{{ITEM_ROWS}}` swap didn't take). Order: deploy the React change first (it emits both the legacy `{{ITEM_*}}` tokens AND `{{ITEM_ROWS}}`, so apply order is actually safe either way), then apply this migration to flip the template to multi-row. Until applied, multi-item work orders keep printing only the primary item.
 
 - [ ] **[MIGRATION-P2/P3/P4a/P5/P6 — feat/migration/batch-handlers-and-routing — operator deploy] Deploy 17 new + 4 existing SB-primary Edge Functions.** Builder env has no `SUPABASE_ACCESS_TOKEN`; run from a machine with `supabase login` complete. From `C:\dev\Stride-GS-app\stride-gs-app`:
 
