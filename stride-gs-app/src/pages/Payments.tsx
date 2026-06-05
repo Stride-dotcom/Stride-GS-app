@@ -424,6 +424,27 @@ export function Payments() {
   // tab live without a manual reload.
   const { apiClients } = useClients();
   const customers = useMemo<StaxCustomerRow[]>(() => clientsToStaxCustomers(apiClients), [apiClients]);
+  // All active clients for the Create Stax Charge picker — NOT just those with
+  // a Stax customer id. For clients without one the EF creates a Stax customer
+  // (and persists the id back) when the charge is pushed.
+  const allClientOptions = useMemo(
+    () => apiClients
+      .filter(c => c.active !== false)
+      .map(c => ({
+        value: c.name,
+        label: String(c.staxCustomerId || '').trim() ? c.name : `${c.name} (no Stax customer yet)`,
+      }))
+      .sort((a, b) => a.value.localeCompare(b.value)),
+    [apiClients],
+  );
+  const staxIdByClientName = useMemo(() => {
+    const m: Record<string, string> = {};
+    for (const c of apiClients) {
+      const sid = String(c.staxCustomerId || '').trim();
+      if (sid) m[c.name] = sid;
+    }
+    return m;
+  }, [apiClients]);
   const [autoCharge, setAutoCharge] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -491,6 +512,8 @@ export function Payments() {
   const [testError, setTestError] = useState<string | null>(null);
   const [testDueDate, setTestDueDate] = useState(new Date().toISOString().slice(0, 10));
   const [pushTestNow, setPushTestNow] = useState(true);
+  const [testNotes, setTestNotes] = useState('');
+  const [testAutoCharge, setTestAutoCharge] = useState(true);
 
   const loadData = useCallback(async (noCache = false) => {
     if (noCache) setNextFetchNoCache();
@@ -834,25 +857,25 @@ export function Payments() {
               <InfoTooltip text="Pushes all PENDING invoices to Stax's system. This creates each invoice in Stax, assigns a Stax Invoice ID, and changes status from PENDING to CREATED. Invoices must be Created in Stax before they can be charged." size={12} />
               </span>
               <div style={{ position: 'relative' }}>
-                <button onClick={() => { setShowTestInvoice(!showTestInvoice); setTestResult(null); setTestError(null); }} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '5px 12px', fontSize: 12, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: 'pointer', color: theme.colors.textSecondary, fontFamily: 'inherit' }}><DollarSign size={12} /> Create Test Invoice</button>
-                <InfoTooltip text="Creates a small test invoice ($1.00 default) for a selected customer. This lets you test the full charge workflow — Create Stax Invoices → Run Charges — without going through the billing, IIF export, and import process. Test invoices show a purple 'Test' badge in the table. You can charge test invoices for real (to verify Stax end-to-end with a $1 charge) or use Dry Run mode to test without any real charge. Void any real test charges in the Stax dashboard afterward." size={12} />
+                <button onClick={() => { setShowTestInvoice(!showTestInvoice); setTestResult(null); setTestError(null); }} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '5px 12px', fontSize: 12, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: 'pointer', color: theme.colors.textSecondary, fontFamily: 'inherit' }}><DollarSign size={12} /> Create Stax Charge</button>
+                <InfoTooltip text="Create a one-off Stax charge for any client and any amount. Picks/creates the client's Stax customer, creates the invoice in Stax (when 'Push to Stax now' is on) so it's ready to charge, and sets the due date that controls when the daily auto-charge fires. Turn off 'Auto Charge' to charge it manually instead. Use Notes to reference what the charge is for. These rows carry a purple 'Test' badge to distinguish them from batch-created (IIF) invoices." size={12} />
                 {showTestInvoice && (
-                  <div style={{ position: 'absolute', top: '100%', right: 0, marginTop: 8, padding: 16, background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 12, boxShadow: '0 8px 24px rgba(0,0,0,0.12)', zIndex: 100, width: 320 }}>
-                    <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 12 }}>Create Test Invoice</div>
+                  <div style={{ position: 'absolute', top: '100%', right: 0, marginTop: 8, padding: 16, background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 12, boxShadow: '0 8px 24px rgba(0,0,0,0.12)', zIndex: 100, width: 340 }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 12 }}>Create Stax Charge</div>
                     <div style={{ marginBottom: 10 }}>
-                      <label style={{ fontSize: 11, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', display: 'block', marginBottom: 3 }}>Customer *</label>
+                      <label style={{ fontSize: 11, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', display: 'block', marginBottom: 3 }}>Client *</label>
                       <AutocompleteSelect
                         value={testCustomer}
                         onChange={setTestCustomer}
-                        placeholder="Select customer..."
-                        options={customers.filter(c => c.staxId).map(c => ({ value: c.qbName, label: c.qbName }))}
+                        placeholder="Select client..."
+                        options={allClientOptions}
                         style={{ width: '100%' }}
                       />
                     </div>
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 10 }}>
                       <div>
-                        <label style={{ fontSize: 11, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', display: 'block', marginBottom: 3 }}>Amount ($)</label>
-                        <input type="number" min={0.01} max={100} step={0.01} value={testAmount} onChange={e => setTestAmount(e.target.value)} style={{ width: '100%', padding: '7px 10px', fontSize: 13, border: `1px solid ${theme.colors.border}`, borderRadius: 8, fontFamily: 'inherit', boxSizing: 'border-box' }} />
+                        <label style={{ fontSize: 11, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', display: 'block', marginBottom: 3 }}>Amount ($) *</label>
+                        <input type="number" min={0.01} step={0.01} value={testAmount} onChange={e => setTestAmount(e.target.value)} style={{ width: '100%', padding: '7px 10px', fontSize: 13, border: `1px solid ${theme.colors.border}`, borderRadius: 8, fontFamily: 'inherit', boxSizing: 'border-box' }} />
                       </div>
                       <div>
                         <label style={{ fontSize: 11, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', display: 'block', marginBottom: 3 }}>Due Date</label>
@@ -860,9 +883,19 @@ export function Payments() {
                       </div>
                     </div>
                     <div style={{ marginBottom: 10 }}>
-                      <label style={{ fontSize: 11, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', display: 'block', marginBottom: 3 }}>QB Invoice # <span style={{ fontWeight: 400, fontSize: 10 }}>(optional — auto-generates TEST-... if blank)</span></label>
-                      <input value={testQbNo} onChange={e => setTestQbNo(e.target.value)} placeholder="Auto: TEST-..." style={{ width: '100%', padding: '7px 10px', fontSize: 13, border: `1px solid ${theme.colors.border}`, borderRadius: 8, fontFamily: 'inherit', boxSizing: 'border-box' }} />
+                      <label style={{ fontSize: 11, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', display: 'block', marginBottom: 3 }}>Notes / Reference <span style={{ fontWeight: 400, fontSize: 10, textTransform: 'none' }}>(optional — e.g. “for INV-000142”)</span></label>
+                      <input value={testNotes} onChange={e => setTestNotes(e.target.value)} placeholder="What is this charge for?" style={{ width: '100%', padding: '7px 10px', fontSize: 13, border: `1px solid ${theme.colors.border}`, borderRadius: 8, fontFamily: 'inherit', boxSizing: 'border-box' }} />
                     </div>
+                    <div style={{ marginBottom: 10 }}>
+                      <label style={{ fontSize: 11, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', display: 'block', marginBottom: 3 }}>Invoice # <span style={{ fontWeight: 400, fontSize: 10, textTransform: 'none' }}>(optional — auto-generates TEST-… if blank)</span></label>
+                      <input value={testQbNo} onChange={e => setTestQbNo(e.target.value)} placeholder="Auto: TEST-…" style={{ width: '100%', padding: '7px 10px', fontSize: 13, border: `1px solid ${theme.colors.border}`, borderRadius: 8, fontFamily: 'inherit', boxSizing: 'border-box' }} />
+                    </div>
+                    <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 8, cursor: 'pointer' }}>
+                      <input type="checkbox" checked={testAutoCharge} onChange={e => setTestAutoCharge(e.target.checked)} style={{ marginTop: 2, cursor: 'pointer' }} />
+                      <span style={{ fontSize: 11, color: theme.colors.textSecondary, lineHeight: 1.4 }}>
+                        <span style={{ fontWeight: 600 }}>Auto Charge</span> — the daily auto-pay run charges this on its due date using the card on file. Uncheck to leave it for a manual charge.
+                      </span>
+                    </label>
                     <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 10, cursor: 'pointer' }}>
                       <input type="checkbox" checked={pushTestNow} onChange={e => setPushTestNow(e.target.checked)} style={{ marginTop: 2, cursor: 'pointer' }} />
                       <span style={{ fontSize: 11, color: theme.colors.textSecondary, lineHeight: 1.4 }}>
@@ -873,27 +906,32 @@ export function Payments() {
                     {testResult && <div style={{ padding: '6px 10px', marginBottom: 8, borderRadius: 6, background: '#F0FDF4', border: '1px solid #BBF7D0', fontSize: 11, color: '#166534' }}>{testResult}</div>}
                     <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
                       <button onClick={() => { setShowTestInvoice(false); setTestResult(null); setTestError(null); }} style={{ padding: '6px 12px', fontSize: 12, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: 'pointer', fontFamily: 'inherit' }}>Cancel</button>
-                      <WriteButton label={creatingTest ? 'Creating...' : 'Create'} variant="primary" size="sm" disabled={creatingTest || !testCustomer} onClick={async () => {
+                      <WriteButton label={creatingTest ? 'Creating…' : 'Create Charge'} variant="primary" size="sm" disabled={creatingTest || !testCustomer || !(parseFloat(testAmount) > 0)} onClick={async () => {
                         setCreatingTest(true); setTestError(null); setTestResult(null);
                         // 100% Supabase — invokes the create-test-stax-invoice Edge
                         // Function directly (no GAS, no apiPost/feature-flag routing).
-                        const staxCustomerId = customers.find(c => c.qbName === testCustomer)?.staxId || undefined;
+                        // staxCustomerId is passed when known; for a client without
+                        // one the EF creates a Stax customer (and persists it back).
+                        const staxCustomerId = staxIdByClientName[testCustomer] || undefined;
                         const res = await invokeCreateTestStaxInvoice({
                           customer: testCustomer,
-                          amount: parseFloat(testAmount) || 1.00,
+                          amount: parseFloat(testAmount) || 0,
                           qbInvoiceNo: testQbNo || undefined,
                           dueDate: testDueDate || undefined,
+                          notes: testNotes || undefined,
+                          autoCharge: testAutoCharge,
                           staxCustomerId,
                           pushToStax: pushTestNow,
                         });
                         setCreatingTest(false);
                         if (res.success) {
                           const where = res.pushed ? 'created in Stax (ready to charge)' : 'staged as PENDING';
-                          setTestResult(`Test invoice ${res.qbInvoiceNo} ${where} for ${res.customer} — $${(res.amount ?? 0).toFixed(2)}`);
-                          setTestCustomer(''); setTestAmount('1.00'); setTestQbNo('');
+                          const ac = res.autoCharge === false ? ' · manual' : ' · auto-charge';
+                          setTestResult(`Charge ${res.qbInvoiceNo} ${where} for ${res.customer} — $${(res.amount ?? 0).toFixed(2)}${ac}`);
+                          setTestCustomer(''); setTestAmount('1.00'); setTestQbNo(''); setTestNotes(''); setTestAutoCharge(true);
                           loadData(true);
                         } else {
-                          setTestError(res.error || 'Failed to create test invoice');
+                          setTestError(res.error || 'Failed to create Stax charge');
                           // A push failure still leaves a PENDING row — refresh so it shows.
                           if (res.code === 'STAX_CREATE_FAILED' || res.code === 'STAX_NOT_CONFIGURED') loadData(true);
                         }
