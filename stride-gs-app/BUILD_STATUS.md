@@ -108,6 +108,16 @@
 
 ---
 
+## Recent Changes (2026-06-05, test invoice now mirrors to Supabase — fix/billing/test-invoice-sb-mirror, PR #629)
+
+- **Fixed: "Create Test Invoice" (Payments/Stax page) reported success but the invoice never appeared, never got a `stax_id`, and stayed PENDING forever.** Root cause: `handleCreateTestInvoice_` (StrideAPI.gs ~39552) appended a PENDING row to the Stax **Invoices** sheet but never mirrored it to `public.stax_invoices`. The React Payments page reads invoices from Supabase (`fetchStaxInvoicesFromSupabase`), so the test invoice was invisible in the UI — it could never be selected, never pushed to Stax via **Create Stax Invoices**, and stayed PENDING with no `stax_id`. This is also why `gas_call_log` showed no `createStaxInvoices` call (the invoice was never visible to push).
+- **Fix:** added the standard one-line Supabase write-through `try { api_sbResyncStaxInvoice_(qbInvoiceNo); } catch (_) {}` before the success return, matching the ~7 sibling Stax write handlers that all already do this (`resetStaxInvoiceStatus`, `toggleAutoCharge`, `updateStaxInvoice`, etc.). `createTestInvoice` was the lone handler missing it. `StrideAPI.gs` → **v38.262.1** (live as Apps Script version 561).
+- No change to the intentional PENDING-staging design (test invoices still do NOT auto-push to Stax on create); no schema change; no billing logic touched; no change to the v38.182 atomic invoice counter.
+- **Verified end-to-end** against the live deployed API: created a $1 test invoice for "Justin Demo Account" → row appeared in `public.stax_invoices` with correct `stax_customer_id` (`175f3b63…`), `is_test=true`, `status=PENDING`. Cleaned up the verification artifact afterward.
+- **Known related gap (out of scope, flagged separately):** `deleteStaxInvoice` removes the sheet row but leaves an orphaned `public.stax_invoices` mirror row (the post-delete resync only upserts existing sheet rows; it never deletes the SB mirror).
+
+---
+
 ## Recent Changes (2026-06-04, insurance auto-billing proration — fix/billing/insurance-proration)
 
 - **The daily insurance auto-billing cron (`insurance_bill_due()`) now PRORATES instead of always charging a flat 30-day rate.** Three cases, all day-for-day (per 30):
