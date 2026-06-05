@@ -564,7 +564,25 @@ export function Payments() {
         fetchStaxRunLog(),
         fetchStaxConfig(),
       ]);
-      if (invRes.ok && invRes.data) setInvoices(invRes.data.invoices);
+      if (invRes.ok && invRes.data) {
+        // This GAS path runs on a hard refresh (noCache) or when the Supabase
+        // cache is down. It reads the Stax SHEET, which omits SB-authoritative
+        // rows not yet mirrored there — e.g. a test invoice from
+        // create-test-stax-invoice whose best-effort sheet mirror hasn't landed
+        // (or failed). Merge in any SB-only rows so a refresh never drops them.
+        // GAS (sheet) rows win on conflict — the sheet is still the charge-path
+        // source of truth.
+        let list = invRes.data.invoices;
+        try {
+          const sbFresh = await fetchStaxInvoicesFromSupabase();
+          if (sbFresh) {
+            const gasNos = new Set(list.map(r => r.qbInvoice));
+            const sbOnly = sbFresh.invoices.filter(r => !gasNos.has(r.qbInvoice));
+            if (sbOnly.length) list = [...list, ...sbOnly];
+          }
+        } catch { /* SB unavailable — fall back to the GAS-only list */ }
+        setInvoices(list);
+      }
       if (chargeRes.ok && chargeRes.data) setCharges(chargeRes.data.charges);
       if (excRes.ok && excRes.data) setExceptions(excRes.data.exceptions);
       if (logRes.ok && logRes.data) setRunLog(logRes.data.entries);
