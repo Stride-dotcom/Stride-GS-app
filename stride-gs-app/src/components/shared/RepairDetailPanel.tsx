@@ -1312,8 +1312,15 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
               exactly where the breakdown was previously invisible — this is
               now the one place it shows. No role gate: clients see their own
               quote, matching the footer + page Quote-tab behavior (neither
-              is admin-gated). */}
-          {Array.isArray(repair.quoteLines) && repair.quoteLines.length > 0
+              is admin-gated).
+              Slide-out only (`!renderAsPage`): page mode has a dedicated
+              Quote tab (renderRepairQuoteTab) that already renders this same
+              breakdown for every status, so adding it to the Details body
+              there would surface the identical card in two tabs. The gap
+              this fills — no breakdown after Approved — exists only in the
+              slide-out panel, which has no Quote tab. */}
+          {!renderAsPage
+            && Array.isArray(repair.quoteLines) && repair.quoteLines.length > 0
             && !(isActive && (effectiveStatus === 'Quote Sent' || effectiveStatus === 'Approved')) && (
             <div style={{ marginBottom: 16 }}>
               <RepairQuoteSummary
@@ -1331,8 +1338,10 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
           {/* Legacy single-amount quotes (pre-multiline builder) have no
               line items to break down — surface the one number we have,
               to all roles (the grid's "Quote Amount" field is admin-only).
-              Same status gate as the breakdown above. */}
-          {(!Array.isArray(repair.quoteLines) || repair.quoteLines.length === 0)
+              Same status + slide-out gate as the breakdown above (page mode's
+              Quote tab already shows the legacy amount). */}
+          {!renderAsPage
+            && (!Array.isArray(repair.quoteLines) || repair.quoteLines.length === 0)
             && typeof repair.quoteAmount === 'number' && repair.quoteAmount > 0
             && !(isActive && (effectiveStatus === 'Quote Sent' || effectiveStatus === 'Approved')) && (
             <div style={{ marginBottom: 16 }}>
