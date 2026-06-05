@@ -181,19 +181,21 @@ Deno.serve(async (req: Request) => {
   }
 
   // c) create a Stax customer if still missing and we're going to push.
-  if (!staxCustId && pushToStax && staxConfigured) {
+  //    Gated on clientRowId: we only auto-create when we resolved a real
+  //    client row to write the new id back to. Creating for an unresolved
+  //    name would orphan Stax customers (a new one every test run) — so an
+  //    unknown name falls through to the NO_CUSTOMER error below instead.
+  if (!staxCustId && pushToStax && staxConfigured && clientRowId) {
     const created = await createStaxCustomer(staxApiKey, customer, clientEmail);
     if (created.id) {
       staxCustId = created.id;
       // Persist back onto public.clients so future invoices resolve directly.
-      if (clientRowId) {
-        try {
-          await sb.from('clients')
-            .update({ stax_customer_id: staxCustId, updated_at: new Date().toISOString() })
-            .eq('id', clientRowId);
-        } catch (e) {
-          console.error('[create-test-stax-invoice] persist stax_customer_id failed:', e);
-        }
+      try {
+        await sb.from('clients')
+          .update({ stax_customer_id: staxCustId, updated_at: new Date().toISOString() })
+          .eq('id', clientRowId);
+      } catch (e) {
+        console.error('[create-test-stax-invoice] persist stax_customer_id failed:', e);
       }
     } else {
       return jsonResponse({
@@ -450,9 +452,14 @@ async function createStaxCustomer(
 
 /** Escape a value for use inside a PostgREST `.or(...)` ilike filter. */
 function escapeOr(v: string): string {
-  // Commas and parens break the or() grammar; strip them and wrap in
-  // wildcards for a forgiving match. PostgREST treats `*` as the ilike `%`.
-  return `*${v.replace(/[,()]/g, ' ').trim()}*`;
+  // 1. Escape SQL LIKE metacharacters (% _ \) so a customer name like
+  //    "A_B Logistics" matches literally instead of as a wildcard — a
+  //    wildcard match could resolve the WRONG client row and push a
+  //    real-money invoice to the wrong Stax customer.
+  // 2. Strip commas/parens which break the .or() grammar.
+  // 3. Wrap in `*` — PostgREST shorthand for the ilike `%` wildcard.
+  const safe = v.replace(/[\\%_]/g, '\\$&').replace(/[,()]/g, ' ').trim();
+  return `*${safe}*`;
 }
 
 /** YYYY-MM-DD in America/Los_Angeles (matches the GAS sheet date). */
