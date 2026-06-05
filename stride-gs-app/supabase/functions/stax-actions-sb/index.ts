@@ -18,7 +18,9 @@
  * Supported actions (16):
  *   importIIF, importIIFFromDrive, updateStaxConfig, saveStaxCustomerMapping,
  *   autoMatchStaxCustomers, pullStaxCustomers, syncStaxCustomers,
- *   createTestInvoice, updateStaxInvoice, deleteStaxInvoice,
+ *   updateStaxInvoice, deleteStaxInvoice,
+ *   (createTestInvoice moved to the dedicated 100%-Supabase
+ *    create-test-stax-invoice EF — no longer proxied here)
  *   staxRefreshCustomerIds, staxRefreshPaymentStatus, chargeSingleInvoice,
  *   sendStaxPayLinks, sendStaxPayLink, voidStaxInvoice, toggleAutoCharge,
  *   resetStaxInvoiceStatus, resolveStaxException, batchVoidStaxInvoices,
@@ -35,7 +37,7 @@ const SUPPORTED_ACTIONS = new Set([
   'autoMatchStaxCustomers',
   'pullStaxCustomers',
   'syncStaxCustomers',
-  'createTestInvoice',
+  // createTestInvoice migrated to the dedicated create-test-stax-invoice EF.
   'updateStaxInvoice',
   'deleteStaxInvoice',
   'staxRefreshCustomerIds',
