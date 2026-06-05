@@ -44,14 +44,21 @@
  * Required EF secrets:
  *   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
  *
- * Optional (env-guarded — when missing we do an SB-only push, logging a
- * warning. Lets the operator dry-run before wiring real Stax credentials):
- *   STAX_API_KEY        — Bearer token for Stax API.
+ * Stax credentials:
+ *   STAX_API_KEY        — Bearer token for Stax API. REQUIRED to create
+ *                         invoices. When missing, the handler fails closed
+ *                         ({ success:false, code:'STAX_NOT_CONFIGURED' })
+ *                         instead of reporting a false success — a missing
+ *                         key means nothing reaches Stax, and the UI must
+ *                         see that, not a green "Pushed to Stax".
  *   STAX_INVOICE_PAY_URL — Default https://app.staxpayments.com/#/bill/
  *
- * Response:
- *   { success: true, created: N, skipped: M, errors: [...],
- *     staxInvoiceIds: string[] }
+ * Response (HTTP 200 in all cases; handler-level failures carry `error`
+ * the way GAS does so apiRouter marks ok:false):
+ *   success path : { success:true,  created:N, skipped:M, errors:[...],
+ *                    staxInvoiceIds:string[], summary }
+ *   nothing made : { success:false, error, code, created:0, skipped:M,
+ *                    errors:[...], summary }
  */
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
@@ -344,9 +351,14 @@ Deno.serve(async (req: Request) => {
       { staxId, amount, customer: custName });
   }
 
+  // ── Outcome summary ──────────────────────────────────────────────────
+  const summary = staxConfigured
+    ? `${createdCount} created, ${skippedCount} skipped`
+        + (errors.length ? `, ${errors.length} error(s)` : '')
+    : `STAX_API_KEY not configured — 0 created, ${candidates.length} not pushed to Stax`;
+
   // run-log mirror (best-effort).
   try {
-    const summary = `${createdCount} created, ${skippedCount} skipped`;
     await sb.from('stax_run_log').insert({
       timestamp: new Date().toISOString(),
       fn:        'create-stax-invoices-sb',
@@ -357,6 +369,52 @@ Deno.serve(async (req: Request) => {
     console.error('[create-stax-invoices-sb] run-log insert threw:', e);
   }
 
+  // ── Honest outcome envelope (silent-failure guard) ──────────────────
+  // The React Payments handlers render a green "Pushed to Stax" on
+  // `res.ok && res.data` and print `res.data.summary`. Returning
+  // success:true with created:0 — because STAX_API_KEY was missing, every
+  // POST 4xx'd, or fetch failed — is the silent-failure trap the operator
+  // hit on the P6 canary: "UI says success but nothing gets created in
+  // Stax." We now surface an `error` (HTTP 200 + body.error, the same
+  // shape GAS uses) so apiRouter.invokeSupabaseHandler marks ok:false and
+  // the UI shows the real reason instead of a false success. `summary`
+  // mirrors the GAS response shape the UI already reads.
+  if (!staxConfigured) {
+    return jsonResponse({
+      success:        false,
+      error:          `STAX_API_KEY is not configured on this Edge Function — `
+                      + `${candidates.length} invoice(s) were NOT created in Stax. `
+                      + `Configure the secret (or route createStaxInvoices back to GAS) and retry.`,
+      code:           'STAX_NOT_CONFIGURED',
+      created:        0,
+      skipped:        skippedCount,
+      errors,
+      staxInvoiceIds,
+      staxConfigured,
+      summary,
+      requestId,
+    }, 200);
+  }
+  if (createdCount === 0 && candidates.length > 0) {
+    const e0 = errors[0];
+    const firstErr = e0
+      ? `${e0.invoiceNo}: ${e0.reason}${e0.detail ? ' — ' + e0.detail : ''}`
+      : 'see Stax exceptions log';
+    return jsonResponse({
+      success:        false,
+      error:          `No invoices were created in Stax `
+                      + `(${candidates.length} attempted, all skipped or failed). First: ${firstErr}`,
+      code:           'STAX_CREATE_NONE',
+      created:        0,
+      skipped:        skippedCount,
+      errors,
+      staxInvoiceIds,
+      staxConfigured,
+      summary,
+      requestId,
+    }, 200);
+  }
+
   return jsonResponse({
     success:        true,
     created:        createdCount,
@@ -364,6 +422,7 @@ Deno.serve(async (req: Request) => {
     errors,
     staxInvoiceIds,
     staxConfigured,
+    summary,
     requestId,
   }, 200);
 });
