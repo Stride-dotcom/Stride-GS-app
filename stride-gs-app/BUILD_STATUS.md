@@ -108,6 +108,14 @@
 
 ---
 
+## Recent Changes (2026-06-05, create-stax-invoices-sb fails loudly on zero-created — fix/payments/stax-create-silent-success, PR #632)
+
+- **Hardened the remaining silent-failure in the Stax create→push path.** Follow-up to PR #629 (which fixed the actual reported "test invoice invisible" bug — see entry below; verified live this session that #629/v38.262.1 is deployed and the create→mirror→push flow works end-to-end on GAS). While tracing the path, found that `create-stax-invoices-sb` (the SB Edge Function behind `createStaxInvoices`) returned **`success: true` even when it created ZERO invoices in Stax**: a missing `STAX_API_KEY` (dry-run skip), Stax API 4xx, or fetch failure all incremented `skipped`/`errors` but fell through to an unconditional `success: true` with **no `summary`**. The React Payments push handlers render a green "Pushed to Stax" on `res.ok && res.data` and print `res.data.summary` — so a `created:0` run displayed as success while nothing reached Stax. This is the exact "UI says success but nothing in Stax" trap the P6 `createStaxInvoices` canary hit.
+- **Fix:** honest outcome envelope in `supabase/functions/create-stax-invoices-sb/index.ts`. `!staxConfigured` → `{ success:false, code:'STAX_NOT_CONFIGURED', error }`; candidates attempted but `created===0` → `{ success:false, code:'STAX_CREATE_NONE', error }` (first error surfaced). Both return HTTP 200 + `body.error` (GAS shape) so `apiRouter.invokeSupabaseHandler` marks `ok:false` and the UI shows the real reason. Adds `summary` to **every** response for parity with the GAS handler the UI already reads. **Deployed** as `create-stax-invoices-sb` version 3 (verify_jwt preserved).
+- **Dormant today, deployed defensively:** `feature_flags.createStaxInvoices.active_backend = 'gas'` (tenant_scope null) → all tenants use the GAS push, which is verified-working. This removes the silent-success landmine before any future SB flip. Single Deno EF file; no React/schema/billing changes; v38.182 atomic invoice counter untouched.
+
+---
+
 ## Recent Changes (2026-06-05, test invoice now mirrors to Supabase — fix/billing/test-invoice-sb-mirror, PR #629)
 
 - **Fixed: "Create Test Invoice" (Payments/Stax page) reported success but the invoice never appeared, never got a `stax_id`, and stayed PENDING forever.** Root cause: `handleCreateTestInvoice_` (StrideAPI.gs ~39552) appended a PENDING row to the Stax **Invoices** sheet but never mirrored it to `public.stax_invoices`. The React Payments page reads invoices from Supabase (`fetchStaxInvoicesFromSupabase`), so the test invoice was invisible in the UI — it could never be selected, never pushed to Stax via **Create Stax Invoices**, and stayed PENDING with no `stax_id`. This is also why `gas_call_log` showed no `createStaxInvoices` call (the invoice was never visible to push).
