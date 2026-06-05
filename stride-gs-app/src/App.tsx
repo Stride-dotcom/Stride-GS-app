@@ -154,10 +154,11 @@ export default function App() {
           <Route path="/orders" element={<RoleGuard allowed={['admin', 'client']}><Orders /></RoleGuard>} />
           <Route path="/orders/:orderId" element={<RoleGuard allowed={['admin', 'client']}><React.Suspense fallback={<div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }}>Loading...</div>}><OrderPage /></React.Suspense></RoleGuard>} />
           <Route path="/billing" element={<RoleGuard allowed={['admin']}><Billing /></RoleGuard>} />
-          {/* Invoice portal — clients see their own invoices; admin + staff get
-              the sidebar item too for support/preview + the PDF backfill tool.
-              RLS on `invoice_tracking` scopes the rows. */}
-          <Route path="/invoices" element={<RoleGuard allowed={['admin', 'staff', 'client']}><Invoices /></RoleGuard>} />
+          {/* Invoice portal — clients see their own invoices; admins also
+              allowed for support/preview + the PDF backfill tool. Staff are
+              excluded (no billing/invoice visibility). Sidebar item is
+              client + admin only. RLS on `invoice_tracking` scopes the rows. */}
+          <Route path="/invoices" element={<RoleGuard allowed={['admin', 'client']}><Invoices /></RoleGuard>} />
           {/* Printable invoice — admin/staff/client all allowed; RLS on `billing`
               gates which invoices the user can actually load. Email-CTA pattern
               passes `?client=<spreadsheetId>`, which scopes the query for admins. */}
