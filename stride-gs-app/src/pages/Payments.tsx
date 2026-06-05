@@ -14,7 +14,7 @@ import {
   postSaveStaxCustomerMapping, postAutoMatchStaxCustomers,
   postCreateStaxInvoices, postStaxRefreshCustomerIds, postStaxRefreshPaymentStatus, postChargeSingleInvoice,
   postSendStaxPayLinks, postSendStaxPayLink,
-  postCreateTestInvoice, postVoidStaxInvoice, postUpdateStaxInvoice, postDeleteStaxInvoice, postResetStaxInvoiceStatus, postToggleAutoCharge, postLinkStaxInvoiceToExisting,
+  invokeCreateTestStaxInvoice, postVoidStaxInvoice, postUpdateStaxInvoice, postDeleteStaxInvoice, postResetStaxInvoiceStatus, postToggleAutoCharge, postLinkStaxInvoiceToExisting,
   postBatchVoidStaxInvoices, postBatchDeleteStaxInvoices, type BatchMutationResult,
   fetchIIFFiles, postImportIIFFromDrive, type IIFFile,
   setNextFetchNoCache,
@@ -490,6 +490,7 @@ export function Payments() {
   const [testResult, setTestResult] = useState<string | null>(null);
   const [testError, setTestError] = useState<string | null>(null);
   const [testDueDate, setTestDueDate] = useState(new Date().toISOString().slice(0, 10));
+  const [pushTestNow, setPushTestNow] = useState(true);
 
   const loadData = useCallback(async (noCache = false) => {
     if (noCache) setNextFetchNoCache();
@@ -844,19 +845,40 @@ export function Payments() {
                       <label style={{ fontSize: 11, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', display: 'block', marginBottom: 3 }}>QB Invoice # <span style={{ fontWeight: 400, fontSize: 10 }}>(optional — auto-generates TEST-... if blank)</span></label>
                       <input value={testQbNo} onChange={e => setTestQbNo(e.target.value)} placeholder="Auto: TEST-..." style={{ width: '100%', padding: '7px 10px', fontSize: 13, border: `1px solid ${theme.colors.border}`, borderRadius: 8, fontFamily: 'inherit', boxSizing: 'border-box' }} />
                     </div>
+                    <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: 10, cursor: 'pointer' }}>
+                      <input type="checkbox" checked={pushTestNow} onChange={e => setPushTestNow(e.target.checked)} style={{ marginTop: 2, cursor: 'pointer' }} />
+                      <span style={{ fontSize: 11, color: theme.colors.textSecondary, lineHeight: 1.4 }}>
+                        <span style={{ fontWeight: 600 }}>Push to Stax now</span> — creates the invoice in Stax immediately (ready to charge). Uncheck to stage it as PENDING and push later via “Create Stax Invoices”.
+                      </span>
+                    </label>
                     {testError && <div style={{ padding: '6px 10px', marginBottom: 8, borderRadius: 6, background: '#FEF2F2', border: '1px solid #FECACA', fontSize: 11, color: '#DC2626' }}>{testError}</div>}
                     {testResult && <div style={{ padding: '6px 10px', marginBottom: 8, borderRadius: 6, background: '#F0FDF4', border: '1px solid #BBF7D0', fontSize: 11, color: '#166534' }}>{testResult}</div>}
                     <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
                       <button onClick={() => { setShowTestInvoice(false); setTestResult(null); setTestError(null); }} style={{ padding: '6px 12px', fontSize: 12, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: 'pointer', fontFamily: 'inherit' }}>Cancel</button>
                       <WriteButton label={creatingTest ? 'Creating...' : 'Create'} variant="primary" size="sm" disabled={creatingTest || !testCustomer} onClick={async () => {
                         setCreatingTest(true); setTestError(null); setTestResult(null);
-                        const res = await postCreateTestInvoice({ customer: testCustomer, amount: parseFloat(testAmount) || 1.00, qbInvoiceNo: testQbNo || undefined, dueDate: testDueDate || undefined });
+                        // 100% Supabase — invokes the create-test-stax-invoice Edge
+                        // Function directly (no GAS, no apiPost/feature-flag routing).
+                        const staxCustomerId = customers.find(c => c.qbName === testCustomer)?.staxId || undefined;
+                        const res = await invokeCreateTestStaxInvoice({
+                          customer: testCustomer,
+                          amount: parseFloat(testAmount) || 1.00,
+                          qbInvoiceNo: testQbNo || undefined,
+                          dueDate: testDueDate || undefined,
+                          staxCustomerId,
+                          pushToStax: pushTestNow,
+                        });
                         setCreatingTest(false);
-                        if (res.ok && res.data?.success) {
-                          setTestResult(`Test invoice ${res.data.qbInvoiceNo} created for ${res.data.customer} — $${res.data.amount.toFixed(2)}`);
+                        if (res.success) {
+                          const where = res.pushed ? 'created in Stax (ready to charge)' : 'staged as PENDING';
+                          setTestResult(`Test invoice ${res.qbInvoiceNo} ${where} for ${res.customer} — $${(res.amount ?? 0).toFixed(2)}`);
                           setTestCustomer(''); setTestAmount('1.00'); setTestQbNo('');
                           loadData(true);
-                        } else { setTestError(res.data?.error || res.error || 'Failed to create test invoice'); }
+                        } else {
+                          setTestError(res.error || 'Failed to create test invoice');
+                          // A push failure still leaves a PENDING row — refresh so it shows.
+                          if (res.code === 'STAX_CREATE_FAILED' || res.code === 'STAX_NOT_CONFIGURED') loadData(true);
+                        }
                       }} />
                     </div>
                   </div>

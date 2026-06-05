@@ -4954,15 +4954,27 @@ export function postChargeSingleInvoice(params: { qbInvoiceNo?: string; staxInvo
   return apiPost<ChargeSingleInvoiceResponse>('chargeSingleInvoice', params as Record<string, unknown>);
 }
 
-// ─── Test Invoice Creation ──────────────────────────────────────────────────
+// ─── Test Invoice Creation (100% Supabase — no GAS) ──────────────────────────
+// Stax-migration proving ground. The Payments page invokes the
+// `create-test-stax-invoice` Edge Function DIRECTLY via
+// supabase.functions.invoke — it does NOT route through apiPost/GAS or the
+// feature-flag apiRouter. The EF inserts a public.stax_invoices is_test row
+// and (by default) pushes it straight to the Stax API so it's ready to charge.
+// See invokeCreateTestStaxInvoice below.
 
-export interface CreateTestInvoiceResponse {
+export interface CreateTestStaxInvoiceResult {
   success: boolean;
-  qbInvoiceNo: string;
-  customer: string;
-  amount: number;
-  isTest: true;
+  qbInvoiceNo?: string;
+  customer?: string;
+  amount?: number;
+  isTest?: boolean;
+  staxCustomerId?: string;
+  staxId?: string;
+  status?: string;       // 'CREATED' (pushed) | 'PENDING' (staged)
+  pushed?: boolean;
+  summary?: string;
   error?: string;
+  code?: string;
 }
 
 export function postResetStaxInvoiceStatus(params: { qbInvoiceNo: string }) {
@@ -5026,8 +5038,31 @@ export function postDeleteStaxInvoice(params: { qbInvoiceNo: string; rowIndex?: 
   return apiPost<{ success: boolean; qbInvoiceNo: string; previousStatus: string }>('deleteStaxInvoice', params as Record<string, unknown>);
 }
 
-export function postCreateTestInvoice(params: { customer: string; amount: number; qbInvoiceNo?: string; dueDate?: string }) {
-  return apiPost<CreateTestInvoiceResponse>('createTestInvoice', params as Record<string, unknown>);
+/**
+ * Create a Stax test invoice entirely through Supabase (no GAS). Calls the
+ * `create-test-stax-invoice` Edge Function directly. supabase-js attaches the
+ * caller's session JWT; the EF enforces an admin/staff role gate (MIG-017).
+ *
+ * pushToStax (default true) makes the EF POST the invoice to Stax immediately
+ * so it appears in Stax ready to charge. When false (or on push failure) the
+ * row stays PENDING and is pushable later via "Create Stax Invoices".
+ */
+export async function invokeCreateTestStaxInvoice(params: {
+  customer: string;
+  amount: number;
+  description?: string;
+  qbInvoiceNo?: string;
+  dueDate?: string;
+  staxCustomerId?: string;
+  pushToStax?: boolean;
+}): Promise<CreateTestStaxInvoiceResult> {
+  const { supabase } = await import('./supabase');
+  const { data, error } = await supabase.functions.invoke<CreateTestStaxInvoiceResult>(
+    'create-test-stax-invoice',
+    { body: params as Record<string, unknown> },
+  );
+  if (error) return { success: false, error: error.message };
+  return data ?? { success: false, error: 'No response from create-test-stax-invoice' };
 }
 
 export interface SendStaxPayLinksResponse {

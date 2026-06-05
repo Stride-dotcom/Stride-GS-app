@@ -105,7 +105,11 @@ const GROUPED_CLAIM_ACTIONS = [
 const GROUPED_STAX_ACTIONS = [
   'importIIFFromDrive', 'updateStaxConfig', 'saveStaxCustomerMapping',
   'autoMatchStaxCustomers', 'pullStaxCustomers', 'syncStaxCustomers',
-  'createTestInvoice', 'updateStaxInvoice', 'deleteStaxInvoice',
+  // 'createTestInvoice' is intentionally NOT routed here — test invoices are
+  // 100% Supabase via the dedicated create-test-stax-invoice EF, invoked
+  // directly from Payments.tsx (no apiPost/feature-flag path). See
+  // invokeCreateTestStaxInvoice in src/lib/api.ts.
+  'updateStaxInvoice', 'deleteStaxInvoice',
   'staxRefreshCustomerIds', 'staxRefreshPaymentStatus', 'chargeSingleInvoice',
   'sendStaxPayLinks', 'sendStaxPayLink', 'voidStaxInvoice',
   'toggleAutoCharge', 'resetStaxInvoiceStatus', 'resolveStaxException',
