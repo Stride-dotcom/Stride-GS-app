@@ -66,6 +66,7 @@
  */
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { gasProxy } from '../_shared/gas-proxy.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -374,6 +375,43 @@ Deno.serve(async (req: Request) => {
     console.error('[create-test-stax-invoice] run-log insert threw:', e);
   }
 
+  // ── Reverse-writethrough to the GAS Stax sheet (MIG-002, best-effort) ──
+  // The EF owns the authoritative public.stax_invoices row, but the still-GAS
+  // charge path (handleChargeSingleInvoice_ / handleRunStaxCharges_) finds
+  // invoices by reading the Stax "Invoices" SHEET, and the Payments page's
+  // hard-refresh reads the sheet via GAS too. Without this mirror the SB-only
+  // row is invisible on refresh AND uncharageable ("Invoice not found"). We
+  // mirror the row into the sheet (with the final status + stax_id) so the
+  // legacy paths keep working until runStaxCharges migrates to SB. Best-effort:
+  // a failure does NOT fail the create (the SB row + the Payments SB-merge
+  // still keep it visible); we surface it for transparency.
+  let sheetMirrored = false;
+  let sheetMirrorError: string | null = null;
+  try {
+    const mirror = await gasProxy('staxSheetUpsert', {
+      qbInvoiceNo,
+      customer,
+      staxCustomerId: staxCustId,
+      invoiceDate:    today,
+      dueDate,
+      amount,
+      lineItemsJson,
+      staxId,                 // '' when not pushed
+      status,                 // CREATED | PENDING
+      notes:          TEST_NOTE,
+      isTest:         true,
+      autoCharge:     true,
+      callerEmail,            // withAdminGuard_ on the GAS side reads this
+    }, { timeoutMs: 25_000 });
+    sheetMirrored = mirror.ok;
+    if (!mirror.ok) sheetMirrorError = mirror.error ?? 'staxSheetUpsert failed';
+  } catch (e) {
+    sheetMirrorError = e instanceof Error ? e.message : String(e);
+  }
+  if (!sheetMirrored) {
+    console.error('[create-test-stax-invoice] sheet mirror failed (row is SB-only, not chargeable via GAS yet):', sheetMirrorError);
+  }
+
   // ── Response ──────────────────────────────────────────────────────────
   // When a push was requested but failed, surface success:false + error so
   // the UI never shows a false "pushed" (the #632 silent-failure guard). The
@@ -393,6 +431,8 @@ Deno.serve(async (req: Request) => {
       staxId:         '',
       status,
       pushed:         false,
+      sheetMirrored,
+      sheetMirrorError,
       summary,
       requestId,
     }, 200);
@@ -408,6 +448,8 @@ Deno.serve(async (req: Request) => {
     staxId,
     status,
     pushed,
+    sheetMirrored,
+    sheetMirrorError,
     summary,
     requestId,
   }, 200);
