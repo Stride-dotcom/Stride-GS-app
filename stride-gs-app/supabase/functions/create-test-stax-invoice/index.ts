@@ -354,7 +354,9 @@ Deno.serve(async (req: Request) => {
         .update({
           stax_id:    staxId,
           status:     'CREATED',
-          notes:      `${TEST_NOTE} — pushed to Stax at ${nowIso}`,
+          // Preserve the operator's note/reference (rowNotes) — appending the
+          // push stamp rather than overwriting, so the Payments UI keeps it.
+          notes:      `${rowNotes} — pushed to Stax at ${nowIso}`,
           updated_at: new Date().toISOString(),
         })
         .eq('id', rowId);
@@ -375,10 +377,10 @@ Deno.serve(async (req: Request) => {
 
   const status = pushed ? 'CREATED' : 'PENDING';
   const summary = pushed
-    ? `Test invoice ${qbInvoiceNo} created in Stax ($${amount.toFixed(2)}, ${customer})`
+    ? `Stax charge ${qbInvoiceNo} created in Stax ($${amount.toFixed(2)}, ${customer})`
     : pushToStax
-      ? `Test invoice ${qbInvoiceNo} staged as PENDING — Stax push failed: ${pushError}`
-      : `Test invoice ${qbInvoiceNo} staged as PENDING ($${amount.toFixed(2)}, ${customer})`;
+      ? `Stax charge ${qbInvoiceNo} staged as PENDING — Stax push failed: ${pushError}`
+      : `Stax charge ${qbInvoiceNo} staged as PENDING ($${amount.toFixed(2)}, ${customer})`;
 
   // run-log mirror (best-effort).
   try {
