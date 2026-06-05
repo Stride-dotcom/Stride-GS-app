@@ -1,1 +1,0 @@
-import{r as e}from"./index-DiR5Lk7E.js";export{e as renderDocUpload};
