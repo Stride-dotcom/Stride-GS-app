@@ -4972,6 +4972,9 @@ export interface CreateTestStaxInvoiceResult {
   staxId?: string;
   status?: string;       // 'CREATED' (pushed) | 'PENDING' (staged)
   pushed?: boolean;
+  autoCharge?: boolean;
+  sheetMirrored?: boolean;
+  sheetMirrorError?: string | null;
   summary?: string;
   error?: string;
   code?: string;
@@ -5053,6 +5056,8 @@ export async function invokeCreateTestStaxInvoice(params: {
   description?: string;
   qbInvoiceNo?: string;
   dueDate?: string;
+  notes?: string;
+  autoCharge?: boolean;
   staxCustomerId?: string;
   pushToStax?: boolean;
 }): Promise<CreateTestStaxInvoiceResult> {
