@@ -1,5 +1,5 @@
 /* ===================================================
-   StrideAPI.gs — v38.262.1 — 2026-06-05 PST — [STAX] fix: handleCreateTestInvoice_ now mirrors the new PENDING row to public.stax_invoices via api_sbResyncStaxInvoice_. The "Create Test Invoice" button (Payments page) appended a PENDING row to the Stax Invoices sheet but never wrote the Supabase mirror — every other Stax write handler (resetStaxInvoiceStatus, toggleAutoCharge, updateStaxInvoice, etc.) calls api_sbResyncStaxInvoice_ at the end, but createTestInvoice was the lone handler missing it. The React Payments page reads invoices from public.stax_invoices (fetchStaxInvoicesFromSupabase), so a test invoice that never mirrored was invisible in the UI: Justin saw "success" but the row never appeared, could never be selected, never got pushed to Stax via Create Stax Invoices, and stayed PENDING forever with no stax_id (Justin, 2026-06-04 — no stax_invoices rows created June 3-4, no createStaxInvoices in gas_call_log because the invoice was never visible to push). Fix: added the standard one-line write-through before the success return so the new PENDING test invoice mirrors to Supabase immediately and shows in the UI, where it can be selected and pushed to Stax normally. No change to the create flow's intentional PENDING-staging design (test invoices still do NOT auto-push to Stax), no schema change, no billing logic touched, no change to the v38.182 atomic invoice counter.
+   StrideAPI.gs — v38.263.0 — 2026-06-05 PST — [STAX] feat: new staxSheetUpsert action (handleStaxSheetUpsert_) — reverse-writethrough mirror of a single Stax invoice row from Supabase into the Stax Auto Pay "Invoices" sheet, called by the create-test-stax-invoice Edge Function. That EF is SB-primary (inserts public.stax_invoices + POSTs to Stax directly, no GAS), but the still-GAS charge path (handleChargeSingleInvoice_ / handleRunStaxCharges_) finds invoices by reading the Invoices SHEET — so an SB-only test invoice was invisible to a hard refresh (the noCache path reads the sheet via GAS) and could not be charged ("Invoice not found"). This action mirrors the EF's row into the sheet (MIG-002 synchronous reverse-writethrough) so the legacy charge + refresh paths keep working until runStaxCharges migrates to SB. Idempotent on QB Invoice # (updates in place else appends), header-resolved columns via stax_invoiceCols_ (no positional writes), admin-only via withAdminGuard_, LockService-guarded. It is the SHEET writer ONLY — it does NOT call api_sbResyncStaxInvoice_ because the EF already owns the authoritative public.stax_invoices row. No schema change, no billing logic touched, no change to the v38.182 atomic invoice counter. — v38.262.1 — 2026-06-05 PST — [STAX] fix: handleCreateTestInvoice_ now mirrors the new PENDING row to public.stax_invoices via api_sbResyncStaxInvoice_. The "Create Test Invoice" button (Payments page) appended a PENDING row to the Stax Invoices sheet but never wrote the Supabase mirror — every other Stax write handler (resetStaxInvoiceStatus, toggleAutoCharge, updateStaxInvoice, etc.) calls api_sbResyncStaxInvoice_ at the end, but createTestInvoice was the lone handler missing it. The React Payments page reads invoices from public.stax_invoices (fetchStaxInvoicesFromSupabase), so a test invoice that never mirrored was invisible in the UI: Justin saw "success" but the row never appeared, could never be selected, never got pushed to Stax via Create Stax Invoices, and stayed PENDING forever with no stax_id (Justin, 2026-06-04 — no stax_invoices rows created June 3-4, no createStaxInvoices in gas_call_log because the invoice was never visible to push). Fix: added the standard one-line write-through before the success return so the new PENDING test invoice mirrors to Supabase immediately and shows in the UI, where it can be selected and pushed to Stax normally. No change to the create flow's intentional PENDING-staging design (test invoices still do NOT auto-push to Stax), no schema change, no billing logic touched, no change to the v38.182 atomic invoice counter.
    StrideAPI.gs — v38.262.0 — 2026-06-04 PST — [USERS] fix: createUser now defaults Active=TRUE so new accounts can log in immediately. handleCreateUser_ previously wrote Active=FALSE for every manually-created user (Settings → Users → Add User), requiring an admin to remember to flip the toggle afterward — staff routinely forgot, locking the new user out of login and the whole app. The default is now TRUE (line ~12065: active = forceActive==="FALSE" ? "FALSE" : "TRUE"), matching the onboarding path api_upsertClientUser_ which has always created client users Active=TRUE. Callers can still create a deactivated account by explicitly passing active="FALSE". Companion React changes: the Add User modal (Settings.tsx) gains an "Active" checkbox defaulting to ON, useUsers.addUser + createApiUser thread the active flag through as params.active, and the profiles.is_active column default is made explicit via migration 20260604160000_profiles_is_active_default_true.sql (the live DB already had DEFAULT true — this version-controls it). No schema/billing change, no change to the v38.182 atomic invoice counter, half-write detection, or any billing logic.
    StrideAPI.gs — v38.261.0 — 2026-06-03 PST — [DOCS] feat: Repair Work Order items table gains a Location column. The DOC_REPAIR_WORK_ORDER items table showed Item ID/Qty/Vendor/Description/Sidemark/Room but not the item's warehouse Location, so staff working a repair couldn't see where to pull it from. Both GAS renderers of this doc now fill {{ITEM_LOCATION}} = api_esc_(itemLoc || "") (the same item-location var already used for the header {{LOCATION}} token): handleStartRepair_ (~line 21490) and handleRespondToRepairQuote_ (~line 20838). Companion React change (docTokens.ts buildRepairTokens fills {{ITEM_LOCATION}} from repair.location) + migration 20260603140000_repair_work_order_location_column.sql (adds the Location header + {{ITEM_LOCATION}} monospace cell after Room). Migration applied AFTER both renderers deploy so the token is never left unrendered. No data/schema change beyond the template, no billing logic touched.
    StrideAPI.gs — v38.260.0 — 2026-06-03 PST — [CLIENTS] fix: __writeThroughReverseClients_ now writes CLIENT_NAME to the per-tenant Settings tab. Renaming a client in the app routes through update-client-sb → writeThroughReverse → __writeThroughReverseClients_, which mirrored the changed row to CB Clients (cbHeader) + SB but NOT the per-tenant Settings tab CLIENT_NAME key. Reason: CLIENT_FIELDS_.clientName has cbHeader + supabaseColumn but no clientSettingsKey, so the schema loop that writes per-tenant Settings skipped it (same as clientEmail/contactName/phone — which were ALREADY handled by explicit writeSetting_ lines for CLIENT_EMAIL/CONTACT_NAME/PHONE). CLIENT_NAME had no such explicit line, so it never propagated. Symptom (Justin, 2026-06-03): renamed Arkitektura Forty → Arkitektura in the app; SB clients.name + CB Clients updated, but inspection-report emails (handleCompleteTask_ reads settings["CLIENT_NAME"] via api_getSettings_) still said "Arkitektura Forty" because the per-tenant Settings tab kept the onboarding-time value. Fix: added `if (row.hasOwnProperty("name")) writeSetting_("CLIENT_NAME", ...)` alongside the existing CLIENT_EMAIL/CONTACT_NAME/PHONE writes so all four identity fields propagate to the per-tenant Settings tab on every SB-primary client update. The legacy GAS path (api_writeClientSettings_ line ~30678) already wrote CLIENT_NAME explicitly — this brings the SB-primary mirror to parity. No schema change, no CB/SB change, no billing logic touched. Arkitektura's stale Settings.CLIENT_NAME backfilled once after deploy via a writeThroughReverse re-fire.
@@ -10636,6 +10636,10 @@ function doPost(e) {
       case "createTestInvoice":
         return withAdminGuard_(callerEmail, function() {
           return handleCreateTestInvoice_(payload);
+        });
+      case "staxSheetUpsert":
+        return withAdminGuard_(callerEmail, function() {
+          return handleStaxSheetUpsert_(payload);
         });
       case "importIIFFromDrive":
         return withAdminGuard_(callerEmail, function() {
@@ -39691,6 +39695,93 @@ function handleCreateTestInvoice_(payload) {
       isTest: true
     });
 
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * POST staxSheetUpsert — reverse-writethrough mirror of a single Stax invoice
+ * row from Supabase into the Stax Auto Pay "Invoices" sheet.
+ *
+ * v38.263.0 — added for the create-test-stax-invoice Edge Function. That EF is
+ * SB-primary (it inserts public.stax_invoices and POSTs to Stax directly, no
+ * GAS), but the still-GAS charge path (handleChargeSingleInvoice_ /
+ * handleRunStaxCharges_) reads the Invoices SHEET by qb_invoice_no + Stax
+ * Invoice ID — so an SB-only row is invisible to a hard refresh AND cannot be
+ * charged ("Invoice not found"). This action lets the EF mirror its row into
+ * the sheet (MIG-002 synchronous reverse-writethrough) so the legacy charge +
+ * refresh paths keep working until runStaxCharges migrates to SB. It is the
+ * sheet writer ONLY — it does NOT call api_sbResyncStaxInvoice_, because the
+ * EF already owns the authoritative public.stax_invoices row (re-mirroring
+ * would be redundant and could clobber the EF's fresher values).
+ *
+ * Idempotent on QB Invoice #: updates the row in place if it exists, else
+ * appends. Header-resolved columns (stax_invoiceCols_) — no positional writes.
+ * Admin-only via withAdminGuard_ at the doPost call site; LockService-guarded.
+ *
+ * Payload: { qbInvoiceNo (required), customer, staxCustomerId, invoiceDate,
+ *   dueDate, amount, lineItemsJson, staxId, status, notes, isTest, autoCharge }
+ */
+function handleStaxSheetUpsert_(payload) {
+  var qbInvoiceNo = String(payload.qbInvoiceNo || "").trim();
+  if (!qbInvoiceNo) return errorResponse_("qbInvoiceNo is required", "MISSING_PARAM");
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) {
+    return errorResponse_("Another operation is in progress. Please wait.", "LOCK_CONFLICT");
+  }
+
+  try {
+    var ss = getStaxSpreadsheet_();
+    var invSheet = ss.getSheetByName("Invoices");
+    if (!invSheet) return errorResponse_("Invoices tab not found in Stax spreadsheet", "NOT_FOUND");
+
+    var cols = stax_invoiceCols_(invSheet);  // header-resolved (ensures all columns exist)
+    var lastCol = invSheet.getLastColumn();
+
+    // Locate an existing row by QB Invoice # (idempotent re-runs / updates).
+    var data = invSheet.getDataRange().getValues();
+    var foundRow = -1;
+    for (var i = 1; i < data.length; i++) {
+      if (String(data[i][cols.qb - 1] || "").trim() === qbInvoiceNo) { foundRow = i + 1; break; }
+    }
+
+    // Build a full-width row, preserving existing cells on update.
+    var row = foundRow > 0
+      ? invSheet.getRange(foundRow, 1, 1, lastCol).getValues()[0]
+      : new Array(lastCol).fill("");
+
+    function setCol_(colIdx, value) { if (colIdx > 0 && colIdx <= lastCol) row[colIdx - 1] = value; }
+
+    var nowTs = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+    setCol_(cols.qb,          qbInvoiceNo);
+    if (payload.customer        !== undefined) setCol_(cols.customer,    String(payload.customer || ""));
+    if (payload.staxCustomerId  !== undefined) setCol_(cols.staxCustId,  String(payload.staxCustomerId || ""));
+    if (payload.invoiceDate     !== undefined) setCol_(cols.invoiceDate, String(payload.invoiceDate || ""));
+    if (payload.dueDate         !== undefined) setCol_(cols.dueDate,     String(payload.dueDate || ""));
+    if (payload.amount          !== undefined) setCol_(cols.amount,      Number(payload.amount) || 0);
+    if (payload.lineItemsJson   !== undefined) setCol_(cols.lineItems,   String(payload.lineItemsJson || ""));
+    if (payload.staxId          !== undefined) setCol_(cols.staxId,      String(payload.staxId || ""));
+    if (payload.status          !== undefined) setCol_(cols.status,      String(payload.status || "PENDING"));
+    if (payload.notes           !== undefined) setCol_(cols.notes,       String(payload.notes || ""));
+    setCol_(cols.isTest,     payload.isTest     === false ? "" : "TRUE");
+    setCol_(cols.autoCharge, payload.autoCharge === false ? "" : "TRUE");
+    if (foundRow <= 0) setCol_(cols.createdAt, nowTs);
+
+    if (foundRow > 0) {
+      invSheet.getRange(foundRow, 1, 1, lastCol).setValues([row]);
+    } else {
+      invSheet.appendRow(row);
+    }
+
+    try { CacheService.getScriptCache().remove("stax_invoices"); } catch (e) {}
+
+    return jsonResponse_({
+      success: true,
+      qbInvoiceNo: qbInvoiceNo,
+      action: foundRow > 0 ? "updated" : "appended"
+    });
   } finally {
     lock.releaseLock();
   }
