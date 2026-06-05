@@ -43,13 +43,22 @@
  *     response carries success:false + a real error in that case — never a
  *     green "pushed" on a zero-push (the #632 silent-failure trap).
  *
+ * Backs the Payments "Create Stax Charge" tool — general-purpose (any client,
+ * any positive amount, user-set due date / notes / auto-charge). is_test stays
+ * true to distinguish these from batch-created (IIF-imported) invoices.
+ *
  * Inputs:
  *   {
  *     customer:        string             // required — client display name
- *     amount:          number             // required — 0.01 .. 100.00
+ *     amount:          number             // required — any amount > 0
  *     description?:    string             // optional — Stax line-item label
  *     qbInvoiceNo?:    string             // optional — auto TEST-… if blank
  *     dueDate?:        string             // optional — YYYY-MM-DD, else today
+ *                                         //   (controls when auto-charge fires)
+ *     notes?:          string             // optional — free-text reference,
+ *                                         //   e.g. "for INV-000142"
+ *     autoCharge?:     boolean            // optional — default true; false marks
+ *                                         //   the row manual (daily runner skips)
  *     staxCustomerId?: string             // optional — pre-resolved by the UI
  *     pushToStax?:     boolean            // optional — default true
  *     tenantId?:       string             // optional — audit only
@@ -85,6 +94,8 @@ interface Body {
   dueDate?:         string;
   staxCustomerId?:  string;
   pushToStax?:      boolean;
+  autoCharge?:      boolean;   // default true; false → row + sheet marked manual
+  notes?:           string;    // free-text reference (e.g. "for INV-000142")
   tenantId?:        string;
   callerEmail?:     string;
   requestId?:       string;
@@ -132,17 +143,23 @@ Deno.serve(async (req: Request) => {
   const customer = String(body.customer ?? '').trim();
   if (!customer) return jsonResponse({ error: 'Customer name is required', code: 'MISSING_PARAM' }, 200);
 
+  // Any positive amount — this is now a general-purpose "Create Stax Charge"
+  // tool (was capped at $100 when it was test-only). is_test stays true to
+  // distinguish from batch-created invoices.
   let amount = Number(body.amount);
-  if (!Number.isFinite(amount) || amount <= 0 || amount > 100) {
-    return jsonResponse({ error: 'Amount must be between $0.01 and $100.00', code: 'INVALID_PAYLOAD' }, 200);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return jsonResponse({ error: 'Amount must be greater than $0.00', code: 'INVALID_PAYLOAD' }, 200);
   }
   amount = Math.round(amount * 100) / 100;
 
   const tenantId    = String(body.tenantId    ?? '').trim();
   const callerEmail = String(body.callerEmail ?? '').trim() || userData.user.email || '';
   const requestId   = String(body.requestId   ?? '').trim() || crypto.randomUUID();
-  const description = String(body.description ?? '').trim() || `Test invoice ${customer}`;
+  const userNotes   = String(body.notes ?? '').trim();
+  const description = String(body.description ?? '').trim() || userNotes || `Stax charge ${customer}`;
   const pushToStax  = body.pushToStax !== false;   // default true
+  const autoCharge  = body.autoCharge !== false;   // default true
+  const rowNotes    = userNotes || TEST_NOTE;
 
   const staxApiKey = Deno.env.get('STAX_API_KEY') ?? '';
   const payUrlBase = Deno.env.get('STAX_INVOICE_PAY_URL') ?? DEFAULT_PAY_URL;
@@ -256,9 +273,9 @@ Deno.serve(async (req: Request) => {
     stax_id:          '',
     status:           'PENDING',
     created_at_sheet: laStamp2(now),
-    notes:            TEST_NOTE,
+    notes:            rowNotes,
     is_test:          true,
-    auto_charge:      true,
+    auto_charge:      autoCharge,
     updated_at:       nowIso,
   };
   const { data: inserted, error: insErr } = await sb
@@ -292,7 +309,7 @@ Deno.serve(async (req: Request) => {
     if (!staxConfigured) {
       pushError = 'STAX_API_KEY is not configured on this Edge Function';
     } else {
-      const subtotal = amount;            // single test line; tax 0
+      const subtotal = amount;            // single charge line; tax 0
       const staxPayload: Record<string, unknown> = {
         customer_id: staxCustId,
         total:       amount,
@@ -300,7 +317,7 @@ Deno.serve(async (req: Request) => {
         meta: {
           subtotal,
           tax: 0,
-          memo: `Test ${qbInvoiceNo} - ${customer}`,
+          memo: userNotes ? `${qbInvoiceNo} - ${customer} - ${userNotes}` : `${qbInvoiceNo} - ${customer}`,
           reference: qbInvoiceNo,
           invoiceNumber: qbInvoiceNo,
           lineItems,
@@ -398,10 +415,10 @@ Deno.serve(async (req: Request) => {
       lineItemsJson,
       staxId,                 // '' when not pushed
       status,                 // CREATED | PENDING
-      notes:          TEST_NOTE,
+      notes:          rowNotes,
       isTest:         true,
-      autoCharge:     true,
-      callerEmail,            // withAdminGuard_ on the GAS side reads this
+      autoCharge,             // false → GAS writes an explicit "FALSE" so the daily runner skips it
+      callerEmail,            // forwarded for parity (action is token-gated, not withAdminGuard_)
     }, { timeoutMs: 25_000 });
     sheetMirrored = mirror.ok;
     if (!mirror.ok) sheetMirrorError = mirror.error ?? 'staxSheetUpsert failed';
@@ -431,6 +448,7 @@ Deno.serve(async (req: Request) => {
       staxId:         '',
       status,
       pushed:         false,
+      autoCharge,
       sheetMirrored,
       sheetMirrorError,
       summary,
@@ -448,6 +466,7 @@ Deno.serve(async (req: Request) => {
     staxId,
     status,
     pushed,
+    autoCharge,
     sheetMirrored,
     sheetMirrorError,
     summary,
