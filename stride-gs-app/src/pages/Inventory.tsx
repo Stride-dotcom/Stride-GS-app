@@ -42,6 +42,7 @@ import { fmtDate, fmtDateLocal } from '../lib/constants';
 import { tanstackGlobalFilter, rowMatchesSearch } from '../lib/searchFilters';
 import { ItemDetailPanel } from '../components/shared/ItemDetailPanel';
 import { ItemIdBadges } from '../components/shared/ItemIdBadges';
+import { useItemIndicators } from '../hooks/useItemIndicators';
 import { CreateWillCallModal } from '../components/shared/CreateWillCallModal';
 import { CreateDeliveryOrderModal } from '../components/shared/CreateDeliveryOrderModal';
 import { TransferItemsModal } from '../components/shared/TransferItemsModal';
@@ -685,6 +686,14 @@ export function Inventory() {
   useLocations(apiConfigured);
   const { tasks, refetch: refetchTasks, addOptimisticTask, removeOptimisticTask } = useTasks(apiConfigured && clientFilter.length > 0, selectedSheetId);
   const { repairs, addOptimisticRepair, removeOptimisticRepair } = useRepairs(apiConfigured && clientFilter.length > 0, selectedSheetId);
+  // Supabase-backed indicator sets. We only consume its repair sets here:
+  // useItemIndicators expands the repair_items join (PR #616) so EVERY item on
+  // a batch repair is badged, not just the primary. The page's own inline
+  // derivation below stamps only the primary item (the `repairs` row carries a
+  // single item_id), which is why secondary items on a batch repair showed no
+  // R badge here even after #616 fixed the hook. We union the two below so the
+  // primary keeps its instant/optimistic badge AND secondaries get badged.
+  const repairIndicators = useItemIndicators(selectedSheetId);
   const { willCalls, addOptimisticWc, removeOptimisticWc } = useWillCalls(apiConfigured && clientFilter.length > 0, selectedSheetId);
   const { orders } = useOrders();
   const { apiShipments } = useShipments(apiConfigured && clientFilter.length > 0, selectedSheetId);
@@ -1114,7 +1123,7 @@ export function Inventory() {
   // and paints the item orange (the pattern that left badges lingering on cancelled
   // entities until item-by-item cleanup). Mirrors the same skip logic in
   // hooks/useItemIndicators.ts so the two derivations stay in sync.
-  const { inspOpenItems, inspDoneItems, inspFailedItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems, wcOpenItems, wcDoneItems, dtOpenItems, dtDoneItems } = useMemo(() => {
+  const { inspOpenItems, inspDoneItems, inspFailedItems, asmOpenItems, asmDoneItems, repairOpenItems: inlineRepairOpenItems, repairDoneItems: inlineRepairDoneItems, wcOpenItems, wcDoneItems, dtOpenItems, dtDoneItems } = useMemo(() => {
     const inspOpen = new Set<string>();
     const inspDone = new Set<string>();
     const inspFailed = new Set<string>();
@@ -1183,6 +1192,22 @@ export function Inventory() {
 
     return { inspOpenItems: inspOpen, inspDoneItems: inspDone, inspFailedItems: inspFailed, asmOpenItems: asmOpen, asmDoneItems: asmDone, repairOpenItems: repOpen, repairDoneItems: repDone, wcOpenItems: wcOpen, wcDoneItems: wcDone, dtOpenItems: dtOpen, dtDoneItems: dtDone };
   }, [tasks, repairs, willCalls, orders]);
+
+  // Union the page-local repair badge sets (instant + optimistic, but PRIMARY
+  // item only — the `repairs` row carries one item_id) with useItemIndicators'
+  // Supabase sets, which expand the repair_items join so every item on a batch
+  // repair is badged. Open wins over done: an item open in EITHER source is
+  // orange; it's green only if done in some source and open in none. This is
+  // the fix for PR #616's R badge regressing here — the hook was fixed but this
+  // page's parallel derivation still stamped only the primary item.
+  const { repairOpenItems, repairDoneItems } = useMemo(() => {
+    const open = new Set<string>(inlineRepairOpenItems);
+    for (const id of repairIndicators.repairOpenItems) open.add(id);
+    const done = new Set<string>();
+    for (const id of inlineRepairDoneItems) if (!open.has(id)) done.add(id);
+    for (const id of repairIndicators.repairDoneItems) if (!open.has(id)) done.add(id);
+    return { repairOpenItems: open, repairDoneItems: done };
+  }, [inlineRepairOpenItems, inlineRepairDoneItems, repairIndicators.repairOpenItems, repairIndicators.repairDoneItems]);
 
   // Latest public entity_note per visible item, batched so the Notes
   // column can show collaborative notes without per-row queries. Falls
