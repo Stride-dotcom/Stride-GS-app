@@ -1300,6 +1300,59 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
               <Field label="Completed" value={fmtDate(repair.completedDate)} />
             </div>
           )}
+
+          {/* Quote breakdown — line-item detail (each service line + qty,
+              subtotal, sales tax, customer total) so the team can see the
+              full breakdown, not just the total amount.
+              The slide-out footer already renders this same summary for
+              Quote Sent / Approved (paired with Edit / Void), so we suppress
+              it here for those two active statuses to avoid a duplicate
+              card. For every later status (In Progress / Complete /
+              Cancelled / Declined) the footer drops it entirely, which is
+              exactly where the breakdown was previously invisible — this is
+              now the one place it shows. No role gate: clients see their own
+              quote, matching the footer + page Quote-tab behavior (neither
+              is admin-gated). */}
+          {Array.isArray(repair.quoteLines) && repair.quoteLines.length > 0
+            && !(isActive && (effectiveStatus === 'Quote Sent' || effectiveStatus === 'Approved')) && (
+            <div style={{ marginBottom: 16 }}>
+              <RepairQuoteSummary
+                heading="Quote breakdown"
+                lines={repair.quoteLines}
+                subtotal={repair.quoteSubtotal ?? 0}
+                taxAreaName={repair.quoteTaxAreaName ?? ''}
+                taxRate={repair.quoteTaxRate ?? 0}
+                taxAmount={repair.quoteTaxAmount ?? 0}
+                grandTotal={repair.quoteGrandTotal ?? 0}
+              />
+            </div>
+          )}
+
+          {/* Legacy single-amount quotes (pre-multiline builder) have no
+              line items to break down — surface the one number we have,
+              to all roles (the grid's "Quote Amount" field is admin-only).
+              Same status gate as the breakdown above. */}
+          {(!Array.isArray(repair.quoteLines) || repair.quoteLines.length === 0)
+            && typeof repair.quoteAmount === 'number' && repair.quoteAmount > 0
+            && !(isActive && (effectiveStatus === 'Quote Sent' || effectiveStatus === 'Approved')) && (
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ fontSize: 11, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 6 }}>
+                Quote
+              </div>
+              <div style={{ padding: 10, background: theme.colors.bgSubtle, borderRadius: 8 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 4, fontSize: 13 }}>
+                  <span style={{ fontWeight: 700, color: theme.colors.text }}>Quote amount</span>
+                  <span style={{ fontWeight: 700, color: theme.colors.orange, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                    ${repair.quoteAmount.toFixed(2)}
+                  </span>
+                </div>
+                <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 4 }}>
+                  Legacy single-amount quote — no line-item breakdown on file.
+                </div>
+              </div>
+            </div>
+          )}
+
           <Field label="Description" value={repair.description} />
 
           {/* Repair Notes (editable) */}
@@ -2855,12 +2908,17 @@ function RepairQuoteSummary(props: {
   taxRate: number;
   taxAmount: number;
   grandTotal: number;
+  // Header label. Defaults to "Quote (sent)" for the footer/Quote-tab
+  // usages where the quote was just sent; the Details tab passes
+  // "Quote breakdown" so the heading reads accurately on later
+  // statuses (In Progress / Complete / etc.) too.
+  heading?: string;
 }) {
-  const { lines, subtotal, taxAreaName, taxRate, taxAmount, grandTotal } = props;
+  const { lines, subtotal, taxAreaName, taxRate, taxAmount, grandTotal, heading = 'Quote (sent)' } = props;
   return (
     <div style={{ marginBottom: 10 }}>
       <div style={{ fontSize: 11, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 6 }}>
-        Quote (sent)
+        {heading}
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 3, padding: 10, background: theme.colors.bgSubtle, borderRadius: 8 }}>
         {lines.map((l, i) => (
