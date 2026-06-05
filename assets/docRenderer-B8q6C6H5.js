@@ -1,1 +1,0 @@
-import{r as e}from"./index-wFzo7-JH.js";export{e as renderDocUpload};
