@@ -1,5 +1,21 @@
 /**
- * dt-push-order — Supabase Edge Function (Phase 2c) — v43 2026-05-30 PST
+ * dt-push-order — Supabase Edge Function (Phase 2c) — v44 2026-06-05 PST
+ *
+ * v44: Stop wiping DT phone/email on re-push. The `contact` group emitted
+ *      <phone1>/<phone2>/<email> unconditionally with a `|| ''` fallback,
+ *      so any order whose dt_orders.contact_phone / contact_email was
+ *      empty pushed an empty tag — which DT's add_order upsert treats as
+ *      "set this field to blank" and overwrites the value the dispatcher
+ *      (or the original import) had on file. Now each tag is emitted only
+ *      when Stride holds a non-empty value; an empty column means the tag
+ *      is omitted and DT keeps its existing data (same per-field omit-
+ *      when-empty rule already used for <additional_field_N> + item
+ *      <location>/<cube>). Reported 2026-06-05 on an Amy-Chu /
+ *      Michelle-Mele order whose phone + email vanished from DT after an
+ *      in-app edit + re-push. Address identity fields (address1/city/
+ *      state/zip) are unchanged — they stay always-emitted because DT
+ *      geocodes/routes on them and blanking the stop is worse than
+ *      re-sending an unchanged value.
  *
  * ⚠️ DEPLOY WITH verify_jwt=false (`supabase functions deploy dt-push-order
  *    --no-verify-jwt`). NOT a code setting — it's a per-deploy gateway flag
@@ -1045,9 +1061,28 @@ function buildOrderXml(
   // scoped push is the whole point: DT keeps the dispatcher's schedule.
   // <items> → `items` group. <description>/<notes> → `notes` group.
   // <service_time>/<additional_fields> → `custom` group.
-  const contactExtrasXml = include('contact')
-    ? `\n      <phone1>${xmlEscape(order.contact_phone || '')}</phone1>\n      <phone2>${xmlEscape(order.contact_phone2 || '')}</phone2>\n      <email>${xmlEscape(order.contact_email || '')}</email>`
-    : '';
+  // phone1 / phone2 / email are editable `contact` extras. Emit each tag
+  // ONLY when Stride holds a non-empty value. An empty <phone1></phone1>
+  // (or <email/>) on a re-push is read by DT's add_order upsert as
+  // "set this field to blank" and WIPES whatever the dispatcher or the
+  // original import had on file — the unconditional `|| ''` tags below
+  // were doing exactly that. Skipping the tag when the column is empty
+  // leaves DT's existing value intact, mirroring the per-field "omit
+  // when empty" rule already used for <additional_field_N> and the item
+  // <location>/<cube> tags. (Fix for the 2026-06-05 Amy-Chu / Michelle-
+  // Mele report: a re-push after an in-app edit blanked the DT phone +
+  // email because that dt_orders row had contact_phone/contact_email
+  // empty, so the old tags pushed destructive blanks.)
+  const contactExtras: string[] = [];
+  if (include('contact')) {
+    const phone1 = (order.contact_phone || '').trim();
+    const phone2 = (order.contact_phone2 || '').trim();
+    const email  = (order.contact_email || '').trim();
+    if (phone1) contactExtras.push(`      <phone1>${xmlEscape(phone1)}</phone1>`);
+    if (phone2) contactExtras.push(`      <phone2>${xmlEscape(phone2)}</phone2>`);
+    if (email)  contactExtras.push(`      <email>${xmlEscape(email)}</email>`);
+  }
+  const contactExtrasXml = contactExtras.length > 0 ? '\n' + contactExtras.join('\n') : '';
 
   // v39 — prefer dt_scheduled_date (mirrored from DT's export.xml by
   // dt-sync-statuses v19) over local_service_date when set. This keeps
