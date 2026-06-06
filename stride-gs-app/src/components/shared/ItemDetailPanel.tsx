@@ -24,6 +24,7 @@ import { useAutocomplete } from '../../hooks/useAutocomplete';
 import { FloatingActionMenu, type FABAction } from './FloatingActionMenu';
 import { usePhotoGraphRollup, useNoteGraphRollup, type RollupContext } from '../../hooks/useGraphRollup';
 import { EntityNotesInline } from '../notes/EntityNotesInline';
+import { ItemCodStorageSection } from './ItemCodStorageSection';
 import { useDocuments } from '../../hooks/useDocuments';
 import { useServiceCatalog } from '../../hooks/useServiceCatalog';
 
@@ -748,6 +749,7 @@ export function ItemDetailPanel({
     : null;
 
   const requestRepairQuoteBackend = useFeatureFlag('requestRepairQuote');
+  const codStorageEnabled = useFeatureFlag('codStorageBilling') === 'supabase';
   const handleRequestRepair = useCallback(async () => {
     if (!isApiConfigured() || !clientSheetId || !item.itemId) return;
     setRepairRequesting(true);
@@ -1113,6 +1115,17 @@ export function ItemDetailPanel({
             })}
           </div>
         </Section>
+      )}
+
+      {/* COD Storage (feature-gated: end customers pay storage) */}
+      {codStorageEnabled && (
+        <ItemCodStorageSection
+          item={item}
+          clientSheetId={clientSheetId}
+          canEdit={!!canEditStaff}
+          applyItemPatch={applyItemPatch}
+          clearItemPatch={clearItemPatch}
+        />
       )}
 
       {/* Related — panel mode only. In page mode the Activity tab already
