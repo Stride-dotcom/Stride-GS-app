@@ -75,6 +75,70 @@ function round2(n: number): number {
 }
 
 /**
+ * Persisted per-item shape stored in dt_orders.cod_storage_details (JSONB).
+ * snake_case so the mark_cod_storage_collected SQL RPC reads it directly.
+ */
+export interface CodStorageDetail {
+  item_id: string;
+  inventory_id: string | null;
+  sidemark: string;
+  description: string;
+  item_class: string;
+  cubic_feet: number;
+  start_date: string;
+  end_date: string;
+  days: number;
+  rate: number;
+  amount: number;
+}
+
+/** Serialize computed line items to the persisted snake_case detail rows. */
+export function serializeCodDetails(items: CodStorageLineItem[], rate: number): CodStorageDetail[] {
+  return items.map(it => ({
+    item_id: it.itemId,
+    inventory_id: it.inventoryId,
+    sidemark: it.sidemark,
+    description: it.description,
+    item_class: it.itemClass,
+    cubic_feet: it.cubicFeet,
+    start_date: it.startDate,
+    end_date: it.endDate,
+    days: it.days,
+    rate,
+    amount: it.amount,
+  }));
+}
+
+export interface RecomputedCodLine {
+  details: CodStorageDetail[];
+  itemCount: number;
+  total: number;
+  periodStart: string | null;
+}
+
+/**
+ * Recompute a COD line from its persisted detail rows when the cutoff or rate
+ * changes (OrderPage editing). Self-contained — each detail row already carries
+ * cubic_feet + start_date, so no inventory re-fetch is needed.
+ */
+export function recomputeCodLineFromDetails(
+  details: CodStorageDetail[],
+  cutoffIso: string,
+  rate: number,
+): RecomputedCodLine {
+  let total = 0;
+  let periodStart: string | null = null;
+  const out = details.map(d => {
+    const days = daysInclusive(d.start_date, cutoffIso);
+    const amount = round2((d.cubic_feet || 0) * (rate || 0) * days);
+    total += amount;
+    if (!periodStart || (d.start_date && d.start_date < periodStart)) periodStart = d.start_date;
+    return { ...d, end_date: cutoffIso, days, rate, amount };
+  });
+  return { details: out, itemCount: out.length, total: round2(total), periodStart };
+}
+
+/**
  * Compute the COD Storage collection line for a delivery order.
  *
  * Per item: cubicFeet × rate × eligibleDays, where eligibleDays spans

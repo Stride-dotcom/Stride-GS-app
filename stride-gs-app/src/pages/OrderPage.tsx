@@ -22,6 +22,8 @@ import {
 import { theme } from '../styles/theme';
 import { BtnSpinner } from '../components/ui/BtnSpinner';
 import { useAuth } from '../contexts/AuthContext';
+import { useFeatureFlagRow, resolveFlagBackend } from '../contexts/FeatureFlagContext';
+import { OrderCodStorageCard } from '../components/shared/OrderCodStorageCard';
 import { useOrderDetail } from '../hooks/useOrderDetail';
 import { useGoBack } from '../hooks/useGoBack';
 import {
@@ -509,6 +511,8 @@ function DetailsTab({
    *  standalone pickup or a closed order). */
   onAddPickup?: () => void;
 }) {
+  const codFlagRow = useFeatureFlagRow('codStorageBilling');
+  const codStorageOn = !!codFlagRow && resolveFlagBackend(codFlagRow, order.tenantId) === 'supabase';
   const addressLine = [order.contactAddress, order.contactCity, order.contactState, order.contactZip].filter(Boolean).join(', ');
   // Identify the P+D partner — when this row is the delivery leg of a
   // pair, the partner is the pickup leg (and vice versa). Drives the
@@ -1223,6 +1227,11 @@ function DetailsTab({
             </>
           )}
         </EPCard>
+      )}
+
+      {/* Card 4.5 — COD Storage collection line (feature-gated) */}
+      {codStorageOn && !editing && (
+        <OrderCodStorageCard order={order} performedBy={performedBy} canEdit={isStaff} />
       )}
 
       {/* Card 5 — Notes. v42 split: Pickup Notes (pushed to the pickup

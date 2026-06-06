@@ -113,7 +113,7 @@ import { uploadOrderAttachments } from '../../lib/orderAttachmentUpload';
 import { ConfirmDialog } from './ConfirmDialog';
 import { summarizeDtChanges, DT_GROUP_LABEL, type DtFieldGroup, type DtChangeSummary } from '../../lib/dtSelectivePush';
 import { useFeatureFlagRow, resolveFlagBackend } from '../../contexts/FeatureFlagContext';
-import { computeCodStorageLine, COD_STORAGE_DEFAULT_RATE, todayIso } from '../../lib/codStorage';
+import { computeCodStorageLine, serializeCodDetails, COD_STORAGE_DEFAULT_RATE, todayIso } from '../../lib/codStorage';
 
 // ── Address Book helpers ─────────────────────────────────────────────────
 interface AddressBookContact {
@@ -2916,7 +2916,7 @@ export function CreateDeliveryOrderModal({
             cod_storage_total: codLine.total,
             cod_storage_item_count: codLine.itemCount,
             cod_storage_period_start: codLine.periodStart,
-            cod_storage_details: codLine.items,
+            cod_storage_details: serializeCodDetails(codLine.items, COD_STORAGE_DEFAULT_RATE),
           }
         : {};
 

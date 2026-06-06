@@ -9,6 +9,7 @@
  * allowing the caller to fall back to the GAS API.
  */
 import { supabase } from './supabase';
+import type { CodStorageDetail } from './codStorage';
 import type {
   ApiInventoryItem,
   InventoryResponse,
@@ -1973,6 +1974,17 @@ export interface SupabaseDtOrderRow {
   actual_service_time_minutes: number | null;
   cod_amount: number | null;
   dt_status_code: string | null;
+  // COD Storage collection line.
+  cod_storage_enabled: boolean | null;
+  cod_storage_cutoff_date: string | null;
+  cod_storage_rate: number | null;
+  cod_storage_total: number | null;
+  cod_storage_item_count: number | null;
+  cod_storage_period_start: string | null;
+  cod_storage_details: CodStorageDetail[] | null;
+  cod_storage_collected_at: string | null;
+  cod_storage_collected_by: string | null;
+  cod_storage_collection_notes: string | null;
 }
 
 export interface DtOrderItemForUI {
@@ -2159,6 +2171,17 @@ export interface DtOrderForUI {
   actualServiceTimeMinutes: number | null;
   codAmount: number | null;
   dtStatusCode: string;
+  // COD Storage (end customers pay storage) — collection line on the order.
+  codStorageEnabled: boolean;
+  codStorageCutoffDate: string | null;
+  codStorageRate: number | null;
+  codStorageTotal: number | null;
+  codStorageItemCount: number | null;
+  codStoragePeriodStart: string | null;
+  codStorageDetails: CodStorageDetail[] | null;
+  codStorageCollectedAt: string | null;
+  codStorageCollectedBy: string | null;
+  codStorageCollectionNotes: string | null;
   // When the row was first written to dt_orders (Postgres-side
   // created_at). Used as the default-newest sort on the Orders page
   // and for the "Date Created" column. Distinct from
@@ -2447,6 +2470,16 @@ export async function fetchDtOrdersFromSupabase(
         actualServiceTimeMinutes: row.actual_service_time_minutes,
         codAmount: row.cod_amount != null ? Number(row.cod_amount) : null,
         dtStatusCode: row.dt_status_code ?? '',
+        codStorageEnabled: row.cod_storage_enabled === true,
+        codStorageCutoffDate: row.cod_storage_cutoff_date ?? null,
+        codStorageRate: row.cod_storage_rate != null ? Number(row.cod_storage_rate) : null,
+        codStorageTotal: row.cod_storage_total != null ? Number(row.cod_storage_total) : null,
+        codStorageItemCount: row.cod_storage_item_count ?? null,
+        codStoragePeriodStart: row.cod_storage_period_start ?? null,
+        codStorageDetails: Array.isArray(row.cod_storage_details) ? (row.cod_storage_details as CodStorageDetail[]) : null,
+        codStorageCollectedAt: row.cod_storage_collected_at ?? null,
+        codStorageCollectedBy: row.cod_storage_collected_by ?? null,
+        codStorageCollectionNotes: row.cod_storage_collection_notes ?? null,
       };
     });
   } catch {
@@ -2681,6 +2714,16 @@ export async function fetchDtOrderByIdFromSupabase(
       actualServiceTimeMinutes: row.actual_service_time_minutes,
       codAmount: row.cod_amount != null ? Number(row.cod_amount) : null,
       dtStatusCode: row.dt_status_code ?? '',
+      codStorageEnabled: row.cod_storage_enabled === true,
+      codStorageCutoffDate: row.cod_storage_cutoff_date ?? null,
+      codStorageRate: row.cod_storage_rate != null ? Number(row.cod_storage_rate) : null,
+      codStorageTotal: row.cod_storage_total != null ? Number(row.cod_storage_total) : null,
+      codStorageItemCount: row.cod_storage_item_count ?? null,
+      codStoragePeriodStart: row.cod_storage_period_start ?? null,
+      codStorageDetails: Array.isArray(row.cod_storage_details) ? (row.cod_storage_details as CodStorageDetail[]) : null,
+      codStorageCollectedAt: row.cod_storage_collected_at ?? null,
+      codStorageCollectedBy: row.cod_storage_collected_by ?? null,
+      codStorageCollectionNotes: row.cod_storage_collection_notes ?? null,
     };
   } catch {
     return null;
