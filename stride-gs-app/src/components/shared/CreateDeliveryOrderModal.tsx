@@ -112,6 +112,8 @@ import { AttachmentUploadField } from './AttachmentUploadField';
 import { uploadOrderAttachments } from '../../lib/orderAttachmentUpload';
 import { ConfirmDialog } from './ConfirmDialog';
 import { summarizeDtChanges, DT_GROUP_LABEL, type DtFieldGroup, type DtChangeSummary } from '../../lib/dtSelectivePush';
+import { useFeatureFlagRow, resolveFlagBackend } from '../../contexts/FeatureFlagContext';
+import { computeCodStorageLine, COD_STORAGE_DEFAULT_RATE, todayIso } from '../../lib/codStorage';
 
 // ── Address Book helpers ─────────────────────────────────────────────────
 interface AddressBookContact {
@@ -776,6 +778,9 @@ export function CreateDeliveryOrderModal({
     if (!cls) return null;
     return cuFtByCode.get(String(cls).trim().toUpperCase()) ?? null;
   };
+
+  // COD Storage feature gate — resolved against this order's tenant.
+  const codFlagRow = useFeatureFlagRow('codStorageBilling');
 
   // If no liveItems were passed (modal opened from Orders page, not Inventory),
   // pull our own inventory. useInventory auto-scopes to accessible clients.
@@ -2876,6 +2881,45 @@ export function CreateDeliveryOrderModal({
         zip: deliveryZip, phone: deliveryPhone, phone2: deliveryPhone2, email: deliveryEmail,
       };
 
+      // ── COD Storage line (auto-computed at create) ──────────────────
+      // Only for delivery-of-warehouse-items, when the feature is on for
+      // this tenant and some items are flagged cod_storage. Cutoff defaults
+      // to the service date; rate to $0.05/cuft/day. The OrderPage owns
+      // subsequent editing (cutoff/rate/recalc/remove) + collection, so we
+      // only seed these on INSERT (see below) to avoid clobbering edits.
+      const codFeatureOn = !!codFlagRow && resolveFlagBackend(codFlagRow, clientSheetId || null) === 'supabase';
+      const codCutoff = serviceDate || todayIso();
+      const codLine = (codFeatureOn && mode === 'delivery' && itemsSource === 'warehouse')
+        ? computeCodStorageLine(
+            selectedInvItems
+              .filter(i => i.codStorage && i.codStorageStartDate)
+              .map(i => ({
+                itemId: i.itemId,
+                inventoryId: i.inventoryRowId ?? null,
+                sidemark: i.sidemark,
+                description: i.description,
+                itemClass: i.itemClass,
+                cubicFeet: classToCuFt(i.itemClass),
+                codStorage: true,
+                codStorageStartDate: i.codStorageStartDate,
+              })),
+            codCutoff,
+            COD_STORAGE_DEFAULT_RATE,
+            {},
+          )
+        : null;
+      const codStoragePayload: Record<string, unknown> = (codLine && codLine.itemCount > 0)
+        ? {
+            cod_storage_enabled: true,
+            cod_storage_cutoff_date: codCutoff,
+            cod_storage_rate: COD_STORAGE_DEFAULT_RATE,
+            cod_storage_total: codLine.total,
+            cod_storage_item_count: codLine.itemCount,
+            cod_storage_period_start: codLine.periodStart,
+            cod_storage_details: codLine.items,
+          }
+        : {};
+
       const payload: Record<string, unknown> = {
         tenant_id: clientSheetId || null,
         timezone: 'America/Los_Angeles',
@@ -3003,7 +3047,7 @@ export function CreateDeliveryOrderModal({
         const draftIdent = genDraftIdent();
         const { data: row, error: insErr } = await supabase
           .from('dt_orders')
-          .insert({ ...payload, dt_identifier: draftIdent })
+          .insert({ ...payload, ...codStoragePayload, dt_identifier: draftIdent })
           .select('id')
           .single();
         if (insErr || !row) throw new Error(`Draft insert failed: ${insErr?.message}`);
