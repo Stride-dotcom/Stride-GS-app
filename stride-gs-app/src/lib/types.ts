@@ -49,6 +49,11 @@ export interface InventoryItem {
   images?: string[];
   declaredValue?: number;
   coverageOptionId?: string;
+  // COD Storage (end customers pay storage). cod_storage flags an item so the
+  // designer is billed storage only through codStorageStartDate - 1; remaining
+  // days are collected from the end customer at delivery.
+  codStorage?: boolean;
+  codStorageStartDate?: string; // ISO date (YYYY-MM-DD) or ''
 }
 
 export type InventoryStatus = 'Active' | 'Released' | 'On Hold' | 'Transferred';
