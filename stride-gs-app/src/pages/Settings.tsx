@@ -2375,6 +2375,8 @@ export function Settings() {
                   // v2 — payment_method_required is Supabase-only (no GAS/CB Clients
                   // sheet round-trip). Drives the intake form's Step 4 copy variant.
                   payment_method_required: data.paymentMethodRequired,
+                  // COD Storage — Supabase-only (auto-flags received items).
+                  end_customer_pays_storage: data.endCustomerPaysStorage === true,
                 })
                 .eq('spreadsheet_id', newSheetId);
             } catch (taxErr) {
@@ -2444,6 +2446,8 @@ export function Settings() {
                   billing_email:        data.billingEmail        || null,
                   billing_address:      data.billingAddress      || null,
                   payment_method_required: data.paymentMethodRequired,
+                  // COD Storage — Supabase-only (auto-flags received items).
+                  end_customer_pays_storage: data.endCustomerPaysStorage === true,
                 })
                 .eq('spreadsheet_id', data.spreadsheetId);
             } catch (billingErr) {

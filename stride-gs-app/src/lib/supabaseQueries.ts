@@ -3055,6 +3055,8 @@ interface SupabaseClientRow {
   billing_contact_name: string | null;
   billing_email: string | null;
   billing_address: string | null;
+  // COD Storage (Supabase-only)
+  end_customer_pays_storage: boolean | null;
 }
 
 export async function fetchClientsFromSupabase(
@@ -3096,6 +3098,7 @@ export async function fetchClientsFromSupabase(
       billingContactName: row.billing_contact_name ?? '',
       billingEmail:       row.billing_email ?? '',
       billingAddress:     row.billing_address ?? '',
+      endCustomerPaysStorage: row.end_customer_pays_storage ?? false,
     }));
 
     return { clients, count: clients.length };

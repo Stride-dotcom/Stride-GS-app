@@ -11,7 +11,7 @@ import { theme } from '../../styles/theme';
 import { fmtDate, fmtDateTime } from '../../lib/constants';
 import { useReceivingAddons } from '../../hooks/useReceivingAddons';
 import { postUpdateInventoryItem, fetchItemMoveHistory, postRequestRepairQuote, postRequestRepairQuoteSb, postAddItemAddon, postRemoveItemAddon, isApiConfigured } from '../../lib/api';
-import { useFeatureFlag } from '../../contexts/FeatureFlagContext';
+import { useFeatureFlag, useFeatureFlagRow, resolveFlagBackend } from '../../contexts/FeatureFlagContext';
 import { entityEvents } from '../../lib/entityEvents';
 import type { MoveHistoryEntry } from '../../lib/api';
 import type { InventoryItem, InventoryStatus } from '../../lib/types';
@@ -749,7 +749,9 @@ export function ItemDetailPanel({
     : null;
 
   const requestRepairQuoteBackend = useFeatureFlag('requestRepairQuote');
-  const codStorageEnabled = useFeatureFlag('codStorageBilling') === 'supabase';
+  // COD Storage gate — resolved against this item's tenant (clientSheetId).
+  const codFlagRow = useFeatureFlagRow('codStorageBilling');
+  const codStorageEnabled = !!codFlagRow && resolveFlagBackend(codFlagRow, clientSheetId || null) === 'supabase';
   const handleRequestRepair = useCallback(async () => {
     if (!isApiConfigured() || !clientSheetId || !item.itemId) return;
     setRepairRequesting(true);
