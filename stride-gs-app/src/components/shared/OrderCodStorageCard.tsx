@@ -63,9 +63,12 @@ export function OrderCodStorageCard({ order, performedBy, canEdit }: Props) {
     [details, cutoff, rate],
   );
 
+  // Baseline matches the same fallback chain used for the initial state, so
+  // a null persisted cutoff doesn't make the card mount in a "dirty" state.
+  const persistedCutoff = order.codStorageCutoffDate || order.localServiceDate || todayIso();
   const dirty =
     enabled !== order.codStorageEnabled ||
-    cutoff !== (order.codStorageCutoffDate || '') ||
+    cutoff !== persistedCutoff ||
     rate !== (order.codStorageRate ?? COD_STORAGE_DEFAULT_RATE) ||
     recomputed.total !== (order.codStorageTotal ?? 0);
 

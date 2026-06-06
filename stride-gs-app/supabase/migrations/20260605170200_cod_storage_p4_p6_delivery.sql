@@ -72,6 +72,9 @@ DECLARE
   v_count     integer := 0;
   v_total     numeric  := 0;
   d           jsonb;
+  v_ps        date;
+  v_pe        date;
+  v_amt       numeric;
 BEGIN
   -- Admin/staff gate (defense in depth; the Orders UI is staff-gated).
   IF auth.role() = 'service_role' THEN
@@ -107,6 +110,18 @@ BEGIN
   IF v_order.cod_storage_details IS NOT NULL THEN
     FOR d IN SELECT * FROM jsonb_array_elements(v_order.cod_storage_details)
     LOOP
+      v_ps := NULLIF(d ->> 'start_date', '')::date;
+      v_pe := COALESCE(NULLIF(d ->> 'end_date', '')::date, v_order.cod_storage_cutoff_date);
+      -- period_start / period_end are NOT NULL columns — skip a malformed
+      -- detail row rather than aborting the whole collection.
+      IF v_ps IS NULL OR v_pe IS NULL THEN
+        CONTINUE;
+      END IF;
+      v_amt := COALESCE(NULLIF(d ->> 'amount', '')::numeric, 0);
+
+      -- ON CONFLICT against the (tenant_id, item_id, period_start, period_end)
+      -- WHERE status <> 'Void' partial unique index — a stray overlap from
+      -- another source updates in place instead of aborting the RPC.
       INSERT INTO public.storage_billing_items (
         tenant_id, sidemark, item_id, description,
         period_start, period_end, billable_days, rate, amount,
@@ -117,16 +132,25 @@ BEGIN
         COALESCE(d ->> 'sidemark', ''),
         COALESCE(d ->> 'item_id', ''),
         d ->> 'description',
-        NULLIF(d ->> 'start_date', '')::date,
-        COALESCE(NULLIF(d ->> 'end_date', '')::date, v_order.cod_storage_cutoff_date),
+        v_ps,
+        v_pe,
         NULLIF(d ->> 'days', '')::integer,
         NULLIF(d ->> 'rate', '')::numeric,
-        COALESCE(NULLIF(d ->> 'amount', '')::numeric, 0),
+        v_amt,
         v_summary,
         'COD Collected'
-      );
+      )
+      ON CONFLICT (tenant_id, item_id, period_start, period_end) WHERE status <> 'Void'
+      DO UPDATE SET
+        billable_days         = EXCLUDED.billable_days,
+        rate                  = EXCLUDED.rate,
+        amount                = EXCLUDED.amount,
+        summary_ledger_row_id = EXCLUDED.summary_ledger_row_id,
+        status                = EXCLUDED.status,
+        description           = EXCLUDED.description,
+        updated_at            = now();
       v_count := v_count + 1;
-      v_total := v_total + COALESCE(NULLIF(d ->> 'amount', '')::numeric, 0);
+      v_total := v_total + v_amt;
     END LOOP;
   END IF;
 

@@ -18,9 +18,11 @@ import { supabase } from './supabase';
 /** Default COD storage rate: $/cubic-foot/day. Operator-editable per order. */
 export const COD_STORAGE_DEFAULT_RATE = 0.05;
 
-/** Today as YYYY-MM-DD in local time. */
+/** Today as YYYY-MM-DD in local time (not UTC — avoids an evening-Pacific
+ *  off-by-one vs the operator's calendar day). */
 export function todayIso(): string {
-  return new Date().toISOString().slice(0, 10);
+  const d = new Date();
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
 }
 
 /**
