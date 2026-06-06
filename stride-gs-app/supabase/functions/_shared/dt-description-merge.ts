@@ -128,14 +128,15 @@ export async function fetchDtOrderDescription(opts: DtExportLookup): Promise<str
  * parseable <service_order>.
  */
 export function extractOrderDescription(xml: string): string | null {
-  let doc: Document | null = null;
+  let order;
   try {
-    doc = new DOMParser().parseFromString(xml, 'text/xml') as unknown as Document;
+    // Same xmldom pattern dt-backfill-orders uses (proven in deploy).
+    const doc = new DOMParser().parseFromString(xml, 'text/xml');
+    order = doc.getElementsByTagName('service_order')[0];
   } catch (err) {
     console.warn(`[dt-description-merge] export.xml parse failed: ${(err as Error).message}`);
     return null;
   }
-  const order = doc?.getElementsByTagName('service_order')?.[0];
   if (!order) return null;
 
   // Direct-child <description> only. getElementsByTagName would also match
@@ -144,8 +145,8 @@ export function extractOrderDescription(xml: string): string | null {
   // regardless of DT's element ordering.
   const kids = order.childNodes;
   for (let i = 0; i < kids.length; i++) {
-    const node = kids[i] as Node;
-    if (node.nodeType === 1 /* ELEMENT_NODE */ && node.nodeName === 'description') {
+    const node = kids[i];
+    if (node && node.nodeType === 1 /* ELEMENT_NODE */ && node.nodeName === 'description') {
       return (node.textContent || '').replace(/\r\n/g, '\n').trim();
     }
   }
