@@ -11,7 +11,7 @@ import { theme } from '../../styles/theme';
 import { fmtDate, fmtDateTime } from '../../lib/constants';
 import { useReceivingAddons } from '../../hooks/useReceivingAddons';
 import { postUpdateInventoryItem, fetchItemMoveHistory, postRequestRepairQuote, postRequestRepairQuoteSb, postAddItemAddon, postRemoveItemAddon, isApiConfigured } from '../../lib/api';
-import { useFeatureFlag } from '../../contexts/FeatureFlagContext';
+import { useFeatureFlag, useFeatureFlagRow, resolveFlagBackend } from '../../contexts/FeatureFlagContext';
 import { entityEvents } from '../../lib/entityEvents';
 import type { MoveHistoryEntry } from '../../lib/api';
 import type { InventoryItem, InventoryStatus } from '../../lib/types';
@@ -24,6 +24,7 @@ import { useAutocomplete } from '../../hooks/useAutocomplete';
 import { FloatingActionMenu, type FABAction } from './FloatingActionMenu';
 import { usePhotoGraphRollup, useNoteGraphRollup, type RollupContext } from '../../hooks/useGraphRollup';
 import { EntityNotesInline } from '../notes/EntityNotesInline';
+import { ItemCodStorageSection } from './ItemCodStorageSection';
 import { useDocuments } from '../../hooks/useDocuments';
 import { useServiceCatalog } from '../../hooks/useServiceCatalog';
 
@@ -748,6 +749,9 @@ export function ItemDetailPanel({
     : null;
 
   const requestRepairQuoteBackend = useFeatureFlag('requestRepairQuote');
+  // COD Storage gate — resolved against this item's tenant (clientSheetId).
+  const codFlagRow = useFeatureFlagRow('codStorageBilling');
+  const codStorageEnabled = !!codFlagRow && resolveFlagBackend(codFlagRow, clientSheetId || null) === 'supabase';
   const handleRequestRepair = useCallback(async () => {
     if (!isApiConfigured() || !clientSheetId || !item.itemId) return;
     setRepairRequesting(true);
@@ -1113,6 +1117,17 @@ export function ItemDetailPanel({
             })}
           </div>
         </Section>
+      )}
+
+      {/* COD Storage (feature-gated: end customers pay storage) */}
+      {codStorageEnabled && (
+        <ItemCodStorageSection
+          item={item}
+          clientSheetId={clientSheetId}
+          canEdit={!!canEditStaff}
+          applyItemPatch={applyItemPatch}
+          clearItemPatch={clearItemPatch}
+        />
       )}
 
       {/* Related — panel mode only. In page mode the Activity tab already

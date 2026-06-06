@@ -1,5 +1,11 @@
 /**
- * dt-push-order — Supabase Edge Function (Phase 2c) — v45 2026-06-05 PST
+ * dt-push-order — Supabase Edge Function (Phase 2c) — v46 2026-06-05 PST
+ *
+ * v46: COD Storage summary in the STRIDE APP section. When the order carries
+ *      a COD storage line (cod_storage_enabled, some items are cod_storage),
+ *      append a "COD STORAGE (collect from customer)" block — item count,
+ *      rate, period, and amount due — so the driver collects it on delivery.
+ *      Built on v45's read-before-write merge so dispatcher edits stay safe.
  *
  * v45: Read-before-write merge for the DT <description> ("Order Details")
  *      block — foundational infrastructure for the COD-storage feature.
@@ -515,6 +521,13 @@ interface DtOrderRow {
    *  DRIVER] " prefix on delivery-leg items. Null until PU completes
    *  or on standalone (non-P+D) orders. */
   linked_pickup_driver_name: string | null;
+  // COD Storage collection line (end customers pay storage).
+  cod_storage_enabled: boolean | null;
+  cod_storage_total: number | null;
+  cod_storage_rate: number | null;
+  cod_storage_item_count: number | null;
+  cod_storage_period_start: string | null;
+  cod_storage_cutoff_date: string | null;
 }
 
 interface DtOrderItemRow {
@@ -761,6 +774,21 @@ function buildOrderDescription(
     }
     if (order.order_total != null) {
       descParts.push(`Total = $${Number(order.order_total).toFixed(2)}`);
+    }
+    // COD Storage — collected from the END CUSTOMER at delivery (separate
+    // from the designer's Total above; the designer pays all other services).
+    // Surfaced so the driver collects it on delivery.
+    if (order.cod_storage_enabled && order.cod_storage_total != null && Number(order.cod_storage_total) > 0) {
+      descParts.push('');
+      descParts.push('COD STORAGE (collect from customer):');
+      descParts.push(`Items stored: ${order.cod_storage_item_count || 0}`);
+      if (order.cod_storage_rate != null) {
+        descParts.push(`Rate: $${Number(order.cod_storage_rate).toFixed(2)}/cu ft/day`);
+      }
+      if (order.cod_storage_period_start && order.cod_storage_cutoff_date) {
+        descParts.push(`Period: ${order.cod_storage_period_start} to ${order.cod_storage_cutoff_date}`);
+      }
+      descParts.push(`Amount due = $${Number(order.cod_storage_total).toFixed(2)}`);
     }
   }
 
@@ -1591,7 +1619,7 @@ Deno.serve(async (req: Request) => {
   // ── 1. Fetch primary order ────────────────────────────────────────────
   const { data: order, error: orderErr } = await supabase
     .from('dt_orders')
-    .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_phone2, contact_email, local_service_date, dt_scheduled_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, order_notes, driver_notes, internal_notes, pickup_notes, delivery_notes, service_time_minutes, review_status, pushed_to_dt_at, billing_method, order_total, base_delivery_fee, extra_items_count, extra_items_fee, accessorials_json, accessorials_total, coverage_option_id, coverage_charge, declared_value, billing_review_status, paid_at, paid_amount, paid_method, linked_pickup_driver_name')
+    .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_phone2, contact_email, local_service_date, dt_scheduled_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, order_notes, driver_notes, internal_notes, pickup_notes, delivery_notes, service_time_minutes, review_status, pushed_to_dt_at, billing_method, order_total, base_delivery_fee, extra_items_count, extra_items_fee, accessorials_json, accessorials_total, coverage_option_id, coverage_charge, declared_value, billing_review_status, paid_at, paid_amount, paid_method, linked_pickup_driver_name, cod_storage_enabled, cod_storage_total, cod_storage_rate, cod_storage_item_count, cod_storage_period_start, cod_storage_cutoff_date')
     .eq('id', orderId)
     .maybeSingle();
 
@@ -1881,7 +1909,7 @@ Deno.serve(async (req: Request) => {
       for (const pickupId of extraPickupIds) {
         const { data: extraRow, error: extraRowErr } = await supabase
           .from('dt_orders')
-          .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_phone2, contact_email, local_service_date, dt_scheduled_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, order_notes, driver_notes, internal_notes, pickup_notes, delivery_notes, service_time_minutes, review_status, pushed_to_dt_at, billing_method, order_total, base_delivery_fee, extra_items_count, extra_items_fee, accessorials_json, accessorials_total, coverage_option_id, coverage_charge, declared_value, billing_review_status, paid_at, paid_amount, paid_method, linked_pickup_driver_name')
+          .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_phone2, contact_email, local_service_date, dt_scheduled_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, order_notes, driver_notes, internal_notes, pickup_notes, delivery_notes, service_time_minutes, review_status, pushed_to_dt_at, billing_method, order_total, base_delivery_fee, extra_items_count, extra_items_fee, accessorials_json, accessorials_total, coverage_option_id, coverage_charge, declared_value, billing_review_status, paid_at, paid_amount, paid_method, linked_pickup_driver_name, cod_storage_enabled, cod_storage_total, cod_storage_rate, cod_storage_item_count, cod_storage_period_start, cod_storage_cutoff_date')
           .eq('id', pickupId)
           .maybeSingle();
         if (extraRowErr || !extraRow) {

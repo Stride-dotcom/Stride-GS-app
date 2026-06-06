@@ -48,6 +48,8 @@ import { CreateDeliveryOrderModal } from '../components/shared/CreateDeliveryOrd
 import { TransferItemsModal } from '../components/shared/TransferItemsModal';
 import { ReleaseItemsModal } from '../components/shared/ReleaseItemsModal';
 import { StorageCreditModal } from '../components/shared/StorageCreditModal';
+import { SetCodStorageModal } from '../components/shared/SetCodStorageModal';
+import { useFeatureFlagRow, resolveFlagBackend } from '../contexts/FeatureFlagContext';
 import { CreateTaskModal } from '../components/shared/CreateTaskModal';
 import { AddToWillCallModal } from '../components/shared/AddToWillCallModal';
 import type { InventoryItem, InventoryStatus } from '../lib/types';
@@ -707,6 +709,14 @@ export function Inventory() {
     [itemClasses]
   );
   const { user } = useAuth();
+  // COD Storage feature gate — resolved against the DATA tenant (the client
+  // the selected items belong to), so it shows for the Justin Demo tenant's
+  // items regardless of which admin/staff is logged in.
+  const codFlagRow = useFeatureFlagRow('codStorageBilling');
+  const codEnabledFor = useCallback(
+    (tenantId?: string | null) => !!codFlagRow && resolveFlagBackend(codFlagRow, tenantId || null) === 'supabase',
+    [codFlagRow],
+  );
   const navigate = useNavigate();
   // v38.72.0 Phase 3 — inline cell editing is admin/staff only (client-role
   // users see their own data but shouldn't mutate it from the table).
@@ -854,6 +864,7 @@ export function Inventory() {
   const [showAddToWCModal, setShowAddToWCModal] = useState(false);
   const [showReleaseModal, setShowReleaseModal] = useState(false);
   const [showStorageCreditModal, setShowStorageCreditModal] = useState(false);
+  const [showCodStorageModal, setShowCodStorageModal] = useState(false);
   const [showDeliveryModal, setShowDeliveryModal] = useState(false);
 
   // Detail panel action items — when user triggers action from detail panel, we use these
@@ -2535,6 +2546,9 @@ export function Inventory() {
           {user?.role === 'admin' && (
             <WriteButton label="Credit" variant="ghost" size="sm" onClick={async () => { const items = selectedRows.map(r => r.original); if (!items.length) { showToast('Select items first to credit'); return; } const guard = checkBatchClientGuard(items); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Storage Credit'); return; } setShowStorageCreditModal(true); }} />
           )}
+          {codEnabledFor(selectedRows[0]?.original.clientId) && (user?.role === 'staff' || user?.role === 'admin') && (
+            <WriteButton label="COD" variant="ghost" size="sm" onClick={async () => { const items = selectedRows.map(r => r.original); if (!items.length) { showToast('Select items first'); return; } const guard = checkBatchClientGuard(items); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Set COD Storage'); return; } setShowCodStorageModal(true); }} />
+          )}
           {(user?.role === 'staff' || user?.role === 'admin') && (
             <WriteButton
               label="Labels"
@@ -2712,6 +2726,20 @@ export function Inventory() {
           createdBy={user?.email || 'unknown'}
           onClose={() => { setShowStorageCreditModal(false); setDetailActionItem(null); }}
           onSuccess={(n) => { showToast(`Storage credit added to ${n} item${n !== 1 ? 's' : ''}`); setRowSelection({}); setDetailActionItem(null); }}
+        />
+      )}
+
+      {/* ── COD Storage Modal (feature-gated) ── */}
+      {showCodStorageModal && codEnabledFor(detailActionItem?.clientId || selectedRows[0]?.original.clientId) && (detailActionItem || selectedRows.length > 0) && (
+        <SetCodStorageModal
+          items={(detailActionItem ? [detailActionItem] : selectedRows.map(r => r.original)).map(i => ({ itemId: i.itemId, description: i.description }))}
+          clientName={detailActionItem?.clientName || selectedRows[0]?.original.clientName || ''}
+          clientSheetId={detailActionItem?.clientId || selectedRows[0]?.original.clientId || ''}
+          createdBy={user?.email || 'unknown'}
+          onClose={() => { setShowCodStorageModal(false); setDetailActionItem(null); }}
+          onSuccess={(n) => { showToast(`COD storage updated on ${n} item${n !== 1 ? 's' : ''}`); setRowSelection({}); setDetailActionItem(null); }}
+          applyItemPatch={applyItemPatch}
+          clearItemPatch={clearItemPatch}
         />
       )}
 

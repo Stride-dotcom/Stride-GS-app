@@ -3,6 +3,7 @@ import { X, Check, Users, Edit2, ExternalLink, FolderOpen, Sheet, Info, Loader2,
 import { theme } from '../../styles/theme';
 import { AutocompleteSelect } from './AutocompleteSelect';
 import { InfoTooltip } from './InfoTooltip';
+import { useFeatureFlagRow, resolveFlagBackend } from '../../contexts/FeatureFlagContext';
 import { usePaymentTerms } from '../../hooks/usePaymentTerms';
 import type { ApiClient } from '../../lib/api';
 import { DocumentList } from '../media/DocumentList';
@@ -49,6 +50,8 @@ export interface OnboardClientFormData {
    *  variant. When OFF, Step 4 shows the "encouraged but not required"
    *  variant (grandfathered terms-only clients). */
   paymentMethodRequired: boolean;
+  // COD Storage (Supabase-only) — auto-flag received items as cod_storage.
+  endCustomerPaysStorage: boolean;
   // Active
   active: boolean;
   // Parent/child
@@ -204,6 +207,7 @@ function buildInitialData(existing: ApiClient | null): OnboardClientFormData {
       enableReceivingBilling: true, enableShipmentEmail: true,
       enableNotifications: true, autoInspection: true, separateBySidemark: false, autoCharge: false,
       paymentMethodRequired: true,
+      endCustomerPaysStorage: false,
       active: true, parentClient: '', importInventoryUrl: '', notes: '', shipmentNote: '',
       taxExempt: true, taxExemptReason: 'Resale', resaleCertExpires: '',
       spreadsheetId: '', folderId: '', photosFolderId: '', invoiceFolderId: '', webAppUrl: '',
@@ -231,6 +235,7 @@ function buildInitialData(existing: ApiClient | null): OnboardClientFormData {
     separateBySidemark: existing.separateBySidemark === true,
     autoCharge: existing.autoCharge === true,
     paymentMethodRequired: (existing as ApiClient & { paymentMethodRequired?: boolean }).paymentMethodRequired !== false,
+    endCustomerPaysStorage: existing.endCustomerPaysStorage === true,
     active: existing.active !== false,
     parentClient: existing.parentClient || '',
     importInventoryUrl: '',
@@ -249,6 +254,11 @@ function buildInitialData(existing: ApiClient | null): OnboardClientFormData {
 
 export function OnboardClientModal({ mode = 'create', existingClient = null, allClients = [], onClose, onSubmit, initialData, pendingIntake = null }: Props) {
   const isEdit = mode === 'edit';
+  // COD Storage feature gate — resolved against the client being edited
+  // (Justin Demo canary). Only shown in edit mode for an in-scope tenant.
+  const codFlagRow = useFeatureFlagRow('codStorageBilling');
+  const codStorageEnabled = isEdit && !!existingClient?.spreadsheetId &&
+    !!codFlagRow && resolveFlagBackend(codFlagRow, existingClient.spreadsheetId) === 'supabase';
   const [data, setData] = useState<OnboardClientFormData>(() => {
     const base = buildInitialData(existingClient);
     // Edit mode + pendingIntake: overlay the intake's submitted values on
@@ -647,6 +657,18 @@ export function OnboardClientModal({ mode = 'create', existingClient = null, all
                     <div style={{ fontSize: 10, opacity: 0.75, marginTop: 1 }}>Disable to hide from active list</div>
                   </div>
                   {toggleDot(data.active)}
+                </div>
+              )}
+              {codStorageEnabled && (
+                <div onClick={() => set('endCustomerPaysStorage', !data.endCustomerPaysStorage)} style={toggleStyle(data.endCustomerPaysStorage)}>
+                  <div>
+                    <div style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4 }}>
+                      End Customer Pays Storage
+                      <InfoTooltip text="When ON, every item received for this client is auto-flagged for COD storage (cod_storage) starting on its receive date. The designer is billed storage only up to that date; remaining storage is collected from the end customer at delivery." />
+                    </div>
+                    <div style={{ fontSize: 10, opacity: 0.75, marginTop: 1 }}>Auto-flag received items as COD storage</div>
+                  </div>
+                  {toggleDot(data.endCustomerPaysStorage)}
                 </div>
               )}
             </div>

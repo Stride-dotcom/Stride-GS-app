@@ -26,6 +26,21 @@ Delivery order workflow: customer-create → admin review/approve → push to Di
 
 ---
 
+## COD Storage (end customers pay storage)
+
+Feature-gated to the Justin Demo tenant via the `codStorageBilling` feature flag (UI gate only — resolved against the DATA tenant via `useFeatureFlagRow` + `resolveFlagBackend`). Designer flags items so the end customer pays storage from a start date; the designer's storage report is capped at that date, and the remaining storage is collected on the delivery order.
+
+| Layer | Files |
+|---|---|
+| Lib | `src/lib/codStorage.ts` (RPC callers `setCodStorage`/`markCodStorageCollected`, calc `computeCodStorageLine`/`recomputeCodLineFromDetails`/`serializeCodDetails`, `CodStorageDetail` type, `COD_STORAGE_DEFAULT_RATE`=0.05, `todayIso`) |
+| Components | `src/components/shared/SetCodStorageModal.tsx` (Inventory batch set/remove), `src/components/shared/ItemCodStorageSection.tsx` (Item Detail toggle+date), `src/components/shared/OrderCodStorageCard.tsx` (OrderPage line: editable cutoff/rate/include + per-item breakdown + Mark as Collected) |
+| Wired into | `src/pages/Inventory.tsx` (batch "COD" button + modal), `src/components/shared/ItemDetailPanel.tsx` (Details tab section), `src/components/shared/OnboardClientModal.tsx` + `src/pages/Settings.tsx` (client "End customers pay storage" toggle, Supabase-only), `src/components/shared/CreateDeliveryOrderModal.tsx` (auto-seed line on create), `src/pages/OrderPage.tsx` (card), `src/lib/supabaseQueries.ts` (inventory + dt_orders + clients mappings), `src/lib/types.ts` / `src/lib/api.ts` (types) |
+| RPCs | `set_cod_storage(tenant, item_ids[], enabled, start_date)` (admin/staff SECURITY DEFINER inventory write — bypasses the missing inventory UPDATE policy), `mark_cod_storage_collected(order_id, notes, by)` (Phase 6 collection record), `_compute_storage_charges` (P3 COD cap), `apply_cod_storage_on_receive()` trigger fn |
+| Edge Functions | `supabase/functions/dt-push-order/index.ts` v46 (COD STORAGE summary block in the STRIDE APP section) |
+| Migrations | `20260605170000_cod_storage_p1_data_model.sql` (inventory/clients cols + parity mirror + flag + receive trigger), `20260605170100_cod_storage_p3_storage_filter.sql` (`_compute_storage_charges` COD cap), `20260605170200_cod_storage_p4_p6_delivery.sql` (dt_orders COD cols + `mark_cod_storage_collected`), `20260605170300_cod_storage_set_rpc.sql` (`set_cod_storage`) |
+
+---
+
 ## Billing
 
 Billing ledger, service catalog, activity log, insurance auto-billing. React reads only — all writes go through Apps Script (Consolidated Billing). (The old MPL-vs-Supabase Rate Parity tab was removed 2026-05-17 — superseded by the Migration Dashboard at `#/migration`.)

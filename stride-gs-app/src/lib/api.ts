@@ -229,6 +229,10 @@ export interface ApiClient {
   billingContactName?: string;
   billingEmail?: string;
   billingAddress?: string;
+  /** COD Storage (Supabase-only, like the billing-contact fields above — no
+   *  CB Clients column, no GAS round-trip). When true, items received for this
+   *  client are auto-flagged cod_storage so end customers pay storage. */
+  endCustomerPaysStorage?: boolean;
 }
 
 export interface ClientsResponse {
