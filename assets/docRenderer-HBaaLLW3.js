@@ -1,0 +1,1 @@
+import{r as e}from"./index-CWXOLFOF.js";export{e as renderDocUpload};
