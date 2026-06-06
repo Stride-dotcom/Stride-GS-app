@@ -162,8 +162,23 @@ export function extractOrderDescription(xml: string): string | null {
  * the <description> emit site in the caller.
  */
 export function buildStrideAppSection(appContent: string, timestamp: string): string {
-  const body = (appContent ?? '').replace(/\r\n/g, '\n').trim();
+  const body = sanitizeBody((appContent ?? '').replace(/\r\n/g, '\n').trim());
   return `${STRIDE_START} (${timestamp}) ---\n${body}\n${STRIDE_END}`;
+}
+
+// Defang any STRIDE APP marker fence that appears INSIDE the app-owned
+// body. `buildOrderDescription` folds operator free-text (order.details)
+// into the body verbatim — if an operator ever typed a literal
+// "--- END STRIDE APP ---" (or an opening fence) there, it would create a
+// premature boundary that the non-greedy section regex would latch onto
+// on the NEXT merge, splitting the section and orphaning the real trailing
+// content (which then accumulates every cycle). Neutralize the exact
+// dash-fenced phrases the merge regex anchors on; a bare un-fenced mention
+// is harmless (the regex requires the dashes) so we leave those readable.
+function sanitizeBody(body: string): string {
+  return body
+    .replace(/-{3,}\s*END STRIDE APP\s*-{3,}/gi, '[END STRIDE APP]')
+    .replace(/-{3,}\s*STRIDE APP\b/gi, '[STRIDE APP]');
 }
 
 /**
