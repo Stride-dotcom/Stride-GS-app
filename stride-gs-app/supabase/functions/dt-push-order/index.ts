@@ -1,5 +1,46 @@
 /**
- * dt-push-order — Supabase Edge Function (Phase 2c) — v44 2026-06-05 PST
+ * dt-push-order — Supabase Edge Function (Phase 2c) — v45 2026-06-05 PST
+ *
+ * v45: Read-before-write merge for the DT <description> ("Order Details")
+ *      block — foundational infrastructure for the COD-storage feature.
+ *
+ *      v37 made the description dispatcher-owned after the initial push by
+ *      simply NOT emitting <description> on re-pushes (DT's add_order is a
+ *      full-replace upsert, so re-emitting Stride's synthesized block would
+ *      clobber whatever the dispatcher typed in DT). The cost: Stride could
+ *      never update its own billing / COD summary after create.
+ *
+ *      v45 keeps dispatcher edits safe AND lets Stride keep its section
+ *      current. Stride now owns ONE clearly-marked section of the
+ *      description; the dispatcher owns everything outside it:
+ *
+ *        <dispatcher free text / payment notes>
+ *        --- STRIDE APP (2026-06-05 14:32 PT) ---
+ *        <Stride billing / COD / delivery summary>
+ *        --- END STRIDE APP ---
+ *        <more dispatcher free text>
+ *
+ *      • Initial push (pushed_to_dt_at IS NULL): DT has no description yet,
+ *        so we SEED it with Stride's content wrapped in the markers — that
+ *        establishes the boundary future re-pushes merge into.
+ *      • Re-push (pushed_to_dt_at set): READ DT's current description via
+ *        the export.xml API (_shared/dt-description-merge.ts), replace ONLY
+ *        the STRIDE APP section, and push the merged result. Dispatcher
+ *        lines outside the markers are preserved verbatim.
+ *      • Fallback: if the export read fails (timeout / HTTP error /
+ *        unparseable), push the STRIDE-APP-only section rather than block
+ *        the push, and log it. Trade-off: a dispatcher note outside the
+ *        markers could be overwritten on that rare failure — acceptable vs.
+ *        failing the push. <description> still belongs to the `notes` field
+ *        group, so a scoped re-push that didn't touch notes omits it
+ *        entirely (DT keeps its block untouched, same as v34+).
+ *
+ *      The export read reuses the same credentials as add_order (code=
+ *      expressinstallation + api_key=dt_credentials.auth_token_encrypted)
+ *      and the same per-order lookup dt-sync-statuses uses (export.xml?
+ *      service_order_id=<dt_identifier>). buildOrderDescription now returns
+ *      RAW text (CDATA escaping moved to the emit site) so the merge
+ *      operates on unescaped strings and escapes the merged result once.
  *
  * v44: Stop wiping DT phone/email on re-push. The `contact` group emitted
  *      <phone1>/<phone2>/<email> unconditionally with a `|| ''` fallback,
@@ -400,6 +441,11 @@
  */
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import {
+  fetchDtOrderDescription,
+  mergeStrideAppSection,
+  formatStrideTimestamp,
+} from '../_shared/dt-description-merge.ts';
 
 interface DtOrderRow {
   id: string;
@@ -734,7 +780,11 @@ function buildOrderDescription(
     descParts.push(order.details);
   }
 
-  return cdataEscape(descParts.join('\n'));
+  // v45 — returns RAW text. CDATA escaping is applied once at the
+  // <description> emit site AFTER the read-before-write merge, so the
+  // merge operates on (and DT's preserved dispatcher text stays as)
+  // unescaped strings.
+  return descParts.join('\n');
 }
 
 // Build the DT "Attachments" custom field value (<additional_field_3>).
@@ -899,6 +949,13 @@ function buildOrderXml(
   // on single-pickup deliveries (the order-level driver name fallback
   // is correct there). Caller is pushSingleOrder.
   legDriverByLegId?: Map<string, string | null>,
+  // v45 — the fully-resolved <description> text to emit, RAW (not CDATA-
+  // escaped — this function escapes it once below). The caller
+  // (pushSingleOrder) does the read-before-write merge: it reads DT's
+  // current description, replaces only the STRIDE APP section, and passes
+  // the merged string here. null → omit <description> entirely (a scoped
+  // re-push that didn't touch the `notes` group, so DT keeps its block).
+  descriptionToEmit: string | null = null,
 ): string {
   const include = makeIncluder(groups);
   const nameParts = (order.contact_name || '').trim().split(/\s+/);
@@ -969,13 +1026,10 @@ function buildOrderXml(
     return `    <item>\n      <item_id>${xmlEscape(sku)}</item_id>\n      <description>${xmlEscape(desc)}</description>\n      <quantity>${qty}</quantity>${cubeVal}${locationVal}\n    </item>`;
   }).join('\n');
 
-  // <description> carries the dispatcher-facing billing/coverage summary
-  // + the operator's free-text details. It belongs to the `notes` group:
-  // skip building it on a scoped push that didn't touch notes so DT
-  // keeps whatever the dispatcher may have annotated on their side.
-  const desc = include('notes')
-    ? buildOrderDescription(order, accountName, crossRefIdent, linkedDeliveryInfo)
-    : '';
+  // v45 — <description> content is now resolved by the caller
+  // (pushSingleOrder) via the read-before-write merge and handed in as
+  // `descriptionToEmit`. buildOrderXml no longer synthesizes it inline;
+  // see the descriptionXml emit below.
 
   // Build notes XML. Per-leg split (v42):
   //   • pickup_notes   → Public <note> for the pickup leg only.
@@ -1098,27 +1152,18 @@ function buildOrderXml(
     ? `\n    <delivery_date>${xmlEscape(deliveryDateForDt)}</delivery_date>\n    <request_time_window_start>${xmlEscape(winStart)}</request_time_window_start>\n    <request_time_window_end>${xmlEscape(winEnd)}</request_time_window_end>`
     : '';
 
-  // <description> = the dispatcher-facing "Order Details" block on the
-  // DT order page. Stride's buildOrderDescription() synthesizes this
-  // from billing summary + order.details on every call, so historically
-  // every re-push that included the `notes` group would REGENERATE the
-  // description from current Stride state and overwrite any edits the
-  // DT dispatcher had made to it (e.g. "PAID CASH ON DELIVERY $200",
-  // "Customer not home, called and rescheduled", etc.). v37 (2026-05-21)
-  // makes the description Stride-authored on the INITIAL push only;
-  // after the order has been pushed once (pushed_to_dt_at IS NOT NULL),
-  // the dispatcher owns the description and Stride no longer touches it.
-  // The pre-v37 footgun is documented in the file header.
-  //
-  // Trade-off: billing-summary changes in Stride after create won't
-  // propagate to DT's description. If the operator needs to push a new
-  // billing summary into DT later, a future "Re-push order details"
-  // button can be added that explicitly opts in (would override the
-  // initial-push gate). Today, billing reconciliation happens via the
-  // invoice / Consolidated Billing flow, not via DT's description.
-  const isInitialPush = !order.pushed_to_dt_at;
-  const descriptionXml = include('notes') && isInitialPush
-    ? `\n    <description><![CDATA[${desc}]]></description>`
+  // <description> = the dispatcher-facing "Order Details" block on the DT
+  // order page. v45 (2026-06-05) replaced v37's initial-push-only gate
+  // with a read-before-write merge done by the caller: pushSingleOrder
+  // reads DT's current description, swaps only the STRIDE APP section for
+  // fresh Stride content, and passes the merged string here as
+  // `descriptionToEmit`. So Stride keeps its billing/COD summary current
+  // WITHOUT clobbering dispatcher-authored notes outside the markers
+  // (the pre-v37 footgun). null → omit the tag (scoped re-push that
+  // didn't touch `notes`, or notes-group caller that opted out). The
+  // string is RAW here, so CDATA-escape it exactly once on emit.
+  const descriptionXml = descriptionToEmit != null
+    ? `\n    <description><![CDATA[${cdataEscape(descriptionToEmit)}]]></description>`
     : '';
 
   const serviceTimeXml = include('custom') && order.service_time_minutes != null && order.service_time_minutes > 0
@@ -1373,6 +1418,13 @@ async function pushSingleOrder(
   crossRefIdent?: string,
   linkedDeliveryInfo?: { identifier: string; contactName?: string; address?: string; city?: string; state?: string; zip?: string },
   groups: Set<DtFieldGroup> | null = null,
+  // v45 — DT API base + api_key, threaded in so the read-before-write
+  // description merge can call the export.xml endpoint. Same credentials
+  // as the add_order postUrl. Empty strings disable the export read (the
+  // merge falls back to a STRIDE-APP-only description) — defensive, but
+  // every real call site passes them.
+  exportBaseUrl = '',
+  exportApiKey = '',
 ): Promise<{ ok: boolean; body: string; errMsg?: string; dispatchId?: number | null }> {
   // Build the DT Attachments custom-field BEFORE the XML — best-effort
   // and never blocks the push (returns '' on any failure). Skip the
@@ -1436,8 +1488,39 @@ async function pushSingleOrder(
     }
   }
 
-  const xml = buildOrderXml(order, items, accountName, crossRefIdent, linkedDeliveryInfo, attachmentsField, groups, completionWarningPrefix, legDriverByLegId);
-  console.log(`[dt-push-order] POST order=${order.dt_identifier} type=${order.order_type || 'delivery'} items=${items.length} account=${accountName}${crossRefIdent ? ` crossRef=${crossRefIdent}` : ''} scope=${groups === null ? 'FULL' : [...groups].join(',')}`);
+  // ── v45 read-before-write description merge ───────────────────────────
+  // <description> belongs to the `notes` group, so a scoped re-push that
+  // didn't touch notes leaves descriptionToEmit null → DT keeps its block.
+  // Otherwise:
+  //   • Initial push (pushed_to_dt_at IS NULL): DT has no description yet,
+  //     so seed it with Stride's content wrapped in STRIDE APP markers.
+  //   • Re-push: read DT's current description and replace ONLY the STRIDE
+  //     APP section, preserving dispatcher-authored text outside it.
+  //   • Export read failed: fall back to the STRIDE-APP-only section
+  //     (logged) rather than blocking the push.
+  let descriptionToEmit: string | null = null;
+  if (groups === null || groups.has('notes')) {
+    const appContent = buildOrderDescription(order, accountName, crossRefIdent, linkedDeliveryInfo);
+    const ts = formatStrideTimestamp(new Date());
+    if (!order.pushed_to_dt_at) {
+      descriptionToEmit = mergeStrideAppSection('', appContent, ts);
+    } else {
+      const currentDtDescription = await fetchDtOrderDescription({
+        baseUrl: exportBaseUrl,
+        apiKey: exportApiKey,
+        lookupId: order.dt_identifier || '',
+      });
+      if (currentDtDescription === null) {
+        console.warn(`[dt-push-order] export read failed for ${order.dt_identifier} — falling back to STRIDE-APP-only description (dispatcher notes outside the markers may be overwritten on this push)`);
+        descriptionToEmit = mergeStrideAppSection('', appContent, ts);
+      } else {
+        descriptionToEmit = mergeStrideAppSection(currentDtDescription, appContent, ts);
+      }
+    }
+  }
+
+  const xml = buildOrderXml(order, items, accountName, crossRefIdent, linkedDeliveryInfo, attachmentsField, groups, completionWarningPrefix, legDriverByLegId, descriptionToEmit);
+  console.log(`[dt-push-order] POST order=${order.dt_identifier} type=${order.order_type || 'delivery'} items=${items.length} account=${accountName}${crossRefIdent ? ` crossRef=${crossRefIdent}` : ''} scope=${groups === null ? 'FULL' : [...groups].join(',')} desc=${descriptionToEmit != null ? 'merged' : 'omitted'}`);
   console.log(`[dt-push-order] XML payload:\n${xml.slice(0, 800)}`);
   try {
     // DT API expects XML as a form-encoded "data" parameter (per API docs v8.1)
@@ -1704,6 +1787,7 @@ Deno.serve(async (req: Request) => {
           zip: deliveryRow.contact_zip || undefined,
         } : undefined,
         changedFields, // same scope on both legs — diff is order-level
+        baseUrl, apiKey, // v45 — export read credentials for desc merge
       );
 
       if (!linkedPush.ok) {
@@ -1844,6 +1928,7 @@ Deno.serve(async (req: Request) => {
             zip: deliveryRowForFanout.contact_zip || undefined,
           },
           changedFields,
+          baseUrl, apiKey, // v45 — export read credentials for desc merge
         );
 
         if (!extraPush.ok) {
@@ -1890,6 +1975,7 @@ Deno.serve(async (req: Request) => {
     linkedPushedIdentifier, // include cross-ref if we pushed a linked leg
     primaryLinkedDeliveryInfo,
     changedFields,
+    baseUrl, apiKey, // v45 — export read credentials for desc merge
   );
 
   if (!primaryPush.ok) {
