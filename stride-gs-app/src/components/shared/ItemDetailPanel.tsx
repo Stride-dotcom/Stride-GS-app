@@ -426,13 +426,22 @@ function ItemHistory({ itemId, tasks, repairs, willCalls, billing, moves, shipme
     for (const s of catalogServices) if (s.code && s.name) m.set(s.code, s.name);
     return m;
   }, [catalogServices]);
+
+  // COD storage set/remove audit for THIS item, scoped to COD actions — keeps
+  // this a COD-feature change rather than surfacing the item's full
+  // edit/release/transfer audit (which is fetched but was never rendered).
+  const codAudit = (itemId ? (auditByEntity[itemId] || []) : []).filter(
+    e => e.action === 'cod_storage_set' || e.action === 'cod_storage_removed'
+  );
+
   return (
     <div>
-      {/* Item — item-level audit (COD storage, field edits, etc.). Hidden when
-          the item has no own audit rows so it never adds an empty section. */}
-      {itemId && (auditByEntity[itemId]?.length ?? 0) > 0 && (
-        <CollapsibleHistorySection icon={Package} title="Item" count={auditByEntity[itemId]?.length || 0}>
-          <AuditSubTimeline entries={auditByEntity[itemId] || []} />
+      {/* COD Storage — item-level COD set/remove events. Scoped to COD actions
+          so this stays a COD-feature change (the item's broader edit/release/
+          transfer audit is fetched but intentionally not surfaced here). */}
+      {codAudit.length > 0 && (
+        <CollapsibleHistorySection icon={DollarSign} title="COD Storage" count={codAudit.length}>
+          <AuditSubTimeline entries={codAudit} />
         </CollapsibleHistorySection>
       )}
 
@@ -751,7 +760,7 @@ export function ItemDetailPanel({
     });
   }, [item.itemId]);
 
-  const historyCount = (hasShipment ? 1 : 0) + combinedMoves.length + itemTasks.length + itemRepairs.length + itemWillCalls.length + itemBilling.length + (auditByEntity[item.itemId]?.length || 0);
+  const historyCount = (hasShipment ? 1 : 0) + combinedMoves.length + itemTasks.length + itemRepairs.length + itemWillCalls.length + itemBilling.length + (auditByEntity[item.itemId] || []).filter(e => e.action === 'cod_storage_set' || e.action === 'cod_storage_removed').length;
 
   // Can this user edit?
   const canEditBasic = !!clientSheetId; // all roles can edit basic fields
