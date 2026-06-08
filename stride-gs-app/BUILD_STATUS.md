@@ -110,6 +110,13 @@
 
 ---
 
+## Recent Changes (2026-06-08, receiving: fix dock photo upload on desktop + clear Upload button — fix/receiving/dock-photo-upload, PR #659)
+
+- **Two regressions from the #608 batch-first Dock Photos change, both reported on desktop.** (1) **Upload silently did nothing:** the file-input `onChange` reset `e.target.value=''` BEFORE snapshotting the FileList — resetting `value` empties `e.target.files`, and the code held a *live reference*, so `Array.from(files)` ran against an already-empty list. Selecting a photo uploaded nothing ("doesn't appear"). (2) The only non-camera path was a bare 56px icon tile (easy to miss); the `MultiCapture` "Take Photos" pending→save flow is really the phone/tablet camera experience, which felt like "one at a time then save" on desktop.
+- **Fix (`Receiving.tsx`):** snapshot first — `const files = Array.from(e.target.files ?? []); e.target.value=''; if (files.length===0) return;` then iterate the array. Replaced the icon tile with a clear labeled **"Upload Photos"** button (multi-select, uploads immediately — the natural desktop flow + photo library on mobile), `disabled` while a batch is in flight with a spinner. Kept "Take Photos" (`MultiCapture` batch camera) for phone/tablet. Thumbnail strip is now thumbnails-only (gated on `photos.length>0`). Opus locked-in code-review: APPROVE, no Critical/Important (verified the snapshot fix, `uploadPhoto` signature, label/disabled re-entry guard, JSX balance, no landmines). tsc + build clean; React deployed via canonical clone.
+
+---
+
 ## Recent Changes (2026-06-08, receiving: require piece count to Complete Receiving — fix/receiving/require-piece-count-on-complete, PR #658)
 
 - **Companion to #657 — makes the "REQUIRED" Piece Count actually required on Complete, so `dock_piece_count` is always entered AND saved.** Justin: dock pieces "required in stage one… being entered but apparently not saved." Saving was the #657 root cause (the reconcile that stamps `dock_piece_count` was skipped in the straight-through flow). On top of that, **Complete Receiving never enforced the count** — the button gated only on `client + ≥1 item`, and `handleComplete` only guarded `!client || filledItems.length===0`. The field is labeled "REQUIRED" and "Save for Later" enforces it (`saveBlocked` includes `!pieceCountValid`), but an operator could Complete with it blank → `dock_piece_count` null. (Confirmed live: post-#657, new receipts now reconcile WITH dock pieces — `dock_completed_at` count 4→5.)

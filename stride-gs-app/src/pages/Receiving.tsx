@@ -246,10 +246,10 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
   const { documents } = useDocuments({
     contextType: 'shipment', contextId: dockNo, tenantId: photoTenant,
   });
-  // v2026-06-08 — spinner state for the SECONDARY Dock-Photos file picker
-  // (attach saved images from disk). The PRIMARY capture path is the
-  // MultiCapture batch camera ("take many, save once"), which owns its own
-  // saving state — see the Dock Photos block below.
+  // v2026-06-08 — spinner state for the Dock-Photos "Upload Photos" button
+  // (multi-select file upload from disk / photo library — the desktop path).
+  // The co-equal "Take Photos" MultiCapture batch camera owns its own saving
+  // state — see the Dock Photos block below.
   const [dockPhotoUploading, setDockPhotoUploading] = useState(false);
 
   // ─── Save for Later gating ──────────────────────────────────────────────
@@ -1733,15 +1733,18 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
               </div>
             ) : (
               <>
-                {/* v2026-06-08 — batch camera FIRST: "take many, save once",
-                    matching the Tasks photo flow + the per-row item media
-                    (ReceivingRowMedia). Tapping "Take Photos" queues each shot
-                    locally and auto-reopens the camera; one "Save N Photos"
-                    commits the batch. Previously this led with PhotoUploadButton's
-                    "Upload Photos" file picker, whose camera path uploaded each
-                    shot immediately (click→save, click→save). The file-upload
-                    affordance is now the secondary dashed tile in the strip
-                    below (attach saved images / use the photo library on mobile). */}
+                {/* v2026-06-08b — TWO clear ways to add dock photos so both
+                    device types work well:
+                      • "Take Photos" (MultiCapture) — batch camera: take many,
+                        then one "Save N Photos". Smooth on a phone/tablet.
+                      • "Upload Photos" — file picker, MULTI-SELECT, uploads
+                        immediately. The natural desktop flow (and photo library
+                        on mobile).
+                    The earlier version demoted Upload to a bare icon tile AND
+                    reset the <input> value BEFORE snapshotting the FileList — so
+                    on desktop the selection emptied and nothing uploaded. Both
+                    fixed: a labeled button + an array snapshot taken before the
+                    value reset. */}
                 <MultiCapture
                   mode="photo"
                   onUpload={async (file: File) => {
@@ -1751,55 +1754,65 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
                   compact
                   label="Take Photos"
                 />
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 10, alignItems: 'center' }}>
-                  {/* Secondary: attach existing image files from disk / photo library. */}
-                  <label
-                    title="Upload photos from files"
-                    style={{
-                      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                      width: 56, height: 56, borderRadius: 6, flexShrink: 0,
-                      background: '#FFF7F0', border: `1px dashed ${theme.colors.orange}`,
-                      color: '#B34710', cursor: dockPhotoUploading ? 'default' : 'pointer',
-                      opacity: dockPhotoUploading ? 0.6 : 1,
+                <label
+                  title="Upload one or more photos from this computer (or your photo library)"
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 6,
+                    marginTop: 8, padding: '8px 16px',
+                    fontSize: 11, fontWeight: 700, letterSpacing: '1px', textTransform: 'uppercase',
+                    borderRadius: 8, border: `1px solid ${theme.colors.orange}`,
+                    background: '#FFF7F0', color: '#B34710',
+                    cursor: dockPhotoUploading ? 'default' : 'pointer',
+                    opacity: dockPhotoUploading ? 0.6 : 1, minHeight: 38,
+                  }}
+                >
+                  {dockPhotoUploading
+                    ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} />
+                    : <Upload size={14} />}
+                  {dockPhotoUploading ? 'Uploading…' : 'Upload Photos'}
+                  <input
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    disabled={dockPhotoUploading}
+                    onChange={e => {
+                      // Snapshot the FileList into an array BEFORE resetting the
+                      // input. Resetting `value` empties e.target.files, and the
+                      // old code held a live reference — so Array.from(...) ran
+                      // against an already-empty list and nothing uploaded (the
+                      // desktop "photo doesn't appear" bug).
+                      const files = Array.from(e.target.files ?? []);
+                      e.target.value = '';
+                      if (files.length === 0) return;
+                      void (async () => {
+                        setDockPhotoUploading(true);
+                        try { for (const f of files) await uploadPhoto(f, 'receiving'); }
+                        finally { setDockPhotoUploading(false); }
+                      })();
                     }}
-                  >
-                    {dockPhotoUploading
-                      ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} />
-                      : <Upload size={16} />}
-                    <input
-                      type="file"
-                      accept="image/*"
-                      multiple
-                      onChange={e => {
-                        const files = e.target.files;
-                        e.target.value = '';
-                        if (!files || files.length === 0) return;
-                        void (async () => {
-                          setDockPhotoUploading(true);
-                          try { for (const f of Array.from(files)) await uploadPhoto(f, 'receiving'); }
-                          finally { setDockPhotoUploading(false); }
-                        })();
-                      }}
-                      style={{ display: 'none' }}
-                    />
-                  </label>
-                  {photos.slice(0, 8).map(p => (
-                    <div
-                      key={p.id}
-                      title={p.file_name}
-                      style={{
-                        width: 56, height: 56, borderRadius: 6, flexShrink: 0,
-                        background: `#E5E7EB url(${p.thumbnail_url || p.storage_url || ''}) center/cover`,
-                        border: '1px solid rgba(0,0,0,0.08)',
-                      }}
-                    />
-                  ))}
-                  {photos.length > 8 && (
-                    <span style={{ fontSize: 11, color: theme.colors.textMuted, fontWeight: 600, alignSelf: 'center' }}>
-                      +{photos.length - 8}
-                    </span>
-                  )}
-                </div>
+                    style={{ display: 'none' }}
+                  />
+                </label>
+                {photos.length > 0 && (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 10, alignItems: 'center' }}>
+                    {photos.slice(0, 8).map(p => (
+                      <div
+                        key={p.id}
+                        title={p.file_name}
+                        style={{
+                          width: 56, height: 56, borderRadius: 6, flexShrink: 0,
+                          background: `#E5E7EB url(${p.thumbnail_url || p.storage_url || ''}) center/cover`,
+                          border: '1px solid rgba(0,0,0,0.08)',
+                        }}
+                      />
+                    ))}
+                    {photos.length > 8 && (
+                      <span style={{ fontSize: 11, color: theme.colors.textMuted, fontWeight: 600, alignSelf: 'center' }}>
+                        +{photos.length - 8}
+                      </span>
+                    )}
+                  </div>
+                )}
               </>
             )}
           </div>
