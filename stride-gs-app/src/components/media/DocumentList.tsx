@@ -7,11 +7,12 @@
  * accepts a pre-fetched list for composition inside a parent that already
  * owns the hook.
  */
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { FileText, Image as ImageIcon, File as FileIcon, Trash2, ExternalLink, Download, Loader2, AlertTriangle } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { fmtDateTime } from '../../lib/constants';
 import { useDocuments, type DocumentContextType, type DocumentRow } from '../../hooks/useDocuments';
+import { DocumentPreviewModal } from './DocumentPreviewModal';
 
 interface Props {
   contextType: DocumentContextType;
@@ -28,6 +29,35 @@ function iconFor(mime: string | null | undefined) {
   if (m.startsWith('image/')) return <ImageIcon size={14} />;
   if (m.includes('pdf')) return <FileText size={14} />;
   return <FileIcon size={14} />;
+}
+
+/** Row thumbnail: image docs lazily fetch a signed URL and show the actual
+ *  image; everything else shows the type icon. One signed-URL call per image
+ *  row (documents live in a private bucket). */
+function DocThumb({ doc, getSignedUrl }: {
+  doc: DocumentRow;
+  getSignedUrl: (storageKey: string, expiresInSeconds?: number) => Promise<string | null>;
+}) {
+  const isImage = (doc.mime_type || '').toLowerCase().startsWith('image/');
+  const [thumb, setThumb] = useState<string | null>(null);
+  useEffect(() => {
+    if (!isImage) return;
+    let cancelled = false;
+    void getSignedUrl(doc.storage_key).then(u => { if (!cancelled && u) setThumb(u); });
+    return () => { cancelled = true; };
+  }, [isImage, doc.storage_key, getSignedUrl]);
+  const box: React.CSSProperties = {
+    width: 40, height: 40, borderRadius: 6, flexShrink: 0,
+    border: `1px solid ${theme.v2.colors.border}`,
+  };
+  if (isImage && thumb) {
+    return <div style={{ ...box, background: `#F3F4F6 url(${thumb}) center/cover` }} aria-hidden />;
+  }
+  return (
+    <div style={{ ...box, display: 'flex', alignItems: 'center', justifyContent: 'center', background: theme.v2.colors.bgCard, color: theme.v2.colors.accent }} aria-hidden>
+      {iconFor(doc.mime_type)}
+    </div>
+  );
 }
 
 function fmtBytes(n: number | null): string {
@@ -52,6 +82,8 @@ export function DocumentList({ contextType, contextId, tenantId, readOnly, compa
   const [downloading, setDownloading] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [openError, setOpenError] = useState<string | null>(null);
+  // Index into `documents` of the doc shown in the inline preview modal (null = closed).
+  const [previewIndex, setPreviewIndex] = useState<number | null>(null);
 
   const handleOpen = useCallback(async (doc: DocumentRow) => {
     setOpening(doc.id); setOpenError(null);
@@ -131,21 +163,30 @@ export function DocumentList({ contextType, contextId, tenantId, readOnly, compa
                 borderBottom: i < documents.length - 1 ? `1px solid ${theme.v2.colors.border}` : 'none',
               }}
             >
-              <div style={{ color: theme.v2.colors.accent, display: 'flex', flexShrink: 0 }}>
-                {iconFor(d.mime_type)}
-              </div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{
-                  fontSize: 13, fontWeight: 500, color: theme.v2.colors.text,
-                  whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-                }}>
-                  {d.file_name}
+              <button
+                type="button"
+                onClick={() => setPreviewIndex(i)}
+                title="Preview"
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 12, flex: 1, minWidth: 0,
+                  background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+                  textAlign: 'left', fontFamily: 'inherit',
+                }}
+              >
+                <DocThumb doc={d} getSignedUrl={getSignedUrl} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{
+                    fontSize: 13, fontWeight: 500, color: theme.v2.colors.text,
+                    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                  }}>
+                    {d.file_name}
+                  </div>
+                  <div style={{ fontSize: 10, color: theme.v2.colors.textMuted, marginTop: 2 }}>
+                    {fmtBytes(d.file_size)} · {fmtDate(d.created_at)}
+                    {d.uploaded_by_name && <> · {d.uploaded_by_name}</>}
+                  </div>
                 </div>
-                <div style={{ fontSize: 10, color: theme.v2.colors.textMuted, marginTop: 2 }}>
-                  {fmtBytes(d.file_size)} · {fmtDate(d.created_at)}
-                  {d.uploaded_by_name && <> · {d.uploaded_by_name}</>}
-                </div>
-              </div>
+              </button>
               <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
                 <button
                   onClick={() => handleDownload(d)}
@@ -183,6 +224,15 @@ export function DocumentList({ contextType, contextId, tenantId, readOnly, compa
             </div>
           ))}
         </div>
+      )}
+
+      {previewIndex !== null && documents[previewIndex] && (
+        <DocumentPreviewModal
+          documents={documents}
+          startIndex={previewIndex}
+          getSignedUrl={getSignedUrl}
+          onClose={() => setPreviewIndex(null)}
+        />
       )}
     </div>
   );
