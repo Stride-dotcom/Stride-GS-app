@@ -8,10 +8,10 @@
  *
  * Query is tenant-scoped and cached per client filter. ~50ms from Supabase.
  *
- * Realtime: subscribes to entityEvents for task / repair / will_call writes
- * (which fire from useSupabaseRealtime + every explicit emit). Without this,
- * creating a will call / task / repair on one page didn't refresh the badges
- * on another open page until manual reload.
+ * Realtime: subscribes to entityEvents for task / repair / will_call / inventory
+ * writes (which fire from useSupabaseRealtime + every explicit emit). Without
+ * this, creating a will call / task / repair (or flagging COD storage) on one
+ * page didn't refresh the badges on another open page until manual reload.
  */
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
@@ -36,6 +36,8 @@ export interface ItemIndicators {
   wcOpenItems: Set<string>;
   /** v2026-04-23 — Will Call items in Released → green W */
   wcDoneItems: Set<string>;
+  /** v2026-06-08 — Inventory items flagged cod_storage=true → amber "$" badge */
+  codItems: Set<string>;
   loaded: boolean;
 }
 
@@ -44,6 +46,7 @@ const EMPTY: ItemIndicators = {
   asmOpenItems: new Set(), asmDoneItems: new Set(),
   repairOpenItems: new Set(), repairDoneItems: new Set(),
   wcOpenItems: new Set(), wcDoneItems: new Set(),
+  codItems: new Set(),
   loaded: false,
 };
 
@@ -93,6 +96,7 @@ export function useItemIndicators(clientSheetIds?: string | string[]): ItemIndic
     const repDone = new Set<string>();
     const wcOpen = new Set<string>();
     const wcDone = new Set<string>();
+    const cod = new Set<string>();
 
     try {
       // Fetch task indicators (INSP + ASM) with status for open/done split.
@@ -202,6 +206,24 @@ export function useItemIndicators(clientSheetIds?: string | string[]): ItemIndic
           }
         }
       }
+
+      // v2026-06-08 — COD storage: inventory items flagged cod_storage=true get
+      // an amber "$" badge ("end customer pays storage"). Direct boolean on the
+      // inventory row (no related-entity join) — a tenant-scoped select of the
+      // flagged item_ids. Only Justin Demo has any today (the set RPC + UI are
+      // feature-gated), so this is naturally near-empty for other tenants.
+      let cq = supabase.from('inventory').select('item_id').eq('cod_storage', true);
+      if (Array.isArray(clientSheetIds) && clientSheetIds.length > 0) {
+        cq = cq.in('tenant_id', clientSheetIds);
+      } else if (typeof clientSheetIds === 'string') {
+        cq = cq.eq('tenant_id', clientSheetIds);
+      }
+      const { data: codRows } = await cq.range(0, 49999);
+      if (codRows && !ctx.cancelled) {
+        for (const c of codRows as { item_id: string | null }[]) {
+          if (c.item_id) cod.add(c.item_id);
+        }
+      }
     } catch { /* best-effort */ }
 
     if (!ctx.cancelled) {
@@ -210,6 +232,7 @@ export function useItemIndicators(clientSheetIds?: string | string[]): ItemIndic
         asmOpenItems: asmOpen, asmDoneItems: asmDone,
         repairOpenItems: repOpen, repairDoneItems: repDone,
         wcOpenItems: wcOpen, wcDoneItems: wcDone,
+        codItems: cod,
         loaded: true,
       });
     }
@@ -233,7 +256,7 @@ export function useItemIndicators(clientSheetIds?: string | string[]): ItemIndic
   useEffect(() => {
     if (!key) return;
     return entityEvents.subscribe((type) => {
-      if (type === 'task' || type === 'repair' || type === 'will_call') {
+      if (type === 'task' || type === 'repair' || type === 'will_call' || type === 'inventory') {
         void fetchIndicators();
       }
     });

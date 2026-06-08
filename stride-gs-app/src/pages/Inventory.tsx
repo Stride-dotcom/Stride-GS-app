@@ -1288,7 +1288,7 @@ export function Inventory() {
               textDecorationColor: 'transparent',
               transition: 'text-decoration-color 0.1s',
             }}>{id}</span>
-            <ItemIdBadges itemId={id} inspOpenItems={inspOpenItems} inspDoneItems={inspDoneItems} inspFailedItems={inspFailedItems} asmOpenItems={asmOpenItems} asmDoneItems={asmDoneItems} repairOpenItems={repairOpenItems} repairDoneItems={repairDoneItems} wcOpenItems={wcOpenItems} wcDoneItems={wcDoneItems} dtOpenItems={dtOpenItems} dtDoneItems={dtDoneItems} />
+            <ItemIdBadges itemId={id} inspOpenItems={inspOpenItems} inspDoneItems={inspDoneItems} inspFailedItems={inspFailedItems} asmOpenItems={asmOpenItems} asmDoneItems={asmDoneItems} repairOpenItems={repairOpenItems} repairDoneItems={repairDoneItems} wcOpenItems={wcOpenItems} wcDoneItems={wcDoneItems} dtOpenItems={dtOpenItems} dtDoneItems={dtDoneItems} codItems={repairIndicators.codItems} />
           </div>
         );
       },
@@ -1570,7 +1570,7 @@ export function Inventory() {
       ),
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [showToast, inspOpenItems, inspDoneItems, inspFailedItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems, applyItemPatch, mergeItemPatch, canEditInventory, canEditClientFields, notesByItemId, notesDetailByItemId]);
+  ], [showToast, inspOpenItems, inspDoneItems, inspFailedItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems, repairIndicators.codItems, applyItemPatch, mergeItemPatch, canEditInventory, canEditClientFields, notesByItemId, notesDetailByItemId]);
 
   // When navigating from Shipments page, filter table to that shipment
   const tableData = useMemo(() => {
@@ -2735,7 +2735,6 @@ export function Inventory() {
           items={(detailActionItem ? [detailActionItem] : selectedRows.map(r => r.original)).map(i => ({ itemId: i.itemId, description: i.description }))}
           clientName={detailActionItem?.clientName || selectedRows[0]?.original.clientName || ''}
           clientSheetId={detailActionItem?.clientId || selectedRows[0]?.original.clientId || ''}
-          createdBy={user?.email || 'unknown'}
           onClose={() => { setShowCodStorageModal(false); setDetailActionItem(null); }}
           onSuccess={(n) => { showToast(`COD storage updated on ${n} item${n !== 1 ? 's' : ''}`); setRowSelection({}); setDetailActionItem(null); }}
           applyItemPatch={applyItemPatch}

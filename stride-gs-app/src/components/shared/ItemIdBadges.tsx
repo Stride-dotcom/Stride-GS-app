@@ -1,5 +1,5 @@
 /**
- * ItemIdBadges — Renders (I), (A), (R), (W), (D) indicator badges next to an Item ID.
+ * ItemIdBadges — Renders (I), (A), (R), (W), (D), ($) indicator badges next to an Item ID.
  * Color rules apply to all badge types:
  *   Orange = open / in-progress (job exists but not yet completed)
  *   Green  = completed / released / delivered
@@ -32,6 +32,8 @@ interface Props {
   dtOpenItems?: Set<string>;
   /** DT order items with statusCategory completed → green D */
   dtDoneItems?: Set<string>;
+  /** Inventory items flagged cod_storage=true → amber "$" badge (end customer pays storage) */
+  codItems?: Set<string>;
 }
 
 const badgeStyle: React.CSSProperties = {
@@ -49,12 +51,14 @@ const DONE_BG = '#16A34A';  // bold green
 const DONE_FG = '#fff';
 const FAIL_BG = '#DC2626';  // bright red — failed inspection
 const FAIL_FG = '#fff';
+const COD_BG = '#CA8A04';   // amber — COD storage (end customer pays); distinct from open/done/failed
+const COD_FG = '#fff';
 
-type BadgeState = 'open' | 'done' | 'failed';
+type BadgeState = 'open' | 'done' | 'failed' | 'cod';
 
 function Badge({ label, state, title }: { label: string; state: BadgeState; title: string }) {
-  const bg = state === 'failed' ? FAIL_BG : state === 'open' ? OPEN_BG : DONE_BG;
-  const fg = state === 'failed' ? FAIL_FG : state === 'open' ? OPEN_FG : DONE_FG;
+  const bg = state === 'failed' ? FAIL_BG : state === 'cod' ? COD_BG : state === 'open' ? OPEN_BG : DONE_BG;
+  const fg = state === 'failed' ? FAIL_FG : state === 'cod' ? COD_FG : state === 'open' ? OPEN_FG : DONE_FG;
   const fontWeight = state === 'failed' ? 900 : 700;
   return (
     <span style={{ ...badgeStyle, background: bg, color: fg, fontWeight }} title={title}>{label}</span>
@@ -68,6 +72,7 @@ export function ItemIdBadges({
   repairOpenItems, repairDoneItems,
   wcOpenItems, wcDoneItems,
   dtOpenItems, dtDoneItems,
+  codItems,
 }: Props) {
   const hasIFailed = inspFailedItems?.has(itemId) ?? false;
   const hasIOpen = !hasIFailed && (inspOpenItems?.has(itemId) ?? false);
@@ -90,8 +95,9 @@ export function ItemIdBadges({
   const hasR = hasROpen || hasRDone;
   const hasW = hasWOpen || hasWDone;
   const hasD = hasDOpen || hasDDone;
+  const hasCod = codItems?.has(itemId) ?? false;
 
-  if (!hasI && !hasA && !hasR && !hasW && !hasD) return null;
+  if (!hasI && !hasA && !hasR && !hasW && !hasD && !hasCod) return null;
   return (
     <span style={{ display: 'inline-flex', gap: 2, marginLeft: 4, flexShrink: 0 }}>
       {hasI && (
@@ -105,6 +111,7 @@ export function ItemIdBadges({
       {hasR && <Badge label="R" state={hasROpen ? 'open' : 'done'} title={hasROpen ? 'Repair in progress' : 'Repair completed'} />}
       {hasW && <Badge label="W" state={hasWOpen ? 'open' : 'done'} title={hasWOpen ? 'Will call in progress' : 'Will call released'} />}
       {hasD && <Badge label="D" state={hasDOpen ? 'open' : 'done'} title={hasDOpen ? 'Delivery order scheduled' : 'Delivery order completed'} />}
+      {hasCod && <Badge label="$" state="cod" title="End customer pays storage (COD)" />}
     </span>
   );
 }

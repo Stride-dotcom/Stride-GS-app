@@ -16,8 +16,8 @@ import { X, CheckCircle2, AlertTriangle, CalendarDays, PackageX } from 'lucide-r
 import { theme } from '../../styles/theme';
 import { WriteButton } from './WriteButton';
 import { ProcessingOverlay } from './ProcessingOverlay';
-import { supabase } from '../../lib/supabase';
 import { setCodStorage, todayIso } from '../../lib/codStorage';
+import { entityEvents } from '../../lib/entityEvents';
 import type { InventoryItem } from '../../lib/types';
 
 export interface CodStorageModalItem {
@@ -30,8 +30,6 @@ interface Props {
   clientName: string;
   /** tenant_id (the per-client sheet id used as tenant_id in Supabase). */
   clientSheetId: string;
-  /** Email of the acting admin/staff — stored on the audit row. */
-  createdBy: string;
   onClose: () => void;
   onSuccess: (updatedCount: number) => void;
   /** Optimistic table patch (Inventory passes these). */
@@ -43,7 +41,7 @@ type Mode = 'set' | 'remove';
 type SetWhen = 'today' | 'date';
 
 export function SetCodStorageModal({
-  items, clientName, clientSheetId, createdBy, onClose, onSuccess, applyItemPatch, clearItemPatch,
+  items, clientName, clientSheetId, onClose, onSuccess, applyItemPatch, clearItemPatch,
 }: Props) {
   const today = todayIso();
   const [mode, setMode] = useState<Mode>('set');
@@ -74,21 +72,14 @@ export function SetCodStorageModal({
     try {
       const n = await setCodStorage(clientSheetId, itemIds, enabled, effectiveStart);
 
-      // Audit trail — best-effort, mirrors StorageCreditModal.
-      const auditRows = itemIds.map(itemId => ({
-        entity_type: 'inventory',
-        entity_id: itemId,
-        tenant_id: clientSheetId,
-        action: enabled ? 'cod_storage_set' : 'cod_storage_removed',
-        changes: enabled
-          ? { cod_storage: true, cod_storage_start_date: effectiveStart }
-          : { cod_storage: false, cod_storage_start_date: null },
-        performed_by: createdBy,
-        source: 'app',
-      }));
-      supabase.from('entity_audit_log').insert(auditRows).then(({ error: aErr }) => {
-        if (aErr) console.warn('[cod_storage] audit insert failed (non-fatal):', aErr.message);
-      });
+      // The set_cod_storage RPC writes the entity_audit_log row server-side
+      // (SECURITY DEFINER bypasses the admin/staff INSERT policy that rejects
+      // browser inserts) — so the Activity tab is fed from there, not here.
+
+      // Signal open Item Detail panels + the I/A/R/W/D/$ badge hook to refetch
+      // (mirrors ItemCodStorageSection's per-save emit). Without this the detail
+      // page COD state + the "$" badges stay stale after a batch set/remove.
+      for (const id of itemIds) entityEvents.emit('inventory', id);
 
       setDoneCount(n);
       onSuccess(n);
