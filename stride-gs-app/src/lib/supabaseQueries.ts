@@ -3894,6 +3894,12 @@ export async function fetchItemByIdFromSupabase(
       shipmentFolderUrl: row.shipment_folder_url || undefined,
       declaredValue: row.declared_value ?? 0,
       coverageOptionId: row.coverage_option_id ?? '',
+      // COD Storage (end customers pay storage). Requires the inventory_live
+      // view to expose cod_storage / cod_storage_start_date (migration
+      // 20260608230000) — without it the detail-page toggle always read OFF
+      // even when inventory.cod_storage=true.
+      codStorage: !!row.cod_storage,
+      codStorageStartDate: row.cod_storage_start_date || '',
     };
   } catch {
     return null;
