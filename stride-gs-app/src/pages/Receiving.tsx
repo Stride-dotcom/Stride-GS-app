@@ -1324,7 +1324,7 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
             if (e.key.length > 1) return;                     // Arrows, Tab, Enter, Backspace, etc.
             if (!/^[0-9]$/.test(e.key)) e.preventDefault();   // digits only
           }}
-          onChange={e => update(row.original._originalIdx, 'qty', parseInt(e.target.value) || 1)}
+          onChange={e => update(row.original._originalIdx, 'qty', parseInt(e.target.value, 10) || 1)}
           style={{ ...cellInput, width: 46, textAlign: 'center' }}
         />
       ),
