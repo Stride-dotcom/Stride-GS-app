@@ -226,8 +226,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // realUser/authState state we're about to set ourselves.
   const impersonationSwapRef = useRef(false);
   // Distinct from recoveryRef: only set when resetPassword() is explicitly called.
-  // handleSession() also calls supabase.auth.updateUser() for role-sync metadata,
-  // which fires USER_UPDATED — passwordChangeRef lets us tell the two apart.
+  // The impersonation path also calls supabase.auth.updateUser({ data }), which
+  // fires USER_UPDATED — passwordChangeRef lets us tell the two apart.
   const passwordChangeRef = useRef(false);
 
   const clearCache = useCallback(() => {
@@ -264,41 +264,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           const cached = JSON.parse(cachedRaw) as AuthUser;
           if (cached?.email?.toLowerCase() === email.toLowerCase() && cached?.role) {
             // Same user, valid cache — use it directly, no GAS roundtrip.
-            // BUT: only mark authenticated once the Supabase JWT carries the
-            // matching role/clientSheetId/accessibleClientSheetIds in
-            // user_metadata. Otherwise the first data fetch can race a stale
-            // JWT and RLS denies (admin policy keys off `user_metadata.role`,
-            // and the multi-tenant `user_has_tenant_access` helper from
-            // migration `multi_tenant_rls_access` keys off
-            // `user_metadata.accessibleClientSheetIds`), surfacing as
-            // spurious "Task Not Found" flashes — including the deeplink-
-            // not-found bug for users assigned to multiple tenants. Cheap
-            // when already in sync (no network); ~one round-trip when not.
-            const jwtMeta = (session.user.user_metadata ?? {}) as {
-              role?: string;
-              clientSheetId?: string;
-              accessibleClientSheetIds?: string[];
-              childClientSheetIds?: string[];
-            };
-            const targetClientSheetId = cached.clientSheetId ?? '';
-            const targetAccessible = cached.accessibleClientSheetIds ?? [];
-            const targetChildren = cached.childClientSheetIds ?? [];
-            const inSync = jwtMeta.role === cached.role
-              && (jwtMeta.clientSheetId ?? '') === targetClientSheetId
-              && arraysEqualOrderless(jwtMeta.accessibleClientSheetIds ?? [], targetAccessible)
-              && arraysEqualOrderless(jwtMeta.childClientSheetIds ?? [], targetChildren);
-            if (!inSync) {
-              try {
-                await supabase.auth.updateUser({
-                  data: {
-                    role: cached.role,
-                    clientSheetId: targetClientSheetId,
-                    accessibleClientSheetIds: targetAccessible,
-                    childClientSheetIds: targetChildren,
-                  },
-                });
-              } catch { /* best-effort — fall through and authenticate anyway */ }
-            }
+            //
+            // SECURITY (2026-06-08): role/clientSheetId/accessibleClientSheetIds
+            // are served into the JWT user_metadata claim by the
+            // custom_access_token_hook from the SERVICE-ROLE-ONLY app_metadata
+            // (GAS stamps it — StrideAPI stampAppMetadata_). The previous
+            // client-side supabase.auth.updateUser({ data }) that wrote those
+            // claims here was the privilege-escalation vector (user_metadata is
+            // user-writable) — removed. The hook re-derives the claims from the
+            // seeded/stamped app_metadata on every token mint, so the cached
+            // user can be trusted directly; a role/tenant change propagates on
+            // the next token refresh (≤1h) without the client touching its own
+            // claims.
             setCallerEmail(cached.email);
             setLoginPhase('success');
             setAuthState({ status: 'authenticated', user: cached });
@@ -360,38 +337,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         localStorage.setItem(AUTH_CACHE_KEY, JSON.stringify(user));
       }
 
-      // Sync role + clientSheetId + accessibleClientSheetIds into Supabase
-      // user_metadata so RLS policies can grant the right access. Awaited
-      // only when the JWT is stale — otherwise the first data fetch can
-      // race a stale JWT and RLS denies (e.g. tasks_select_staff keys off
-      // `user_metadata.role`; the multi-tenant `user_has_tenant_access`
-      // helper from migration `multi_tenant_rls_access` keys off
-      // `user_metadata.accessibleClientSheetIds`).
-      try {
-        const jwtMeta = (session.user.user_metadata ?? {}) as {
-          role?: string;
-          clientSheetId?: string;
-          accessibleClientSheetIds?: string[];
-          childClientSheetIds?: string[];
-        };
-        const targetClientSheetId = user.clientSheetId ?? '';
-        const targetAccessible = user.accessibleClientSheetIds ?? [];
-        const targetChildren = user.childClientSheetIds ?? [];
-        const inSync = jwtMeta.role === user.role
-          && (jwtMeta.clientSheetId ?? '') === targetClientSheetId
-          && arraysEqualOrderless(jwtMeta.accessibleClientSheetIds ?? [], targetAccessible)
-          && arraysEqualOrderless(jwtMeta.childClientSheetIds ?? [], targetChildren);
-        if (!inSync) {
-          await supabase.auth.updateUser({
-            data: {
-              role: user.role,
-              clientSheetId: targetClientSheetId,
-              accessibleClientSheetIds: targetAccessible,
-              childClientSheetIds: targetChildren,
-            },
-          });
-        }
-      } catch { /* best-effort */ }
+      // SECURITY (2026-06-08): role/clientSheetId/accessibleClientSheetIds are
+      // served into the JWT user_metadata claim by the custom_access_token_hook
+      // from the SERVICE-ROLE-ONLY app_metadata, which GAS just (re)stamped
+      // inside resolveUserFromApi → fetchUserByEmail (handleGetUserByEmail_ →
+      // stampAppMetadata_). The previous client-side
+      // supabase.auth.updateUser({ data }) that wrote those claims here was the
+      // privilege-escalation vector (user_metadata is user-writable) — removed.
+      // The hook re-derives the claims from app_metadata on every token mint,
+      // so a role/tenant change propagates on the next token refresh (≤1h)
+      // without the client ever writing its own claims.
 
       setCallerEmail(user.email);
       setLoginPhase('success');
@@ -559,9 +514,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             }
             if (event === 'USER_UPDATED') {
               // Only proceed if resetPassword() explicitly set passwordChangeRef.
-              // handleSession() also calls supabase.auth.updateUser() for role-sync
-              // metadata and that fires USER_UPDATED too — passwordChangeRef lets us
-              // tell the two apart, avoiding a race that logged users in prematurely.
+              // The impersonation path also calls supabase.auth.updateUser({ data })
+              // and that fires USER_UPDATED too — passwordChangeRef lets us tell the
+              // two apart, avoiding a race that logged users in prematurely.
               if (!passwordChangeRef.current) return;
               passwordChangeRef.current = false;
               recoveryRef.current = false;
@@ -631,7 +586,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const resetPassword = useCallback(
     async (newPassword: string): Promise<{ error: string | null }> => {
       // Mark BEFORE calling updateUser so the USER_UPDATED event that follows
-      // can be distinguished from the role-sync updateUser in handleSession().
+      // can be distinguished from the impersonation-path updateUser({ data }).
       passwordChangeRef.current = true;
       const { error } = await supabase.auth.updateUser({ password: newPassword });
       if (error) passwordChangeRef.current = false; // reset on failure — no USER_UPDATED will fire
