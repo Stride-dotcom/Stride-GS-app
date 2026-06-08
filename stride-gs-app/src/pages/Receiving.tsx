@@ -246,10 +246,10 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
   const { documents } = useDocuments({
     contextType: 'shipment', contextId: dockNo, tenantId: photoTenant,
   });
-  // v2026-06-08 — spinner state for the SECONDARY Dock-Photos file picker
-  // (attach saved images from disk). The PRIMARY capture path is the
-  // MultiCapture batch camera ("take many, save once"), which owns its own
-  // saving state — see the Dock Photos block below.
+  // v2026-06-08 — spinner state for the Dock-Photos "Upload Photos" button
+  // (multi-select file upload from disk / photo library — the desktop path).
+  // The co-equal "Take Photos" MultiCapture batch camera owns its own saving
+  // state — see the Dock Photos block below.
   const [dockPhotoUploading, setDockPhotoUploading] = useState(false);
 
   // ─── Save for Later gating ──────────────────────────────────────────────
