@@ -110,6 +110,13 @@
 
 ---
 
+## Recent Changes (2026-06-08, receiving: require piece count to Complete Receiving — fix/receiving/require-piece-count-on-complete, PR #658)
+
+- **Companion to #657 — makes the "REQUIRED" Piece Count actually required on Complete, so `dock_piece_count` is always entered AND saved.** Justin: dock pieces "required in stage one… being entered but apparently not saved." Saving was the #657 root cause (the reconcile that stamps `dock_piece_count` was skipped in the straight-through flow). On top of that, **Complete Receiving never enforced the count** — the button gated only on `client + ≥1 item`, and `handleComplete` only guarded `!client || filledItems.length===0`. The field is labeled "REQUIRED" and "Save for Later" enforces it (`saveBlocked` includes `!pieceCountValid`), but an operator could Complete with it blank → `dock_piece_count` null. (Confirmed live: post-#657, new receipts now reconcile WITH dock pieces — `dock_completed_at` count 4→5.)
+- **Fix (`Receiving.tsx`):** added `!pieceCountValid` to the Complete button gate (disabled + tooltip, mirroring the `saveBlocked` IIFE) AND a defense-in-depth early-return in `handleComplete` (inline `parseInt(pieceCount,10)` check — `pieceCount` was already a callback dep, so no dep-array change). Photo requirement intentionally NOT added to Complete (it never enforced one; out of scope for this report). Opus locked-in code-review: no Critical/Important — guard is token-identical to the `pieceCountValid` useMemo, mirrors the proven save-for-later pattern, no photo gating slipped in, demo-mode ordering fine. tsc + build clean; React deployed via canonical clone.
+
+---
+
 ## Recent Changes (2026-06-08, receiving: mark shipment 'received' on EVERY completion — fix/receiving/always-mark-received, PR #657)
 
 - **Root-cause fix for the "Expected" recurrence** (the backfill below corrected the existing 565 rows; this stops new receipts landing wrong). The DOCK→SHP reconcile in `Receiving.tsx` — which flips `inbound_status`'expected'→'received', stamps dock metadata, relinks dock photos/docs `dockNo`→SHP, and deletes the DOCK placeholder — was gated on `reconcileDock = hasSavedDraft || existingDockNo`. The **common straight-through flow** (open Receiving → fill items → Complete Receiving, without ever clicking "Save for Later" or reopening a draft) leaves both false, so the whole block was skipped and the shipment kept GAS's write-through default `inbound_status='expected'`. Only the rare save-for-later/reopen receipts (4 of 570) ever flipped — hence 565 stuck.
