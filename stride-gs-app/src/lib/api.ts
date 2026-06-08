@@ -329,6 +329,11 @@ export interface ApiInventoryItem {
   declaredValue?: number;
   /** Phase B (session 79): reference to coverage_options.id. */
   coverageOptionId?: string;
+  /** COD Storage (end customer pays storage). Mirrors inventory.cod_storage /
+   *  cod_storage_start_date — surfaced via the inventory_live view (detail
+   *  page) and the inventory base table (list). */
+  codStorage?: boolean;
+  codStorageStartDate?: string;
 }
 
 export interface InventoryResponse {
