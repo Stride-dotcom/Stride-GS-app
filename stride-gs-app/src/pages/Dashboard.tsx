@@ -213,7 +213,7 @@ const OPEN_ROW_ON_TAP = typeof window !== 'undefined'
   && typeof window.matchMedia === 'function'
   && window.matchMedia('(pointer: coarse)').matches;
 
-function TasksTab({ tasks, onNavigate, indicators, canEditPriority }: { tasks: SummaryTask[]; onNavigate: (task: SummaryTask) => void; indicators?: { inspOpenItems: Set<string>; inspDoneItems: Set<string>; inspFailedItems: Set<string>; asmOpenItems: Set<string>; asmDoneItems: Set<string>; repairOpenItems: Set<string>; repairDoneItems: Set<string>; wcOpenItems: Set<string>; wcDoneItems: Set<string> }; canEditPriority: boolean }) {
+function TasksTab({ tasks, onNavigate, indicators, canEditPriority }: { tasks: SummaryTask[]; onNavigate: (task: SummaryTask) => void; indicators?: { inspOpenItems: Set<string>; inspDoneItems: Set<string>; inspFailedItems: Set<string>; asmOpenItems: Set<string>; asmDoneItems: Set<string>; repairOpenItems: Set<string>; repairDoneItems: Set<string>; wcOpenItems: Set<string>; wcDoneItems: Set<string>; codItems: Set<string> }; canEditPriority: boolean }) {
   const colT = createColumnHelper<SummaryTask>();
   // Service-label resolution from the live Master Price List service_catalog.
   // public.tasks.type can carry either the raw svcCode (GAS writer path) or
@@ -579,7 +579,7 @@ function TasksTab({ tasks, onNavigate, indicators, canEditPriority }: { tasks: S
 const REPAIR_DEFAULT_ORDER = ['repairId', 'repairStatus', 'repairItem', 'repairDesc', 'repairItemVendor', 'repairTech', 'repairQuote', 'repairClient', 'repairCreated', 'repairFolder'];
 const REPAIR_COL_LABELS: Record<string, string> = { repairId: 'Repair ID', repairStatus: 'Status', repairItem: 'Item', repairDesc: 'Description', repairItemVendor: 'Vendor', repairTech: 'Repair Tech', repairQuote: 'Quote', repairClient: 'Client', repairCreated: 'Created', repairFolder: 'Folder' };
 
-function RepairsTab({ repairs, onNavigate, userRole, indicators }: { repairs: SummaryRepair[]; onNavigate: (repair: SummaryRepair) => void; userRole?: string; indicators?: { inspOpenItems: Set<string>; inspDoneItems: Set<string>; inspFailedItems: Set<string>; asmOpenItems: Set<string>; asmDoneItems: Set<string>; repairOpenItems: Set<string>; repairDoneItems: Set<string>; wcOpenItems: Set<string>; wcDoneItems: Set<string> } }) {
+function RepairsTab({ repairs, onNavigate, userRole, indicators }: { repairs: SummaryRepair[]; onNavigate: (repair: SummaryRepair) => void; userRole?: string; indicators?: { inspOpenItems: Set<string>; inspDoneItems: Set<string>; inspFailedItems: Set<string>; asmOpenItems: Set<string>; asmDoneItems: Set<string>; repairOpenItems: Set<string>; repairDoneItems: Set<string>; wcOpenItems: Set<string>; wcDoneItems: Set<string>; codItems: Set<string> } }) {
   const colR = createColumnHelper<SummaryRepair>();
   // Default sort: Created ascending (oldest first). Repairs don't have
   // a due-date column, so "oldest waiting" is the closest proxy for
