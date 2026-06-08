@@ -226,8 +226,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // realUser/authState state we're about to set ourselves.
   const impersonationSwapRef = useRef(false);
   // Distinct from recoveryRef: only set when resetPassword() is explicitly called.
-  // handleSession() also calls supabase.auth.updateUser() for role-sync metadata,
-  // which fires USER_UPDATED — passwordChangeRef lets us tell the two apart.
+  // The impersonation path also calls supabase.auth.updateUser({ data }), which
+  // fires USER_UPDATED — passwordChangeRef lets us tell the two apart.
   const passwordChangeRef = useRef(false);
 
   const clearCache = useCallback(() => {
@@ -514,9 +514,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             }
             if (event === 'USER_UPDATED') {
               // Only proceed if resetPassword() explicitly set passwordChangeRef.
-              // handleSession() also calls supabase.auth.updateUser() for role-sync
-              // metadata and that fires USER_UPDATED too — passwordChangeRef lets us
-              // tell the two apart, avoiding a race that logged users in prematurely.
+              // The impersonation path also calls supabase.auth.updateUser({ data })
+              // and that fires USER_UPDATED too — passwordChangeRef lets us tell the
+              // two apart, avoiding a race that logged users in prematurely.
               if (!passwordChangeRef.current) return;
               passwordChangeRef.current = false;
               recoveryRef.current = false;
@@ -586,7 +586,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const resetPassword = useCallback(
     async (newPassword: string): Promise<{ error: string | null }> => {
       // Mark BEFORE calling updateUser so the USER_UPDATED event that follows
-      // can be distinguished from the role-sync updateUser in handleSession().
+      // can be distinguished from the impersonation-path updateUser({ data }).
       passwordChangeRef.current = true;
       const { error } = await supabase.auth.updateUser({ password: newPassword });
       if (error) passwordChangeRef.current = false; // reset on failure — no USER_UPDATED will fire
