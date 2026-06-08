@@ -757,6 +757,18 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
     if (!client || filledItems.length === 0) return;
     setSubmitError('');
 
+    // Piece count is REQUIRED — it stamps dock_piece_count on the shipment
+    // during the DOCK→SHP reconcile. The "REQUIRED" label + the Save-for-Later
+    // gate already enforce it, but Complete Receiving historically did NOT, so
+    // an operator could complete with it blank and leave dock_piece_count null.
+    // Guard here (in addition to the disabled button below) so it can't be
+    // bypassed. pieceCount is already a dependency of this callback.
+    const pcNum = parseInt(pieceCount, 10);
+    if (!(Number.isFinite(pcNum) && pcNum > 0)) {
+      setSubmitError('Enter a piece count (positive number) before completing — it records the dock piece count on the shipment.');
+      return;
+    }
+
     // If API not configured, use demo mode
     if (!apiConfigured || !clientSheetId) {
       setSubmitResult({ shipmentNo: 'SHP-DEMO', itemCount: filledItems.length, tasksCreated: 0, billingRows: 0 });
@@ -2183,15 +2195,28 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
             {/* Complete Receiving — runs the full GAS flow. Hidden until at
                 least one item row has actual content. Operators who just
                 want to capture dock metadata use Save for Later instead. */}
-            {filledItems.length > 0 && (
+            {filledItems.length > 0 && (() => {
+              // Piece count is REQUIRED — it stamps dock_piece_count on the
+              // shipment during the reconcile. Enforce it on Complete too, not
+              // just Save for Later, so the "REQUIRED" label is honest and the
+              // dock piece count is never left null. Mirrors the saveBlocked
+              // gate above (minus the photo requirement, which Complete has
+              // never enforced).
+              const completeBlocked = !client || !pieceCountValid || submitting || savingDraft;
+              const completeBlockedReason =
+                !client ? 'Pick a client first.'
+                : !pieceCountValid ? 'Enter a piece count (positive number) — it records the dock piece count.'
+                : null;
+              return (
               <button
                 onClick={handleComplete}
-                disabled={!client || submitting || savingDraft}
+                disabled={completeBlocked}
+                title={completeBlockedReason || 'Complete receiving — creates inventory rows, tasks, and billing.'}
                 style={{
                   padding: '9px 20px', fontSize: 13, fontWeight: 600, borderRadius: 8, border: 'none',
-                  background: (!client || submitting || savingDraft) ? theme.colors.border : theme.colors.orange,
-                  color: (!client || submitting || savingDraft) ? theme.colors.textMuted : '#fff',
-                  cursor: (!client || submitting || savingDraft) ? 'not-allowed' : 'pointer',
+                  background: completeBlocked ? theme.colors.border : theme.colors.orange,
+                  color: completeBlocked ? theme.colors.textMuted : '#fff',
+                  cursor: completeBlocked ? 'not-allowed' : 'pointer',
                   fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 6,
                 }}
               >
@@ -2201,7 +2226,8 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
                   <><Check size={15} /> Complete Receiving</>
                 )}
               </button>
-            )}
+              );
+            })()}
           </div>
         </div>
       </div>
