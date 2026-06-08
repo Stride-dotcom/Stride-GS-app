@@ -249,3 +249,5 @@ BEGIN
   RETURN;
 END;
 $function$;
+
+NOTIFY pgrst, 'reload schema';
