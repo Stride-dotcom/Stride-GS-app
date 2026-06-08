@@ -863,16 +863,23 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
       // doesn't roll back the GAS write (which already succeeded and
       // produced inventory rows + billing). We surface warnings instead.
       // ─── DOCK → SHP reconciliation ────────────────────────────────────
-      // Only fires when there's actually a DOCK row to reconcile against.
-      // The unified flow ALWAYS holds a `dockNo`, but a row only exists in
-      // Supabase after the operator has saved at least once (hasSavedDraft)
-      // OR is mid-completion of a previously reopened intake (existingDockNo
-      // was set on mount). Skip the reconcile entirely for a "fresh load,
-      // never saved, hit Complete Receiving immediately" flow — there's no
-      // DOCK row, no draft items, no photos to re-link against `dockNo`.
+      // Runs on EVERY successful completion (only needs the new SHP number),
+      // not just the saved-draft / reopened-intake path.
+      //
+      // v2026-06-08 — this used to be gated on (hasSavedDraft || existingDockNo),
+      // so the common straight-through flow (open → fill → Complete Receiving,
+      // without ever clicking "Save for Later") skipped the whole block and the
+      // shipment kept GAS's write-through default of inbound_status='expected'.
+      // That left 565/570 shipments showing "Expected" on the Shipments page
+      // (statusLabel maps 'expected' → "Expected"); only the rare save-for-later
+      // / reopen receipts ever got flipped to 'received'. The status flip + dock
+      // metadata stamp + dock photo/doc relink (dock photos attach to `dockNo`
+      // before the SHP number exists, in this flow too) must all run regardless.
+      // Step 4's DELETE is self-guarding — it matches 0 rows when no
+      // Save-for-Later DOCK row exists, so running it unconditionally is a no-op
+      // in the straight-through flow (dockNo is never a real SHP number).
       const reconcileWarnings: string[] = [];
-      const reconcileDock = !!newShipmentNo && (hasSavedDraft || !!existingDockNo);
-      if (reconcileDock) {
+      if (newShipmentNo) {
         // Each step is best-effort + isolated. We DO gate the final DELETEs on
         // success of every preceding step, though — otherwise we'd leave the
         // operator looking at a DOCK row in the list whose photos already
