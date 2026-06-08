@@ -880,11 +880,11 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
       // in the straight-through flow (dockNo is never a real SHP number).
       const reconcileWarnings: string[] = [];
       if (newShipmentNo) {
-        // Each step is best-effort + isolated. We DO gate the final DELETEs on
-        // success of every preceding step, though — otherwise we'd leave the
-        // operator looking at a DOCK row in the list whose photos already
-        // moved to SHP, with no obvious recovery path. Errors surface as
-        // warnings so the GAS write (already done) isn't rolled back.
+        // Each step is best-effort + isolated. The final DELETE (Step 4) stays
+        // gated on the success of Steps 1-3 — otherwise we'd leave the operator
+        // looking at a DOCK row whose photos already moved to SHP, with no
+        // obvious recovery path. Errors surface as warnings so the GAS write
+        // (already done) isn't rolled back.
         let metadataOk = false;
         let photosOk = false;
         let docsOk = false;
