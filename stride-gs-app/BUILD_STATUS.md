@@ -110,6 +110,12 @@
 
 ---
 
+## Recent Changes (2026-06-08, receiving: qty cell replaces preset value on tablet tap — feat/fix/receiving-qty-tablet, PR #651)
+
+- **Item-entry Qty cell now replaces its preset value on a tablet tap instead of appending.** Justin (on a tablet): the Qty cell is preset to 1, but tapping placed the caret after the "1" and typing a new value appended — changing 1→3 produced **"13"**; operators couldn't set a qty without deleting the 1 first. Fix (`src/pages/Receiving.tsx`, Qty column renderer ~line 1308): added **`onFocus={e => e.currentTarget.select()}`** so tapping highlights the preset value and the next digit replaces it; switched `type="number"` → **`type="text"` + `inputMode="numeric"` + `pattern="[0-9]*"`** (iOS Safari number inputs don't support `.select()`/`setSelectionRange`, so select-on-focus wouldn't fire on them — `inputMode` keeps the tablet numeric keypad); added a digit-only `onKeyDown` guard (allows Cmd/Ctrl + Arrows/Backspace/Tab/Enter, blocks non-digits); `parseInt(value, 10) || 1` onChange keeps qty a positive integer (min 1). Mirrors the Item ID cell's existing numeric-text pattern in the same table. React-only — no billing/GAS/sheet/migration/RLS; qty still flows into the shipment item payload as an integer. Opus locked-in code-reviewer: clear to merge (verified controlled-input correctness for multi-digit entry, min-1 invariant, keypad preserved, onKeyDown guard, no `type="number"` dependency downstream). tsc + build clean; React deployed via canonical clone (dist `e608704..6e1338d`).
+
+---
+
 ## Recent Changes (2026-06-08, receiving: batch-first Dock Photos capture — feat/receiving/batch-photo-capture, PR #646)
 
 - **Dock Photos (stage-1 dock intake) now leads with the batch camera ("take many, save once"), matching the Tasks photo flow + the per-row item media.** Justin: the Receiving photo/doc capture felt per-photo (click→save, click→save) vs. Tasks' "click, click, click → save all at once," and asked whether Receiving was even using the shared module. Finding: it **is** — all three Receiving capture surfaces (Dock Photos, Dock Documents, per-row `ReceivingRowMedia`) already plug into the shared `MultiCapture` batch component. The per-photo *feel* came from the Dock Photos section leading with `PhotoUploadButton`'s prominent orange **"Upload Photos"** button — the file-picker path, whose phone-camera option returns one shot per tap and uploads it immediately. The batch `MultiCapture` flow was only the secondary "Take Photo" button most operators never reached for.
