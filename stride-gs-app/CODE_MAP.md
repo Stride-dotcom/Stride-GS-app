@@ -184,6 +184,20 @@ iMessage-style conversations attached to entities, with email/SMS bridging.
 
 ---
 
+## Photos / Media
+
+Per-entity photo galleries on every detail panel (item/task/repair/will-call/shipment/claim/dt_order), backed by `public.item_photos` + the private `photos` storage bucket. Cross-entity rollup so a panel shows photos from its graph neighbours.
+
+| Layer | Files |
+|---|---|
+| Hooks | `src/hooks/usePhotos.ts` (CRUD + signed URLs + client-side thumbnail gen — `THUMB_MAX_EDGE=1000` since PR #664), `src/hooks/useGraphRollup.ts` (`usePhotoGraphRollup` cross-entity read), `src/hooks/usePhotoShares.ts` (anon share links) |
+| Components | `src/components/media/PhotoGallery.tsx` (composes the lifecycle; rollup-mode mutations call `rollupHook.refetch()` — PR #606), `src/components/media/PhotoGrid.tsx`, `src/components/media/PhotoLightbox.tsx` (fullscreen viewer with cross-platform Pointer-Events **zoom/pan** — PR #664), `src/components/media/PhotoUploadButton.tsx`, `src/components/media/MultiCapture.tsx`, `src/components/shared/EntityAttachments.tsx` |
+| Public | `src/pages/PublicPhotoGallery.tsx` (anon shared gallery) |
+| Edge Functions | `supabase/functions/backfill-photo-thumbnails/index.ts` (one-shot 400→1000px thumbnail backfill; resizes via Supabase image-transform `storage.download({transform})`, writes over the same `thumbnail_key`, stamps `thumb_regen_at`; batched/resumable, driven by a self-terminating `backfill-photo-thumbs-drain` pg_cron job — PR #667/#669), `supabase/functions/get-shared-photos/index.ts` (share-gated anon proxy) |
+| Migrations | `20260419200000_media_messaging_infra.sql` (item_photos table + RLS), `20260426120000_photo_shares.sql` + `20260426130000_photo_shares_narrow_anon_columns.sql` (share links), `20260608234500_item_photos_thumb_regen_marker.sql` (`thumb_regen_at` backfill progress marker + partial index — PR #667) |
+
+---
+
 ## Client Onboarding
 
 Client intake form → admin review → onboarding → T&C signing → first sheet provision.

@@ -35,6 +35,8 @@
 
 - [ ] DetailPanel internals v2 polish — deep interiors still have old styling in places
 - [ ] Generate Work Order button from TaskDetailPanel (backend handler exists, needs React wiring)
+- [x] **Photo lightbox zoom/pan — cross-platform (desktop wheel+buttons+double-click, tablet/phone pinch+double-tap, drag-pan, swipe-nav at fit-scale). Shipped 2026-06-08 (PR #664).**
+- [x] **Crisp photo thumbnails — bumped 400→1000px for new uploads + one-shot backfill regenerating the ~6,449 existing thumbnails via Supabase image-transform. Shipped 2026-06-08 (PRs #664/#667/#669).**
 
 ## Repairs
 
