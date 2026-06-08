@@ -360,6 +360,8 @@ const AUDIT_ACTION_LABELS: Record<string, { label: string; color: string }> = {
   transfer: { label: 'Transferred', color: '#0891B2' },
   assign: { label: 'Assigned', color: '#B45309' },
   status_change: { label: 'Status Changed', color: '#6D28D9' },
+  cod_storage_set:     { label: 'COD Storage On',  color: '#CA8A04' },
+  cod_storage_removed: { label: 'COD Storage Off', color: '#6B7280' },
 };
 
 interface AuditEntry {
@@ -400,7 +402,8 @@ function AuditSubTimeline({ entries }: { entries: AuditEntry[] }) {
 
 // ─── Item History Component ────────────────────────────────────────────────────
 
-function ItemHistory({ tasks, repairs, willCalls, billing, moves, shipmentNumber, receiveDate, shipmentCarrier, shipmentTracking, auditByEntity, clientSheetId }: {
+function ItemHistory({ itemId, tasks, repairs, willCalls, billing, moves, shipmentNumber, receiveDate, shipmentCarrier, shipmentTracking, auditByEntity, clientSheetId }: {
+  itemId?: string;
   tasks: any[];
   repairs: any[];
   willCalls: any[];
@@ -423,9 +426,26 @@ function ItemHistory({ tasks, repairs, willCalls, billing, moves, shipmentNumber
     for (const s of catalogServices) if (s.code && s.name) m.set(s.code, s.name);
     return m;
   }, [catalogServices]);
+
+  // COD storage set/remove audit for THIS item, scoped to COD actions — keeps
+  // this a COD-feature change rather than surfacing the item's full
+  // edit/release/transfer audit (which is fetched but was never rendered).
+  const codAudit = (itemId ? (auditByEntity[itemId] || []) : []).filter(
+    e => e.action === 'cod_storage_set' || e.action === 'cod_storage_removed'
+  );
+
   return (
     <div>
-      {/* Shipment — always first */}
+      {/* COD Storage — item-level COD set/remove events. Scoped to COD actions
+          so this stays a COD-feature change (the item's broader edit/release/
+          transfer audit is fetched but intentionally not surfaced here). */}
+      {codAudit.length > 0 && (
+        <CollapsibleHistorySection icon={DollarSign} title="COD Storage" count={codAudit.length}>
+          <AuditSubTimeline entries={codAudit} />
+        </CollapsibleHistorySection>
+      )}
+
+      {/* Shipment */}
       <CollapsibleHistorySection icon={Ship} title="Shipment" count={shipmentNumber ? 1 : 0}>
         {shipmentNumber && (
           <>
@@ -602,7 +622,7 @@ export function ItemDetailPanel({
   // already-loaded tasks/repairs; the detail panel has to fetch on its own
   // because it may open from a deep link or a page that doesn't keep the
   // full task/repair list in scope. Tenant-scoped Supabase read, ~50ms.
-  const { inspOpenItems, inspDoneItems, inspFailedItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems, wcOpenItems, wcDoneItems } = useItemIndicators(clientSheetId);
+  const { inspOpenItems, inspDoneItems, inspFailedItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems, wcOpenItems, wcDoneItems, codItems } = useItemIndicators(clientSheetId);
 
   // Tab badge counts — Photos / Docs / Notes. Drive folder URLs are external
   // links, not uploaded assets, and are intentionally NOT counted here.
@@ -696,6 +716,9 @@ export function ItemDetailPanel({
 
   // Fetch audit log entries for this item and all related entities
   const [auditByEntity, setAuditByEntity] = useState<Record<string, AuditEntry[]>>({});
+  // Bumped by an entityEvents('inventory', itemId) emit (e.g. a COD storage
+  // set/remove) so the Activity tab re-fetches without needing a panel reopen.
+  const [auditTick, setAuditTick] = useState(0);
   useEffect(() => {
     if (!item.itemId) return;
     let cancelled = false;
@@ -724,9 +747,20 @@ export function ItemDetailPanel({
       } catch { /* best-effort */ }
     })();
     return () => { cancelled = true; };
-  }, [item.itemId, item.shipmentNumber, itemTasks.length, itemRepairs.length, itemWillCalls.length]);
+  }, [item.itemId, item.shipmentNumber, itemTasks.length, itemRepairs.length, itemWillCalls.length, auditTick]);
 
-  const historyCount = (hasShipment ? 1 : 0) + combinedMoves.length + itemTasks.length + itemRepairs.length + itemWillCalls.length + itemBilling.length;
+  // Live-refresh the audit timeline when this item changes — the COD storage
+  // set/remove path (SetCodStorageModal / ItemCodStorageSection) emits
+  // entityEvents('inventory', itemId) after the set_cod_storage RPC writes its
+  // audit row; bump the tick so the effect above re-fetches.
+  useEffect(() => {
+    if (!item.itemId) return;
+    return entityEvents.subscribe((type, id) => {
+      if (type === 'inventory' && id === item.itemId) setAuditTick(t => t + 1);
+    });
+  }, [item.itemId]);
+
+  const historyCount = (hasShipment ? 1 : 0) + combinedMoves.length + itemTasks.length + itemRepairs.length + itemWillCalls.length + itemBilling.length + (auditByEntity[item.itemId] || []).filter(e => e.action === 'cod_storage_set' || e.action === 'cod_storage_removed').length;
 
   // Can this user edit?
   const canEditBasic = !!clientSheetId; // all roles can edit basic fields
@@ -1191,6 +1225,7 @@ export function ItemDetailPanel({
           </div>
         ) : (
           <ItemHistory
+            itemId={item.itemId}
             tasks={itemTasks}
             repairs={itemRepairs}
             willCalls={itemWillCalls}
@@ -1537,6 +1572,7 @@ export function ItemDetailPanel({
             repairDoneItems={repairDoneItems}
             wcOpenItems={wcOpenItems}
             wcDoneItems={wcDoneItems}
+            codItems={codItems}
           />
         }
         belowId={headerStatusBadge}
