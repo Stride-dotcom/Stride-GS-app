@@ -108,14 +108,22 @@ export function MultiCapture({
     setError(null);
 
     // Auto-reopen the camera so a warehouse user can rip through a stack of
-    // pages / damage shots without re-tapping Take Photo between each. iOS
-    // Safari's `capture="environment"` is single-shot — programmatically
-    // re-clicking the hidden input after a short delay is the working
-    // workaround (delay lets the native camera UI finish tearing down).
-    // To stop capturing, the user dismisses the camera modal; no onChange
-    // fires on cancel, so the loop ends cleanly.
+    // pages / damage shots without re-tapping. iOS Safari's
+    // `capture="environment"` is single-shot — programmatically re-clicking the
+    // hidden input after a short delay is the working workaround (delay lets the
+    // native camera UI finish tearing down). To stop, the user dismisses the
+    // camera; no onChange fires on cancel, so the loop ends cleanly.
+    //
+    // v2026-06-08 — gate this on a COARSE pointer (touch). On desktop the hidden
+    // input is a FILE DIALOG, not a camera, and auto-reopening it is jarring (the
+    // dialog keeps popping back after every pick); desktop users multi-select in
+    // one dialog instead. Fixes the "after the first upload it auto reopens"
+    // complaint on the Receiving page.
+    const isCoarsePointer = typeof window !== 'undefined'
+      && typeof window.matchMedia === 'function'
+      && window.matchMedia('(pointer: coarse)').matches;
     const nextPendingCount = pending.length + next.length;
-    if (nextPendingCount < maxItems && !disabled) {
+    if (isCoarsePointer && nextPendingCount < maxItems && !disabled) {
       if (reopenTimerRef.current !== null) {
         window.clearTimeout(reopenTimerRef.current);
       }

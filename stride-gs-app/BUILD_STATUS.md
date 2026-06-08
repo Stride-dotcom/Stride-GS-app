@@ -110,6 +110,12 @@
 
 ---
 
+## Recent Changes (2026-06-08, receiving: immediate Upload Document button + stop camera auto-reopen on desktop — fix/receiving/dock-doc-upload, PR #665)
+
+- **Dock Documents flow on desktop.** Justin: "documents still require you to click save again after adding, and after the first upload it auto reopens the upload page again." Dock Documents had only "Scan Document" (`MultiCapture`: pending→"Save N"); on desktop the hidden input is a *file dialog* (not a camera), and MultiCapture's auto-reopen re-fired it after every pick. **Fix 1:** MultiCapture auto-reopen now gated on a coarse pointer (`matchMedia('(pointer: coarse)')`, touch) — phone camera still rips through pages (unchanged), desktop file dialog no longer pops back. Helps Scan Document AND Take Photos on desktop. **Fix 2:** added an immediate "Upload Document" button (`DocumentUploadButton`, multi-select, uploads on pick, no pending/Save) to Dock Documents, mirroring the Dock Photos "Upload Photos" pair (#659); "Scan Document" stays for the phone/tablet camera batch. Opus locked-in code-review: APPROVE, 0 Critical/Important (matchMedia gate SSR-safe + no mobile regression across all 5 MultiCapture consumers; DocumentUploadButton snapshots files before the input reset; no landmines). React-only; tsc + build clean; deployed via canonical clone.
+
+---
+
 ## Recent Changes (2026-06-08, receiving: fix dock photo upload on desktop + clear Upload button — fix/receiving/dock-photo-upload, PR #659)
 
 - **Two regressions from the #608 batch-first Dock Photos change, both reported on desktop.** (1) **Upload silently did nothing:** the file-input `onChange` reset `e.target.value=''` BEFORE snapshotting the FileList — resetting `value` empties `e.target.files`, and the code held a *live reference*, so `Array.from(files)` ran against an already-empty list. Selecting a photo uploaded nothing ("doesn't appear"). (2) The only non-camera path was a bare 56px icon tile (easy to miss); the `MultiCapture` "Take Photos" pending→save flow is really the phone/tablet camera experience, which felt like "one at a time then save" on desktop.

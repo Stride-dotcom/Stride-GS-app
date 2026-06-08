@@ -11,6 +11,7 @@ import { theme } from '../styles/theme';
 import { AutocompleteSelect } from '../components/shared/AutocompleteSelect';
 import { MultiCapture } from '../components/media/MultiCapture';
 import { DocumentScanButton } from '../components/media/DocumentScanButton';
+import { DocumentUploadButton } from '../components/media/DocumentUploadButton';
 import { supabase } from '../lib/supabase';
 import { fetchShipmentByNoFromSupabase } from '../lib/supabaseQueries';
 import { useAuth } from '../contexts/AuthContext';
@@ -243,14 +244,16 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
   const { photos, uploadPhoto } = usePhotos({
     entityType: 'shipment', entityId: dockNo, tenantId: photoTenant,
   });
-  const { documents } = useDocuments({
+  const { documents, uploadDocument } = useDocuments({
     contextType: 'shipment', contextId: dockNo, tenantId: photoTenant,
   });
-  // v2026-06-08 — spinner state for the Dock-Photos "Upload Photos" button
-  // (multi-select file upload from disk / photo library — the desktop path).
-  // The co-equal "Take Photos" MultiCapture batch camera owns its own saving
-  // state — see the Dock Photos block below.
+  // v2026-06-08 — spinner state for the immediate "Upload Photos" / "Upload
+  // Document" file-picker buttons (multi-select upload from disk / library —
+  // the desktop path; no pending queue, no "Save N", no auto-reopen). The
+  // co-equal "Take Photos" / "Scan Document" MultiCapture batch cameras own
+  // their own saving state — see the Dock blocks below.
   const [dockPhotoUploading, setDockPhotoUploading] = useState(false);
+  const [dockDocUploading, setDockDocUploading] = useState(false);
 
   // ─── Save for Later gating ──────────────────────────────────────────────
   // Three preconditions for Save for Later — picked one by one against
@@ -1833,6 +1836,21 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
                   tenantId={photoTenant}
                   label="Scan Document"
                 />
+                {/* Immediate multi-select upload — the desktop path (no pending
+                    queue, no "Save N", no auto-reopen). "Scan Document" above is
+                    the mobile camera batch flow. Mirrors the Dock Photos pair. */}
+                <div style={{ marginTop: 8 }}>
+                  <DocumentUploadButton
+                    onUpload={async (files: File[]) => {
+                      setDockDocUploading(true);
+                      try { for (const f of files) await uploadDocument(f); }
+                      finally { setDockDocUploading(false); }
+                    }}
+                    uploading={dockDocUploading}
+                    compact
+                    label="Upload Document"
+                  />
+                </div>
                 {documents.length > 0 && (
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>
                     {documents.slice(0, 6).map(d => (
