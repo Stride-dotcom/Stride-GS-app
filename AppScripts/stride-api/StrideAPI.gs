@@ -1,4 +1,5 @@
 /* ===================================================
+   StrideAPI.gs — v38.265.0 — 2026-06-08 PST — [SECURITY] feat: going-forward app_metadata sync (Step 5 of the 2026-06-08 privilege-escalation remediation). The Custom Access Token Hook (public.custom_access_token_hook, live) copies the SERVICE-ROLE-ONLY app_metadata.{role,clientSheetId,accessibleClientSheetIds} into the JWT user_metadata claim at every token mint, so the ~136 RLS policies + RPC gates read TRUSTED (un-editable) values instead of the user-writable user_metadata. But app_metadata was only SEEDED once at cutover — role/tenant changes and brand-new users did NOT propagate, so the hook served stale claims. This version wires GAS — the authoritative user resolver (CB "Users" sheet via lookupUser_, which correctly classifies the info@/dispatch@ staff special-cases the cb_users mirror gets wrong) — to stamp app_metadata via the service-role-only set_app_metadata_by_email RPC whenever it resolves a user: handleGetUserByEmail_ (login), handleCreateUser_ (new user), handleUpdateUser_ (role/tenant change). New helpers stampAppMetadata_ (low-level PostgREST rpc/set_app_metadata_by_email call) + syncAppMetadataForUser_ (resolves accessibleClientSheetIds the SAME way handleGetUserByEmail_ does — parent→children expansion for clients, null for admin/staff — so login/create/update stamp identical values). BEST-EFFORT, wrapped in try/catch, NEVER blocks or fails the login/create/update response (the hook is fail-open, so a brief stale stamp can't lock anyone out). Companion React change removes the now-redundant + attack-vector client-side user_metadata sync in AuthContext.handleSession (the supabase.auth.updateUser({data:{role,clientSheetId,accessibleClientSheetIds}}) blocks); password-change updateUser calls are kept. No schema change (RPC + hook already live from PR #660), no billing logic touched, no change to the v38.182 atomic invoice counter.
    StrideAPI.gs — v38.264.0 — 2026-06-05 PST — [STAX] fix: staxSheetUpsert now writes an EXPLICIT "FALSE" to the Auto Charge cell when payload.autoCharge===false (was writing blank). The daily auto-charge runner (StaxAutoPay.gs _prepareEligiblePending) treats a blank invoice-level Auto Charge cell as "fall back to the client-level setting" and only an explicit FALSE/NO/OFF as a per-invoice skip — so a blank cell on a manual-marked Quick Stax Charge row would silently inherit the client's Auto Charge=TRUE and auto-charge anyway. Writing "FALSE" makes the operator's manual choice authoritative per-invoice. Supports the new general-purpose "Create Stax Charge" modal (any client, any amount, user-set due date + notes + auto-charge toggle; is_test still true to distinguish from batch invoices). No schema change, no billing logic touched, no change to the v38.182 atomic invoice counter. — v38.263.0 — 2026-06-05 PST — [STAX] feat: new staxSheetUpsert action (handleStaxSheetUpsert_) — reverse-writethrough mirror of a single Stax invoice row from Supabase into the Stax Auto Pay "Invoices" sheet, called by the create-test-stax-invoice Edge Function. That EF is SB-primary (inserts public.stax_invoices + POSTs to Stax directly, no GAS), but the still-GAS charge path (handleChargeSingleInvoice_ / handleRunStaxCharges_) finds invoices by reading the Invoices SHEET — so an SB-only test invoice was invisible to a hard refresh (the noCache path reads the sheet via GAS) and could not be charged ("Invoice not found"). This action mirrors the EF's row into the sheet (MIG-002 synchronous reverse-writethrough) so the legacy charge + refresh paths keep working until runStaxCharges migrates to SB. Idempotent on QB Invoice # (updates in place else appends), header-resolved columns via stax_invoiceCols_ (no positional writes), token-gated (the GAS API_TOKEN bearer, same surface as writeThroughReverse — the EF enforces the admin/staff JWT gate before calling), LockService-guarded. It is the SHEET writer ONLY — it does NOT call api_sbResyncStaxInvoice_ because the EF already owns the authoritative public.stax_invoices row. No schema change, no billing logic touched, no change to the v38.182 atomic invoice counter. — v38.262.1 — 2026-06-05 PST — [STAX] fix: handleCreateTestInvoice_ now mirrors the new PENDING row to public.stax_invoices via api_sbResyncStaxInvoice_. The "Create Test Invoice" button (Payments page) appended a PENDING row to the Stax Invoices sheet but never wrote the Supabase mirror — every other Stax write handler (resetStaxInvoiceStatus, toggleAutoCharge, updateStaxInvoice, etc.) calls api_sbResyncStaxInvoice_ at the end, but createTestInvoice was the lone handler missing it. The React Payments page reads invoices from public.stax_invoices (fetchStaxInvoicesFromSupabase), so a test invoice that never mirrored was invisible in the UI: Justin saw "success" but the row never appeared, could never be selected, never got pushed to Stax via Create Stax Invoices, and stayed PENDING forever with no stax_id (Justin, 2026-06-04 — no stax_invoices rows created June 3-4, no createStaxInvoices in gas_call_log because the invoice was never visible to push). Fix: added the standard one-line write-through before the success return so the new PENDING test invoice mirrors to Supabase immediately and shows in the UI, where it can be selected and pushed to Stax normally. No change to the create flow's intentional PENDING-staging design (test invoices still do NOT auto-push to Stax), no schema change, no billing logic touched, no change to the v38.182 atomic invoice counter.
    StrideAPI.gs — v38.262.0 — 2026-06-04 PST — [USERS] fix: createUser now defaults Active=TRUE so new accounts can log in immediately. handleCreateUser_ previously wrote Active=FALSE for every manually-created user (Settings → Users → Add User), requiring an admin to remember to flip the toggle afterward — staff routinely forgot, locking the new user out of login and the whole app. The default is now TRUE (line ~12065: active = forceActive==="FALSE" ? "FALSE" : "TRUE"), matching the onboarding path api_upsertClientUser_ which has always created client users Active=TRUE. Callers can still create a deactivated account by explicitly passing active="FALSE". Companion React changes: the Add User modal (Settings.tsx) gains an "Active" checkbox defaulting to ON, useUsers.addUser + createApiUser thread the active flag through as params.active, and the profiles.is_active column default is made explicit via migration 20260604160000_profiles_is_active_default_true.sql (the live DB already had DEFAULT true — this version-controls it). No schema/billing change, no change to the v38.182 atomic invoice counter, half-write detection, or any billing logic.
    StrideAPI.gs — v38.261.0 — 2026-06-03 PST — [DOCS] feat: Repair Work Order items table gains a Location column. The DOC_REPAIR_WORK_ORDER items table showed Item ID/Qty/Vendor/Description/Sidemark/Room but not the item's warehouse Location, so staff working a repair couldn't see where to pull it from. Both GAS renderers of this doc now fill {{ITEM_LOCATION}} = api_esc_(itemLoc || "") (the same item-location var already used for the header {{LOCATION}} token): handleStartRepair_ (~line 21490) and handleRespondToRepairQuote_ (~line 20838). Companion React change (docTokens.ts buildRepairTokens fills {{ITEM_LOCATION}} from repair.location) + migration 20260603140000_repair_work_order_location_column.sql (adds the Location header + {{ITEM_LOCATION}} monospace cell after Room). Migration applied AFTER both renderers deploy so the token is never left unrendered. No data/schema change beyond the template, no billing logic touched.
@@ -11339,6 +11340,96 @@ function withClientIsolation_(callerEmail, requestedClientSheetId, handler) {
   return handler(effectiveClientSheetId);
 }
 
+/**
+ * v38.265.0 — Going-forward app_metadata sync (security follow-up to the
+ * 2026-06-08 Custom Access Token Hook).
+ *
+ * The hook public.custom_access_token_hook copies the SERVICE-ROLE-ONLY
+ * app_metadata.{role,clientSheetId,accessibleClientSheetIds} into the JWT
+ * user_metadata claim at every token mint, so the ~136 RLS policies + RPC gates
+ * read TRUSTED (un-editable) values instead of the user-writable user_metadata.
+ * This helper keeps that app_metadata fresh: GAS — the authoritative resolver
+ * (CB "Users" sheet via lookupUser_, which correctly classifies the
+ * info@/dispatch@ staff special-cases the cb_users mirror gets wrong) — stamps
+ * it via the service-role-only set_app_metadata_by_email RPC whenever it
+ * resolves a user (login / create / update).
+ *
+ * BEST-EFFORT, NEVER THROWS — auth/login must never be blocked by or depend on
+ * this. The hook is fail-open, so a brief stale app_metadata can't lock anyone
+ * out; a miss just means the user's next login re-stamps.
+ *
+ * @param {string} email           the user's email
+ * @param {string} role            lowercased role (admin/staff/client)
+ * @param {string} clientSheetId   RAW "Client Spreadsheet ID" (may be a CSV for multi-tenant)
+ * @param {Array|null} accessible  accessibleClientSheetIds (clients only; null for admin/staff)
+ * @return {{ok: boolean, code?: number}}
+ */
+function stampAppMetadata_(email, role, clientSheetId, accessible) {
+  try {
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) return { ok: false };
+    var em = String(email || "").trim();
+    if (!em) return { ok: false };
+
+    var payload = {
+      p_email:           em,
+      p_role:            role ? String(role).trim() : null,
+      p_client_sheet_id: (clientSheetId === null || clientSheetId === undefined) ? null : String(clientSheetId).trim(),
+      // jsonb param: array for clients, null for admin/staff. The RPC strips null
+      // keys, so passing null leaves any existing value untouched (harmless for
+      // admin/staff, who gate access by role not by the accessible list).
+      p_accessible:      (accessible && accessible.length) ? accessible : null
+    };
+
+    var resp = UrlFetchApp.fetch(url + "/rest/v1/rpc/set_app_metadata_by_email", {
+      method: "post",
+      contentType: "application/json",
+      headers: { "Authorization": "Bearer " + key, "apikey": key },
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    });
+    var code = resp.getResponseCode();
+    if (code < 200 || code >= 300) {
+      Logger.log("stampAppMetadata_ HTTP " + code + " for " + em + ": " + resp.getContentText().substring(0, 200));
+      return { ok: false, code: code };
+    }
+    return { ok: true, code: code };
+  } catch (e) {
+    Logger.log("stampAppMetadata_ error (non-fatal) for " + email + ": " + e);
+    return { ok: false };
+  }
+}
+
+/**
+ * v38.265.0 — Resolve accessibleClientSheetIds for a user object the SAME way
+ * handleGetUserByEmail_ does (so login / create / update all stamp identical
+ * values), then call stampAppMetadata_. Used by the create / update handlers,
+ * which hold a freshly-written user object but not the login-path enrichment.
+ * BEST-EFFORT, NEVER THROWS.
+ *
+ * @param {Object} user  { email, role, clientName, clientSheetId, active, ... }
+ * @return {{ok: boolean, code?: number}}
+ */
+function syncAppMetadataForUser_(user) {
+  try {
+    if (!user || !user.email) return { ok: false };
+    var role = String(user.role || "").trim().toLowerCase();
+    var accessible = null;
+    // Mirror handleGetUserByEmail_: only client users carry an accessible list;
+    // admin/staff gate access by role. getAccessibleClientScope_ expands parent
+    // → children; standalone clients fall back to their own CSV ids.
+    if (role === "client" && user.active) {
+      var scope = getAccessibleClientScope_(user);
+      accessible = (scope && scope.length) ? scope : parseCSV_(user.clientSheetId);
+    }
+    return stampAppMetadata_(user.email, role, user.clientSheetId, accessible);
+  } catch (e) {
+    Logger.log("syncAppMetadataForUser_ error (non-fatal) for " + (user && user.email) + ": " + e);
+    return { ok: false };
+  }
+}
+
 // ─── User Management Endpoints ──────────────────────────────────────────────
 
 /**
@@ -11409,6 +11500,19 @@ function handleGetUserByEmail_(params) {
       userResponse.accessibleClientNames = explicitNames;
     }
   }
+
+  // v38.265.0 — Going-forward security sync (best-effort): stamp the locked
+  // app_metadata (read by custom_access_token_hook) from the authoritative
+  // sheet-resolved claims so role/tenant changes take effect on next login.
+  // userResponse.accessibleClientSheetIds is set only for client users above.
+  try {
+    stampAppMetadata_(
+      userResponse.email,
+      userResponse.role,
+      userResponse.clientSheetId,
+      userResponse.accessibleClientSheetIds || null
+    );
+  } catch (_) {}
 
   return jsonResponse_({ user: userResponse });
 }
@@ -12150,6 +12254,9 @@ function handleCreateUser_(params, callerEmail) {
   if (supabaseWarning) resp.supabaseWarning = supabaseWarning;
   if (welcomeWarning) resp.welcomeWarning = welcomeWarning;
   resyncUserToSupabase_(email);
+  // v38.265.0 — Going-forward security sync (best-effort): stamp app_metadata so
+  // the access-token hook serves the new user's real claims from first login.
+  try { syncAppMetadataForUser_(user); } catch (_) {}
   return jsonResponse_(resp);
 }
 
@@ -12349,6 +12456,9 @@ function handleUpdateUser_(params, callerEmail) {
     resp.welcomeWarning = "Activation succeeded but welcome email skipped: " + welcomeResult.reason;
   }
   resyncUserToSupabase_(lookup.user.email);
+  // v38.265.0 — Going-forward security sync (best-effort): propagate role/tenant
+  // changes into the locked app_metadata so the next token mint reflects them.
+  try { syncAppMetadataForUser_(lookup.user); } catch (_) {}
   return jsonResponse_(resp);
 }
 
