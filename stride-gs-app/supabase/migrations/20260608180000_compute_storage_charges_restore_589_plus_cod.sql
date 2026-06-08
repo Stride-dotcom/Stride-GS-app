@@ -31,6 +31,13 @@
 --   live posture (both wrappers are SECURITY DEFINER) — so the ONLY change from
 --   the live function is the restored body logic. Non-COD behavior == #589.
 --
+-- NOTE (vs the COD migration 20260605170100): the `transferred`-source billing
+--   branch (bill receive_date -> transfer_date-1) is DELIBERATELY GONE — #589
+--   supersedes it. Transferred source rows are filtered out by the WHERE
+--   TRANSFER-FIX (and CONTINUE as belt-and-suspenders), and their pre-transfer
+--   days are billed via the STOR-TRANSFER backfill on the destination tenant.
+--   This is the proven-good #589 behavior, not a regression.
+--
 -- 2026-06-08 PST
 -- ============================================================================
 
