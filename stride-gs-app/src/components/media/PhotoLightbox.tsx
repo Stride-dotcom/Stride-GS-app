@@ -134,6 +134,16 @@ export function PhotoLightbox({
     return () => window.removeEventListener('resize', onResize);
   }, [measureBase]);
 
+  // Lock body scroll while the lightbox is open. Without this, wheel-zooming
+  // also scrolls the page behind the fixed overlay (a fixed overlay blocks
+  // clicks but not wheel-scroll of the underlying document), so closing the
+  // lightbox would dump the user at a shifted scroll position.
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prev; };
+  }, []);
+
   // Clamp pan offsets so at least part of the image stays on screen — never
   // let the user fling it fully out of the viewport.
   const clampPan = useCallback((nx: number, ny: number, s: number): { x: number; y: number } => {
@@ -161,6 +171,11 @@ export function PhotoLightbox({
     const cy = cr.top + cr.height / 2;
     const fx = focusX ?? cx;
     const fy = focusY ?? cy;
+    // Refresh the fit-scale footprint before computing the clamp. Guards the
+    // few-ms gap after navigating to a different-aspect photo where the rAF
+    // measure may have run against the previous bitmap; onLoad also re-measures
+    // but a zoom taken in that window would otherwise clamp on a stale base.
+    if (imgRef.current?.complete) measureBase();
     const { scale: s0, tx: tx0, ty: ty0 } = stateRef.current;
     const s1 = clamp(nextScaleRaw, MIN_SCALE, MAX_SCALE);
     if (s1 === s0) return;
@@ -175,7 +190,7 @@ export function PhotoLightbox({
     setScale(s1);
     setTx(clamped.x);
     setTy(clamped.y);
-  }, [clampPan]);
+  }, [clampPan, measureBase]);
 
   const resetZoom = useCallback((withAnim = true) => {
     setAnimate(withAnim);
@@ -208,6 +223,12 @@ export function PhotoLightbox({
 
   // ── Pointer gesture handlers (mouse + touch + pen unified) ─────────────
   const onPointerDown = useCallback((e: React.PointerEvent) => {
+    // Let the nav arrows + zoom-cluster buttons own their own clicks — don't
+    // capture the pointer or start a gesture when the press lands on a button.
+    // (Also stops a button tap from seeding the double-tap detector.) Fixes
+    // the iPad-Safari case where ancestor pointer-capture can swallow a child
+    // button's click.
+    if ((e.target as HTMLElement).closest('button')) return;
     const el = e.currentTarget as HTMLElement;
     el.setPointerCapture?.(e.pointerId);
     pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
