@@ -80,8 +80,15 @@ export interface UsePhotosResult {
 }
 
 const BUCKET = 'photos';
-const THUMB_MAX_EDGE = 400;
-const THUMB_QUALITY = 0.85;
+// v2026-05-xx — bumped 400 → 1000. The grid renders tiles at ~200-300 CSS px,
+// which is 400-600 PHYSICAL px on the Retina / hi-DPI displays staff use, so a
+// 400px thumbnail was being upscaled and looked blurry until the full-res
+// original loaded in the lightbox. 1000px keeps grid tiles crisp at 2× DPI with
+// only a modest file-size bump (~3-4× the old thumb, still well under 150 KB).
+// Existing photos keep their 400px thumbs until the backfill job regenerates
+// them (separate PR).
+const THUMB_MAX_EDGE = 1000;
+const THUMB_QUALITY = 0.82;
 // Private bucket — every <img src> needs a signed URL. 1 hour TTL is long
 // enough for a warehouse session; panels refetch on focus so URLs get
 // refreshed before they expire in practice.
