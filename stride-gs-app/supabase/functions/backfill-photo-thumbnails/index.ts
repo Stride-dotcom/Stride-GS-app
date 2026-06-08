@@ -1,42 +1,45 @@
 /**
  * backfill-photo-thumbnails — one-shot admin backfill (batched + resumable).
  *
- * PR #664 bumped new-upload thumbnails 400px → 1000px. The ~6,437 existing
- * photos still carry 400px thumbnails baked into storage, so they look soft
- * on hi-DPI grid tiles (the lightbox loads the full-res original, which is
- * why opening a photo was always sharp). This function regenerates the
- * thumbnail at 1000px for a batch of pre-cutoff rows per invocation, writes
- * it back over the SAME thumbnail_key (so existing DB rows + signed URLs stay
- * valid), and stamps item_photos.thumb_regen_at so the work is resumable and
- * idempotent.
+ * PR #664 bumped new-upload thumbnails 400px → 1000px. The ~6,446 existing
+ * photos still carry 400px thumbnails baked into storage. This regenerates
+ * them to 1000px STORED thumbnails so the grid is crisp for every photo.
  *
- * Driven by a short-lived pg_cron job (same net.http_post + inlined
- * service-role bearer pattern as dt-sync-statuses). The job is removed once
- * `thumb_regen_at IS NULL AND thumbnail_key IS NOT NULL AND created_at <
- * cutoff` drains to zero.
+ * Resize engine: Supabase Storage image transformation (the render endpoint),
+ * which is enabled on this project. We download the original THROUGH the
+ * transform (width/height=maxEdge, resize=contain) so Supabase does the resize
+ * server-side, then write those bytes back over the SAME thumbnail_key. The
+ * edge worker only MOVES bytes — no client-side bitmap decode — so there's no
+ * memory accumulation. (The first cut used ImageScript to decode/resize in the
+ * worker and hit 546 WORKER_RESOURCE_LIMIT at batch=60 because 60 decoded
+ * bitmaps blew the worker's memory cap; the transform approach removed that
+ * ceiling and is also faster: ~860ms/img vs ~1290ms.)
+ *
+ * Transforms are used ONCE here as the resize engine; the grid keeps serving
+ * the STORED thumbnails afterward, so there is no ongoing per-view transform
+ * billing (that distinction was the reason we chose "backfill regenerate" over
+ * "serve transforms live" for the grid).
  *
  * Body (all optional):
- *   { limit?: number,        // max rows to process this call (default 25)
- *     cutoffIso?: string,    // only rows created before this (default the
- *                            //   PR-#664 deploy boundary)
+ *   { limit?: number,        // max rows per call (default 80)
+ *     cutoffIso?: string,    // only rows created before this (default PR-#664 deploy)
  *     maxEdge?: number,      // thumbnail long-edge px (default 1000)
  *     quality?: number,      // JPEG quality 1-100 (default 82)
- *     budgetMs?: number }    // stop starting new images after this elapsed
- *                            //   wall-clock (default 110000, under the edge
- *                            //   150s ceiling)
+ *     budgetMs?: number }    // stop starting new images after this elapsed (default 100000)
  *
  * Response:
- *   { ok, processed, skipped, failed, remaining, elapsedMs,
- *     avgMsPerImage, errors: [{ id, key, stage, message }] }
+ *   { ok, processed, skipped, failed, remaining, elapsedMs, avgMsPerImage,
+ *     errors: [{ id, key, stage, message }] }
  *
- * Auth: verify_jwt left at the platform default; the cron caller sends the
- * service-role bearer which the gateway accepts. The function itself uses the
- * service role for storage + DB, so a caller can't escalate beyond the
- * idempotent thumbnail regeneration this performs.
+ * Driven by a short-lived pg_cron job `backfill-photo-thumbs-drain` (same
+ * net.http_post + inlined service-role bearer pattern as dt-sync-statuses,
+ * operational-only / not in source), removed once the queue drains.
+ *
+ * Auth: verify_jwt; the cron caller sends the service-role bearer which the
+ * gateway accepts. The function itself uses the service role for storage + DB.
  */
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
-import { Image } from 'https://deno.land/x/imagescript@1.2.17/mod.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin':  '*',
@@ -47,10 +50,10 @@ const corsHeaders = {
 const BUCKET = 'photos';
 // Rows created on/after PR #664's deploy already have 1000px thumbs.
 const DEFAULT_CUTOFF_ISO = '2026-06-08T23:00:00Z';
-const DEFAULT_LIMIT = 25;
+const DEFAULT_LIMIT = 80;
 const DEFAULT_MAX_EDGE = 1000;
 const DEFAULT_QUALITY = 82;
-const DEFAULT_BUDGET_MS = 110_000;
+const DEFAULT_BUDGET_MS = 100_000;
 
 interface ErrItem { id: string; key: string; stage: string; message: string }
 
@@ -67,7 +70,7 @@ Deno.serve(async (req: Request) => {
   const startedAt = Date.now();
   try {
     const body = await req.json().catch(() => ({}));
-    const limit     = Math.max(1, Math.min(200, Number(body.limit) || DEFAULT_LIMIT));
+    const limit     = Math.max(1, Math.min(500, Number(body.limit) || DEFAULT_LIMIT));
     const cutoffIso = typeof body.cutoffIso === 'string' && body.cutoffIso ? body.cutoffIso : DEFAULT_CUTOFF_ISO;
     const maxEdge   = Math.max(200, Math.min(4000, Number(body.maxEdge) || DEFAULT_MAX_EDGE));
     const quality   = Math.max(1, Math.min(100, Number(body.quality) || DEFAULT_QUALITY));
@@ -95,45 +98,39 @@ Deno.serve(async (req: Request) => {
     const errors: ErrItem[] = [];
 
     for (const row of rows ?? []) {
-      if (Date.now() - startedAt > budgetMs) break;  // leave headroom under the edge ceiling
+      if (Date.now() - startedAt > budgetMs) break;  // leave headroom under the edge 150s ceiling
       const id = String(row.id);
       const origKey = String(row.storage_key || '');
       const thumbKey = String(row.thumbnail_key || '');
       if (!origKey || !thumbKey) { skipped++; continue; }
 
-      // 1. Download the original. A download failure is treated as TRANSIENT —
-      //    we don't stamp thumb_regen_at, so a later pass retries it.
-      const { data: blob, error: dlErr } = await supabase.storage.from(BUCKET).download(origKey);
+      // 1. Download the original THROUGH the transform so Supabase resizes it
+      //    server-side. A failure here is treated as TRANSIENT (not stamped →
+      //    retried on a later pass).
+      const { data: blob, error: dlErr } = await supabase.storage.from(BUCKET).download(origKey, {
+        transform: { width: maxEdge, height: maxEdge, resize: 'contain', quality },
+      });
       if (dlErr || !blob) {
         failed++;
-        errors.push({ id, key: origKey, stage: 'download', message: dlErr?.message || 'no blob' });
+        errors.push({ id, key: origKey, stage: 'transform', message: dlErr?.message || 'no blob' });
         continue;
       }
 
-      // 2. Decode + resize + re-encode. A decode/encode failure is treated as
-      //    PERMANENT (e.g. HEIC or a corrupt original) — we stamp thumb_regen_at
-      //    so the batch advances and we don't retry a poison row forever. The
-      //    old 400px thumb simply stays in place (grid still renders it).
-      let out: Uint8Array;
-      try {
-        const bytes = new Uint8Array(await blob.arrayBuffer());
-        const img = await Image.decode(bytes);
-        const longEdge = Math.max(img.width, img.height);
-        if (longEdge > maxEdge) {
-          const scale = maxEdge / longEdge;
-          img.resize(Math.max(1, Math.round(img.width * scale)), Math.max(1, Math.round(img.height * scale)));
-        }
-        out = await img.encodeJPEG(quality);
-      } catch (e) {
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      // Guard: a transform error can come back as a tiny JSON/text body rather
+      // than an image. Treat an implausibly small payload as a PERMANENT skip
+      // (stamp so the batch advances) — the old 400px thumb stays in place and
+      // a poison row can't stall the queue forever.
+      if (bytes.byteLength < 512) {
         failed++;
-        errors.push({ id, key: origKey, stage: 'decode', message: (e as Error).message?.slice(0, 200) || 'decode error' });
+        errors.push({ id, key: origKey, stage: 'transform', message: `tiny payload ${bytes.byteLength}b` });
         await supabase.from('item_photos').update({ thumb_regen_at: new Date().toISOString() }).eq('id', id);
         continue;
       }
 
-      // 3. Overwrite the thumbnail at the SAME key (upsert). Keeps the DB row's
+      // 2. Overwrite the thumbnail at the SAME key (upsert). Keeps the DB row's
       //    thumbnail_key valid and lets cached signed URLs serve the new bytes.
-      const { error: upErr } = await supabase.storage.from(BUCKET).upload(thumbKey, out, {
+      const { error: upErr } = await supabase.storage.from(BUCKET).upload(thumbKey, bytes, {
         contentType: 'image/jpeg',
         upsert: true,
       });
@@ -143,7 +140,7 @@ Deno.serve(async (req: Request) => {
         continue;  // transient — don't stamp, retry next pass
       }
 
-      // 4. Stamp success.
+      // 3. Stamp success.
       const { error: updErr } = await supabase
         .from('item_photos')
         .update({ thumb_regen_at: new Date().toISOString() })
@@ -156,7 +153,7 @@ Deno.serve(async (req: Request) => {
       processed++;
     }
 
-    // ── Remaining count for the driver to know when to stop ─────────────
+    // ── Remaining count so the driver knows when to stop ────────────────
     const { count: remaining } = await supabase
       .from('item_photos')
       .select('id', { count: 'exact', head: true })
