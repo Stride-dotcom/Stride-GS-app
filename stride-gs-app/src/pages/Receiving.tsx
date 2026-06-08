@@ -6,10 +6,10 @@ import {
   type SortingState, type VisibilityState,
 } from '@tanstack/react-table';
 import { useTablePreferences } from '../hooks/useTablePreferences';
-import { Plus, Copy, X, Check, Truck, Package, AlertTriangle, Printer, ClipboardPaste, ChevronDown, ChevronRight, ChevronUp, Zap, Settings2, Camera, FileText as DocIcon, Loader2, Save } from 'lucide-react';
+import { Plus, Copy, X, Check, Truck, Package, AlertTriangle, Printer, ClipboardPaste, ChevronDown, ChevronRight, ChevronUp, Zap, Settings2, Camera, FileText as DocIcon, Loader2, Save, Upload } from 'lucide-react';
 import { theme } from '../styles/theme';
 import { AutocompleteSelect } from '../components/shared/AutocompleteSelect';
-import { PhotoUploadButton } from '../components/media/PhotoUploadButton';
+import { MultiCapture } from '../components/media/MultiCapture';
 import { DocumentScanButton } from '../components/media/DocumentScanButton';
 import { supabase } from '../lib/supabase';
 import { fetchShipmentByNoFromSupabase } from '../lib/supabaseQueries';
@@ -246,6 +246,11 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
   const { documents } = useDocuments({
     contextType: 'shipment', contextId: dockNo, tenantId: photoTenant,
   });
+  // v2026-06-08 — spinner state for the SECONDARY Dock-Photos file picker
+  // (attach saved images from disk). The PRIMARY capture path is the
+  // MultiCapture batch camera ("take many, save once"), which owns its own
+  // saving state — see the Dock Photos block below.
+  const [dockPhotoUploading, setDockPhotoUploading] = useState(false);
 
   // ─── Save for Later gating ──────────────────────────────────────────────
   // Three preconditions for Save for Later — picked one by one against
@@ -1683,37 +1688,73 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
               </div>
             ) : (
               <>
-                <PhotoUploadButton
-                  onUpload={async (files: File[]) => {
-                    for (const f of files) await uploadPhoto(f, 'receiving');
-                  }}
-                  onUploadOne={async (file: File) => {
+                {/* v2026-06-08 — batch camera FIRST: "take many, save once",
+                    matching the Tasks photo flow + the per-row item media
+                    (ReceivingRowMedia). Tapping "Take Photos" queues each shot
+                    locally and auto-reopens the camera; one "Save N Photos"
+                    commits the batch. Previously this led with PhotoUploadButton's
+                    "Upload Photos" file picker, whose camera path uploaded each
+                    shot immediately (click→save, click→save). The file-upload
+                    affordance is now the secondary dashed tile in the strip
+                    below (attach saved images / use the photo library on mobile). */}
+                <MultiCapture
+                  mode="photo"
+                  onUpload={async (file: File) => {
                     const result = await uploadPhoto(file, 'receiving');
                     return !!result;
                   }}
-                  label="Upload Photos"
                   compact
+                  label="Take Photos"
                 />
-                {photos.length > 0 && (
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>
-                    {photos.slice(0, 8).map(p => (
-                      <div
-                        key={p.id}
-                        title={p.file_name}
-                        style={{
-                          width: 56, height: 56, borderRadius: 6, flexShrink: 0,
-                          background: `#E5E7EB url(${p.thumbnail_url || p.storage_url || ''}) center/cover`,
-                          border: '1px solid rgba(0,0,0,0.08)',
-                        }}
-                      />
-                    ))}
-                    {photos.length > 8 && (
-                      <span style={{ fontSize: 11, color: theme.colors.textMuted, fontWeight: 600, alignSelf: 'center' }}>
-                        +{photos.length - 8}
-                      </span>
-                    )}
-                  </div>
-                )}
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 10, alignItems: 'center' }}>
+                  {/* Secondary: attach existing image files from disk / photo library. */}
+                  <label
+                    title="Upload photos from files"
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                      width: 56, height: 56, borderRadius: 6, flexShrink: 0,
+                      background: '#FFF7F0', border: `1px dashed ${theme.colors.orange}`,
+                      color: '#B34710', cursor: dockPhotoUploading ? 'default' : 'pointer',
+                      opacity: dockPhotoUploading ? 0.6 : 1,
+                    }}
+                  >
+                    {dockPhotoUploading
+                      ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} />
+                      : <Upload size={16} />}
+                    <input
+                      type="file"
+                      accept="image/*"
+                      multiple
+                      onChange={e => {
+                        const files = e.target.files;
+                        e.target.value = '';
+                        if (!files || files.length === 0) return;
+                        void (async () => {
+                          setDockPhotoUploading(true);
+                          try { for (const f of Array.from(files)) await uploadPhoto(f, 'receiving'); }
+                          finally { setDockPhotoUploading(false); }
+                        })();
+                      }}
+                      style={{ display: 'none' }}
+                    />
+                  </label>
+                  {photos.slice(0, 8).map(p => (
+                    <div
+                      key={p.id}
+                      title={p.file_name}
+                      style={{
+                        width: 56, height: 56, borderRadius: 6, flexShrink: 0,
+                        background: `#E5E7EB url(${p.thumbnail_url || p.storage_url || ''}) center/cover`,
+                        border: '1px solid rgba(0,0,0,0.08)',
+                      }}
+                    />
+                  ))}
+                  {photos.length > 8 && (
+                    <span style={{ fontSize: 11, color: theme.colors.textMuted, fontWeight: 600, alignSelf: 'center' }}>
+                      +{photos.length - 8}
+                    </span>
+                  )}
+                </div>
               </>
             )}
           </div>
