@@ -265,16 +265,14 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
   }, [pieceCount]);
   const hasAtLeastOnePhoto = photos.length > 0;
 
-  // ─── Reopen hydrator ────────────────────────────────────────────────────
-  // Pulls the shipments row + draft items for `existingDockNo` once liveClients
-  // has loaded enough to resolve clientName. Guarded by a one-shot ref so a
-  // late re-render of liveClients doesn't restomp operator edits.
-  //
-  // Timeout safety net: if the clients API never returns (network down,
-  // GAS misconfig, the autoFetch=false code paths still apply, etc.), we'd
-  // hang the operator on an infinite spinner. After 8 seconds without
-  // liveClients we proceed anyway and leave the client-name display blank
-  // (the underlying tenant_id is enough to make Save / Complete work).
+  // ─── Reopen hydrator (one-shot) ──────────────────────────────────────────
+  // Fetches the shipments row + draft items for `existingDockNo` exactly once.
+  // Depends on [existingDockNo] ONLY — deliberately NOT liveClients — so a
+  // liveClients update while a fetch is in flight can't re-run + cancel this run
+  // and orphan the operator on an infinite spinner (the bug this replaced; see
+  // the in-body NOTE). The client display NAME is set best-effort from the
+  // clients cache here and finalized by the separate backfill effect below; the
+  // tenant_id (clientSheetId) set here is what Save / Complete actually key off.
   const hydratedRef = useRef(false);
   useEffect(() => {
     if (!existingDockNo || hydratedRef.current) return;
@@ -297,6 +295,11 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
         // NAME is now resolved by the separate backfill effect below once liveClients
         // loads; the tenant_id (clientSheetId) set here is enough for Save/Complete.
         setClientSheetId(row.clientSheetId);
+        // Best-effort name from the already-loaded clients cache so the
+        // Complete / Save buttons (gated on `client`) aren't briefly disabled on
+        // reopen. Blank if liveClients hasn't resolved yet — the backfill effect
+        // below fills it the moment it does.
+        setClient(liveClients.find(c => c.id === row.clientSheetId)?.name || '');
         setCarrier(row.carrier || '');
         setTracking(row.trackingNumber || '');
         setPieceCount(row.dockPieceCount != null ? String(row.dockPieceCount) : '');
