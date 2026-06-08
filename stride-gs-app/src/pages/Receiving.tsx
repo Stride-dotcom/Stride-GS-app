@@ -1306,9 +1306,14 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
       size: 50,
       header: () => 'Qty',
       cell: ({ row }) => (
-        // v2026-06-08 — select-on-focus so tapping the field on a tablet
+        // v2026-06-08 — select-on-focus so tapping/clicking the field
         // highlights the preset value (1) and the next digit REPLACES it.
         // Previously the caret landed after "1" and typing 3 yielded "13".
+        // onMouseUp preventDefault is the DESKTOP half: a mouse click fires
+        // focus (→ select-all) and THEN mouseup, and that mouseup collapses
+        // the selection to the click point — undoing select() on desktop,
+        // while touch (no caret-placing mouseup) already worked. Blocking the
+        // default holds the full selection so click-then-type replaces too.
         // Uses type="text"+inputMode (not type="number") because iOS Safari
         // number inputs don't support .select()/setSelectionRange — mirrors
         // the Item ID cell's numeric-text pattern (onKeyDown digit guard +
@@ -1319,6 +1324,7 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
           pattern="[0-9]*"
           value={row.original.qty}
           onFocus={e => e.currentTarget.select()}
+          onMouseUp={e => e.preventDefault()}
           onKeyDown={e => {
             if (e.metaKey || e.ctrlKey || e.altKey) return;   // Cmd/Ctrl shortcuts
             if (e.key.length > 1) return;                     // Arrows, Tab, Enter, Backspace, etc.
