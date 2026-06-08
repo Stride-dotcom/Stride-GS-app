@@ -3717,6 +3717,9 @@ export function Billing() {
                     <div style={{ fontSize: 14, fontWeight: 700, color: '#B45309' }}>Storage Preview</div>
                     <div style={{ fontSize: 12, color: '#92400E' }}>
                       {storClientFilter.length ? storClientFilter.join(', ') : 'All Clients'} &middot; {storStartDate} to {storEndDate} &middot; {previewRows.length} items &middot; ${previewTotalAmount.toFixed(2)}
+                      {selCount > 0 && (
+                        <> &middot; <strong style={{ color: '#B45309' }}>{selCount} selected &middot; ${selectionTotal.toFixed(2)}</strong></>
+                      )}
                       {' '} &middot; <strong>These charges are NOT in the ledger yet</strong>
                     </div>
                   </div>

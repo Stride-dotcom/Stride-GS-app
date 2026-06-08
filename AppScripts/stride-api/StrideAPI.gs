@@ -1,4 +1,5 @@
 /* ===================================================
+   StrideAPI.gs — v38.266.0 — 2026-06-08 PST — [BILLING] fix: storage partial-selection no longer strands unchecked rows. handleCommitStorageRows_'s finalized-summary gate (tenantWindowLockedNote / lockedSidemarks) refused to re-commit ANY item in a window once a STOR-SUMMARY was finalized — for a separate_by_sidemark=FALSE client the single BLANK-sidemark summary locks the WHOLE tenant, so unchecking some rows + invoicing the rest left the unchecked items permanently un-billable (revenue loss). Fix: read storage_billing_items FIRST (now also selecting summary_ledger_row_id), build sbiFinalizedSummaries (summaries that carry FINALIZED per-item rows), and skip the coarse summary lock for those — the precise per-item sbiAlreadyBilled guard already blocks exactly the items that summary billed, so the unchecked items commit. The lock still fires for a summary with NO per-item detail (Supabase blip during its commit), preserving the double-bill fallback; !sbiActive leaves the set empty → legacy whole-tenant lock. Companion SB migration 20260608235000 applies the SAME rule to the PREVIEW dedup (_compute_storage_charges source (b) gains AND NOT EXISTS finalized storage_billing_items for the summary) so the unchecked rows reappear in Preview Storage. Companion React: the Storage Preview banner shows the selected subset count + total alongside the available total. No change to dollar totals on a full commit, the v38.182 atomic invoice counter, half-write detection, or the per-item double-bill guards (storage_billing_items + uq_sbi_active_item_period untouched).
    StrideAPI.gs — v38.265.0 — 2026-06-08 PST — [SECURITY] feat: going-forward app_metadata sync (Step 5 of the 2026-06-08 privilege-escalation remediation). The Custom Access Token Hook (public.custom_access_token_hook, live) copies the SERVICE-ROLE-ONLY app_metadata.{role,clientSheetId,accessibleClientSheetIds} into the JWT user_metadata claim at every token mint, so the ~136 RLS policies + RPC gates read TRUSTED (un-editable) values instead of the user-writable user_metadata. But app_metadata was only SEEDED once at cutover — role/tenant changes and brand-new users did NOT propagate, so the hook served stale claims. This version wires GAS — the authoritative user resolver (CB "Users" sheet via lookupUser_, which correctly classifies the info@/dispatch@ staff special-cases the cb_users mirror gets wrong) — to stamp app_metadata via the service-role-only set_app_metadata_by_email RPC whenever it resolves a user: handleGetUserByEmail_ (login), handleCreateUser_ (new user), handleUpdateUser_ (role/tenant change). New helpers stampAppMetadata_ (low-level PostgREST rpc/set_app_metadata_by_email call) + syncAppMetadataForUser_ (resolves accessibleClientSheetIds the SAME way handleGetUserByEmail_ does — parent→children expansion for clients, null for admin/staff — so login/create/update stamp identical values). BEST-EFFORT, wrapped in try/catch, NEVER blocks or fails the login/create/update response (the hook is fail-open, so a brief stale stamp can't lock anyone out). Companion React change removes the now-redundant + attack-vector client-side user_metadata sync in AuthContext.handleSession (the supabase.auth.updateUser({data:{role,clientSheetId,accessibleClientSheetIds}}) blocks); password-change updateUser calls are kept. No schema change (RPC + hook already live from PR #660), no billing logic touched, no change to the v38.182 atomic invoice counter.
    StrideAPI.gs — v38.264.0 — 2026-06-05 PST — [STAX] fix: staxSheetUpsert now writes an EXPLICIT "FALSE" to the Auto Charge cell when payload.autoCharge===false (was writing blank). The daily auto-charge runner (StaxAutoPay.gs _prepareEligiblePending) treats a blank invoice-level Auto Charge cell as "fall back to the client-level setting" and only an explicit FALSE/NO/OFF as a per-invoice skip — so a blank cell on a manual-marked Quick Stax Charge row would silently inherit the client's Auto Charge=TRUE and auto-charge anyway. Writing "FALSE" makes the operator's manual choice authoritative per-invoice. Supports the new general-purpose "Create Stax Charge" modal (any client, any amount, user-set due date + notes + auto-charge toggle; is_test still true to distinguish from batch invoices). No schema change, no billing logic touched, no change to the v38.182 atomic invoice counter. — v38.263.0 — 2026-06-05 PST — [STAX] feat: new staxSheetUpsert action (handleStaxSheetUpsert_) — reverse-writethrough mirror of a single Stax invoice row from Supabase into the Stax Auto Pay "Invoices" sheet, called by the create-test-stax-invoice Edge Function. That EF is SB-primary (inserts public.stax_invoices + POSTs to Stax directly, no GAS), but the still-GAS charge path (handleChargeSingleInvoice_ / handleRunStaxCharges_) finds invoices by reading the Invoices SHEET — so an SB-only test invoice was invisible to a hard refresh (the noCache path reads the sheet via GAS) and could not be charged ("Invoice not found"). This action mirrors the EF's row into the sheet (MIG-002 synchronous reverse-writethrough) so the legacy charge + refresh paths keep working until runStaxCharges migrates to SB. Idempotent on QB Invoice # (updates in place else appends), header-resolved columns via stax_invoiceCols_ (no positional writes), token-gated (the GAS API_TOKEN bearer, same surface as writeThroughReverse — the EF enforces the admin/staff JWT gate before calling), LockService-guarded. It is the SHEET writer ONLY — it does NOT call api_sbResyncStaxInvoice_ because the EF already owns the authoritative public.stax_invoices row. No schema change, no billing logic touched, no change to the v38.182 atomic invoice counter. — v38.262.1 — 2026-06-05 PST — [STAX] fix: handleCreateTestInvoice_ now mirrors the new PENDING row to public.stax_invoices via api_sbResyncStaxInvoice_. The "Create Test Invoice" button (Payments page) appended a PENDING row to the Stax Invoices sheet but never wrote the Supabase mirror — every other Stax write handler (resetStaxInvoiceStatus, toggleAutoCharge, updateStaxInvoice, etc.) calls api_sbResyncStaxInvoice_ at the end, but createTestInvoice was the lone handler missing it. The React Payments page reads invoices from public.stax_invoices (fetchStaxInvoicesFromSupabase), so a test invoice that never mirrored was invisible in the UI: Justin saw "success" but the row never appeared, could never be selected, never got pushed to Stax via Create Stax Invoices, and stayed PENDING forever with no stax_id (Justin, 2026-06-04 — no stax_invoices rows created June 3-4, no createStaxInvoices in gas_call_log because the invoice was never visible to push). Fix: added the standard one-line write-through before the success return so the new PENDING test invoice mirrors to Supabase immediately and shows in the UI, where it can be selected and pushed to Stax normally. No change to the create flow's intentional PENDING-staging design (test invoices still do NOT auto-push to Stax), no schema change, no billing logic touched, no change to the v38.182 atomic invoice counter.
    StrideAPI.gs — v38.262.0 — 2026-06-04 PST — [USERS] fix: createUser now defaults Active=TRUE so new accounts can log in immediately. handleCreateUser_ previously wrote Active=FALSE for every manually-created user (Settings → Users → Add User), requiring an admin to remember to flip the toggle afterward — staff routinely forgot, locking the new user out of login and the whole app. The default is now TRUE (line ~12065: active = forceActive==="FALSE" ? "FALSE" : "TRUE"), matching the onboarding path api_upsertClientUser_ which has always created client users Active=TRUE. Callers can still create a deactivated account by explicitly passing active="FALSE". Companion React changes: the Add User modal (Settings.tsx) gains an "Active" checkbox defaulting to ON, useUsers.addUser + createApiUser thread the active flag through as params.active, and the profiles.is_active column default is made explicit via migration 20260604160000_profiles_is_active_default_true.sql (the live DB already had DEFAULT true — this version-controls it). No schema/billing change, no change to the v38.182 atomic invoice counter, half-write detection, or any billing logic.
@@ -25018,49 +25019,24 @@ function handleCommitStorageRows_(payload) {
       // grouping produced 6 orphan CB invoices + 4 LEDGER_PARTIAL_FLIP rolls).
       var sepBySidemark = api_clientSeparatesBySidemark_(tenantId);
 
-      // Finalized-summary gate. Collect the set of sidemarks whose window is
-      // already locked by a FINALIZED (Invoiced/Billed/Void) STOR-SUMMARY that
-      // overlaps the request window — re-committing those would double-bill.
-      // A finalized BLANK-sidemark summary represents the WHOLE tenant's
-      // storage for the window, so when one exists we lock the entire tenant
-      // (a window already billed as one line can't be safely re-split).
-      var lockedSidemarks = {};            // normalized sidemark -> locking id
-      var tenantWindowLockedNote = null;
-      for (var fi = 0; fi < blAllData.length; fi++) {
-        var fStatus = String(blAllData[fi][blCols.status - 1] || "").trim().toLowerCase();
-        if (fStatus !== "invoiced" && fStatus !== "billed" && fStatus !== "void") continue;
-        var fSvc = blCols.svcCode ? String(blAllData[fi][blCols.svcCode - 1] || "").trim().toUpperCase() : "";
-        if (fSvc !== "STOR") continue;
-        var fLrid = blCols.ledgerRowId ? String(blAllData[fi][blCols.ledgerRowId - 1] || "").trim() : "";
-        if (!fLrid || fLrid.indexOf("STOR-SUMMARY-") !== 0) continue;
-        var fPeriod = api_parseStorSummaryPeriod_(fLrid);
-        if (!fPeriod) continue;
-        // Reject any overlap with the request window.
-        if (fPeriod.end.getTime() < startDate.getTime()) continue;
-        if (fPeriod.start.getTime() > endDate.getTime()) continue;
-        var fSm = blCols.sidemark ? String(blAllData[fi][blCols.sidemark - 1] || "").trim().toUpperCase() : "";
-        if (fSm === "") { tenantWindowLockedNote = fLrid; break; }   // blank = whole-tenant lock
-        lockedSidemarks[fSm] = fLrid;
-      }
-      if (tenantWindowLockedNote) {
-        skipped.push(clientName + " (finalized summary " + tenantWindowLockedNote + " already covers window)");
-        return;
-      }
-
-      // v38.x — storage_billing_items: per-item billed-tracking + dedup.
+      // v38.266.0 — storage_billing_items per-item read FIRST (moved ahead of
+      // the finalized-summary gate below). Yields BOTH the per-item
+      // already-billed set AND the set of finalized STOR-SUMMARY ids that carry
+      // per-item detail, so the gate can defer its coarse whole-tenant/sidemark
+      // lock to the precise per-item guard when that detail exists.
       // Read which items already carry a FINALIZED (non-Void, non-Unbilled)
       // storage charge overlapping this window so we never re-bill them, and
       // clear the Unbilled working-set rows we're about to replace (mirrors the
       // sheet delete-pass below). FAIL-SAFE: any Supabase read failure disables
-      // BOTH the per-item skip AND the storage_billing_items write for this
-      // tenant this commit, falling back to legacy sheet-only behaviour — the
-      // finalized-summary gate above stays the primary double-bill guard, so a
-      // Supabase outage can never block or corrupt a storage commit.
+      // the per-item skip AND the write AND leaves sbiFinalizedSummaries empty
+      // (so the summary gate keeps its legacy whole-tenant lock) — an SB outage
+      // can never block or corrupt a storage commit.
       // period_start/period_end are DATE columns; the commit's
       // periodStartStr/periodEndStr are already YYYY-MM-DD.
       var sbiActive = false;
-      var sbiAlreadyBilled = {};   // item_id -> true (FINALIZED, overlapping window)
-      var sbiRows = [];            // per-item rows to insert for THIS commit
+      var sbiAlreadyBilled = {};        // item_id -> true (FINALIZED, overlapping window)
+      var sbiFinalizedSummaries = {};   // summary_ledger_row_id -> true (has a FINALIZED per-item row)
+      var sbiRows = [];                 // per-item rows to insert for THIS commit
       (function() {
         var sel = supabaseSelect_(
           "storage_billing_items",
@@ -25068,7 +25044,7 @@ function handleCommitStorageRows_(payload) {
             "&status=neq.Void" +
             "&period_start=lte." + encodeURIComponent(periodEndStr) +
             "&period_end=gte." + encodeURIComponent(periodStartStr),
-          "item_id,status"
+          "item_id,status,summary_ledger_row_id"
         );
         if (!sel.ok) {
           Logger.log("handleCommitStorageRows_ storage_billing_items dedup read failed for " +
@@ -25082,7 +25058,11 @@ function handleCommitStorageRows_(payload) {
           // Only FINALIZED rows block re-billing. Unbilled rows are the prior
           // working set we're about to delete + replace, so they must NOT
           // exclude their item from this commit.
-          if (iid && ist !== "Unbilled") sbiAlreadyBilled[iid] = true;
+          if (ist !== "Unbilled") {
+            if (iid) sbiAlreadyBilled[iid] = true;
+            var slr = String(sel.rows[si].summary_ledger_row_id || "").trim();
+            if (slr) sbiFinalizedSummaries[slr] = true;
+          }
         }
         supabaseDelete_(
           "storage_billing_items",
@@ -25092,6 +25072,48 @@ function handleCommitStorageRows_(payload) {
             "&period_end=gte." + encodeURIComponent(periodStartStr)
         );
       })();
+
+      // Finalized-summary gate. Collect the set of sidemarks whose window is
+      // already locked by a FINALIZED (Invoiced/Billed/Void) STOR-SUMMARY that
+      // overlaps the request window — re-committing those would double-bill.
+      // A finalized BLANK-sidemark summary represents the WHOLE tenant's
+      // storage for the window, so when one exists we lock the entire tenant
+      // (a window already billed as one line can't be safely re-split).
+      //
+      // v38.266.0 — partial-selection fix: when a finalized summary HAS
+      // per-item storage_billing_items detail (sbiFinalizedSummaries), DON'T
+      // apply its coarse lock. The precise per-item sbiAlreadyBilled guard
+      // below already blocks exactly the items that summary billed, so items
+      // the operator left UNCHECKED in that partial commit can be billed now
+      // (pre-fix the blank-sidemark whole-tenant lock stranded them forever).
+      // The lock still fires for a summary with NO per-item detail (Supabase
+      // blip during its commit) — preserving the double-bill fallback.
+      var lockedSidemarks = {};            // normalized sidemark -> locking id
+      var tenantWindowLockedNote = null;
+      for (var fi = 0; fi < blAllData.length; fi++) {
+        var fStatus = String(blAllData[fi][blCols.status - 1] || "").trim().toLowerCase();
+        if (fStatus !== "invoiced" && fStatus !== "billed" && fStatus !== "void") continue;
+        var fSvc = blCols.svcCode ? String(blAllData[fi][blCols.svcCode - 1] || "").trim().toUpperCase() : "";
+        if (fSvc !== "STOR") continue;
+        var fLrid = blCols.ledgerRowId ? String(blAllData[fi][blCols.ledgerRowId - 1] || "").trim() : "";
+        if (!fLrid || fLrid.indexOf("STOR-SUMMARY-") !== 0) continue;
+        // Defer to per-item: this summary's items are individually tracked in
+        // storage_billing_items, so sbiAlreadyBilled handles dedup precisely —
+        // don't let its coarse summary range strand the unchecked items.
+        if (sbiActive && sbiFinalizedSummaries[fLrid]) continue;
+        var fPeriod = api_parseStorSummaryPeriod_(fLrid);
+        if (!fPeriod) continue;
+        // Reject any overlap with the request window.
+        if (fPeriod.end.getTime() < startDate.getTime()) continue;
+        if (fPeriod.start.getTime() > endDate.getTime()) continue;
+        var fSm = blCols.sidemark ? String(blAllData[fi][blCols.sidemark - 1] || "").trim().toUpperCase() : "";
+        if (fSm === "") { tenantWindowLockedNote = fLrid; break; }   // blank = whole-tenant lock
+        lockedSidemarks[fSm] = fLrid;
+      }
+      if (tenantWindowLockedNote) {
+        skipped.push(clientName + " (finalized summary " + tenantWindowLockedNote + " already covers window)");
+        return;
+      }
 
       // Sub-group the incoming per-item rows. separate_by_sidemark=true →
       // one group per normalized sidemark (uppercase+trim, matching React's
