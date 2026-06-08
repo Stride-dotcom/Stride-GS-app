@@ -79,6 +79,13 @@ export function DocumentPreviewModal({ documents, startIndex, getSignedUrl, onCl
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose, go]);
 
+  // If the list shrinks while open (e.g. a Realtime delete from another user),
+  // keep `index` in range so prev/next stay sane. The render guards already
+  // prevent an out-of-bounds read; this just avoids a stuck past-the-end index.
+  useEffect(() => {
+    if (documents.length > 0 && index >= documents.length) setIndex(documents.length - 1);
+  }, [documents.length, index]);
+
   const handleDownload = useCallback(async () => {
     if (!url || !doc) return;
     try {
