@@ -1306,7 +1306,27 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
       size: 50,
       header: () => 'Qty',
       cell: ({ row }) => (
-        <input type="number" min={1} value={row.original.qty} onChange={e => update(row.original._originalIdx, 'qty', parseInt(e.target.value) || 1)} style={{ ...cellInput, width: 46, textAlign: 'center' }} />
+        // v2026-06-08 — select-on-focus so tapping the field on a tablet
+        // highlights the preset value (1) and the next digit REPLACES it.
+        // Previously the caret landed after "1" and typing 3 yielded "13".
+        // Uses type="text"+inputMode (not type="number") because iOS Safari
+        // number inputs don't support .select()/setSelectionRange — mirrors
+        // the Item ID cell's numeric-text pattern (onKeyDown digit guard +
+        // parseInt sanitizer in onChange enforce min-1 integers).
+        <input
+          type="text"
+          inputMode="numeric"
+          pattern="[0-9]*"
+          value={row.original.qty}
+          onFocus={e => e.currentTarget.select()}
+          onKeyDown={e => {
+            if (e.metaKey || e.ctrlKey || e.altKey) return;   // Cmd/Ctrl shortcuts
+            if (e.key.length > 1) return;                     // Arrows, Tab, Enter, Backspace, etc.
+            if (!/^[0-9]$/.test(e.key)) e.preventDefault();   // digits only
+          }}
+          onChange={e => update(row.original._originalIdx, 'qty', parseInt(e.target.value, 10) || 1)}
+          style={{ ...cellInput, width: 46, textAlign: 'center' }}
+        />
       ),
     }),
     // ── Location ─────────────────────────────────────────────────────────────
