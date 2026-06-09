@@ -1557,14 +1557,14 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
   }
 
   return (
-    <div style={{ position: 'relative', background: '#F5F2EE', margin: '-28px -32px', padding: '28px 32px', minHeight: '100%' }}>
+    <div style={{ position: 'relative', background: '#F5F2EE', margin: isMobile ? '-12px -8px' : '-28px -32px', padding: isMobile ? '8px' : '28px 32px', minHeight: '100%', overflowX: isMobile ? 'hidden' : undefined, maxWidth: isMobile ? '100vw' : undefined }}>
       <ProcessingOverlay
         visible={submitting}
         message="Hold tight — completing your shipment"
         subMessage="Adding items to inventory, generating the receiving doc, and emailing the client. This can take 10–20 seconds."
       />
-      <div style={{ marginBottom: 16, fontSize: 20, fontWeight: 700, letterSpacing: '2px', color: '#1C1C1C' }}>
-        STRIDE LOGISTICS · RECEIVING
+      <div style={{ marginBottom: isMobile ? 10 : 16, fontSize: isMobile ? 14 : 20, fontWeight: 700, letterSpacing: isMobile ? '1px' : '2px', color: '#1C1C1C' }}>
+        {isMobile ? 'RECEIVING' : 'STRIDE LOGISTICS · RECEIVING'}
         {/* In-progress chip: shown once the operator has saved at least
             once (or reopened a saved intake). Surfaces the DOCK handle so
             the operator can confirm they're editing the right draft. */}
@@ -2161,7 +2161,7 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
           <div style={{ fontSize: 12, color: theme.colors.textMuted }}>
             <strong>{filledItems.length}</strong> item{filledItems.length !== 1 ? 's' : ''} entered &middot; {filledItems.filter(i => i.needsInspection).length} need inspection &middot; {filledItems.filter(i => i.needsAssembly).length} need assembly
           </div>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', gap: 8, alignItems: isMobile ? 'stretch' : 'center', flexWrap: 'wrap', flexDirection: isMobile ? 'column' : 'row' }}>
             {autoIdError && (
               <div style={{ fontSize: 12, color: '#92400E', background: '#FEF3C7', border: '1px solid #F59E0B', borderRadius: 8, padding: '8px 12px', maxWidth: 420 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
@@ -2208,12 +2208,13 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
                   disabled={saveBlocked}
                   title={saveBlockedReason || 'Save dock intake + items entered so far. You can come back later from the In Progress tab.'}
                   style={{
-                    padding: '9px 18px', fontSize: 13, fontWeight: 600, borderRadius: 8,
+                    padding: isMobile ? '14px 18px' : '9px 18px', fontSize: 13, fontWeight: 600, borderRadius: 8,
                     border: `1px solid ${saveBlocked ? theme.colors.border : theme.colors.orange}`,
                     background: '#fff',
                     color: saveBlocked ? theme.colors.textMuted : theme.colors.orange,
                     cursor: saveBlocked ? 'not-allowed' : 'pointer',
-                    fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 6,
+                    fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                    width: isMobile ? '100%' : undefined, minHeight: isMobile ? 48 : undefined,
                   }}
                 >
                   {savingDraft
@@ -2244,11 +2245,12 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
                 disabled={completeBlocked}
                 title={completeBlockedReason || 'Complete receiving — creates inventory rows, tasks, and billing.'}
                 style={{
-                  padding: '9px 20px', fontSize: 13, fontWeight: 600, borderRadius: 8, border: 'none',
+                  padding: isMobile ? '14px 20px' : '9px 20px', fontSize: 13, fontWeight: 600, borderRadius: 8, border: 'none',
                   background: completeBlocked ? theme.colors.border : theme.colors.orange,
                   color: completeBlocked ? theme.colors.textMuted : '#fff',
                   cursor: completeBlocked ? 'not-allowed' : 'pointer',
-                  fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 6,
+                  fontFamily: 'inherit', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                  width: isMobile ? '100%' : undefined, minHeight: isMobile ? 48 : undefined,
                 }}
               >
                 {submitting ? (

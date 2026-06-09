@@ -772,7 +772,7 @@ function WillCallsTab({ willCalls, onNavigate }: { willCalls: SummaryWillCall[];
 
 /** ⚠️  FRAGILE HOOK ORDER — see Inventory.tsx for full warning. Do not reorder/add/remove hooks. */
 export function Dashboard() {
-  const { isMobile, isTablet } = useIsMobile();
+  const { isMobile, isTablet, isExtraSmall } = useIsMobile();
   const apiConfigured = isApiConfigured();
 
   // Top-level tab: Calendar (default) or Overview (the task/repair/will-call
@@ -978,7 +978,7 @@ export function Dashboard() {
   ];
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 24, margin: '-28px -32px', padding: '28px 32px', minHeight: '100%', background: '#F5F2EE' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: isMobile ? 12 : 24, margin: isMobile ? '-12px -8px' : '-28px -32px', padding: isMobile ? '8px' : '28px 32px', minHeight: '100%', background: '#F5F2EE', overflowX: isMobile ? 'hidden' : undefined, maxWidth: isMobile ? '100vw' : undefined }}>
       <style>{`
         @keyframes spin { to { transform: rotate(360deg); } }
         /* Tablet/mobile density for the three Dashboard overview tables.
@@ -1004,8 +1004,8 @@ export function Dashboard() {
 
       {/* Header — v2 small inline branding */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
-        <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: '2px', color: '#1C1C1C' }}>
-          STRIDE LOGISTICS · DASHBOARD
+        <div style={{ fontSize: isMobile ? 13 : 20, fontWeight: 700, letterSpacing: isMobile ? '1px' : '2px', color: '#1C1C1C' }}>
+          {isMobile ? 'DASHBOARD' : 'STRIDE LOGISTICS · DASHBOARD'}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           {lastSyncedLabel && <span style={{ fontSize: 11, color: '#999' }}>Updated {lastSyncedLabel}</span>}
@@ -1060,7 +1060,7 @@ export function Dashboard() {
       <>
       {/* Stat Cards — all dark v2. On mobile we pack all 3 across with the
           compact StatCard padding so the table below gets real estate. */}
-      <div style={{ display: 'grid', gap: isMobile ? 8 : 14, gridTemplateColumns: 'repeat(3, 1fr)', marginBottom: isMobile ? 10 : 0 }}>
+      <div style={{ display: 'grid', gap: isMobile ? 8 : 14, gridTemplateColumns: isExtraSmall ? 'repeat(2, 1fr)' : 'repeat(3, 1fr)', marginBottom: isMobile ? 10 : 0 }}>
         <StatCard icon={<ClipboardList size={16} />} label="Open Tasks" value={stats.openTasks} sub="Open + In Progress" onClick={() => handleTabChange('tasks')} />
         <StatCard icon={<Wrench size={16} />} label="Active Repairs" value={stats.openRepairs} sub="Pending quote or approved" onClick={() => handleTabChange('repairs')} />
         <StatCard icon={<Truck size={16} />} label="Pending Will Calls" value={stats.pendingWCs} sub="Pending · Scheduled · Partial" onClick={() => handleTabChange('willcalls')} />
