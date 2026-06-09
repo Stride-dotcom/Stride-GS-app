@@ -1,12 +1,13 @@
 import { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useTablePreferences } from '../hooks/useTablePreferences';
+import { ColumnManagerMenu, moveColumnInOrder } from '../components/shared/ColumnManagerMenu';
 import { createPortal } from 'react-dom';
 import {
   useReactTable, getCoreRowModel, getSortedRowModel, getFilteredRowModel,
   flexRender, createColumnHelper,
   type ColumnFiltersState,
-  type RowSelectionState, type FilterFn,
+  type RowSelectionState, type FilterFn, type ColumnSizingState,
 } from '@tanstack/react-table';
 import {
   Eye, Search, Download, ChevronUp, ChevronDown,
@@ -429,10 +430,8 @@ export function Shipments() {
   const [showColMenu, setShowColMenu] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   useEffect(() => { if (!apiLoading && refreshing) setRefreshing(false); }, [apiLoading, refreshing]);
-  const [dragColId, setDragColId] = useState<string | null>(null);
-  const [dragOverColId, setDragOverColId] = useState<string | null>(null);
-  const colBtnRef = useRef<HTMLButtonElement>(null);
-  const colMenuRef = useRef<HTMLDivElement>(null);
+  const [columnSizing, setColumnSizing] = useState<ColumnSizingState>({});
+  const [colToggleRect, setColToggleRect] = useState<DOMRect | null>(null);
 
   // Filters (status filter persisted to localStorage, keyed by user.email
   // so an admin's selection doesn't leak into an impersonated client's
@@ -503,11 +502,7 @@ export function Shipments() {
         setShowStatusDrop(false);
         setShowCarrierDrop(false);
       }
-      // Column menu outside click
-      if (colMenuRef.current && !colMenuRef.current.contains(t) &&
-          colBtnRef.current && !colBtnRef.current.contains(t)) {
-        setShowColMenu(false);
-      }
+      // Column menu (ColumnManagerMenu) self-closes on outside click.
     };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
@@ -538,13 +533,15 @@ export function Shipments() {
   const table = useReactTable({
     data,
     columns,
-    state: { sorting, columnFilters, columnVisibility, rowSelection, globalFilter, columnOrder: columnOrder.length ? columnOrder : DEFAULT_COL_ORDER },
+    state: { sorting, columnFilters, columnVisibility, rowSelection, globalFilter, columnOrder: columnOrder.length ? columnOrder : DEFAULT_COL_ORDER, columnSizing },
     onSortingChange: setSorting,
     onColumnFiltersChange: setColumnFilters,
     onColumnVisibilityChange: setColumnVisibility,
     onRowSelectionChange: setRowSelection,
     onGlobalFilterChange: setGlobalFilter,
     onColumnOrderChange: (updater) => setColumnOrder(typeof updater === 'function' ? updater(columnOrder.length ? columnOrder : DEFAULT_COL_ORDER) : updater),
+    onColumnSizingChange: setColumnSizing,
+    columnResizeMode: 'onChange',
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),
     getFilteredRowModel: getFilteredRowModel(),
@@ -649,65 +646,47 @@ export function Shipments() {
           <button onClick={() => toCSV(data, `shipments-export-${new Date().toISOString().slice(0, 10)}.csv`)} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '6px 10px', fontSize: 11, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', color: theme.colors.textSecondary }}>
             <Download size={13} /> CSV
           </button>
-          <button ref={colBtnRef} onClick={() => setShowColMenu(!showColMenu)} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '6px 10px', fontSize: 11, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', color: theme.colors.textSecondary }}>
+          <button onClick={e => { setColToggleRect(e.currentTarget.getBoundingClientRect()); setShowColMenu(v => !v); }} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '6px 10px', fontSize: 11, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', color: theme.colors.textSecondary }}>
             <Settings2 size={13} /> Columns
           </button>
           <button onClick={() => { setRefreshing(true); refetchShipments(); }} title="Refresh data" style={{ padding: '6px 7px', fontSize: 11, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', color: (refreshing || apiLoading) ? theme.colors.orange : theme.colors.textSecondary, transition: 'color 0.2s' }}><RefreshCw size={13} style={(refreshing || apiLoading) ? { animation: 'spin 1s linear infinite' } : undefined} /></button>
         </div>
       </div>
 
-      {/* Column toggle menu */}
-      {showColMenu && createPortal(
-        <div ref={colMenuRef} style={{
-          position: 'fixed',
-          top: (colBtnRef.current?.getBoundingClientRect().bottom ?? 0) + 4,
-          left: (colBtnRef.current?.getBoundingClientRect().left ?? 0),
-          background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 10,
-          boxShadow: theme.shadows.lg, zIndex: 200, padding: 8, minWidth: 180,
-        }}>
-          {TOGGLEABLE.map(id => {
-            const isVis = columnVisibility[id] !== false;
-            return (
-              <label key={id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 8px', fontSize: 12, cursor: 'pointer', borderRadius: 4 }}>
-                <input type="checkbox" checked={isVis} onChange={() => setColumnVisibility(prev => ({ ...prev, [id]: !isVis }))} style={{ accentColor: theme.colors.orange }} />
-                {COL_LABELS[id]}
-              </label>
-            );
-          })}
-        </div>, document.body
+      {/* Column manager (show/hide + reorder) */}
+      {showColMenu && colToggleRect && (
+        <ColumnManagerMenu
+          anchorRect={colToggleRect}
+          toggleableIds={TOGGLEABLE}
+          labels={COL_LABELS}
+          visibility={columnVisibility}
+          onToggle={id => setColumnVisibility(prev => ({ ...prev, [id]: prev[id] === false }))}
+          columnOrder={columnOrder.length ? columnOrder : DEFAULT_COL_ORDER}
+          onMove={(id, dir) => moveColumnInOrder(id, dir, setColumnOrder, DEFAULT_COL_ORDER)}
+          onClose={() => setShowColMenu(false)}
+          onResetWidths={() => setColumnSizing({})}
+        />
       )}
 
       {/* Table */}
       {clientFilter.length === 0 && <div style={{ padding: '40px 20px', textAlign: 'center', color: '#9CA3AF', fontSize: 13 }}>Select one or more clients to load data.</div>}
       <div style={{ background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: isMobile ? 8 : 12, overflow: 'hidden' }}>
         <div ref={containerRef} style={{ overflowY: 'auto', overflowX: 'auto', maxHeight: isMobile ? 'calc(100dvh - 200px)' : 'calc(100dvh - 280px)', minHeight: isMobile ? 200 : undefined, WebkitOverflowScrolling: 'touch' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, minWidth: isMobile ? 700 : undefined }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13, tableLayout: 'fixed', minWidth: isMobile ? 700 : table.getTotalSize() }}>
             <thead>
               {table.getHeaderGroups().map(hg => (
                 <tr key={hg.id} style={{ borderBottom: `1px solid ${theme.colors.border}` }}>
                   {hg.headers.map(h => {
-                    const isDragTarget = dragOverColId === h.id && dragColId !== h.id;
+                    const canResize = h.column.getCanResize();
                     return (
                       <th key={h.id}
-                        draggable={h.id !== 'select' && h.id !== 'actions'}
-                        onDragStart={() => setDragColId(h.id)}
-                        onDragOver={e => { e.preventDefault(); setDragOverColId(h.id); }}
-                        onDragEnd={() => {
-                          if (dragColId && dragOverColId && dragColId !== dragOverColId) {
-                            const cur = columnOrder.length ? [...columnOrder] : [...DEFAULT_COL_ORDER];
-                            const from = cur.indexOf(dragColId); const to = cur.indexOf(dragOverColId);
-                            if (from !== -1 && to !== -1) { cur.splice(from, 1); cur.splice(to, 0, dragColId); setColumnOrder(cur); }
-                          }
-                          setDragColId(null); setDragOverColId(null);
-                        }}
                         style={{
                           padding: '14px 12px', textAlign: 'left', fontSize: 10, fontWeight: 600,
                           color: h.column.getIsSorted() ? theme.colors.orange : '#888', textTransform: 'uppercase', letterSpacing: '2px',
-                          whiteSpace: 'nowrap', cursor: h.id !== 'select' && h.id !== 'actions' ? 'grab' : 'default',
-                          userSelect: 'none', width: h.getSize(),
-                          background: isDragTarget ? theme.colors.orangeLight : '#F5F2EE',
-                          borderLeft: isDragTarget ? `2px solid ${theme.colors.orange}` : undefined,
-                        }} onClick={(e: React.MouseEvent) => h.column.toggleSorting(undefined, e.shiftKey)}>
+                          whiteSpace: 'nowrap', cursor: h.column.getCanSort() ? 'pointer' : 'default',
+                          userSelect: 'none', width: h.getSize(), boxSizing: 'border-box', position: 'relative',
+                          background: '#F5F2EE',
+                        }} onClick={h.column.getCanSort() ? (e: React.MouseEvent) => h.column.toggleSorting(undefined, e.shiftKey) : undefined}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                           {flexRender(h.column.columnDef.header, h.getContext())}
                           {h.column.getCanSort() && (
@@ -716,6 +695,14 @@ export function Shipments() {
                             <ArrowUpDown size={12} style={{ opacity: 0.3 }} />
                           )}
                         </div>
+                        {canResize && (
+                          <div
+                            onMouseDown={e => { e.stopPropagation(); h.getResizeHandler()(e); }}
+                            onTouchStart={e => { e.stopPropagation(); h.getResizeHandler()(e); }}
+                            onClick={e => e.stopPropagation()}
+                            style={{ position: 'absolute', right: 0, top: 0, height: '100%', width: 8, cursor: 'col-resize', touchAction: 'none', userSelect: 'none', background: h.column.getIsResizing() ? theme.colors.orange : 'transparent', zIndex: 5 }}
+                          />
+                        )}
                       </th>
                     );
                   })}
