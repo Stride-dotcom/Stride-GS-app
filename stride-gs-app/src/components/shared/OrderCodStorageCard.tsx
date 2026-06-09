@@ -172,15 +172,24 @@ export function OrderCodStorageCard({ order, performedBy, canEdit }: Props) {
     if (preview && codItems.length === 0) return null;  // no COD items on order
   }
 
-  const buildSummaryPatch = () => ({
-    cod_storage_enabled: enabled,
-    cod_storage_cutoff_date: cutoff || null,
-    cod_storage_rate: rate,
-    cod_storage_total: total,
-    cod_storage_item_count: billableItems.length,
-    cod_storage_period_start: periodStart,
-    cod_storage_details: detailsFromPreview(preview?.items ?? [], rate),
-  });
+  // Build the dt_orders cod_storage_* patch from a result set (the live
+  // preview for Save, or the commit result for Collect so the persisted
+  // snapshot exactly matches what was billed).
+  const buildSummaryPatch = (res?: CodCollectionResult) => {
+    const src = res ?? preview;
+    const items = (src?.items ?? []).filter((r) => r.status === 'billable');
+    let ps: string | null = null;
+    for (const r of items) if (r.periodStart && (!ps || r.periodStart < ps)) ps = r.periodStart;
+    return {
+      cod_storage_enabled: enabled,
+      cod_storage_cutoff_date: cutoff || null,
+      cod_storage_rate: rate,
+      cod_storage_total: src?.summary.total ?? 0,
+      cod_storage_item_count: items.length,
+      cod_storage_period_start: ps,
+      cod_storage_details: detailsFromPreview(src?.items ?? [], rate),
+    };
+  };
 
   // Persist the line onto dt_orders (drives the DT description push) — no billing.
   const handleSave = async () => {
@@ -221,9 +230,8 @@ export function OrderCodStorageCard({ order, performedBy, canEdit }: Props) {
       const { error: upErr } = await supabase
         .from('dt_orders')
         .update({
-          ...buildSummaryPatch(),
+          ...buildSummaryPatch(res),
           cod_storage_enabled: true,
-          cod_storage_total: res.summary.total,
           cod_storage_collected_at: new Date().toISOString(),
           cod_storage_collected_by: performedBy,
           cod_storage_collection_notes: collectNotes.trim() || null,
