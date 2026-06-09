@@ -1311,7 +1311,7 @@ function ContactsTab({ onSelectContact, showCreate, onShowCreate, showImport, on
           {/* Pagination */}
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 8 }}>
             <span style={{ fontSize: 11, color: theme.colors.textMuted }}>
-              Showing {contacts.length} of {total.toLocaleString()} contacts \u00b7 Page {page} of {totalPages}
+              Showing {contacts.length} of {total.toLocaleString()} contacts{' \u00b7 '}Page {page} of {totalPages}
             </span>
             <div style={{ display: 'flex', gap: 4 }}>
               <button disabled={page <= 1} onClick={() => setPage(p => p - 1)} style={{
