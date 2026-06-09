@@ -1,4 +1,5 @@
 /* ===================================================
+   StrideAPI.gs — v38.270.0 — 2026-06-09 PST — [BILLING/MIGRATION] feat: __writeThroughReverseBilling_ supports op=delete — the SB-native storage commit (commit-storage-charges-sb → commit_storage_rows) removes the stale Unbilled STOR-SUMMARY rows it deleted from public.billing off the per-tenant Billing_Ledger sheet (e.g. blank→sidemark transitions). Finds the row by Ledger Row ID and deletes it, HARD-GUARDED to NEVER delete an Invoiced/Billed row (returns skipped) — only Unbilled/Void/blank; idempotent no-op (skipped) when already absent. Fleet-rollout prerequisite for the commitStorageCharges cutover (the SB commit could previously only insert/update the sheet mirror, stranding stale summaries that GAS invoicing on non-canary tenants could wrongly pick up). Companion: commit_storage_rows returns deletedLedgerIds; the EF fires op=delete for each before mirroring the new summaries. No change to dollar totals, the v38.182 atomic invoice counter, half-write detection, or any insert/update reverse-writethrough path.
    StrideAPI.gs — v38.269.0 — 2026-06-09 PST — [BILLING] fix: transfer storage cutover now bills the SOURCE for the pre-transfer holding window (Option A), matching the Transfer modal. handleTransferItems_'s storage backfill (section 2.5) previously created the receive_date → transfer_date-1 STOR-TRANSFER rows on the DESTINATION ("destination owns storage end-to-end", v38.245.1) — so on a normal client→client transfer the NEW owner was billed for storage that accrued before they owned the item (reported: Brume→Jodie). Now the backfill is written to the SOURCE ledger with the SOURCE's rate/free-days/discount; the destination bills from transfer_date forward via its own _compute (v_eff_recv=transfer_date) so NO destination backfill is created. Operator decision 2026-06-09: universal source-pays (when the source is the non-paying Needs-ID-Holding account, very high free days → $0 backfill → that limbo window is left unbilled, accepted). No double-bill: the source's stale Unbilled per-item STOR is still voided before the backfill recreates the full holding window; PAID (Invoiced/Billed) ranges on either ledger are deduped. No change to _compute_storage_charges, the v38.182 atomic invoice counter, or half-write detection. The admin retroactive-backfill tool (~line 49117) still bills the destination — left as-is (not the live transfer path; bulk historical out of scope). Companion: one-off Brume→Jodie correction.
    StrideAPI.gs — v38.268.0 — 2026-06-09 PST — [EMAIL] fix: api_sendTemplateEmail_ no longer leaks literal repair tokens. The shared Supabase repair templates (PR #711) use {{ITEM_NOUN}} + {{ITEM_ID_LABEL}} to pluralize multi-item repairs; the SB edge functions supply count-aware values but the GAS senders did not, so a GAS-side send/resend rendered the literal placeholder to the customer (reported: "Repair Quote Requested: Seva Home {{ITEM_ID_LABEL}} 63982"). Fix: (a) default {{ITEM_NOUN}}="item" / {{ITEM_ID_LABEL}}="Item ID" (GAS sends are always single-item) before substitution, and (b) a SAFETY NET that strips any leftover {{UPPERCASE_TOKEN}} after substitution so no unsupplied token can ever reach a customer. Mirror change in the per-client Emails.gs sendTemplateEmail_ (v4.9.0), the live sender of the reported resend. No schema change, no billing logic touched, no change to the v38.182 atomic invoice counter.
    StrideAPI.gs — v38.267.0 — 2026-06-08 PST — [BILLING] fix: voiding a storage invoice now makes the storage re-billable (void-reprice). handleCommitStorageRows_'s finalized-summary scan DROPPED 'void' from its lock condition (was invoiced/billed/void) — a VOIDED blank-sidemark summary previously locked the whole tenant's window forever, so voided storage could never be re-committed. Now only invoiced/billed summaries lock (and only when they lack per-item storage_billing_items detail, per v38.266.0). Companion SB migrations: 20260608236000 drops 'void' from _compute_storage_charges preview dedup source (b) so voided-summary storage reappears in Preview Storage (matches the authoritative per-item source (a), which already treats void as re-billable); 20260608236100 applies BOTH per-item-defer + drop-void to generate_storage_charges (the DORMANT SB-commit RPC, flag=gas, not reachable today — defensive parity). The per-item legacy task-range subtraction keeps 'void' (legacy path, conservative). No double-bill: source (a) / sbiAlreadyBilled / uq_sbi_active_item_period unchanged — an item billed via a still-Invoiced summary stays excluded per item; only genuinely-voided storage reappears (operator reviews before invoicing). No change to the v38.182 atomic invoice counter or half-write detection.
@@ -4336,8 +4337,8 @@ function __writeThroughReverseBilling_(ss, payload) {
   var row   = (payload && payload.row) || {};
   var op    = payload && payload.op ? String(payload.op) : "";
 
-  if (op !== "insert" && op !== "update") {
-    throw new Error("__writeThroughReverseBilling_: op '" + op + "' not supported (insert/update only)");
+  if (op !== "insert" && op !== "update" && op !== "delete") {
+    throw new Error("__writeThroughReverseBilling_: op '" + op + "' not supported (insert/update/delete only)");
   }
   if (!rowId) throw new Error("__writeThroughReverseBilling_: rowId (Ledger Row ID) required");
 
@@ -4384,6 +4385,28 @@ function __writeThroughReverseBilling_(ss, payload) {
         break;
       }
     }
+  }
+
+  // ── DELETE: remove a stale row by Ledger Row ID. Used by the SB-native
+  // storage commit to clean up Unbilled STOR-SUMMARY rows it deleted from
+  // public.billing (e.g. a blank-sidemark summary superseded by per-sidemark
+  // ones). HARD GUARD: never delete a finalized (Invoiced/Billed) row off the
+  // sheet — only Unbilled/Void/blank-status rows. Idempotent: a no-op success
+  // when the id is already absent (so a retry can't error).
+  if (op === "delete") {
+    if (foundRow < 0) {
+      return { skipped: true, reason: "row not found (already absent)", rowId: rowId, op: "delete" };
+    }
+    var delStatusCol = billMap["Status"];
+    if (delStatusCol) {
+      var delStatus = String(billSheet.getRange(foundRow, delStatusCol).getValue() || "").trim().toLowerCase();
+      if (delStatus === "invoiced" || delStatus === "billed") {
+        return { rowNumber: foundRow, skipped: true, reason: "row is " + delStatus + " (won't delete finalized billing)", rowId: rowId, op: "delete" };
+      }
+    }
+    billSheet.deleteRow(foundRow);
+    SpreadsheetApp.flush();
+    return { rowNumber: foundRow, op: "delete", rowId: rowId, deleted: true };
   }
 
   // ── Status guard for Invoiced/Void — mirror existing handler ───
