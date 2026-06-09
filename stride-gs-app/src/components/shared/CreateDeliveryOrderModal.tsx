@@ -85,7 +85,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   X, Check, Loader2, CheckCircle2, MapPin, Truck,
   ArrowRight, Wrench, Box, Plus, Trash2, CreditCard, BookOpen, Search,
-  ChevronDown, ChevronRight, AlertTriangle,
+  ChevronDown, ChevronRight, AlertTriangle, Coins, CalendarDays,
 } from 'lucide-react';
 import { AutocompleteSelect } from './AutocompleteSelect';
 import { theme } from '../../styles/theme';
@@ -1177,6 +1177,49 @@ export function CreateDeliveryOrderModal({
     }
     return Array.from(byItemId.values());
   }, [activeItems, selectedIds]);
+
+  // ── COD Storage entry preview (configurable; seeds the order on create) ──
+  // When the feature is on for this tenant and some selected items are
+  // COD-flagged, the operator can review/adjust the end-customer storage line
+  // (cutoff / rate / include) right here. This drives BOTH the visible section
+  // below AND the seed written to dt_orders on create, so what's previewed is
+  // exactly what's seeded. Authoritative dedup against already-collected days +
+  // the actual billing happen later on the OrderPage (collect-cod-storage-sb).
+  const codFeatureOn = !!codFlagRow && resolveFlagBackend(codFlagRow, clientSheetId || null) === 'supabase';
+  const [codInclude, setCodInclude] = useState(true);
+  const [codCutoff, setCodCutoff] = useState('');           // '' → follows serviceDate
+  const [codRate, setCodRate] = useState<number>(COD_STORAGE_DEFAULT_RATE);
+  const effectiveCodCutoff = codCutoff || serviceDate || todayIso();
+  const selectedCodItems = useMemo(
+    () => selectedInvItems.filter(i => i.codStorage && i.codStorageStartDate),
+    [selectedInvItems],
+  );
+  const codApplicable =
+    codFeatureOn && mode === 'delivery' && itemsSource === 'warehouse' && selectedCodItems.length > 0;
+  const codLinePreview = useMemo(
+    () => (codApplicable && codInclude)
+      ? computeCodStorageLine(
+          selectedCodItems.map(i => ({
+            itemId: i.itemId,
+            inventoryId: i.inventoryRowId ?? null,
+            sidemark: i.sidemark,
+            description: i.description,
+            itemClass: i.itemClass,
+            cubicFeet: classToCuFt(i.itemClass),
+            codStorage: true,
+            codStorageStartDate: i.codStorageStartDate,
+          })),
+          effectiveCodCutoff,
+          codRate,
+          {},
+        )
+      : null,
+    // cuFtByCode included so the preview recomputes if item-class sizes finish
+    // loading after items are already selected (classToCuFt reads from it).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [codApplicable, codInclude, selectedCodItems, effectiveCodCutoff, codRate, cuFtByCode],
+  );
+
   const toggleItemSort = (col: string) => {
     setItemSort(prev => prev.col === col ? { col, desc: !prev.desc } : { col, desc: false });
   };
@@ -2905,53 +2948,48 @@ export function CreateDeliveryOrderModal({
         zip: deliveryZip, phone: deliveryPhone, phone2: deliveryPhone2, email: deliveryEmail,
       };
 
-      // ── COD Storage line (auto-computed at create) ──────────────────
-      // Only for delivery-of-warehouse-items, when the feature is on for
-      // this tenant and some items are flagged cod_storage. Cutoff defaults
-      // to the service date; rate to $0.05/cuft/day. The OrderPage owns
-      // subsequent editing (cutoff/rate/recalc/remove) + collection, so we
-      // only seed these on INSERT (see below) to avoid clobbering edits.
+      // ── COD Storage line (seeded on create from the configured preview) ──
+      // The operator reviews/adjusts this in the COD Storage section of the
+      // modal (cutoff / rate / include); we seed exactly what they saw via the
+      // shared `codLinePreview` memo, honoring their include toggle. Only on
+      // INSERT — the OrderPage owns subsequent editing + collection, so we
+      // never clobber its edits on re-save.
       //
       // This is a PROVISIONAL estimate for the DispatchTrack description push
       // (so the driver sees a "COD STORAGE: collect $X" line if the order is
-      // pushed before anyone opens it). It is computed client-side WITHOUT
-      // dedup against already-collected days, so it can over-state if some of
-      // these items were partially collected via the standalone Collect COD.
-      // OrderCodStorageCard recomputes authoritatively (collect-cod-storage-sb
-      // dry-run, with dedup) on first OrderPage open, and the actual billing
-      // only ever happens through that EF — so the estimate is never billed.
-      const codFeatureOn = !!codFlagRow && resolveFlagBackend(codFlagRow, clientSheetId || null) === 'supabase';
-      const codCutoff = serviceDate || todayIso();
-      const codLine = (codFeatureOn && mode === 'delivery' && itemsSource === 'warehouse')
-        ? computeCodStorageLine(
-            selectedInvItems
-              .filter(i => i.codStorage && i.codStorageStartDate)
-              .map(i => ({
-                itemId: i.itemId,
-                inventoryId: i.inventoryRowId ?? null,
-                sidemark: i.sidemark,
-                description: i.description,
-                itemClass: i.itemClass,
-                cubicFeet: classToCuFt(i.itemClass),
-                codStorage: true,
-                codStorageStartDate: i.codStorageStartDate,
-              })),
-            codCutoff,
-            COD_STORAGE_DEFAULT_RATE,
-            {},
-          )
-        : null;
-      const codStoragePayload: Record<string, unknown> = (codLine && codLine.itemCount > 0)
-        ? {
-            cod_storage_enabled: true,
-            cod_storage_cutoff_date: codCutoff,
-            cod_storage_rate: COD_STORAGE_DEFAULT_RATE,
-            cod_storage_total: codLine.total,
-            cod_storage_item_count: codLine.itemCount,
-            cod_storage_period_start: codLine.periodStart,
-            cod_storage_details: serializeCodDetails(codLine.items, COD_STORAGE_DEFAULT_RATE),
-          }
-        : {};
+      // pushed before anyone opens it). It's computed client-side WITHOUT dedup
+      // against already-collected days, so it can over-state if some items were
+      // partially collected via the standalone Collect COD. OrderCodStorageCard
+      // recomputes authoritatively (collect-cod-storage-sb dry-run, with dedup)
+      // on first OrderPage open, and the actual billing only ever happens
+      // through that EF — so the estimate is never billed.
+      const codLine = codInclude ? codLinePreview : null;
+      let codStoragePayload: Record<string, unknown> = {};
+      if (codApplicable) {
+        codStoragePayload = (codLine && codLine.itemCount > 0)
+          ? {
+              cod_storage_enabled: true,
+              cod_storage_cutoff_date: effectiveCodCutoff,
+              cod_storage_rate: codRate,
+              cod_storage_total: codLine.total,
+              cod_storage_item_count: codLine.itemCount,
+              cod_storage_period_start: codLine.periodStart,
+              cod_storage_details: serializeCodDetails(codLine.items, codRate),
+            }
+          // Operator unchecked "Include" (or nothing billable) — persist an
+          // explicit "decided: not included" so the OrderPage card honors it
+          // (cutoff written → hasPersisted=true → checkbox renders unchecked)
+          // rather than defaulting the include toggle back on.
+          : {
+              cod_storage_enabled: false,
+              cod_storage_cutoff_date: effectiveCodCutoff,
+              cod_storage_rate: codRate,
+              cod_storage_total: 0,
+              cod_storage_item_count: 0,
+              cod_storage_period_start: null,
+              cod_storage_details: [],
+            };
+      }
 
       const payload: Record<string, unknown> = {
         tenant_id: clientSheetId || null,
@@ -6019,6 +6057,70 @@ export function CreateDeliveryOrderModal({
                   );
                 })}
               </div>
+              )}
+            </div>
+          )}
+
+          {/* COD Storage — configure the end-customer storage collection that
+              gets seeded onto this order. The OrderPage owns the authoritative
+              (deduped) recompute + the actual billing (collect-cod-storage-sb)
+              after save; here the operator just reviews/adjusts what's seeded. */}
+          {codApplicable && (
+            <div style={section}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                <Coins size={16} color={theme.colors.orange} />
+                <span style={sectionTitle}>COD Storage</span>
+                <span style={{ fontSize: 10, fontWeight: 700, background: '#FFF7F0', color: theme.colors.orange, border: `1px solid ${theme.colors.orange}`, padding: '1px 6px', borderRadius: 6, textTransform: 'uppercase' }}>
+                  Collected from customer
+                </span>
+              </div>
+              <div style={{ fontSize: 11, color: theme.colors.textMuted, marginBottom: 10, lineHeight: 1.5 }}>
+                {selectedCodItems.length} flagged item{selectedCodItems.length !== 1 ? 's' : ''} on this order owe end-customer storage. Review the line below — it'll be collected on the order page after the delivery is scheduled.
+              </div>
+
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: codInclude ? 12 : 0, cursor: 'pointer' }}>
+                <input type="checkbox" checked={codInclude} onChange={e => setCodInclude(e.target.checked)} style={{ accentColor: theme.colors.orange }} />
+                <span style={{ fontSize: 13, color: theme.colors.text }}>Include COD Storage collection line</span>
+              </label>
+
+              {codInclude && (
+                <>
+                  <div style={{ display: 'flex', gap: 12, marginBottom: 12 }}>
+                    <div style={{ flex: 1 }}>
+                      <label style={label}><CalendarDays size={11} style={{ marginRight: 4, verticalAlign: 'middle' }} />Cutoff date</label>
+                      <input type="date" value={effectiveCodCutoff} onChange={e => setCodCutoff(e.target.value)} style={input} />
+                    </div>
+                    <div style={{ width: 140 }}>
+                      <label style={label}>Rate $/cuft/day</label>
+                      <input type="number" min="0" step="0.01" value={codRate} onChange={e => setCodRate(parseFloat(e.target.value) || 0)} style={input} />
+                    </div>
+                  </div>
+
+                  <div style={{ border: `1px solid ${theme.colors.border}`, borderRadius: 8, overflow: 'hidden' }}>
+                    <div style={{ display: 'flex', fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: theme.colors.textSecondary, background: '#FAFAF9', padding: '6px 10px' }}>
+                      <span style={{ flex: 1 }}>Item</span>
+                      <span style={{ width: 44, textAlign: 'right' }}>class</span>
+                      <span style={{ width: 46, textAlign: 'right' }}>cu ft</span>
+                      <span style={{ width: 84, textAlign: 'right' }}>from</span>
+                      <span style={{ width: 40, textAlign: 'right' }}>days</span>
+                      <span style={{ width: 64, textAlign: 'right' }}>amount</span>
+                    </div>
+                    {(codLinePreview?.items ?? []).map((d, i) => (
+                      <div key={d.itemId + i} style={{ display: 'flex', fontSize: 12, padding: '6px 10px', borderTop: `1px solid ${theme.colors.border}` }}>
+                        <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.itemId}</span>
+                        <span style={{ width: 44, textAlign: 'right' }}>{d.itemClass || '—'}</span>
+                        <span style={{ width: 46, textAlign: 'right' }}>{d.cubicFeet || '—'}</span>
+                        <span style={{ width: 84, textAlign: 'right' }}>{d.startDate || '—'}</span>
+                        <span style={{ width: 40, textAlign: 'right' }}>{d.days || 0}</span>
+                        <span style={{ width: 64, textAlign: 'right', fontWeight: 600 }}>${(d.amount || 0).toFixed(2)}</span>
+                      </div>
+                    ))}
+                    <div style={{ display: 'flex', fontSize: 13, padding: '8px 10px', borderTop: `2px solid ${theme.colors.border}`, fontWeight: 700, background: '#FAFAF9' }}>
+                      <span style={{ flex: 1 }}>Total to collect{(codLinePreview?.itemCount ?? 0) > 0 ? ` (${codLinePreview?.itemCount} item${(codLinePreview?.itemCount ?? 0) !== 1 ? 's' : ''})` : ''}</span>
+                      <span>${(codLinePreview?.total ?? 0).toFixed(2)}</span>
+                    </div>
+                  </div>
+                </>
               )}
             </div>
           )}

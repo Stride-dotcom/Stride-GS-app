@@ -162,7 +162,9 @@ export function OrderCodStorageCard({ order, performedBy, canEdit }: Props) {
     enabled !== order.codStorageEnabled ||
     cutoff !== persistedCutoff ||
     rate !== (order.codStorageRate ?? COD_STORAGE_DEFAULT_RATE) ||
-    total !== (order.codStorageTotal ?? 0);
+    // Only the included line's total drives "unsaved changes" — a disabled
+    // line's live total differing from the persisted 0 isn't a pending edit.
+    (enabled && total !== (order.codStorageTotal ?? 0));
 
   // ── Render decision ──────────────────────────────────────────────────
   // Collected orders always show (the green record). Otherwise wait for the

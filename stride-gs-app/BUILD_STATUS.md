@@ -114,6 +114,14 @@
 
 ---
 
+## Recent Changes (2026-06-09, delivery: configurable COD Storage section in the New Delivery Order entry modal — feat/delivery/cod-storage-entry-modal)
+
+- Follow-up to PR #718. The COD Storage line was only visible/editable on the order detail page; in the **New Delivery Order entry modal** it was seeded silently (operator couldn't see or adjust it at entry). Added a visible **COD Storage** section to `CreateDeliveryOrderModal.tsx` that appears when `codStorageBilling` is on for the tenant AND some selected inventory items are COD-flagged AND mode is delivery-of-warehouse-items (`codApplicable`). Shows an "Include COD Storage" checkbox (default checked), cutoff date (defaults to the service date), editable rate ($0.05/cu ft/day), per-item breakdown (item · class · cu ft · from · days · amount), and total.
+- The section is driven by a single `codLinePreview` memo that ALSO feeds the create-time seed, so **what the operator previews is exactly what's seeded** onto `dt_orders` (honoring their include toggle + cutoff + rate). Unchecking "Include" persists an explicit `cod_storage_enabled:false` (+ cutoff/rate/zeros) so the OrderPage card renders the checkbox unchecked instead of defaulting back on. Seed remains INSERT-only (never clobbers the order page's later edits).
+- Still a provisional client-side estimate (no dedup) for the DT description push; `OrderCodStorageCard` on the order page recomputes authoritatively via `collect-cod-storage-sb` (with dedup) and remains the sole billing path. Also tweaked the order-page card's `dirty` check so a *disabled* COD line isn't flagged as unsaved just because its live total differs from the persisted 0. Files: `src/components/shared/CreateDeliveryOrderModal.tsx`, `src/components/shared/OrderCodStorageCard.tsx`. No migration, no EF change. Opus review clean; tsc + build clean.
+
+---
+
 ## Recent Changes (2026-06-09, repairs: automatic repair emails go ONLY to the client's "Notification Emails" list — fix/repairs/notification-emails-only)
 
 - **Report:** Justin — repair auto-emails (quote ready / quote sent / approved / declined / complete) were going to *all* emails associated with the account; they should go only to the client's **"Notification Emails"** list.
