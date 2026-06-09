@@ -5,10 +5,9 @@
  *   1. Fetch the HTML template from `public.email_templates` (per-tab cache).
  *   2. Substitute every `{{TOKEN}}` against the provided map.
  *   3. Dispatch on `options.action`:
- *      - `print`    → open in popup window, fire window.print()
- *      - `download` → render to a hidden host node, html2pdf.js → blob,
- *                     trigger a saveAs download
- *      - `upload`   → render to blob (same as download), upload to the
+ *      - `print`    → open in popup window, fire window.print() (browser-native)
+ *      - `download` → render to a PDF blob server-side, trigger a saveAs download
+ *      - `upload`   → render to a blob (same as download), upload to the
  *                     `documents` bucket + insert a `public.documents`
  *                     row. On failure, enqueue for retry via
  *                     docUploadQueue.
@@ -18,11 +17,11 @@
  * document type means: add a row to `email_templates`, add a
  * `buildXTokens` helper, call `renderDoc('DOC_X', tokens, opts)`.
  *
- * html2pdf.js fidelity caveat: html2canvas does NOT honor `@media print`
- * rules and can render web fonts inconsistently on first paint. Visual
- * parity with the print-button output is *close*, not pixel-identical.
- * For doc-quality output prefer `print`; `download`/`upload` are for
- * archive/sharing where small font-fallback differences are acceptable.
+ * PDF engine: `download`/`upload` render via the `render-doc-pdf` Edge Function
+ * (Cloudflare Browser Rendering = real headless Chrome) — see
+ * `renderHtmlToPdfBlob`. This replaced a client-side html2pdf.js/html2canvas
+ * path that produced BLANK PDFs for every auto-archived doc. `print` still uses
+ * the browser's own engine. All three now render the same HTML faithfully.
  */
 import { supabase } from './supabase';
 import { esc } from './docTokens';
