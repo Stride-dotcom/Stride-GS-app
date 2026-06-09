@@ -476,11 +476,13 @@ export function WillCalls() {
   }
 
   return (
-    <div style={{ background: '#F5F2EE', margin: '-28px -32px', padding: '28px 32px', minHeight: '100%' }}>
-      <div style={{ marginBottom: 20 }}>
-        <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: '2px', color: '#1C1C1C' }}>STRIDE LOGISTICS · WILL CALLS</div>
-      </div>
-      <div style={{ background: '#FFFFFF', borderRadius: 20, padding: 24, border: '1px solid rgba(0,0,0,0.04)' }}>
+    <div style={{ background: '#F5F2EE', margin: isMobile ? '-12px -8px' : '-28px -32px', padding: isMobile ? '8px' : '28px 32px', minHeight: '100%', overflowX: isMobile ? 'hidden' : undefined, maxWidth: isMobile ? '100vw' : undefined }}>
+      {!isMobile && (
+        <div style={{ marginBottom: 20 }}>
+          <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: '2px', color: '#1C1C1C' }}>STRIDE LOGISTICS · WILL CALLS</div>
+        </div>
+      )}
+      <div style={{ background: '#FFFFFF', borderRadius: isMobile ? 10 : 20, padding: isMobile ? 8 : 24, border: '1px solid rgba(0,0,0,0.04)' }}>
 
       <SyncBanner syncing={refreshing} label={clientFilter.length === 1 ? clientFilter[0] : clientFilter.length > 1 ? `${clientFilter.length} clients` : undefined} />
 
@@ -502,15 +504,32 @@ export function WillCalls() {
         <button onClick={() => toCSV(data, 'stride-willcalls.csv')} style={{ padding: '7px 12px', fontSize: 12, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: theme.colors.textSecondary }}><Download size={14} /> Export</button>
         <button onClick={() => { setRefreshing(true); refetchWCs(); }} title="Refresh data" style={{ padding: '7px 8px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', color: (refreshing || wcsLoading) ? theme.colors.orange : theme.colors.textSecondary, transition: 'color 0.2s' }}><RefreshCw size={14} style={(refreshing || wcsLoading) ? { animation: 'spin 1s linear infinite' } : undefined} /></button>
       </div>
+      {isMobile ? (
+        /* Mobile: single compact status dropdown instead of a wrapping pill row. */
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+          <select
+            value={sf.length === 1 ? sf[0] : ''}
+            onChange={e => { clearStatusFilter(); if (e.target.value) toggleStatus(e.target.value); }}
+            style={{ flex: 1, padding: '10px 12px', borderRadius: 10, border: '1px solid rgba(0,0,0,0.12)', background: '#fff', fontSize: 14, fontFamily: 'inherit', fontWeight: 600, color: '#1C1C1C' }}
+          >
+            <option value="">All Statuses ({counts['']})</option>
+            {ALL_STATUSES.map(s => <option key={s} value={s}>{s} ({counts[s] || 0})</option>)}
+          </select>
+          {(sf.length > 0 || globalFilter || sorting.length > 0) && (
+            <button onClick={() => { clearStatusFilter(); setGlobalFilter(''); setSorting([]); }} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '10px 12px', borderRadius: 10, border: `1px solid ${theme.colors.border}`, background: '#fff', cursor: 'pointer', fontSize: 12, color: theme.colors.textSecondary, fontFamily: 'inherit', whiteSpace: 'nowrap' }}><X size={14} />Clear</button>
+          )}
+        </div>
+      ) : (
       <div style={mobileChipsRow(isMobile)}>
         <button onClick={() => clearStatusFilter()} style={chip(sf.length === 0)}>All ({counts['']})</button>
         {ALL_STATUSES.map(s => <button key={s} onClick={() => toggleStatus(s)} style={chip(sf.includes(s))}>{s} ({counts[s] || 0})</button>)}
-        {!isMobile && <div style={{ flex: 1 }} />}
-        {!isMobile && <span style={{ fontSize: 12, color: theme.colors.textMuted, alignSelf: 'center' }}>Showing <strong>{table.getRowModel().rows.length}</strong> of <strong>{data.length}</strong> will calls</span>}
+        <div style={{ flex: 1 }} />
+        <span style={{ fontSize: 12, color: theme.colors.textMuted, alignSelf: 'center' }}>Showing <strong>{table.getRowModel().rows.length}</strong> of <strong>{data.length}</strong> will calls</span>
         {(sf.length > 0 || globalFilter || sorting.length > 0) && (
           <button onClick={() => { clearStatusFilter(); setGlobalFilter(''); setSorting([]); }} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 10px', borderRadius: 8, border: `1px solid ${theme.colors.border}`, background: '#fff', cursor: 'pointer', fontSize: 11, color: theme.colors.textSecondary, fontFamily: 'inherit', whiteSpace: 'nowrap' }}><X size={12} />Clear filters</button>
         )}
       </div>
+      )}
       {clientFilter.length === 0 && <div style={{ padding: '40px 20px', textAlign: 'center', color: '#9CA3AF', fontSize: 13 }}>Select one or more clients to load data.</div>}
       <div style={{ border: `1px solid ${theme.colors.border}`, borderRadius: isMobile ? 8 : 12, overflow: 'hidden', background: '#fff' }}>
         <div ref={containerRef} style={{ overflowY: 'auto', overflowX: 'auto', maxHeight: isMobile ? 'calc(100dvh - 200px)' : 'calc(100dvh - 280px)', minHeight: isMobile ? 200 : undefined, WebkitOverflowScrolling: 'touch' }}>

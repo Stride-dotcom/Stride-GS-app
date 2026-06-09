@@ -572,7 +572,7 @@ export function Shipments() {
   const monthItems = data.filter(r => (r.receivedDate || '').slice(0, 7) === monthStart).reduce((sum, r) => sum + r.itemCount, 0);
 
   return (
-    <div style={{ fontFamily: theme.typography.fontFamily, background: '#F5F2EE', margin: '-28px -32px', padding: '28px 32px', minHeight: '100%' }}>
+    <div style={{ fontFamily: theme.typography.fontFamily, background: '#F5F2EE', margin: isMobile ? '-12px -8px' : '-28px -32px', padding: isMobile ? '8px' : '28px 32px', minHeight: '100%', overflowX: isMobile ? 'hidden' : undefined, maxWidth: isMobile ? '100vw' : undefined }}>
       {/* Loading state */}
       {hasApi && apiLoading && data.length === 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: 300, gap: 12 }}>
@@ -582,17 +582,20 @@ export function Shipments() {
         </div>
       )}
 
-      {/* Page Header — v2 small inline branding */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-        <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: '2px', color: '#1C1C1C' }}>
-          STRIDE LOGISTICS · SHIPMENTS
-          {isLive && <span style={{ marginLeft: 12, display: 'inline-block', fontSize: 10, fontWeight: 700, letterSpacing: '2px', color: '#4A8A5C', background: 'rgba(74,138,92,0.15)', padding: '3px 10px', borderRadius: 100 }}>LIVE</span>}
-          {isDemo && <span style={{ marginLeft: 12, display: 'inline-block', fontSize: 10, fontWeight: 700, letterSpacing: '2px', color: '#B08810', background: 'rgba(200,160,40,0.15)', padding: '3px 10px', borderRadius: 100 }}>DEMO</span>}
+      {/* Page Header — v2 small inline branding. Hidden on mobile to give the
+          table more height (matches the other list pages). */}
+      {!isMobile && (
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+          <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: '2px', color: '#1C1C1C' }}>
+            STRIDE LOGISTICS · SHIPMENTS
+            {isLive && <span style={{ marginLeft: 12, display: 'inline-block', fontSize: 10, fontWeight: 700, letterSpacing: '2px', color: '#4A8A5C', background: 'rgba(74,138,92,0.15)', padding: '3px 10px', borderRadius: 100 }}>LIVE</span>}
+            {isDemo && <span style={{ marginLeft: 12, display: 'inline-block', fontSize: 10, fontWeight: 700, letterSpacing: '2px', color: '#B08810', background: 'rgba(200,160,40,0.15)', padding: '3px 10px', borderRadius: 100 }}>DEMO</span>}
+          </div>
         </div>
-      </div>
+      )}
       {/* Session 73: Expected calendar moved to Dashboard; this page is now
           received-shipments only. */}
-      <div style={{ background: '#FFFFFF', borderRadius: 20, padding: 24, border: '1px solid rgba(0,0,0,0.04)' }}>
+      <div style={{ background: '#FFFFFF', borderRadius: isMobile ? 10 : 20, padding: isMobile ? 8 : 24, border: '1px solid rgba(0,0,0,0.04)' }}>
 
       <SyncBanner syncing={refreshing} label={clientFilter.length === 1 ? clientFilter[0] : clientFilter.length > 1 ? `${clientFilter.length} clients` : undefined} />
 
@@ -605,7 +608,7 @@ export function Shipments() {
       )}
 
       {/* Summary Cards */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 24 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)', gap: isMobile ? 8 : 16, marginBottom: isMobile ? 12 : 24 }}>
         {[
           { label: 'Today', value: todayCount, color: '#fff' },
           { label: 'This Week', value: weekCount, color: '#4ADE80' },
@@ -613,10 +616,10 @@ export function Shipments() {
           { label: 'Items This Month', value: monthItems, color: '#60A5FA' },
         ].map(c => (
           <div key={c.label} style={{
-            background: '#1C1C1C', border: 'none', borderRadius: 20, padding: '20px 22px',
+            background: '#1C1C1C', border: 'none', borderRadius: isMobile ? 14 : 20, padding: isMobile ? '12px 14px' : '20px 22px',
           }}>
-            <div style={{ fontSize: 10, fontWeight: 600, color: 'rgba(255,255,255,0.55)', textTransform: 'uppercase', letterSpacing: '2px', marginBottom: 10 }}>{c.label}</div>
-            <div style={{ fontSize: 28, fontWeight: 300, color: c.color, lineHeight: 1 }}>{c.value}</div>
+            <div style={{ fontSize: isMobile ? 9 : 10, fontWeight: 600, color: 'rgba(255,255,255,0.55)', textTransform: 'uppercase', letterSpacing: isMobile ? '1px' : '2px', marginBottom: isMobile ? 6 : 10 }}>{c.label}</div>
+            <div style={{ fontSize: isMobile ? 22 : 28, fontWeight: 300, color: c.color, lineHeight: 1 }}>{c.value}</div>
           </div>
         ))}
       </div>
