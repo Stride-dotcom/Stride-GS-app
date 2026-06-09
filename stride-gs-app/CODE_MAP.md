@@ -321,6 +321,8 @@ Standalone quote builder with PDF generation and Supabase-backed storage.
 | Repairs | clean id minted inside the `create_repair_quote_request` RPC (used by `supabase/functions/request-repair-quote-sb`) |
 | Will Calls | `supabase/functions/create-will-call-sb/index.ts` — `mintWcNumber()` calls `next_order_id`, legacy fallback |
 | Tasks | `supabase/functions/batch-create-tasks-sb/index.ts` — `orderNumberingOn()` + per-task `next_order_id`, legacy fallback |
+| Auto-tasks (PR #704) | `complete-shipment-sb` (INSP/ASM on receive) + `transfer-items-sb` (INSP on transfer, scoped to destId) — `next_order_id` when on, legacy fallback on RPC error |
+| Inspection dedup (PR #704) | `transfer-items-sb` + `src/components/shared/TransferItemsModal.tsx` — "already inspected" guard matches `task_id LIKE 'INSP-%' OR type=<inspName>` (the `type` column is inconsistent on legacy rows; clean `PREFIX-TSK-N` ids need the type branch) |
 | Delivery | `src/components/shared/CreateDeliveryOrderModal.tsx` — `buildOrderNumberBase()` strips lpad when flag on (keeps global `dt_order_number_seq`) |
 | Linkification | `src/components/shared/LinkifiedText.tsx` — recognizes `PREFIX-RPR/WC/TSK-N` (token in middle segment) |
 | Flag | `feature_flags.orderNumbering` (UI/behavior gate, NOT apiRouter routing; `tenant_scope=[justinDemo]`) |
