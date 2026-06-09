@@ -286,6 +286,7 @@ Never deploy from a worktree.
 |---|---|---|
 | React (`src/**`) | `npm run deploy -- "what changed"` (build → push dist → commit source) | 1–2 min |
 | Supabase migration | MCP `apply_migration` | seconds |
+| Supabase Edge Functions | `npx supabase functions deploy <function-name> --project-ref uqplppugeickmamycpuz` (see EF notes below) | seconds |
 | StrideAPI.gs | `npm run push-api && npm run deploy-api` | ~20s |
 | Consolidated Billing | `npm run push-cb && npm run deploy-cb` | ~20s |
 | Client scripts (×49) | `npm run rollout && npm run deploy-clients` | 3–4 min |
@@ -293,6 +294,15 @@ Never deploy from a worktree.
 | Service rates/catalog | Price List page → inline edit | instant |
 
 **React build safeguards:** `npm run build` routes through `scripts/build.js` (verify-entry → tsc → vite → sanity checks). The `vite.config.ts` preflight **aborts the build** (`FATAL: … must be set in .env. Build aborted to prevent shipping a broken bundle.`) if any of the four required vars — `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `VITE_API_URL`, `VITE_API_TOKEN` — is missing, so an incomplete `.env` can't ship a config-less bundle (2026-06-03 outage prevention). `npm run build:raw` disables guards — emergency only; never use it to bypass a missing-env FATAL.
+
+**Supabase Edge Functions (EFs):** `npm run deploy` is **React-only — it does NOT deploy EFs.** Edge Functions ship separately:
+- **Prerequisite — CLI:** `npm i -g supabase` (install the Supabase CLI once).
+- **Prerequisite — auth:** `SUPABASE_ACCESS_TOKEN` **must be set as an environment variable** before deploying (see the env-var note below). Without it the deploy fails on auth.
+- **Command:** `npx supabase functions deploy <function-name> --project-ref uqplppugeickmamycpuz`
+- **JWT verification:** some EFs must deploy with `--no-verify-jwt` (currently `dt-push-order`, `dt-webhook-ingest`, `dt-sync-statuses`). **Always check an EF's existing `verify_jwt` setting before redeploying** — re-deploying without the flag silently flips it back on and breaks the function.
+- **MCP shortcut:** if the Supabase MCP is connected, use its `deploy_edge_function` tool instead of the CLI.
+
+> **`SUPABASE_ACCESS_TOKEN` must be set as an environment variable before deploying any Edge Function.** The CLI reads it for auth; an unset token is the most common EF-deploy failure.
 
 **Windows schannel TLS retry:** `scripts/deploy.js`'s `pushWithRetry` helper auto-retries any failing `git push` with `-c http.postBuffer=524288000 -c http.version=HTTP/1.1` — the recurring `SEC_E_MESSAGE_ALTERED (0x8009030f)` failure on the ~3MB bundle push has been reproducible enough that retry is built in. If you ever need to push manually (e.g. a recovery from a partial deploy), use the same flags.
 
