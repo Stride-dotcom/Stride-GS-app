@@ -2962,17 +2962,32 @@ export function CreateDeliveryOrderModal({
       // on first OrderPage open, and the actual billing only ever happens
       // through that EF — so the estimate is never billed.
       const codLine = codInclude ? codLinePreview : null;
-      const codStoragePayload: Record<string, unknown> = (codApplicable && codLine && codLine.itemCount > 0)
-        ? {
-            cod_storage_enabled: true,
-            cod_storage_cutoff_date: effectiveCodCutoff,
-            cod_storage_rate: codRate,
-            cod_storage_total: codLine.total,
-            cod_storage_item_count: codLine.itemCount,
-            cod_storage_period_start: codLine.periodStart,
-            cod_storage_details: serializeCodDetails(codLine.items, codRate),
-          }
-        : {};
+      let codStoragePayload: Record<string, unknown> = {};
+      if (codApplicable) {
+        codStoragePayload = (codLine && codLine.itemCount > 0)
+          ? {
+              cod_storage_enabled: true,
+              cod_storage_cutoff_date: effectiveCodCutoff,
+              cod_storage_rate: codRate,
+              cod_storage_total: codLine.total,
+              cod_storage_item_count: codLine.itemCount,
+              cod_storage_period_start: codLine.periodStart,
+              cod_storage_details: serializeCodDetails(codLine.items, codRate),
+            }
+          // Operator unchecked "Include" (or nothing billable) — persist an
+          // explicit "decided: not included" so the OrderPage card honors it
+          // (cutoff written → hasPersisted=true → checkbox renders unchecked)
+          // rather than defaulting the include toggle back on.
+          : {
+              cod_storage_enabled: false,
+              cod_storage_cutoff_date: effectiveCodCutoff,
+              cod_storage_rate: codRate,
+              cod_storage_total: 0,
+              cod_storage_item_count: 0,
+              cod_storage_period_start: null,
+              cod_storage_details: [],
+            };
+      }
 
       const payload: Record<string, unknown> = {
         tenant_id: clientSheetId || null,
