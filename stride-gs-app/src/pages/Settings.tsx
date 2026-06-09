@@ -4740,7 +4740,7 @@ export function Settings() {
             </p>
 
             <div style={{ background: theme.colors.bgSubtle, borderRadius: 10, padding: 14, marginBottom: 14 }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>Step 1 \u2014 open the bound script</div>
+              <div style={{ fontSize: 11, fontWeight: 700, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>Step 1{' \u2014 '}open the bound script</div>
               <button
                 onClick={() => window.open(`https://docs.google.com/spreadsheets/d/${manualSetupClient.spreadsheetId}/edit`, '_blank')}
                 style={{ padding: '8px 14px', fontSize: 12, fontWeight: 600, border: `1px solid ${theme.colors.orange}`, borderRadius: 6, background: '#fff', cursor: 'pointer', color: theme.colors.orange, fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 6 }}
@@ -4748,15 +4748,15 @@ export function Settings() {
                 <ExternalLink size={12} /> Open {manualSetupClient.name}'s spreadsheet
               </button>
               <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 8 }}>
-                In the spreadsheet, click <strong>Extensions \u2192 Apps Script</strong>.
+                In the spreadsheet, click <strong>Extensions{' \u2192 '}Apps Script</strong>.
               </div>
             </div>
 
             <div style={{ background: theme.colors.bgSubtle, borderRadius: 10, padding: 14, marginBottom: 14 }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>Step 2 \u2014 deploy the Web App</div>
+              <div style={{ fontSize: 11, fontWeight: 700, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>Step 2{' \u2014 '}deploy the Web App</div>
               <ol style={{ margin: 0, paddingLeft: 20, fontSize: 12, color: theme.colors.textSecondary, lineHeight: 1.7 }}>
-                <li>In the script editor, click <strong>Deploy \u2192 New deployment</strong> (top right).</li>
-                <li>Click the gear icon next to "Select type" \u2192 choose <strong>Web App</strong>.</li>
+                <li>In the script editor, click <strong>Deploy{' \u2192 '}New deployment</strong> (top right).</li>
+                <li>Click the gear icon next to "Select type"{' \u2192 '}choose <strong>Web App</strong>.</li>
                 <li>Description: <code style={{ background: '#fff', padding: '1px 6px', borderRadius: 4 }}>Stride client web app</code></li>
                 <li>Execute as: <strong>Me</strong></li>
                 <li>Who has access: <strong>Anyone</strong></li>
@@ -4766,7 +4766,7 @@ export function Settings() {
             </div>
 
             <div>
-              <div style={{ fontSize: 11, fontWeight: 700, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>Step 3 \u2014 paste the URL here</div>
+              <div style={{ fontSize: 11, fontWeight: 700, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>Step 3{' \u2014 '}paste the URL here</div>
               <input
                 type="url"
                 value={manualSetupUrl}
