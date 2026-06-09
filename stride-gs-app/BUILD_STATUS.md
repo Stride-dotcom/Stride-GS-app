@@ -110,6 +110,29 @@
 
 ---
 
+## Recent Changes (2026-06-08, documentation audit + mobile Inventory table + catch-up log — docs/audit-refresh)
+
+**Doc-audit pass** reconciling all project docs to the live state of `origin/source` (HEAD = PR #674). Updated **MIGRATION_STATUS.md** (new 2026-06-08 Migration Scorecard: 9 fleet-primary + 54 Justin-Demo-canary + 4 decoy rows + 0 GAS-only handlers; QBO-secrets blocker cleared; per-function table marked SUPERSEDED), **CLAUDE.md** (current counts + Supabase-authoritative-on-demo note), **CODE_MAP.md** (mobile Inventory), and **Session_History.md**. No code change. Also fixed the stale "What's Built" counts in this file (Pages 33→40, Hooks 61→75, Shared Components 60→75, Edge Functions 6→110, migrations 57→241).
+
+**PR #674 — mobile Inventory table (feat/inventory-mobile, template + React).** The Inventory page table is now usable on phones (full-width, taller, status dropdown inline) and the column resize + reorder-via-menu bugs are fixed. Latest source HEAD.
+
+**Catch-up entries for PRs that shipped with no dedicated section here** (most were logged by topic elsewhere in this file or in Session_History; recorded with their PR numbers for traceability):
+
+- **#612 — Client Invoice Portal** (feat/billing/client-invoice-portal): client-facing `#/invoices` list scoped by RLS to the client's own tenant(s); per-row View/Download mints an RLS-scoped signed URL from `invoice_tracking.pdf_path` with a printable-route fallback. New `src/pages/Invoices.tsx`, `src/hooks/useInvoices.ts`, `src/lib/invoicePdf.ts`/`invoiceBackfill.ts`, migration `20260604120000_invoice_tracking_pdf_path_and_client_rls.sql`. See CODE_MAP → Billing → Client Invoice Portal.
+- **#614 / #628 — Invoices nav scoping:** "Invoices" sidebar item added for admin + client roles, then **removed from staff nav + route guard** (#628) so staff (no billing access) don't see it. `Sidebar.tsx` `CLIENT_NAV`; `/invoices` route gated `['admin','client']` in `App.tsx`.
+- **#624 — Invoices list search / sort / filters** (feat/billing): search box + sortable columns + client and date-range filters on the `#/invoices` list.
+- **#621 — Dashboard table headers de-cramped on tablet** (fix/dashboard): Tasks/Repairs/Will-Calls Overview table headers no longer cramp at tablet width (companion to #617's more-rows fix).
+- **#626 — Honor row-selection on storage commit + invoice** (fix/billing/honor-row-selection): unchecking preview rows before Create-Invoice now actually excludes them (the precursor to the #671/#672/#673 storage partial-selection hardening).
+- **#627 — Insurance auto-billing proration** (fix/billing/insurance-proration): first-month / cancellation / mid-period coverage-change day-for-day proration in `insurance_bill_due()`; `coverage_changes` audit table + `log_coverage_change` trigger + `final_billed_at`; dedup tag YYYYMM→YYYYMMDD. Migration `20260604190000_insurance_billing_proration.sql`.
+- **Stax test-invoice trio (#632 / #634 / #635 / #636):** #632 `create-stax-invoices-sb` fails loudly when nothing reaches Stax (was silent-success); **#634 100% Supabase Stax test invoice (no GAS)** — new `create-test-stax-invoice` EF invoked directly from `Payments.tsx`, the first Stax write fully off GAS; #635 makes that SB-only row visible-on-refresh + chargeable via the `staxSheetUpsert` reverse-writethrough bridge (StrideAPI v38.263/264.0); #636 generalizes it into a "Create Stax Charge" modal (any client/amount, auto-charge + notes, push-now toggle). See CODE_MAP → Payments.
+- **#637 — DT push no longer wipes phone/email** (fix/delivery): a present-but-empty editable XML tag was full-replacing DT data on re-push; empty editable tags are now omitted. See memory `reference_dt_addorder_empty_tag_wipes`.
+- **#639 / #640 — Repair quote line-item breakdown** in the RepairDetailPanel Details tab, scoped to the slide-out panel (#640 fix).
+- **#642 — Badge ALL batch-repair items on the Inventory page** (#616 follow-up): Inventory.tsx has its own inline I/A/R/W/D badge derivation parallel to `useItemIndicators`, which #616 missed. See memory `feedback_inventory_parallel_badge_derivation`.
+- **#643 — DT order-description read-before-write merge** (EF v45): `dt-push-order` now reads DT's current `<description>` and replaces only the `--- STRIDE APP --- … --- END STRIDE APP ---` section, preserving dispatcher text. Foundational infra for COD-storage. See CODE_MAP → Delivery → `_shared/dt-description-merge.ts`.
+- **#644 — COD Storage ("end customers pay storage")** (feat/billing/cod-storage, Justin Demo): designers flag items so the end customer pays storage from a start date; the designer's storage report is capped at that date and the remainder is collected on the delivery order. `codStorageBilling` feature flag (UI gate, canary on Justin Demo), Supabase-only columns, `set_cod_storage` / `mark_cod_storage_collected` RPCs, `dt-push-order` v46 COD summary block. See CODE_MAP → COD Storage and memory `project_cod_storage`. Follow-ups #649/#650/#662 (Item-Detail reflect + `$` badge, restore `_compute_storage_charges` #589 dedup, expose `cod_storage` on `inventory_live`).
+
+---
+
 ## Recent Changes (2026-06-08, media: inline document previews + image thumbnails on all entity pages — feat/media/document-previews, PR #668)
 
 - **Closes the "documents are just links" ask** (the open follow-up from PR #665). `DocumentList` — the shared documents surface on every detail panel (Item/Task/Repair/WillCall/Shipment/Claim via `EntityAttachments`) — rendered docs as a generic icon + filename + open/download. New **`DocumentPreviewModal`**: click any doc → inline preview without a new tab — `image/*`→`<img>`, `pdf`→`<iframe>` (native render), other (DOCX/XLSX)→icon + Download/Open fallback; prev/next walks the list, Esc/backdrop/X closes; **one signed URL per view** (private bucket); **portaled to `document.body`** so the slide-in panels' CSS transforms can't clip the fixed overlay (+ an index clamp for a Realtime-delete-while-open). `DocumentList` image docs now show a real **thumbnail** (lazy signed URL, one per image row) instead of a generic icon, and the thumbnail + filename is a button that opens the preview; Download/Open/Delete unchanged. New file: `src/components/media/DocumentPreviewModal.tsx`. Opus locked-in code-review: no Critical / no blocking Important (leak-safe signed-URL effects with a stable `getSignedUrl` useCallback, portal escapes the transformed ancestor, bounds guards + clamp degrade cleanly on delete, thumbnails fire on image rows only; React-only, read-only signed URLs, no landmines). tsc + build clean; React deployed via canonical clone. Built the full recommended version (thumbnails + viewer for images & PDFs) after the scope question went unanswered.
@@ -1312,8 +1335,8 @@ The following were marked "GAS" in v1.0 but are already partially or fully migra
 | System | Version | Notes |
 |---|---|---|
 | React app (GitHub Pages) | Latest on `origin/source` | `npm run deploy` from source. Latest bundle: `index-C2xeMz3s.js`. |
-| StrideAPI.gs | **v38.265.0** (head) | v38.265.0: going-forward `app_metadata` sync — `stampAppMetadata_` + `syncAppMetadataForUser_` called best-effort from `handleGetUserByEmail_`/`handleCreateUser_`/`handleUpdateUser_` (Step 5 of the auth-hook security remediation; PR #661). Deploy via `npm run push-api && npm run deploy-api`. |
-| Supabase | 70+ migrations applied | New `public.invoice_tracking` table (PR #285) — per-invoice push-state ledger with `qbo_pushed_at`, `stax_pushed_at`, `auto_charge` snapshot. RLS staff/admin only + service_role bypass. Realtime publication enabled. 176 historical invoices backfilled. `public.next_invoice_no()` Postgres SEQUENCE replaces the Master sheet RPC counter for invoice numbering. Multi-tenant RLS access (`user_has_tenant_access` helper) — clients with multiple tenant assignments can now read entity rows + storage objects across all accessible tenants. |
+| StrideAPI.gs | **v38.267.0** (head) | v38.266.0/267.0: storage partial-selection + void-reprice fixes (PRs #671/#672 — `handleCommitStorageRows_` reads `storage_billing_items` first, defers the coarse summary lock to per-item). v38.265.0: going-forward `app_metadata` sync — `stampAppMetadata_` + `syncAppMetadataForUser_` from `handleGetUserByEmail_`/`handleCreateUser_`/`handleUpdateUser_` (Step 5 of the auth-hook security remediation; PR #661). Deploy via `npm run push-api && npm run deploy-api`. |
+| Supabase | **241 migrations applied** | 110 Edge Functions deployed (`supabase/functions/`). New `public.invoice_tracking` table (PR #285) — per-invoice push-state ledger with `qbo_pushed_at`, `stax_pushed_at`, `auto_charge` snapshot. RLS staff/admin only + service_role bypass. Realtime publication enabled. 176 historical invoices backfilled. `public.next_invoice_no()` Postgres SEQUENCE replaces the Master sheet RPC counter for invoice numbering. Multi-tenant RLS access (`user_has_tenant_access` helper) — clients with multiple tenant assignments can now read entity rows + storage objects across all accessible tenants. |
 | Client scripts | Rolled out to 49 active clients | Code.gs v4.6.0, Import.gs v4.3.0 |
 | StaxAutoPay.gs | v4.7.6 | Charge Log Customer/Transaction header fix |
 
@@ -1321,7 +1344,7 @@ The following were marked "GAS" in v1.0 but are already partially or fully migra
 
 ## What's Built
 
-### Pages (33 files in `src/pages/`)
+### Pages (40 files in `src/pages/`)
 
 **Main pages (14):** Login, Dashboard, Inventory, Receiving, Shipments, Tasks, Repairs, Will Calls, Billing, Payments/Stax, Claims, Settings, Marketing, Orders/Delivery
 
@@ -1331,7 +1354,7 @@ The following were marked "GAS" in v1.0 but are already partially or fully migra
 
 **Specialized:** Scanner (QR), Labels, QuoteTool, PriceList, PublicRates, Intakes (client onboarding), ParityMonitor, DetailPanelMockup, ClientIntake, AccessDenied
 
-### Hooks (61 in `src/hooks/`)
+### Hooks (75 in `src/hooks/`)
 
 Data: useInventory, useTasks, useRepairs, useWillCalls, useShipments, useBilling, useClaims, useClients, useUsers, useOrders, useLocations, useMessages, useNotifications, usePhotos, useDocuments, useEntityNotes, useProfiles
 
@@ -1345,7 +1368,7 @@ UI: useTablePreferences, useResizablePanel, useIsMobile, useRowSelection, useVir
 
 Other: useCalendarEvents, useExpectedShipments, useFailedOperations, useSupabaseRealtime, useItemIndicators, useItemNotes, useClientIntake, useIntakeAdmin, useClientTcStatus, useClientInsurance, usePriceListShares, useQuoteCatalog, useQuoteStore, useEmailTemplates, useReceivingAddons, useDashboardSummary
 
-### Shared Components (60 in `src/components/shared/`)
+### Shared Components (75 in `src/components/shared/`)
 
 Detail panels (7): ItemDetailPanel, TaskDetailPanel, RepairDetailPanel, WillCallDetailPanel, ShipmentDetailPanel, ClaimDetailPanel, BillingDetailPanel, OrderDetailPanel, PaymentDetailPanel
 
@@ -1353,18 +1376,20 @@ Modals: CreateDeliveryOrderModal, CreateTaskModal, CreateWillCallModal, AddToWil
 
 UI components: FloatingActionMenu, WriteButton, BatchGuard, ActionTooltip, BatchProgress, UniversalSearch, DataTable, DetailHeader, EntityPage, EntityHistory, EntitySourceTabs, EntityAttachments, StatusChips, DeepLink, InfoTooltip, InlineEditableCell, LocationPicker, AutocompleteSelect, MultiSelectFilter, FolderButton, ConfirmDialog, ProcessingOverlay, FailedOperationsDrawer, ReviewQueueTab, TemplateEditor, TabbedDetailPanel, and more
 
-### Edge Functions (6 deployed)
+### Edge Functions (110 deployed)
 
-| Function | Purpose |
-|---|---|
-| `dt-push-order` | Push approved delivery orders to DispatchTrack API |
-| `dt-webhook-ingest` | Receive DT webhook events, upsert orders |
-| `dt-backfill-orders` | Bulk import existing DT orders |
-| `dt-sync-statuses` | Sync DT status/substatus lookup tables |
-| `notify-new-order` | Email notification on new delivery order |
-| `stax-catalog-sync` | Sync service catalog items to Stax payment platform |
+The count grew from 6 (DT/Stax/notify) to **110** as the GAS→Supabase migration shipped a `-sb` (or `-shadow`) Edge Function for every write handler plus 12 grouped-action clusters. `ls supabase/functions/` for the live list; CODE_MAP.md maps each to its feature area. Broad categories:
 
-### Supabase Tables (57 migrations)
+- **DispatchTrack:** `dt-push-order`, `dt-webhook-ingest`, `dt-sync-statuses`, `dt-backfill-orders`, `backfill-dt-finished-releases`, plus the `_shared/` helpers (`dt-description-merge`, `release-on-dt-finished`, `stamp-pickup-on-linked-delivery`).
+- **Notifications / email:** `send-email`, `send-onboarding-email`, `notify-new-order`, `notify-order-revision`, `notify-public-request`, `notify-pickup-completed`, `notify-task-client-note`, `intake-resign-reminder-cron`, `apply-intake-on-submit`.
+- **Payments:** `stax-catalog-sync`, `stax-webhook`, `create-test-stax-invoice`, `create-stax-invoices-sb`, `run-stax-charges-sb`, `qbo-create-invoice-sb`, `qbo-reconcile-payments`, `import-iif-sb`.
+- **Migration `-sb` handlers** (P2–P7): `update-item-sb`, `update-task-sb`, `update-repair-sb`, `batch-create-tasks-sb`, `release-items-sb`, `create-will-call-sb`, `process-wc-release-sb`, `transfer-items-sb`, `complete-shipment-sb`, `start-task`, `complete-task`, `complete-repair-sb`, `commit-storage-charges-sb`, `create-invoice-sb`, `void-invoice-sb`, `reissue-invoice-sb`, `onboard-client-sb`, `update-client-sb`, `create-location-sb`, the repair cluster (`cancel/start/send-repair-quote/respond-repair-quote/request-repair-quote-sb`, `re-quote-repair`), billing-light (`sync-client-billing-sb`, `add/void-manual-charge-sb`, `update-billing-row-sb`, `void-unbilled-rows-sb`, `generate-unbilled-report-sb`), WC/task extras (`cancel/reopen-task-sb`, `batch-cancel-tasks/repairs-sb`, `update/cancel-will-call-sb`, `add/remove-items-to-will-call-sb`), `batch-update-item-locations-sb`.
+- **12 grouped clusters:** `marketing-actions-sb`, `claims-actions-sb`, `stax-actions-sb`, `qb-actions-sb`, `repair-extras-sb`, `wc-extras-sb`, `task-batch-ops-sb`, `billing-extras-sb`, `location-actions-sb`, `admin-users-sb`, `email-templates-sb`, `client-setup-sb`.
+- **Parity shadows + harness:** `replay-shadow` + ~20 `*-shadow` functions (one per migrating handler).
+- **Reverse-writethrough / mirror:** `push-client-settings-to-sheet`, `push-inventory-release-to-sheet`, `push-shipment-edit-to-sheet`, `push-will-call-cod-to-sheet`.
+- **Media / sharing:** `backfill-photo-thumbnails`, `get-shared-doc`, `impersonate-mint-session`.
+
+### Supabase Tables (241 migrations)
 
 **Core mirrors:** inventory, tasks, repairs, will_calls, will_call_items, shipments, billing, clients, claims, cb_users, locations
 

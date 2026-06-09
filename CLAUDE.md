@@ -144,8 +144,8 @@ Dropbox\Apps\GS Inventory\credentials\.sync-config.json  →  AppScripts\stride-
 - **TypeScript must stay clean** — run `npx tsc --noEmit` (or `node node_modules/typescript/lib/tsc.js --noEmit`) before finishing.
 - **Version header on every `.gs`/`.js` edit.** Patch bump for fixes, minor for features. PST timestamps.
 - **Header-based column mapping.** Use `getHeaderMap_()` / `headerMapFromRow_()`. Never positional indexes.
-- **Use existing components** — check `src/components/shared/` (65 components) before creating new ones.
-- **Use existing hooks** — check `src/hooks/` (71 hooks) before creating new ones.
+- **Use existing components** — check `src/components/shared/` (75 components) before creating new ones.
+- **Use existing hooks** — check `src/hooks/` (75 hooks) before creating new ones.
 - **Follow the design system** — Stride orange (#E85D2D), Inter font, `theme.v2` tokens. See `_archive/Docs/Entity_Page_Design_Spec.md` for entity page design.
 - **Every new-table migration MUST include explicit GRANTs + RLS.** See [Supabase](#supabase) for the required 4-step template. Supabase begins enforcing this 2026-10-30: new tables without `GRANT … TO authenticated` are invisible to the Data API and the React app will silently 404 on them.
 - **Update BUILD_STATUS.md at end of session.**
@@ -212,12 +212,12 @@ stride-gs-app/src/
 │   ├── layout/          ← Sidebar, Header, AppLayout
 │   ├── shared/          ← 65 reusable components (detail panels, modals, etc.)
 │   └── ui/              ← Base UI primitives
-├── hooks/               ← 71 hooks (data, UI, billing, messaging, etc.)
+├── hooks/               ← 75 hooks (data, UI, billing, messaging, etc.)
 ├── lib/
 │   ├── api.ts           ← apiFetch<T>(), typed API functions
 │   ├── supabase.ts      ← Supabase client
 │   └── supabaseQueries.ts ← Read query helpers
-├── pages/               ← 39 page files (entity list pages + entity detail pages + job pages + public pages)
+├── pages/               ← 40 page files (entity list pages + entity detail pages + job pages + public pages)
 └── types/               ← TypeScript type definitions
 ```
 
@@ -231,10 +231,10 @@ stride-gs-app/src/
 
 ## Supabase
 
-- **Migration files:** `stride-gs-app/supabase/migrations/YYYYMMDDHHMMSS_name.sql` (~170 migrations applied — `ls supabase/migrations/*.sql | wc -l` for exact)
+- **Migration files:** `stride-gs-app/supabase/migrations/YYYYMMDDHHMMSS_name.sql` (~241 migrations applied — `ls supabase/migrations/*.sql | wc -l` for exact)
 - **Apply migrations:** MCP tool `apply_migration(project_id='uqplppugeickmamycpuz', name, query)`. Write the SQL file first (git source of truth), then apply via MCP.
 - **Client:** `stride-gs-app/src/lib/supabase.ts` — anon key in `.env` as `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY`
-- **Edge Functions (~19 deployed in `supabase/functions/`):** DispatchTrack (dt-*), Stax (stax-*), notification (notify-*, send-*), and shadow/replay helpers. `ls supabase/functions/` for the current list.
+- **Edge Functions (~110 deployed in `supabase/functions/`):** DispatchTrack (dt-*), Stax (stax-*), notification (notify-*, send-*), shadow/replay helpers, and — as the GAS→Supabase migration shipped — a `-sb` handler for every write action plus 12 grouped-action clusters (`*-actions-sb`, `*-extras-sb`, `*-ops-sb`). `ls supabase/functions/` for the current list; CODE_MAP.md maps each to its feature.
 
 ### New-table migrations: REQUIRED 4-step template
 
@@ -318,7 +318,9 @@ Supabase              →  read cache mirror + DT delivery + messaging + audit l
 
 **Data flow:** GAS writes → Google Sheet (authoritative) → Supabase (best-effort write-through) → Realtime → React hooks refetch → UI updates in ~1–2s across all tabs.
 
-**Key invariant:** Supabase is a read cache, not authority. GAS writes are the execution authority. Never block a GAS write on a Supabase failure.
+**Key invariant (production tenants):** Supabase is a read cache, not authority. GAS writes are the execution authority. Never block a GAS write on a Supabase failure.
+
+> **⚠️ Migration in progress — the invariant is being reversed per-handler.** As of 2026-06-08 the **Justin Demo Account runs 100% on Supabase** (SB-primary writes with synchronous reverse-writethrough to the sheet), and **9 handlers have graduated fleet-wide** (the repair cluster + `updateShipment` + `generateStorageCharges` + `updateClient`). Routing is per-action via `feature_flags` resolved in `src/lib/apiRouter.ts` (`GAS_TO_SB_MAP`) — when a flag is `supabase` for the caller's tenant, `apiPost` lands on the `-sb` Edge Function instead of GAS. **Before changing any write path, read `stride-gs-app/MIGRATION_STATUS.md` (the Migration Scorecard) to know whether that handler is GAS, canary-SB, or fleet-SB.** For a handler already routed to SB, "GAS is authority" no longer holds — the SB write is primary and the sheet is the mirror.
 
 ---
 
