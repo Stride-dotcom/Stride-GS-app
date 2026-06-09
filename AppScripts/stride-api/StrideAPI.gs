@@ -50519,3 +50519,99 @@ function pushInv001046ToStax_() {
     };
   }
 }
+
+/**
+ * ONE-OFF (run once, 2026-06-09): correct the Brume → Jodie transfer storage
+ * attribution. The 2026-06-08 transfer billed the pre-cutover holding window
+ * (5/22 → 6/7) to the DESTINATION (Jodie) under the old "destination owns
+ * storage end-to-end" behaviour. Per v38.269.0 (source-pays) that window belongs
+ * to the SOURCE (Brume). Brume's rates == Jodie's (0 free / 0 discount / same
+ * STOR rate), so the 4 STOR-TRANSFER rows MOVE unchanged: void on Jodie, copy to
+ * Brume (Client → Brume). SHEETS ONLY — the public.billing mirror is corrected
+ * separately. Only touches still-Unbilled rows (never an invoiced/billed one).
+ *   runFixBrumeJodieTransferStorage_(true)  → DRY RUN (logs plan, no writes)
+ *   runFixBrumeJodieTransferStorage_(false) → execute
+ */
+function runFixBrumeJodieTransferStorage_(dryRun) {
+  var SRC_ID = "1vKOeFOLzPtrK676tEFsI9ZNGbpieCFTToTEZvOpCiv8"; // Brume (source)
+  var DST_ID = "17iqtKPu87CWloiV0HZGgMZ6CtTTqJDY4daK6zpgfnA8"; // Jodie Thomas Design (destination)
+  var LEDGER_IDS = {
+    "STOR-TRANSFER-63584-20260522-20260607": true,
+    "STOR-TRANSFER-63586-20260522-20260607": true,
+    "STOR-TRANSFER-63587-20260522-20260607": true,
+    "STOR-TRANSFER-64585-20260522-20260607": true
+  };
+  var NOTE = "Re-attributed to source (Brume) per v38.269.0 source-pays (was mis-billed to destination on transfer) — 2026-06-09";
+
+  var dstSS = SpreadsheetApp.openById(DST_ID);
+  var srcSS = SpreadsheetApp.openById(SRC_ID);
+  var dstBl = dstSS.getSheetByName("Billing_Ledger");
+  var srcBl = srcSS.getSheetByName("Billing_Ledger");
+  if (!dstBl || !srcBl) return { ok: false, error: "Billing_Ledger not found on source or destination" };
+
+  var dstMap = api_getHeaderMap_(dstBl);
+  var srcMap = api_getHeaderMap_(srcBl);
+  var lrCol     = dstMap["Ledger Row ID"] !== undefined ? dstMap["Ledger Row ID"] : dstMap["Ledger Entry ID"];
+  var statusCol = dstMap["Status"];
+  var totalCol  = dstMap["Total"];
+  var notesCol  = dstMap["Item Notes"] !== undefined ? dstMap["Item Notes"] : dstMap["Notes"];
+  if (!lrCol || !statusCol) return { ok: false, error: "Destination missing Ledger Row ID / Status columns" };
+
+  var dstHeaders = dstBl.getRange(1, 1, 1, dstBl.getLastColumn()).getValues()[0];
+  var srcHeaders = srcBl.getRange(1, 1, 1, srcBl.getLastColumn()).getValues()[0];
+  var lastRow = api_getLastDataRow_(dstBl);
+  if (lastRow < 2) return { ok: false, error: "Destination Billing_Ledger is empty" };
+  var data = dstBl.getRange(2, 1, lastRow - 1, dstBl.getLastColumn()).getValues();
+
+  var srcClientName = "Brume";
+  try { srcClientName = String(api_readSettings_(srcSS)["CLIENT_NAME"] || "Brume"); } catch (e) {}
+
+  var srcAppend = [];
+  var voidRowNums = [];
+  var plan = [];
+  for (var i = 0; i < data.length; i++) {
+    var row = data[i];
+    var lid = String(row[lrCol - 1] || "").trim();
+    if (!LEDGER_IDS[lid]) continue;
+    var st = String(row[statusCol - 1] || "").trim().toLowerCase();
+    if (st !== "unbilled") continue; // safety: never move an invoiced/billed row
+    var projected = api_projectRow_(row, dstHeaders, srcHeaders);
+    var sClientCol = srcMap["Client"];
+    if (sClientCol) projected[sClientCol - 1] = srcClientName;
+    var sNotesCol = srcMap["Item Notes"] !== undefined ? srcMap["Item Notes"] : srcMap["Notes"];
+    if (sNotesCol) {
+      var ex = String(projected[sNotesCol - 1] || "").trim();
+      projected[sNotesCol - 1] = (ex ? ex + " | " : "") + NOTE;
+    }
+    srcAppend.push(projected);
+    voidRowNums.push(i + 2);
+    plan.push({ ledgerRowId: lid, total: totalCol ? row[totalCol - 1] : null, jodieSheetRow: i + 2 });
+  }
+
+  if (!srcAppend.length) {
+    return { ok: true, dryRun: !!dryRun, message: "No matching Unbilled STOR-TRANSFER rows on Jodie (already corrected?)", plan: plan };
+  }
+  if (dryRun) {
+    Logger.log("[DRY RUN] would void " + voidRowNums.length + " on Jodie + append " + srcAppend.length + " to Brume. Plan: " + JSON.stringify(plan));
+    return { ok: true, dryRun: true, wouldVoid: voidRowNums.length, wouldCreate: srcAppend.length, brumeClient: srcClientName, plan: plan };
+  }
+
+  // Execute (append to Brume first, then void on Jodie).
+  srcBl.getRange(api_getLastDataRow_(srcBl) + 1, 1, srcAppend.length, srcHeaders.length).setValues(srcAppend);
+  for (var v = 0; v < voidRowNums.length; v++) {
+    dstBl.getRange(voidRowNums[v], statusCol).setValue("Void");
+    if (notesCol) {
+      var c = dstBl.getRange(voidRowNums[v], notesCol);
+      var val = String(c.getValue() || "").trim();
+      c.setValue((val ? val + " | " : "") + NOTE);
+    }
+  }
+  SpreadsheetApp.flush();
+  try { invalidateClientCache_(SRC_ID); invalidateClientCache_(DST_ID); } catch (e) {}
+  return { ok: true, dryRun: false, voidedOnJodie: voidRowNums.length, createdOnBrume: srcAppend.length, brumeClient: srcClientName, plan: plan };
+}
+
+// Editor runners (the Run button passes no args). Run DRYRUN first, read the
+// Execution log, then run EXECUTE. The public.billing mirror is corrected via MCP.
+function runFixBrumeJodieTransferStorage_DRYRUN()  { var r = runFixBrumeJodieTransferStorage_(true);  Logger.log(JSON.stringify(r, null, 2)); return r; }
+function runFixBrumeJodieTransferStorage_EXECUTE() { var r = runFixBrumeJodieTransferStorage_(false); Logger.log(JSON.stringify(r, null, 2)); return r; }
