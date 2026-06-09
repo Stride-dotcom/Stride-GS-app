@@ -2,7 +2,6 @@ import { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useTablePreferences } from '../hooks/useTablePreferences';
 import { ColumnManagerMenu, moveColumnInOrder } from '../components/shared/ColumnManagerMenu';
-import { createPortal } from 'react-dom';
 import {
   useReactTable, getCoreRowModel, getSortedRowModel, getFilteredRowModel,
   flexRender, createColumnHelper,
