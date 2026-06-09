@@ -993,7 +993,7 @@ function DetailsTab({
                                 Tag visually so reviewers know there's no Stride-side
                                 inventory row to release / track / cross-link. */}
                             {!item.inventoryId && !item.dtItemCode && (
-                              <span style={{ fontSize: 9, fontWeight: 600, padding: '1px 6px', borderRadius: 8, background: '#EFF6FF', color: '#1D4ED8', border: '1px solid #BFDBFE', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Ad-hoc</span>
+                              <span style={{ fontSize: 9, fontWeight: 600, padding: '1px 6px', borderRadius: 8, background: '#EFF6FF', color: '#1D4ED8', border: '1px solid #BFDBFE', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Non-inventory</span>
                             )}
                           </div>
                           {item.dtItemCode && (
