@@ -12,6 +12,7 @@ import { QuoteStorageSection } from './QuoteStorageSection';
 import { QuoteOtherServices } from './QuoteOtherServices';
 import { QuoteDiscountCard } from './QuoteDiscountCard';
 import { QuoteCoverageCard } from './QuoteCoverageCard';
+import { QuoteDocumentsCard } from './QuoteDocumentsCard';
 import { QuoteTotalsPanel } from './QuoteTotalsPanel';
 import type { Quote } from '../../lib/quoteTypes';
 import type { useQuoteStore } from '../../hooks/useQuoteStore';
@@ -190,6 +191,11 @@ export function QuoteBuilder({ store, quoteId, onBack }: Props) {
               </div>
             </div>
           </div>
+
+          {/* Attachments — floor plans, packing lists, POs, photos the
+              client sends. Reuses the shared documents module (same bucket,
+              table, RLS); only context_type='quote' is new. */}
+          <QuoteDocumentsCard quote={quote} />
         </div>
 
         <QuoteTotalsPanel quote={quote} catalog={store.catalog} onUpdate={handleChange}
