@@ -201,9 +201,16 @@ export function BillingPreviewCard({
   // per item from wcItems.
   const initialPrimaryQty = Math.max(1, Math.round(Number(primaryQty ?? 1)) || 1);
   const [primaryQtyDraft, setPrimaryQtyDraft] = useState(String(initialPrimaryQty));
+  // Don't clobber an in-progress qty edit when the prop changes underneath us.
+  // A realtime task refetch can deliver a stale primaryQty (e.g. the old qty
+  // before the operator's edit has persisted) mid-typing; without this guard
+  // the resync below would yank the field back to that stale value while the
+  // operator is still editing (the "I typed 6 and it jumped back to 1" bug).
+  // Same focus-guard pattern as Billing.tsx's EditableCell.
+  const [qtyEditing, setQtyEditing] = useState(false);
   useEffect(() => {
-    setPrimaryQtyDraft(String(initialPrimaryQty));
-  }, [initialPrimaryQty]);
+    if (!qtyEditing) setPrimaryQtyDraft(String(initialPrimaryQty));
+  }, [initialPrimaryQty, qtyEditing]);
   const primaryQtyNum = Math.max(1, Math.round(Number(primaryQtyDraft)) || 1);
 
   // ── Will Call: per-item × class projection ──────────────────────────────
@@ -478,6 +485,9 @@ export function BillingPreviewCard({
                       // Local-only update — defer persistence to onQtyBlur
                       // so each keystroke isn't a network round-trip. Same
                       // pattern the addon rows use for their qty inputs.
+                      // qtyEditing freezes the prop→draft resync so a realtime
+                      // refetch can't clobber what's being typed.
+                      setQtyEditing(true);
                       setPrimaryQtyDraft(v);
                     }}
                     onQtyBlur={() => {
@@ -486,6 +496,7 @@ export function BillingPreviewCard({
                         void onUpdatePrimaryQty(n);
                       }
                       setPrimaryQtyDraft(String(n));
+                      setQtyEditing(false);
                     }}
                     rate={primaryRate}
                     rateEditable={editable && !!onUpdatePrimaryRate}

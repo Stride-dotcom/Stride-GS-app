@@ -616,6 +616,12 @@ function buildTaskRow(
     created:         nowIso,
     item_notes:      String(item.itemNotes ?? '').trim(),
     billed:          false,
+    // INSPECTION tasks default qty to the item's TRUE piece count so the
+    // billing preview + complete_task_atomic (which bills tasks.qty × rate)
+    // charge "Inspection × N" for a carton of N pieces. Every other task
+    // type stays qty 1 per item ID (the column default). Staff can still
+    // adjust the inspection qty on the BillingPreviewCard before completion.
+    qty:             svcCode === 'INSP' ? (Math.round(Number(item.qty)) > 0 ? Math.round(Number(item.qty)) : 1) : 1,
     updated_at:      nowIso,
     // svc_code intentionally not written — public.tasks schema doesn't carry
     // it directly (see batch-create-tasks-sb dedup note). Type is the
