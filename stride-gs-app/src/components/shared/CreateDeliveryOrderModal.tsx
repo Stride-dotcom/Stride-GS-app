@@ -820,6 +820,13 @@ export function CreateDeliveryOrderModal({
       reference: i.reference || '',
       status: i.status, qty: i.qty,
       itemClass: i.itemClass || '', room: i.room || '',
+      // COD storage flags — REQUIRED for the create-time COD line seed below.
+      // The seed filters on `i.codStorage && i.codStorageStartDate`; without
+      // these on the self-fetch path (modal opened from Orders, no
+      // liveItemsProp) codLine was always null and the COD Storage card on
+      // OrderPage never appeared.
+      codStorage: i.codStorage,
+      codStorageStartDate: i.codStorageStartDate,
     }));
   }, [liveItemsProp, invHookResult.items]);
   const invLoading = liveItemsProp.length === 0 && invHookResult.loading;

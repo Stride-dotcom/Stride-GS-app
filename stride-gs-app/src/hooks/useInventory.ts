@@ -71,6 +71,12 @@ function mapToAppItem(api: ApiInventoryItem): InventoryItem {
     shipmentFolderUrl: api.shipmentFolderUrl || undefined,
     condition: undefined, // Not in sheet schema
     dimensions: undefined,
+    // COD storage flags (Supabase-only columns). Carried through so the
+    // delivery-order COD line can seed at create time — dropping them here
+    // made CreateDeliveryOrderModal's seed see codStorage=undefined for every
+    // item and never write cod_storage_details (COD card never appeared).
+    codStorage: api.codStorage,
+    codStorageStartDate: api.codStorageStartDate,
   };
 }
 
