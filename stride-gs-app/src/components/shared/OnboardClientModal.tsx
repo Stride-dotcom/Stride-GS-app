@@ -1080,11 +1080,15 @@ export function OnboardClientModal({ mode = 'create', existingClient = null, all
  * everything, client-role users only their own tenant).
  */
 function ClientDocumentsBlock({ clientSheetId }: { clientSheetId: string }) {
-  const { documents, loading, uploadDocument } = useDocuments({
+  // ONE useDocuments instance backs the upload action AND the list below (via
+  // DocumentList's `source` prop) — two instances on the same context would
+  // open colliding Realtime channels and leave the list stale after upload.
+  const docs = useDocuments({
     contextType: 'client',
     contextId: clientSheetId,
     tenantId: clientSheetId,
   });
+  const { documents, loading, uploadDocument } = docs;
   const [uploading, setUploading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -1121,7 +1125,7 @@ function ClientDocumentsBlock({ clientSheetId }: { clientSheetId: string }) {
           No documents yet. The original intake packet lands here when a client is activated from an intake; admins can also upload renewals, COI, tax forms, etc.
         </div>
       ) : (
-        <DocumentList contextType="client" contextId={clientSheetId} tenantId={clientSheetId} />
+        <DocumentList contextType="client" contextId={clientSheetId} tenantId={clientSheetId} source={docs} />
       )}
     </div>
   );

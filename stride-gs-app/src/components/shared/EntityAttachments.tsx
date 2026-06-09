@@ -263,7 +263,12 @@ function DocumentsSection({
   contextType, contextId, tenantId, defaultOpen,
 }: DocumentsCfg & { defaultOpen: boolean }) {
   const [open, setOpen] = useState(defaultOpen);
-  const { documents, uploadDocument } = useDocuments({ contextType, contextId, tenantId });
+  // ONE useDocuments instance backs both the upload action AND the list below
+  // (passed to DocumentList via `source`). Two separate instances on the same
+  // context each open a Realtime channel with the same topic name, collide,
+  // and leave the list stale after an upload (see DocumentList `source` prop).
+  const docs = useDocuments({ contextType, contextId, tenantId });
+  const { documents, uploadDocument } = docs;
   const [uploading, setUploading] = useState(false);
   const handleUpload = async (files: File[]) => {
     setUploading(true);
@@ -289,8 +294,9 @@ function DocumentsSection({
             contextType={contextType}
             contextId={contextId}
             tenantId={tenantId}
+            source={docs}
           />
-          <DocumentList contextType={contextType} contextId={contextId} tenantId={tenantId} />
+          <DocumentList contextType={contextType} contextId={contextId} tenantId={tenantId} source={docs} />
         </div>
       </CollapsibleBody>
     </section>
@@ -345,7 +351,11 @@ export function DocumentsPanel({
   contextId: string;
   tenantId?: string | null;
 }) {
-  const { uploadDocument } = useDocuments({ contextType, contextId, tenantId });
+  // Single useDocuments instance backs the upload action AND the list (via
+  // `source`) — avoids the dual-instance Realtime-channel collision that left
+  // the list stale after an upload. See DocumentList's `source` prop.
+  const docs = useDocuments({ contextType, contextId, tenantId });
+  const { uploadDocument } = docs;
   const [uploading, setUploading] = useState(false);
   const handleUpload = async (files: File[]) => {
     setUploading(true);
@@ -363,9 +373,10 @@ export function DocumentsPanel({
           contextType={contextType}
           contextId={contextId}
           tenantId={tenantId}
+          source={docs}
         />
       </div>
-      <DocumentList contextType={contextType} contextId={contextId} tenantId={tenantId} />
+      <DocumentList contextType={contextType} contextId={contextId} tenantId={tenantId} source={docs} />
     </div>
   );
 }
