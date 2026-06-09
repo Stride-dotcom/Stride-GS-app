@@ -297,8 +297,9 @@ Standalone quote builder with PDF generation and Supabase-backed storage.
 | Layer | Files |
 |---|---|
 | Pages | `src/pages/QuoteTool.tsx` |
+| Components | `src/components/quotes/QuoteBuilder.tsx`, `src/components/quotes/QuoteDocumentsCard.tsx` (document/photo attachments — floor plans, packing lists, POs; reuses the shared documents module via `context_type='quote'`) |
 | Hooks | `src/hooks/useQuoteCatalog.ts`, `src/hooks/useQuoteStore.ts`, `src/hooks/useCoverageOptions.ts` |
-| Migrations | `20260419153921_quote_catalog_classes_tax_coverage.sql` (quote item catalog), `20260420100000_quotes_table_supabase_backed.sql` (quotes table), `20260421180000_quotes_admin_read_all.sql` (RLS for admin read), `20260421210000_quotes_realtime_and_replica_identity.sql` (realtime sync) |
+| Migrations | `20260419153921_quote_catalog_classes_tax_coverage.sql` (quote item catalog), `20260420100000_quotes_table_supabase_backed.sql` (quotes table), `20260421180000_quotes_admin_read_all.sql` (RLS for admin read), `20260421210000_quotes_realtime_and_replica_identity.sql` (realtime sync), `20260609160000_documents_quote_context.sql` (adds `quote` to the documents `context_type` CHECK so the shared documents module can attach files to a quote) |
 | Lib | `src/lib/quoteTypes.ts`, `src/lib/quoteCalc.ts`, `src/lib/quoteDefaults.ts`, `src/lib/quotePdf.ts` |
 
 ---

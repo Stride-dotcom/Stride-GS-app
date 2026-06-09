@@ -112,6 +112,15 @@
 
 ---
 
+## Recent Changes (2026-06-09, quotes: attach documents/photos to quotes — feat/warehouse/quote-documents, PR #698)
+
+- Clients send floor plans, packing lists, purchase orders, photos, etc. for a quote; these now attach to the quote so anyone reviewing it has full context. New **Documents** card at the bottom of the Quote Builder left column (`src/components/quotes/QuoteDocumentsCard.tsx`), wired in `QuoteBuilder.tsx`. Works both during quote creation and when editing an existing quote (the quote has a stable `crypto.randomUUID` id before the builder mounts — `QuoteTool.openBuilder` calls `createQuote()` first).
+- **Reuses the shared documents module wholesale** — same `public.documents` table, same private `documents` Storage bucket, same RLS, same `DocumentUploadButton` (drag-and-drop / click; images + PDFs + Office/CSV) and `DocumentList` (image thumbnails, PDF first-page previews, file icons, download / open / delete per row). The only new thing is a `quote` value on the `documents.context_type` CHECK constraint.
+- Migration `20260609160000_documents_quote_context.sql` adds `'quote'` to `documents_context_type_check` (mirrors the Session-77 `'client'` addition); `useDocuments.ts` `DocumentContextType` union kept in lockstep. **Applied to prod** via the management API.
+- Tenancy: quote docs stamp `tenant_id = quote.clientSheetId || 'quotes'`. The Quote Tool is **admin-only** (`App.tsx`), and `documents_select_staff`/`documents_write_staff` (table) + the storage bucket policies grant admin full access regardless of tenant. The `'quotes'` sentinel can't match any client's `clientSheetId`, so sentinel rows are never client-readable. Opus code review: 0 Critical/Important. tsc + build clean; React deployed via dedicated clone.
+
+---
+
 ## Recent Changes (2026-06-09, media: PDF first-page thumbnails in the documents list — feat/media/pdf-thumbnails, PR #688)
 
 - The documents list showed thumbnails for image docs but a generic icon for PDFs (e.g. the auto-archived receiving docs). Justin: "there is no preview" — for PDFs in the **list row** (the click-to-open inline preview from #668 already works). `DocThumb` (`src/components/media/DocumentList.tsx`) now renders a PDF's **first page** to a 40×40 thumbnail via **lazy-loaded `pdfjs-dist` v6** (`await import('pdfjs-dist')` + worker via `?url` → separate chunk that only loads when a PDF row mounts; main bundle unchanged ~3.19 MB). Fetches the signed URL → renders page 1 to a canvas → data-URL background (anchored `center top` so the letterhead shows); falls back to the type icon on any error (a corrupt PDF can't crash the row). Leak-safe (`cancelled` flag), `pdf.cleanup()` called. Covers all existing + new PDFs — no backend/schema/backfill. Opus locked-in code-review: Looks good, 0 Critical/Important (lazy chunk, benign worker-init race, fallback-to-icon, transitive `@napi-rs/canvas` is `optional`/Node-only → not bundled). React-only, read-only. tsc + build clean; React deployed via canonical clone.
