@@ -20,8 +20,11 @@ import { entityEvents } from '../../lib/entityEvents';
 import {
   recomputeCodLineFromDetails,
   markCodStorageCollected,
+  fetchCollectedCodRanges,
+  uncollectedInWindow,
   COD_STORAGE_DEFAULT_RATE,
   todayIso,
+  type CollectedRange,
 } from '../../lib/codStorage';
 import type { DtOrderForUI } from '../../lib/supabaseQueries';
 
@@ -58,10 +61,51 @@ export function OrderCodStorageCard({ order, performedBy, canEdit }: Props) {
     setRate(order.codStorageRate ?? COD_STORAGE_DEFAULT_RATE);
   }, [order.id, order.codStorageEnabled, order.codStorageCutoffDate, order.codStorageRate, order.localServiceDate]);
 
-  const recomputed = useMemo(
+  // Already-collected day ranges from the durable ledger (standalone COD
+  // collections or other orders). Subtracted below so this order's line only
+  // shows/persists the REMAINING days — never double-collecting a day.
+  const [collectedRanges, setCollectedRanges] = useState<CollectedRange[]>([]);
+  useEffect(() => {
+    let active = true;
+    if (collected) { setCollectedRanges([]); return; }
+    const ids = Array.from(new Set(details.map(d => d.item_id).filter(Boolean)));
+    if (ids.length === 0) { setCollectedRanges([]); return; }
+    fetchCollectedCodRanges(order.tenantId || '', ids).then(r => { if (active) setCollectedRanges(r); });
+    return () => { active = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [order.id, order.tenantId, collected, details.map(d => d.item_id).join(',')]);
+
+  const baseLine = useMemo(
     () => recomputeCodLineFromDetails(details, cutoff, rate),
     [details, cutoff, rate],
   );
+
+  // Apply dedup: per item, subtract days already in the ledger within
+  // [start, cutoff]. With no prior collection, recomputed === baseLine.
+  const recomputed = useMemo(() => {
+    if (collectedRanges.length === 0) return { ...baseLine, alreadyCollectedDays: 0 };
+    const byItem: Record<string, CollectedRange[]> = {};
+    for (const r of collectedRanges) (byItem[r.itemId] ??= []).push(r);
+    let total = 0, already = 0;
+    let periodStart: string | null = null;
+    const adj = baseLine.details.map(d => {
+      const { uncollectedDays, alreadyCollectedDays, firstUncollected } =
+        uncollectedInWindow(d.start_date, cutoff, byItem[d.item_id] ?? []);
+      already += alreadyCollectedDays;
+      const start = firstUncollected ?? d.start_date;
+      const amount = Math.round((d.cubic_feet || 0) * (rate || 0) * uncollectedDays * 100) / 100;
+      total += amount;
+      if (uncollectedDays > 0 && (!periodStart || start < periodStart)) periodStart = start;
+      return { ...d, start_date: start, days: uncollectedDays, rate, amount };
+    });
+    return {
+      details: adj,
+      itemCount: adj.filter(d => d.days > 0).length,
+      total: Math.round(total * 100) / 100,
+      periodStart,
+      alreadyCollectedDays: already,
+    };
+  }, [baseLine, collectedRanges, cutoff, rate]);
 
   // Baseline matches the same fallback chain used for the initial state, so
   // a null persisted cutoff doesn't make the card mount in a "dirty" state.
@@ -144,6 +188,16 @@ export function OrderCodStorageCard({ order, performedBy, canEdit }: Props) {
       <div style={{ fontSize: 12, color: theme.colors.textMuted, marginBottom: 12 }}>
         {recomputed.itemCount} item{recomputed.itemCount !== 1 ? 's' : ''} · {dateRange}
       </div>
+
+      {/* Dedup notice — days already invoiced/collected elsewhere are excluded. */}
+      {!collected && (recomputed.alreadyCollectedDays ?? 0) > 0 && (
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6, padding: 8, background: '#FFF7F0', border: `1px solid ${theme.colors.orange}`, borderRadius: 8, marginBottom: 12 }}>
+          <AlertTriangle size={13} color={theme.colors.orange} style={{ marginTop: 1, flexShrink: 0 }} />
+          <span style={{ fontSize: 11, color: theme.colors.text }}>
+            {recomputed.alreadyCollectedDays} day{recomputed.alreadyCollectedDays !== 1 ? 's' : ''} already invoiced/collected — only the remaining days are shown.
+          </span>
+        </div>
+      )}
 
       {/* Collected view */}
       {collected ? (
