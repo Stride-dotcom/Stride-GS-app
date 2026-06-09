@@ -202,7 +202,7 @@ Deno.serve(async (req: Request) => {
       // One reverse-writethrough call (op=insert carries `row`; op=delete doesn't).
       const fireReverse = async (
         op: 'insert' | 'delete', tenantId: string, rowId: string, row?: Record<string, unknown>,
-      ): Promise<boolean> => {
+      ): Promise<{ ok: boolean; deleted: boolean }> => {
         const reqId = `${requestId}:${op === 'delete' ? 'del:' : ''}${rowId}`;
         const payload: Record<string, unknown> = { tenantId, table: 'billing', op, rowId, requestId: reqId };
         if (row) payload.row = row;
@@ -211,7 +211,7 @@ Deno.serve(async (req: Request) => {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
           });
           const text = await res.text();
-          let parsed: { success?: boolean; error?: string } = {};
+          let parsed: { success?: boolean; error?: string; result?: { deleted?: boolean } } = {};
           try { parsed = JSON.parse(text); } catch { parsed = { error: `non-JSON: ${text.slice(0, 200)}` }; }
           if (!res.ok || !parsed.success) {
             const errMsg = parsed.error ?? `HTTP ${res.status}`;
@@ -223,20 +223,23 @@ Deno.serve(async (req: Request) => {
               request_id: reqId, payload,
               error_message: String(errMsg).slice(0, 1000),
             }).then(() => {}, () => {});
-            return false;
+            return { ok: false, deleted: false };
           }
-          return true;
+          // GAS wraps the writer return as { success, result: { deleted?:true, skipped?:true } }.
+          return { ok: true, deleted: parsed.result?.deleted === true };
         } catch (ex) {
           warnings.push(`Sheet ${op} threw for ${rowId}: ${ex instanceof Error ? ex.message : String(ex)}`);
-          return false;
+          return { ok: false, deleted: false };
         }
       };
 
       // 1. DELETE stale Unbilled summaries the RPC removed (e.g. blank→sidemark).
+      //    deletedCount counts ACTUAL sheet deletions — a GAS no-op skip for an
+      //    already-absent or finalized row returns deleted:false.
       for (const d of deletedLedgers) {
         const rowId    = String(d.ledgerRowId ?? '');
         const tenantId = String(d.tenantId ?? '');
-        if (rowId && tenantId && await fireReverse('delete', tenantId, rowId)) deletedCount++;
+        if (rowId && tenantId && (await fireReverse('delete', tenantId, rowId)).deleted) deletedCount++;
       }
 
       // 2. INSERT/refresh the committed summaries (re-fetched in full billing shape).
@@ -249,7 +252,7 @@ Deno.serve(async (req: Request) => {
           warnings.push(`Read-back for sheet mirror failed: ${readErr.message}`);
         } else {
           for (const row of (billRows ?? []) as Array<Record<string, unknown>>) {
-            if (await fireReverse('insert', String(row.tenant_id ?? ''), String(row.ledger_row_id ?? ''), row)) mirroredCount++;
+            if ((await fireReverse('insert', String(row.tenant_id ?? ''), String(row.ledger_row_id ?? ''), row)).ok) mirroredCount++;
           }
         }
       }

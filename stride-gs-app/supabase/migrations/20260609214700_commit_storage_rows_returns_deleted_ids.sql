@@ -1,4 +1,4 @@
--- 20260609170000_commit_storage_rows_returns_deleted_ids.sql
+-- 20260609214700_commit_storage_rows_returns_deleted_ids.sql
 --
 -- Part B follow-up (fleet-rollout prerequisite). commit_storage_rows now RETURNS
 -- the stale ledger ids it removed from public.billing, so the edge function can
