@@ -154,12 +154,21 @@ BEGIN
 END;
 $$;
 
--- EXECUTE grants — callable by EFs (service_role) + the repair RPC (definer)
--- + React (authenticated, for any future direct use).
-GRANT EXECUTE ON FUNCTION public.next_order_number(text, text) TO authenticated, service_role;
-GRANT EXECUTE ON FUNCTION public.order_client_prefix(text)     TO authenticated, service_role;
-GRANT EXECUTE ON FUNCTION public.order_numbering_enabled(text) TO authenticated, service_role;
-GRANT EXECUTE ON FUNCTION public.next_order_id(text, text)     TO authenticated, service_role;
+-- EXECUTE grants — service_role only. The Edge Functions call these with the
+-- service-role key; the fleet-wide repair RPC is SECURITY DEFINER so it calls
+-- them as its owner (no caller-role grant needed). React reads the flag via
+-- PostgREST (useFeatureFlagRow) and uses the separate zero-arg
+-- next_order_number() for delivery — it never calls these directly. Keeping
+-- the sequence-mutating functions off `authenticated` avoids letting a browser
+-- client burn order numbers.
+REVOKE ALL ON FUNCTION public.next_order_number(text, text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.order_client_prefix(text)     FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.order_numbering_enabled(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.next_order_id(text, text)     FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.next_order_number(text, text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.order_client_prefix(text)     TO service_role;
+GRANT EXECUTE ON FUNCTION public.order_numbering_enabled(text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.next_order_id(text, text)     TO service_role;
 
 -- 6. Repairs: mint the clean ID inside the existing atomic create RPC --------
 -- requestRepairQuote is fleet-wide SB, so the gate lives INSIDE the RPC:
@@ -178,7 +187,7 @@ CREATE OR REPLACE FUNCTION public.create_repair_quote_request(
 RETURNS TABLE(new_repair_id text, item_count integer)
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path TO 'public'
+SET search_path TO 'public', 'pg_temp'
 AS $function$
 DECLARE
   v_repair_id   text;
