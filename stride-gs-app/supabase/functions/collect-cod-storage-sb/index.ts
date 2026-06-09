@@ -99,12 +99,14 @@ Deno.serve(async (req: Request) => {
 
   const { data: invRows, error: invErr } = await sb
     .from('inventory')
-    .select('id, item_id, item_class, sidemark, description, cubic_feet, cod_storage, cod_storage_start_date, status')
+    .select('id, item_id, item_class, sidemark, description, cod_storage, cod_storage_start_date, status')
     .eq('tenant_id', tenantId)
     .in('item_id', itemIds);
   if (invErr) return json({ success: false, error: `inventory read failed: ${invErr.message}` }, 500);
 
-  // Class → storage_size fallback for cubic feet (matches the storage calc).
+  // Cubic feet is CLASS-based: public.inventory has no per-item cubic_feet
+  // column (that lives on dt_order_items). Resolve via item_classes.storage_size
+  // keyed by UPPER(item_class) — exactly how the designer-side storage calc does.
   const { data: classRows } = await sb.from('item_classes').select('id, storage_size');
   const classSize: Record<string, number> = {};
   for (const c of (classRows ?? []) as { id: string; storage_size: number | null }[]) {
@@ -130,7 +132,7 @@ Deno.serve(async (req: Request) => {
     const inv = (invRows ?? []).find((r) => String((r as { item_id: string }).item_id) === id) as
       | {
           id: string; item_id: string; item_class: string | null; sidemark: string | null;
-          description: string | null; cubic_feet: number | null; cod_storage: boolean | null;
+          description: string | null; cod_storage: boolean | null;
           cod_storage_start_date: string | null;
         }
       | undefined;
@@ -159,9 +161,7 @@ Deno.serve(async (req: Request) => {
       continue;
     }
 
-    const cubicFeet = (Number(inv.cubic_feet) > 0)
-      ? Number(inv.cubic_feet)
-      : (classSize[String(inv.item_class ?? '').toUpperCase()] ?? 0);
+    const cubicFeet = classSize[String(inv.item_class ?? '').toUpperCase()] ?? 0;
 
     const codStart = inv.cod_storage_start_date as string;
     const eligibleDays = daysInclusive(codStart, cutoffDate);
