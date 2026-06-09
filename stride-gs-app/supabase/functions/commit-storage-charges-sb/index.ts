@@ -168,7 +168,8 @@ Deno.serve(async (req: Request) => {
     await sb.from('entity_audit_log').insert({
       entity_type:  'billing',
       entity_id:    `STOR-commit-${periodStart}-to-${periodEnd}`,
-      tenant_id:    (summaries[0]?.tenantId as string | undefined) ?? null,
+      tenant_id:    (summaries[0]?.tenantId as string | undefined)
+                    ?? ((commitRows[0] as { tenantId?: string } | undefined)?.tenantId ?? null),
       action:       'create',
       changes:      { summary: 'Storage commit (edited rows)', periodStart, periodEnd,
                       rowsIn: commitRows.length, summariesCreated: result.totalCreated ?? 0 },

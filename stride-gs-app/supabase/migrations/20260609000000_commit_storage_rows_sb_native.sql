@@ -237,6 +237,11 @@ BEGIN
   SELECT
     cr.tenant_id, COALESCE(s.sidemark_display, ''), cr.item_id, max(cr.description),
     p_period_start, p_period_end,
+    -- billable_days is informational (the "billed N days" proof on the Invoiced
+    -- view); `amount` (sum of the operator's edited totals) is authoritative for
+    -- billing. Prefer summed qty, else derive from amount/rate. An operator who
+    -- edits ONLY the dollar total thus leaves days*rate <> amount by design —
+    -- not a money bug (amount wins, and it reconciles to the summary total).
     CASE WHEN sum(cr.qty) > 0           THEN round(sum(cr.qty))::int
          WHEN max(cr.rate) > 0          THEN round(sum(cr.total) / max(cr.rate))::int
          ELSE NULL END,
