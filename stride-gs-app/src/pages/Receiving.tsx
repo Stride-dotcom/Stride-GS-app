@@ -245,9 +245,14 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
   const { photos, uploadPhoto } = usePhotos({
     entityType: 'shipment', entityId: dockNo, tenantId: photoTenant,
   });
-  const { documents, uploadDocument } = useDocuments({
+  // Single useDocuments instance — shared with the Dock's DocumentScanButton
+  // via `source` so a scanned BOL/packing-slip lands in this instance's
+  // `documents` (optimistic + refetch) instead of relying on a second
+  // instance's colliding Realtime channel.
+  const docHook = useDocuments({
     contextType: 'shipment', contextId: dockNo, tenantId: photoTenant,
   });
+  const { documents, uploadDocument } = docHook;
   // v2026-06-08 — spinner state for the immediate "Upload Photos" / "Upload
   // Document" file-picker buttons (multi-select upload from disk / library —
   // the desktop path; no pending queue, no "Save N", no auto-reopen). The
@@ -1818,6 +1823,7 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
                   contextId={dockNo}
                   tenantId={photoTenant}
                   label="Scan Document"
+                  source={docHook}
                 />
                 {/* Immediate multi-select upload — the desktop path (no pending
                     queue, no "Save N", no auto-reopen). "Scan Document" above is

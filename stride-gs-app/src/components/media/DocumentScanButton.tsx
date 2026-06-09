@@ -14,7 +14,7 @@
  * Admins / staff only — camera capture is a warehouse-floor operation.
  */
 import { useCallback, useState } from 'react';
-import { useDocuments, type DocumentContextType } from '../../hooks/useDocuments';
+import { useDocuments, type DocumentContextType, type UseDocumentsResult } from '../../hooks/useDocuments';
 import { MultiCapture } from './MultiCapture';
 
 interface Props {
@@ -26,13 +26,22 @@ interface Props {
   /** Override the button label. Defaults to "Scan Document". */
   label?: string;
   disabled?: boolean;
+  /** Optional parent-owned `useDocuments` result. When supplied, scans upload
+   *  through the shared instance instead of a SECOND one — so the parent's
+   *  list reflects the scan via its own optimistic insert + refetch, with no
+   *  competing Realtime channel (same rationale as DocumentList's `source`). */
+  source?: UseDocumentsResult;
 }
 
 export function DocumentScanButton({
   contextType, contextId, tenantId, onScanned,
-  label, disabled,
+  label, disabled, source,
 }: Props) {
-  const { uploadDocument } = useDocuments({ contextType, contextId, tenantId });
+  // Always call the hook (rules of hooks); disable it when a parent instance
+  // is injected so there's no duplicate subscription. `source ?? internal`
+  // then supplies uploadDocument.
+  const internal = useDocuments({ contextType, contextId, tenantId, enabled: !source });
+  const { uploadDocument } = source ?? internal;
   const [savedThisSession, setSavedThisSession] = useState(0);
 
   // Rename each scan so the Supabase listing makes it obvious this came
