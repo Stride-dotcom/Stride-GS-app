@@ -3,8 +3,9 @@ import { useNavigate } from 'react-router-dom';
 import {
   useReactTable, getCoreRowModel, getSortedRowModel, getFilteredRowModel,
   flexRender, createColumnHelper,
-  type SortingState,
+  type SortingState, type ColumnSizingState,
 } from '@tanstack/react-table';
+import { ColumnManagerMenu, moveColumnInOrder } from '../components/shared/ColumnManagerMenu';
 import {
   ClipboardList, Wrench, Truck, RefreshCw, Settings2, X,
   ChevronUp, ChevronDown, ArrowUpDown,
@@ -167,22 +168,27 @@ function chip(active: boolean): React.CSSProperties {
   };
 }
 
-function DragHeader({ h, dragColId, dragOverColId, onDragStart, onDragOver, onDragEnd, sorted }: {
-  h: any; dragColId: string | null; dragOverColId: string | null;
-  onDragStart: () => void; onDragOver: () => void; onDragEnd: () => void; sorted: false | 'asc' | 'desc';
-}) {
-  const isDragTarget = dragOverColId === h.id && dragColId !== h.id;
+// Header cell: sortable + resizable. Reorder is via the Columns menu (▲/▼).
+function DragHeader({ h, sorted }: { h: any; sorted: false | 'asc' | 'desc' }) {
+  const canResize = h.column.getCanResize();
   return (
     <th
-      key={h.id} draggable
-      onDragStart={onDragStart} onDragOver={e => { e.preventDefault(); onDragOver(); }} onDragEnd={onDragEnd}
+      key={h.id}
       onClick={h.column.getCanSort() ? (e: React.MouseEvent) => h.column.toggleSorting(undefined, e.shiftKey) : undefined}
-      style={{ ...thStyle, width: h.getSize(), color: sorted ? '#E8692A' : '#999999', cursor: 'grab', background: isDragTarget ? 'rgba(232,105,42,0.12)' : '#F5F2EE', borderLeft: isDragTarget ? `2px solid #E8692A` : undefined }}
+      style={{ ...thStyle, width: h.getSize(), boxSizing: 'border-box', color: sorted ? '#E8692A' : '#999999', cursor: h.column.getCanSort() ? 'pointer' : 'default', background: '#F5F2EE' }}
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
         {h.isPlaceholder ? null : flexRender(h.column.columnDef.header, h.getContext())}
         {h.column.getCanSort() && (sorted === 'asc' ? <ChevronUp size={13} color={theme.colors.orange} /> : sorted === 'desc' ? <ChevronDown size={13} color={theme.colors.orange} /> : <ArrowUpDown size={13} color={theme.colors.textMuted} />)}
       </div>
+      {canResize && (
+        <div
+          onMouseDown={e => { e.stopPropagation(); h.getResizeHandler()(e); }}
+          onTouchStart={e => { e.stopPropagation(); h.getResizeHandler()(e); }}
+          onClick={e => e.stopPropagation()}
+          style={{ position: 'absolute', right: 0, top: 0, height: '100%', width: 8, cursor: 'col-resize', touchAction: 'none', userSelect: 'none', background: h.column.getIsResizing() ? theme.colors.orange : 'transparent', zIndex: 5 }}
+        />
+      )}
     </th>
   );
 }
@@ -239,10 +245,8 @@ function TasksTab({ tasks, onNavigate, indicators, canEditPriority }: { tasks: S
   const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder } = useTablePreferences('dashboard-tasks', [{ id: 'taskDueDate', desc: false }, { id: 'taskCreated', desc: true }], {}, TASK_DEFAULT_ORDER);
   const [statusFilters, setStatusFilters] = useState<string[]>(DEFAULT_TASK_STATUSES);
   const [showCols, setShowCols] = useState(false);
-  const [dragColId, setDragColId] = useState<string | null>(null);
-  const [dragOverColId, setDragOverColId] = useState<string | null>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-  useEffect(() => { const h = (e: MouseEvent) => { if (menuRef.current && !menuRef.current.contains(e.target as Node)) setShowCols(false); }; document.addEventListener('mousedown', h); return () => document.removeEventListener('mousedown', h); }, []);
+  const [columnSizing, setColumnSizing] = useState<ColumnSizingState>({});
+  const [colToggleRect, setColToggleRect] = useState<DOMRect | null>(null);
 
   // Selected row (single click). Double click navigates. Persists per page
   // session — losing it on Realtime refetch would erase the highlight every
@@ -457,9 +461,11 @@ function TasksTab({ tasks, onNavigate, indicators, canEditPriority }: { tasks: S
 
   const table = useReactTable({
     data: filtered, columns,
-    state: { sorting, columnVisibility: colVis, columnOrder: columnOrder.length ? columnOrder : TASK_DEFAULT_ORDER },
+    state: { sorting, columnVisibility: colVis, columnOrder: columnOrder.length ? columnOrder : TASK_DEFAULT_ORDER, columnSizing },
     onSortingChange: setSorting, onColumnVisibilityChange: setColVis,
     onColumnOrderChange: (upd: React.SetStateAction<SortingState> | any) => setColumnOrder(typeof upd === 'function' ? upd(columnOrder.length ? columnOrder : TASK_DEFAULT_ORDER) : upd),
+    onColumnSizingChange: setColumnSizing,
+    columnResizeMode: 'onChange',
     getCoreRowModel: getCoreRowModel(), getSortedRowModel: getSortedRowModel(), getFilteredRowModel: getFilteredRowModel(),
     enableMultiSort: true,
   });
@@ -484,19 +490,22 @@ function TasksTab({ tasks, onNavigate, indicators, canEditPriority }: { tasks: S
         )}
         <div style={{ flex: 1 }} />
         <span style={{ fontSize: 12, color: theme.colors.textMuted }}>{filtered.length} task{filtered.length !== 1 ? 's' : ''}</span>
-        <div style={{ position: 'relative' }} ref={menuRef}>
-          <button onClick={() => setShowCols(v => !v)} style={{ padding: '6px 10px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: theme.colors.textSecondary }}>
+        <div style={{ position: 'relative' }}>
+          <button onClick={e => { setColToggleRect(e.currentTarget.getBoundingClientRect()); setShowCols(v => !v); }} style={{ padding: '6px 10px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: theme.colors.textSecondary }}>
             <Settings2 size={13} /> Columns
           </button>
-          {showCols && (
-            <div style={{ position: 'absolute', top: '100%', right: 0, marginTop: 4, background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 10, padding: 8, zIndex: 50, boxShadow: '0 4px 20px rgba(0,0,0,0.1)', minWidth: 170 }}>
-              {TASK_DEFAULT_ORDER.map(id => (
-                <label key={id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px', fontSize: 12, cursor: 'pointer' }}>
-                  <input type="checkbox" checked={colVis[id] !== false} onChange={() => setColVis(v => ({ ...v, [id]: v[id] === false }))} style={{ accentColor: theme.colors.orange }} />
-                  {TASK_COL_LABELS[id]}
-                </label>
-              ))}
-            </div>
+          {showCols && colToggleRect && (
+            <ColumnManagerMenu
+              anchorRect={colToggleRect}
+              toggleableIds={TASK_DEFAULT_ORDER}
+              labels={TASK_COL_LABELS}
+              visibility={colVis}
+              onToggle={id => setColVis(v => ({ ...v, [id]: v[id] === false }))}
+              columnOrder={columnOrder.length ? columnOrder : TASK_DEFAULT_ORDER}
+              onMove={(id, dir) => moveColumnInOrder(id, dir, setColumnOrder, TASK_DEFAULT_ORDER, [])}
+              onClose={() => setShowCols(false)}
+              onResetWidths={() => setColumnSizing({})}
+            />
           )}
         </div>
       </div>
@@ -504,23 +513,12 @@ function TasksTab({ tasks, onNavigate, indicators, canEditPriority }: { tasks: S
       {/* Table */}
       <div style={{ borderRadius: 12, overflow: 'hidden', background: '#fff' }}>
         <div ref={containerRef} style={{ overflowY: 'auto', overflowX: 'auto', overscrollBehavior: 'contain', ...scrollSize, WebkitOverflowScrolling: 'touch' }}>
-          <table className="dash-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <table className="dash-table" style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed', minWidth: table.getTotalSize() }}>
             <thead>
               {table.getHeaderGroups().map(hg => (
                 <tr key={hg.id}>
                   {hg.headers.map(h => (
-                    <DragHeader key={h.id} h={h} dragColId={dragColId} dragOverColId={dragOverColId}
-                      onDragStart={() => setDragColId(h.id)} onDragOver={() => setDragOverColId(h.id)}
-                      onDragEnd={() => {
-                        if (dragColId && dragOverColId && dragColId !== dragOverColId) {
-                          const cur = columnOrder.length ? [...columnOrder] : [...TASK_DEFAULT_ORDER];
-                          const from = cur.indexOf(dragColId); const to = cur.indexOf(dragOverColId);
-                          if (from !== -1 && to !== -1) { cur.splice(from, 1); cur.splice(to, 0, dragColId); setColumnOrder(cur); }
-                        }
-                        setDragColId(null); setDragOverColId(null);
-                      }}
-                      sorted={h.column.getIsSorted()}
-                    />
+                    <DragHeader key={h.id} h={h} sorted={h.column.getIsSorted()} />
                   ))}
                 </tr>
               ))}
@@ -591,10 +589,8 @@ function RepairsTab({ repairs, onNavigate, userRole, indicators }: { repairs: Su
   const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder } = useTablePreferences('dashboard-repairs', [{ id: 'repairCreated', desc: false }], {}, REPAIR_DEFAULT_ORDER);
   const [statusFilters, setStatusFilters] = useState<string[]>(DEFAULT_REPAIR_STATUSES);
   const [showCols, setShowCols] = useState(false);
-  const [dragColId, setDragColId] = useState<string | null>(null);
-  const [dragOverColId, setDragOverColId] = useState<string | null>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-  useEffect(() => { const h = (e: MouseEvent) => { if (menuRef.current && !menuRef.current.contains(e.target as Node)) setShowCols(false); }; document.addEventListener('mousedown', h); return () => document.removeEventListener('mousedown', h); }, []);
+  const [columnSizing, setColumnSizing] = useState<ColumnSizingState>({});
+  const [colToggleRect, setColToggleRect] = useState<DOMRect | null>(null);
 
   const allStatuses = useMemo(() => [...new Set(repairs.map(r => r.status))].sort(), [repairs]);
   const filtered = useMemo(() => statusFilters.length === 0 ? repairs : repairs.filter(r => statusFilters.includes(r.status)), [repairs, statusFilters]);
@@ -623,9 +619,11 @@ function RepairsTab({ repairs, onNavigate, userRole, indicators }: { repairs: Su
 
   const table = useReactTable({
     data: filtered, columns,
-    state: { sorting, columnVisibility: colVis, columnOrder: columnOrder.length ? columnOrder : REPAIR_DEFAULT_ORDER },
+    state: { sorting, columnVisibility: colVis, columnOrder: columnOrder.length ? columnOrder : REPAIR_DEFAULT_ORDER, columnSizing },
     onSortingChange: setSorting, onColumnVisibilityChange: setColVis,
     onColumnOrderChange: (upd: any) => setColumnOrder(typeof upd === 'function' ? upd(columnOrder.length ? columnOrder : REPAIR_DEFAULT_ORDER) : upd),
+    onColumnSizingChange: setColumnSizing,
+    columnResizeMode: 'onChange',
     getCoreRowModel: getCoreRowModel(), getSortedRowModel: getSortedRowModel(), getFilteredRowModel: getFilteredRowModel(),
     enableMultiSort: true,
   });
@@ -646,26 +644,29 @@ function RepairsTab({ repairs, onNavigate, userRole, indicators }: { repairs: Su
         )}
         <div style={{ flex: 1 }} />
         <span style={{ fontSize: 12, color: theme.colors.textMuted }}>{filtered.length} repair{filtered.length !== 1 ? 's' : ''}</span>
-        <div style={{ position: 'relative' }} ref={menuRef}>
-          <button onClick={() => setShowCols(v => !v)} style={{ padding: '6px 10px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: theme.colors.textSecondary }}>
+        <div style={{ position: 'relative' }}>
+          <button onClick={e => { setColToggleRect(e.currentTarget.getBoundingClientRect()); setShowCols(v => !v); }} style={{ padding: '6px 10px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: theme.colors.textSecondary }}>
             <Settings2 size={13} /> Columns
           </button>
-          {showCols && (
-            <div style={{ position: 'absolute', top: '100%', right: 0, marginTop: 4, background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 10, padding: 8, zIndex: 50, boxShadow: '0 4px 20px rgba(0,0,0,0.1)', minWidth: 170 }}>
-              {REPAIR_DEFAULT_ORDER.map(id => (
-                <label key={id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px', fontSize: 12, cursor: 'pointer' }}>
-                  <input type="checkbox" checked={colVis[id] !== false} onChange={() => setColVis(v => ({ ...v, [id]: v[id] === false }))} style={{ accentColor: theme.colors.orange }} />
-                  {REPAIR_COL_LABELS[id]}
-                </label>
-              ))}
-            </div>
+          {showCols && colToggleRect && (
+            <ColumnManagerMenu
+              anchorRect={colToggleRect}
+              toggleableIds={REPAIR_DEFAULT_ORDER}
+              labels={REPAIR_COL_LABELS}
+              visibility={colVis}
+              onToggle={id => setColVis(v => ({ ...v, [id]: v[id] === false }))}
+              columnOrder={columnOrder.length ? columnOrder : REPAIR_DEFAULT_ORDER}
+              onMove={(id, dir) => moveColumnInOrder(id, dir, setColumnOrder, REPAIR_DEFAULT_ORDER, [])}
+              onClose={() => setShowCols(false)}
+              onResetWidths={() => setColumnSizing({})}
+            />
           )}
         </div>
       </div>
       <div style={{ borderRadius: 12, overflow: 'hidden', background: '#fff' }}>
         <div ref={containerRef} style={{ overflowY: 'auto', overflowX: 'auto', overscrollBehavior: 'contain', ...scrollSize, WebkitOverflowScrolling: 'touch' }}>
-          <table className="dash-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>{table.getHeaderGroups().map(hg => <tr key={hg.id}>{hg.headers.map(h => <DragHeader key={h.id} h={h} dragColId={dragColId} dragOverColId={dragOverColId} onDragStart={() => setDragColId(h.id)} onDragOver={() => setDragOverColId(h.id)} onDragEnd={() => { if (dragColId && dragOverColId && dragColId !== dragOverColId) { const cur = columnOrder.length ? [...columnOrder] : [...REPAIR_DEFAULT_ORDER]; const from = cur.indexOf(dragColId); const to = cur.indexOf(dragOverColId); if (from !== -1 && to !== -1) { cur.splice(from, 1); cur.splice(to, 0, dragColId); setColumnOrder(cur); } } setDragColId(null); setDragOverColId(null); }} sorted={h.column.getIsSorted()} />)}</tr>)}</thead>
+          <table className="dash-table" style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed', minWidth: table.getTotalSize() }}>
+            <thead>{table.getHeaderGroups().map(hg => <tr key={hg.id}>{hg.headers.map(h => <DragHeader key={h.id} h={h} sorted={h.column.getIsSorted()} />)}</tr>)}</thead>
             <tbody>
               {virtualRows.length > 0 && <tr style={{ height: virtualRows[0].start }}><td colSpan={table.getVisibleFlatColumns().length} /></tr>}
               {virtualRows.map(vRow => { const row = allRows[vRow.index]; return (<tr key={row.id} onClick={() => onNavigate(row.original)} style={{ cursor: 'pointer', transition: 'background 0.1s' }} onMouseEnter={e => { e.currentTarget.style.background = theme.colors.bgSubtle; }} onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}>{row.getVisibleCells().map(cell => <td key={cell.id} style={tdStyle}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>)}</tr>); })}
@@ -690,10 +691,8 @@ function WillCallsTab({ willCalls, onNavigate }: { willCalls: SummaryWillCall[];
   const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder } = useTablePreferences('dashboard-willcalls', [{ id: 'wcScheduled', desc: false }], {}, WC_DEFAULT_ORDER);
   const [statusFilters, setStatusFilters] = useState<string[]>(DEFAULT_WC_STATUSES);
   const [showCols, setShowCols] = useState(false);
-  const [dragColId, setDragColId] = useState<string | null>(null);
-  const [dragOverColId, setDragOverColId] = useState<string | null>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-  useEffect(() => { const h = (e: MouseEvent) => { if (menuRef.current && !menuRef.current.contains(e.target as Node)) setShowCols(false); }; document.addEventListener('mousedown', h); return () => document.removeEventListener('mousedown', h); }, []);
+  const [columnSizing, setColumnSizing] = useState<ColumnSizingState>({});
+  const [colToggleRect, setColToggleRect] = useState<DOMRect | null>(null);
 
   const allStatuses = useMemo(() => [...new Set(willCalls.map(w => w.status))].sort(), [willCalls]);
   const filtered = useMemo(() => statusFilters.length === 0 ? willCalls : willCalls.filter(w => statusFilters.includes(w.status)), [willCalls, statusFilters]);
@@ -711,9 +710,11 @@ function WillCallsTab({ willCalls, onNavigate }: { willCalls: SummaryWillCall[];
 
   const table = useReactTable({
     data: filtered, columns,
-    state: { sorting, columnVisibility: colVis, columnOrder: columnOrder.length ? columnOrder : WC_DEFAULT_ORDER },
+    state: { sorting, columnVisibility: colVis, columnOrder: columnOrder.length ? columnOrder : WC_DEFAULT_ORDER, columnSizing },
     onSortingChange: setSorting, onColumnVisibilityChange: setColVis,
     onColumnOrderChange: (upd: any) => setColumnOrder(typeof upd === 'function' ? upd(columnOrder.length ? columnOrder : WC_DEFAULT_ORDER) : upd),
+    onColumnSizingChange: setColumnSizing,
+    columnResizeMode: 'onChange',
     getCoreRowModel: getCoreRowModel(), getSortedRowModel: getSortedRowModel(), getFilteredRowModel: getFilteredRowModel(),
     enableMultiSort: true,
   });
@@ -734,26 +735,29 @@ function WillCallsTab({ willCalls, onNavigate }: { willCalls: SummaryWillCall[];
         )}
         <div style={{ flex: 1 }} />
         <span style={{ fontSize: 12, color: theme.colors.textMuted }}>{filtered.length} will call{filtered.length !== 1 ? 's' : ''}</span>
-        <div style={{ position: 'relative' }} ref={menuRef}>
-          <button onClick={() => setShowCols(v => !v)} style={{ padding: '6px 10px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: theme.colors.textSecondary }}>
+        <div style={{ position: 'relative' }}>
+          <button onClick={e => { setColToggleRect(e.currentTarget.getBoundingClientRect()); setShowCols(v => !v); }} style={{ padding: '6px 10px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: theme.colors.textSecondary }}>
             <Settings2 size={13} /> Columns
           </button>
-          {showCols && (
-            <div style={{ position: 'absolute', top: '100%', right: 0, marginTop: 4, background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 10, padding: 8, zIndex: 50, boxShadow: '0 4px 20px rgba(0,0,0,0.1)', minWidth: 160 }}>
-              {WC_DEFAULT_ORDER.map(id => (
-                <label key={id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px', fontSize: 12, cursor: 'pointer' }}>
-                  <input type="checkbox" checked={colVis[id] !== false} onChange={() => setColVis(v => ({ ...v, [id]: v[id] === false }))} style={{ accentColor: theme.colors.orange }} />
-                  {WC_COL_LABELS[id]}
-                </label>
-              ))}
-            </div>
+          {showCols && colToggleRect && (
+            <ColumnManagerMenu
+              anchorRect={colToggleRect}
+              toggleableIds={WC_DEFAULT_ORDER}
+              labels={WC_COL_LABELS}
+              visibility={colVis}
+              onToggle={id => setColVis(v => ({ ...v, [id]: v[id] === false }))}
+              columnOrder={columnOrder.length ? columnOrder : WC_DEFAULT_ORDER}
+              onMove={(id, dir) => moveColumnInOrder(id, dir, setColumnOrder, WC_DEFAULT_ORDER, [])}
+              onClose={() => setShowCols(false)}
+              onResetWidths={() => setColumnSizing({})}
+            />
           )}
         </div>
       </div>
       <div style={{ borderRadius: 12, overflow: 'hidden', background: '#fff' }}>
         <div ref={containerRef} style={{ overflowY: 'auto', overflowX: 'auto', overscrollBehavior: 'contain', ...scrollSize, WebkitOverflowScrolling: 'touch' }}>
-          <table className="dash-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>{table.getHeaderGroups().map(hg => <tr key={hg.id}>{hg.headers.map(h => <DragHeader key={h.id} h={h} dragColId={dragColId} dragOverColId={dragOverColId} onDragStart={() => setDragColId(h.id)} onDragOver={() => setDragOverColId(h.id)} onDragEnd={() => { if (dragColId && dragOverColId && dragColId !== dragOverColId) { const cur = columnOrder.length ? [...columnOrder] : [...WC_DEFAULT_ORDER]; const from = cur.indexOf(dragColId); const to = cur.indexOf(dragOverColId); if (from !== -1 && to !== -1) { cur.splice(from, 1); cur.splice(to, 0, dragColId); setColumnOrder(cur); } } setDragColId(null); setDragOverColId(null); }} sorted={h.column.getIsSorted()} />)}</tr>)}</thead>
+          <table className="dash-table" style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed', minWidth: table.getTotalSize() }}>
+            <thead>{table.getHeaderGroups().map(hg => <tr key={hg.id}>{hg.headers.map(h => <DragHeader key={h.id} h={h} sorted={h.column.getIsSorted()} />)}</tr>)}</thead>
             <tbody>
               {virtualRows.length > 0 && <tr style={{ height: virtualRows[0].start }}><td colSpan={table.getVisibleFlatColumns().length} /></tr>}
               {virtualRows.map(vRow => { const row = allRows[vRow.index]; return (<tr key={row.id} onClick={() => onNavigate(row.original)} style={{ cursor: 'pointer', transition: 'background 0.1s' }} onMouseEnter={e => { e.currentTarget.style.background = theme.colors.bgSubtle; }} onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}>{row.getVisibleCells().map(cell => <td key={cell.id} style={tdStyle}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>)}</tr>); })}
