@@ -1214,8 +1214,10 @@ export function CreateDeliveryOrderModal({
           {},
         )
       : null,
+    // cuFtByCode included so the preview recomputes if item-class sizes finish
+    // loading after items are already selected (classToCuFt reads from it).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [codApplicable, codInclude, selectedCodItems, effectiveCodCutoff, codRate],
+    [codApplicable, codInclude, selectedCodItems, effectiveCodCutoff, codRate, cuFtByCode],
   );
 
   const toggleItemSort = (col: string) => {
