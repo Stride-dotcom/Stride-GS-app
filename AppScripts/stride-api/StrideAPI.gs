@@ -19086,6 +19086,37 @@ function api_findInventoryItem_(ss, itemId) {
 
 // ─── Complete Task Handler ─────────────────────────────────────────────────────
 
+// Read public.tasks.qty (the staff-adjustable inspection piece count, set on
+// the React Billing Preview and stored Supabase-only) for one task. Returns a
+// positive integer, or 0 when unset / not found / on any error — callers fall
+// back to the inventory qty. Best-effort, never throws into the hot completion
+// path. Mirrors the GET pattern used by the addons fetch above.
+function api_fetchTaskQty_(clientSheetId, taskId) {
+  try {
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key || !clientSheetId || !taskId) return 0;
+    var getUrl = url + "/rest/v1/tasks"
+               + "?select=qty"
+               + "&tenant_id=eq." + encodeURIComponent(clientSheetId)
+               + "&task_id=eq." + encodeURIComponent(taskId)
+               + "&limit=1";
+    var resp = UrlFetchApp.fetch(getUrl, {
+      method: "GET",
+      headers: { "Authorization": "Bearer " + key, "apikey": key },
+      muteHttpExceptions: true
+    });
+    var code = resp.getResponseCode();
+    if (code < 200 || code >= 300) return 0;
+    var rows = JSON.parse(resp.getContentText()) || [];
+    if (!rows.length) return 0;
+    var q = Math.round(Number(rows[0].qty));
+    return (isNaN(q) || q < 1) ? 0 : q;
+  } catch (e) {
+    return 0;
+  }
+}
+
 function handleCompleteTask_(clientSheetId, payload) {
   if (!clientSheetId) return errorResponse_("clientSheetId is required", "INVALID_PARAMS");
   if (!payload || !payload.taskId) return errorResponse_("taskId is required in payload", "INVALID_PARAMS");
@@ -19234,13 +19265,24 @@ function handleCompleteTask_(clientSheetId, payload) {
       if (!invItem) {
         warnings.push("Inventory item not found for " + itemId + " — billing skipped");
       } else {
-        // v38.269.0 — INSPECTION tasks bill the inventory item's TRUE qty
-        // (e.g. a carton holding 6 pieces inspected → "Inspection × 6").
-        // Every other service code stays Qty 1 per item ID (RCVG / ASM /
-        // REPAIR / WC / etc. are deliberately 1-per-ID — only inspection
-        // is per-piece). billQty is reused for the Qty cell + Total below.
+        // v38.269.0 — INSPECTION tasks bill the TRUE piece count (Qty × rate),
+        // not a hardcoded 1. Every other service code stays Qty 1 per item ID
+        // (RCVG / ASM / REPAIR / WC / etc. are deliberately 1-per-ID — only
+        // inspection is per-piece). The authoritative count is the TASK's qty
+        // when staff adjusted it on the Billing Preview (e.g. a carton declared
+        // as 1 piece but the inspector found 7) — that edit lives in
+        // public.tasks.qty (Supabase), which the per-tenant Tasks sheet does
+        // NOT mirror, so we read it directly. Fall back to the inventory item's
+        // qty when the task qty is still the default 1 (un-adjusted) or the
+        // read fails. Mirrors complete_task_atomic, which bills the SB
+        // tasks.qty on the canary path. billQty feeds the Qty cell + Total.
         var isInspection = (String(svcCode || "").trim().toUpperCase() === "INSP");
-        var billQty = isInspection ? (Number(invItem.qty) > 0 ? Math.round(Number(invItem.qty)) : 1) : 1;
+        var billQty = 1;
+        if (isInspection) {
+          var invQ = (Number(invItem.qty) > 0) ? Math.round(Number(invItem.qty)) : 1;
+          var sbTaskQty = api_fetchTaskQty_(clientSheetId, taskId);
+          billQty = (sbTaskQty && sbTaskQty > 1) ? sbTaskQty : invQ;
+        }
         var rateData = api_lookupRate_(ss, svcCode, invItem.itemClass, {
           itemId: itemId, clientName: clientName, tenantId: clientSheetId,
           qty: billQty, eventSource: "task_complete",

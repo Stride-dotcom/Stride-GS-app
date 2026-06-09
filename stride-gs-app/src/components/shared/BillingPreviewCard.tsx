@@ -184,10 +184,17 @@ export function BillingPreviewCard({
 
   // Local edit state — synced from props on catalog/customPrice change so
   // external updates (override cleared elsewhere, catalog edited) reflect.
+  // rateEditing freezes that resync while the operator is typing: a realtime
+  // task refetch (or the optimistic mirror) can deliver a stale rate mid-edit
+  // and, because the rate autosaves on a 600ms debounce, the resync would both
+  // yank the field back to the catalog rate AND let the debounced save persist
+  // that catalog value as "no override" — the "I changed the rate and it
+  // reverted to $25" bug. Same guard as the qty field below + EditableCell.
   const [primaryRateDraft, setPrimaryRateDraft] = useState(String(effectivePrimaryRate));
+  const [rateEditing, setRateEditing] = useState(false);
   useEffect(() => {
-    setPrimaryRateDraft(String(effectivePrimaryRate));
-  }, [effectivePrimaryRate]);
+    if (!rateEditing) setPrimaryRateDraft(String(effectivePrimaryRate));
+  }, [effectivePrimaryRate, rateEditing]);
 
   const primaryRateNum = Number(primaryRateDraft);
   const primaryRate = isNaN(primaryRateNum) ? 0 : primaryRateNum;
@@ -502,11 +509,12 @@ export function BillingPreviewCard({
                     rateEditable={editable && !!onUpdatePrimaryRate}
                     rateDraft={primaryRateDraft}
                     onRateChange={(v) => {
+                      setRateEditing(true);
                       setPrimaryRateDraft(v);
                       const num = Number(v);
                       if (!isNaN(num)) schedulePrimarySave(num);
                     }}
-                    onRateBlur={flushPrimarySave}
+                    onRateBlur={() => { flushPrimarySave(); setRateEditing(false); }}
                     total={primaryTotal}
                     hasError={primary.missing && !primaryIsOverride}
                     badge={primaryIsOverride ? 'Override' : null}
