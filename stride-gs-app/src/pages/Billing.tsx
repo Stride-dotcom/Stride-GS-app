@@ -6,7 +6,7 @@ import {
   useReactTable, getCoreRowModel, getSortedRowModel, getFilteredRowModel,
   flexRender, createColumnHelper,
   type ColumnFiltersState,
-  type RowSelectionState, type FilterFn,
+  type RowSelectionState, type FilterFn, type ColumnSizingState,
 } from '@tanstack/react-table';
 import {
   Search, Download, ChevronUp, ChevronDown, ChevronRight, ArrowUpDown,
@@ -56,6 +56,7 @@ import { useClients } from '../hooks/useClients';
 import { useServiceCatalog } from '../hooks/useServiceCatalog';
 import { BillingDetailPanel } from '../components/shared/BillingDetailPanel';
 import { useTablePreferences } from '../hooks/useTablePreferences';
+import { ColumnManagerMenu, moveColumnInOrder } from '../components/shared/ColumnManagerMenu';
 import { InfoTooltip } from '../components/shared/InfoTooltip';
 import { QBOPushButton } from '../components/billing/QBOPushButton';
 import { AddChargeModal, type ManualChargeEditTarget } from '../components/billing/AddChargeModal';
@@ -1242,12 +1243,11 @@ export function Billing() {
   const [globalFilter, setGlobalFilter] = useState('');
   const [rowSel, setRowSel] = useState<RowSelectionState>({});
   const [showCols, setShowCols] = useState(false);
-  const [dragColId, setDragColId] = useState<string | null>(null);
-  const [dragOverColId, setDragOverColId] = useState<string | null>(null);
+  const [columnSizing, setColumnSizing] = useState<ColumnSizingState>({});
+  const [colToggleRect, setColToggleRect] = useState<DOMRect | null>(null);
   const [selectedBillingRow, setSelectedBillingRow] = useState<BillingRow | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   useEffect(() => { if (!reportLoading && !billingLoading && refreshing) setRefreshing(false); }, [reportLoading, billingLoading, refreshing]);
-  const menuRef = useRef<HTMLDivElement>(null);
 
   // ─── Manual charges (v38.77.0) — auth + modal state. The useCallbacks
   //     that depend on showToast / loadReport are defined further down,
@@ -1720,9 +1720,11 @@ export function Billing() {
       const tenant = row.clientSheetId || row.sourceSheetId || '';
       return row.ledgerRowId ? `${tenant}::${row.ledgerRowId}` : `idx-${index}`;
     },
-    state: { sorting, columnFilters, globalFilter, columnVisibility: colVis, rowSelection: rowSel, columnOrder: columnOrder.length ? columnOrder : DEFAULT_COL_ORDER },
+    state: { sorting, columnFilters, globalFilter, columnVisibility: colVis, rowSelection: rowSel, columnOrder: columnOrder.length ? columnOrder : DEFAULT_COL_ORDER, columnSizing },
     onSortingChange: setSorting, onColumnFiltersChange: setColumnFilters, onGlobalFilterChange: setGlobalFilter, onColumnVisibilityChange: setColVis, onRowSelectionChange: setRowSel,
     onColumnOrderChange: (updater) => setColumnOrder(typeof updater === 'function' ? updater(columnOrder.length ? columnOrder : DEFAULT_COL_ORDER) : updater),
+    onColumnSizingChange: setColumnSizing,
+    columnResizeMode: 'onChange',
     getCoreRowModel: getCoreRowModel(), getSortedRowModel: getSortedRowModel(), getFilteredRowModel: getFilteredRowModel(),
     enableMultiSort: true,
     globalFilterFn: tanstackGlobalFilter as FilterFn<BillingRow>,
@@ -2177,7 +2179,7 @@ export function Billing() {
     }
     return resolved;
   }, [table, invoicedTable]);
-  useEffect(() => { const h = (e: MouseEvent) => { if (menuRef.current && !menuRef.current.contains(e.target as Node)) setShowCols(false); }; document.addEventListener('mousedown', h); return () => document.removeEventListener('mousedown', h); }, []);
+  // Columns menu (ColumnManagerMenu) is a portal and closes itself on outside click.
 
   // ─── Stax IIF Export Handler ───────────────────────────────────────────────
   const handleStaxIifExport = async (ledgerRowIds?: string[]) => {
@@ -3024,9 +3026,21 @@ export function Billing() {
       <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
         <div style={{ position: 'relative', flex: '1 1 200px', maxWidth: 320 }}><Search size={15} color={theme.colors.textMuted} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)' }} /><input value={globalFilter} onChange={e => setGlobalFilter(e.target.value)} placeholder="Search rows..." style={{ width: '100%', padding: '7px 10px 7px 32px', fontSize: 13, border: `1px solid ${theme.colors.border}`, borderRadius: 8, outline: 'none', background: theme.colors.bgSubtle, fontFamily: 'inherit' }} /></div>
         <div style={{ flex: 1 }} />
-        <div style={{ position: 'relative' }} ref={menuRef}>
-          <button onClick={() => setShowCols(v => !v)} style={{ padding: '7px 12px', fontSize: 12, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: theme.colors.textSecondary }}><Settings2 size={14} /> Columns</button>
-          {showCols && <div style={{ position: 'absolute', top: '100%', right: 0, marginTop: 4, background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 10, padding: 8, zIndex: 50, boxShadow: '0 4px 20px rgba(0,0,0,0.1)', minWidth: 180 }}>{TOGGLEABLE.map(id => <label key={id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px', fontSize: 12, cursor: 'pointer' }}><input type="checkbox" checked={colVis[id] !== false} onChange={() => setColVis(v => ({ ...v, [id]: v[id] === false }))} style={{ accentColor: theme.colors.orange }} />{COL_LABELS[id]}</label>)}</div>}
+        <div style={{ position: 'relative' }}>
+          <button onClick={e => { setColToggleRect(e.currentTarget.getBoundingClientRect()); setShowCols(v => !v); }} style={{ padding: '7px 12px', fontSize: 12, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: theme.colors.textSecondary }}><Settings2 size={14} /> Columns</button>
+          {showCols && colToggleRect && (
+            <ColumnManagerMenu
+              anchorRect={colToggleRect}
+              toggleableIds={TOGGLEABLE}
+              labels={COL_LABELS}
+              visibility={colVis}
+              onToggle={id => setColVis(v => ({ ...v, [id]: v[id] === false }))}
+              columnOrder={columnOrder.length ? columnOrder : DEFAULT_COL_ORDER}
+              onMove={(id, dir) => moveColumnInOrder(id, dir, setColumnOrder, DEFAULT_COL_ORDER)}
+              onClose={() => setShowCols(false)}
+              onResetWidths={() => setColumnSizing({})}
+            />
+          )}
         </div>
         <button onClick={() => {
           // Real .xlsx (SheetJS) for whichever report is in view. Numbers stay
@@ -3388,26 +3402,24 @@ export function Billing() {
             ) : (
               <>
                 <div ref={containerRef} style={{ overflowY: 'auto', overflowX: 'auto', maxHeight: isMobile ? 'calc(100dvh - 200px)' : 'calc(100dvh - 340px)', minHeight: isMobile ? 200 : undefined, WebkitOverflowScrolling: 'touch' }}>
-                  <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: isMobile ? 700 : undefined }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed', minWidth: isMobile ? 700 : table.getTotalSize() }}>
                     <thead>{table.getHeaderGroups().map(hg => <tr key={hg.id}>{hg.headers.map(h => {
-                      const isDragTarget = dragOverColId === h.id && dragColId !== h.id;
+                      const canResize = h.column.getCanResize();
                       const sorted = h.column.getIsSorted();
                       const sortIdx = h.column.getSortIndex();
                       return <th key={h.id}
-                        draggable={h.id !== 'select' && h.id !== 'actions'}
-                        onDragStart={e => { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', h.id); setDragColId(h.id); }}
-                        onDragOver={e => { e.preventDefault(); setDragOverColId(h.id); }}
-                        onDragEnd={() => {
-                          if (dragColId && dragOverColId && dragColId !== dragOverColId) {
-                            const cur = columnOrder.length ? [...columnOrder] : [...DEFAULT_COL_ORDER];
-                            const from = cur.indexOf(dragColId); const to = cur.indexOf(dragOverColId);
-                            if (from !== -1 && to !== -1) { cur.splice(from, 1); cur.splice(to, 0, dragColId); setColumnOrder(cur); }
-                          }
-                          setDragColId(null); setDragOverColId(null);
-                        }}
-                        style={{ ...th, width: h.getSize(), color: sorted ? theme.colors.orange : theme.colors.textMuted, cursor: h.id !== 'select' && h.id !== 'actions' ? 'grab' : 'default', background: isDragTarget ? theme.colors.orangeLight : '#fff', borderLeft: isDragTarget ? `2px solid ${theme.colors.orange}` : undefined }}
+                        style={{ ...th, width: h.getSize(), boxSizing: 'border-box', color: sorted ? theme.colors.orange : theme.colors.textMuted, cursor: h.column.getCanSort() ? 'pointer' : 'default', background: '#fff' }}
                         onClick={h.column.getCanSort() ? (e: React.MouseEvent) => h.column.toggleSorting(undefined, e.shiftKey) : undefined}
-                      ><div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>{h.isPlaceholder ? null : flexRender(h.column.columnDef.header, h.getContext())}{h.column.getCanSort() && (sorted === 'asc' ? <ChevronUp size={13} color={theme.colors.orange} /> : sorted === 'desc' ? <ChevronDown size={13} color={theme.colors.orange} /> : <ArrowUpDown size={13} color={theme.colors.textMuted} />)}{sorting.length > 1 && sorted && (<span style={{ fontSize: 10, color: theme.colors.orange, background: theme.colors.orangeLight, borderRadius: '50%', width: 14, height: 14, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, flexShrink: 0 }}>{sortIdx + 1}</span>)}</div></th>;
+                      ><div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>{h.isPlaceholder ? null : flexRender(h.column.columnDef.header, h.getContext())}{h.column.getCanSort() && (sorted === 'asc' ? <ChevronUp size={13} color={theme.colors.orange} /> : sorted === 'desc' ? <ChevronDown size={13} color={theme.colors.orange} /> : <ArrowUpDown size={13} color={theme.colors.textMuted} />)}{sorting.length > 1 && sorted && (<span style={{ fontSize: 10, color: theme.colors.orange, background: theme.colors.orangeLight, borderRadius: '50%', width: 14, height: 14, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, flexShrink: 0 }}>{sortIdx + 1}</span>)}</div>
+                        {canResize && (
+                          <div
+                            onMouseDown={e => { e.stopPropagation(); h.getResizeHandler()(e); }}
+                            onTouchStart={e => { e.stopPropagation(); h.getResizeHandler()(e); }}
+                            onClick={e => e.stopPropagation()}
+                            style={{ position: 'absolute', right: 0, top: 0, height: '100%', width: 8, cursor: 'col-resize', touchAction: 'none', userSelect: 'none', background: h.column.getIsResizing() ? theme.colors.orange : 'transparent', zIndex: 5 }}
+                          />
+                        )}
+                      </th>;
                     })}</tr>)}</thead>
                     <tbody>
                       {virtualRows.length > 0 && <tr style={{ height: virtualRows[0].start }}><td colSpan={table.getVisibleFlatColumns().length} /></tr>}
