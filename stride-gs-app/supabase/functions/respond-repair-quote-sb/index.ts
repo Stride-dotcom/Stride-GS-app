@@ -176,21 +176,57 @@ Deno.serve(async (req: Request) => {
       .maybeSingle();
     const clientName = (clientRow as { name?: string } | null)?.name?.trim() || 'Client';
 
-    const itemId = String(existing.item_id ?? '').trim();
+    // Multi-item repairs: the full item list lives in public.repair_items
+    // (parent repairs.item_id is only the denormalized "primary"). One quote
+    // can cover N items, so the subject, the body header ({{ITEM_ID}}) and the
+    // item-detail table must list ALL of them — not just the primary. Pre-fix
+    // only existing.item_id was referenced, so a batch repair's approve/decline
+    // email showed one item ID everywhere. Mirrors send-repair-quote-sb.
+    const primaryItemId = String(existing.item_id ?? '').trim();
     interface InventoryRow {
       item_id: string; description: string | null; vendor: string | null;
       sidemark: string | null; location: string | null;
     }
-    const { data: invRow } = itemId
+    const { data: repairItemRows } = await supabase
+      .from('repair_items')
+      .select('item_id, created_at')
+      .eq('tenant_id', tenantId)
+      .eq('repair_id', repairId)
+      .order('created_at', { ascending: true });
+    const repairItemIds = ((repairItemRows as { item_id: string }[] | null) ?? [])
+      .map(r => String(r.item_id ?? '').trim())
+      .filter(Boolean);
+    // Primary first (deep-link / back-compat), then remaining repair_items in
+    // insertion order, de-duplicated. Legacy single-item repairs predate
+    // repair_items — the primary fallback keeps them rendering one row.
+    const orderedItemIds = Array.from(new Set([primaryItemId, ...repairItemIds].filter(Boolean)));
+
+    const { data: invRows } = orderedItemIds.length > 0
       ? await supabase
           .from('inventory')
           .select('item_id, description, vendor, sidemark, location')
-          .eq('tenant_id', tenantId).eq('item_id', itemId).maybeSingle()
+          .eq('tenant_id', tenantId).in('item_id', orderedItemIds)
       : { data: null };
-    const inv = invRow as InventoryRow | null;
+    const invByItemId = new Map<string, InventoryRow>();
+    for (const r of ((invRows as InventoryRow[] | null) ?? [])) invByItemId.set(r.item_id, r);
+    // Preserve orderedItemIds order; synthesize a bare row for any item missing
+    // from inventory so its ID still appears in the table.
+    const orderedItems: InventoryRow[] = orderedItemIds.map(id =>
+      invByItemId.get(id) ?? { item_id: id, description: null, vendor: null, sidemark: null, location: null });
+    // Primary item's sidemark/location still drive the single-value summary
+    // cells in the dark header card.
+    const inv = invByItemId.get(primaryItemId) ?? null;
+
+    // Comma-joined list of every item — drives the subject and {{ITEM_ID}}.
+    const itemIdsLabel = orderedItemIds.join(', ');
+    // Count-aware grammar tokens: "{{ITEM_NOUN}}" → "item" | "items",
+    // "{{ITEM_ID_LABEL}}" → "Item ID" | "Item IDs".
+    const isMultiItem = orderedItemIds.length > 1;
+    const itemNoun    = isMultiItem ? 'items' : 'item';
+    const itemIdLabel = isMultiItem ? 'Item IDs' : 'Item ID';
 
     const quoteAmount = existing.quote_grand_total ?? existing.quote_amount ?? 0;
-    const itemTableHtml = renderItemTable(itemId, inv);
+    const itemTableHtml = renderItemTable(orderedItems);
 
     // ── 6. Send REPAIR_APPROVED or REPAIR_DECLINED via Resend ────────
     const templateKey = decision === 'Approve' ? 'REPAIR_APPROVED' : 'REPAIR_DECLINED';
@@ -209,7 +245,9 @@ Deno.serve(async (req: Request) => {
           tokens: {
             CLIENT_NAME:     clientName,
             REPAIR_ID:       repairId,
-            ITEM_ID:         itemId,
+            ITEM_ID:         itemIdsLabel,
+            ITEM_NOUN:       itemNoun,
+            ITEM_ID_LABEL:   itemIdLabel,
             ITEM_TABLE_HTML: itemTableHtml,
             LOCATION:        inv?.location ?? '',
             SIDEMARK:        inv?.sidemark ?? '',
@@ -267,13 +305,22 @@ function formatMoney(n: number): string {
   return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-function renderItemTable(itemId: string, inv: {
-  description: string | null; vendor: string | null;
+function renderItemTable(items: {
+  item_id: string; description: string | null; vendor: string | null;
   sidemark: string | null; location: string | null;
-} | null): string {
-  if (!itemId) return '';
+}[]): string {
+  if (items.length === 0) return '';
   const td = 'padding:6px 10px;border-bottom:1px solid #E5E7EB;font-size:13px;color:#1F2937;vertical-align:top;';
   const th = 'padding:8px 10px;background:#F9FAFB;border-bottom:2px solid #D1D5DB;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:#374151;text-align:left;';
+  const rows = items.map(it => [
+    '<tr>',
+    `<td style="${td}font-family:monospace;font-size:12px;">${escapeHtml(it.item_id ?? '')}</td>`,
+    `<td style="${td}">${escapeHtml(it.description ?? '')}</td>`,
+    `<td style="${td}">${escapeHtml(it.vendor ?? '')}</td>`,
+    `<td style="${td}">${escapeHtml(it.sidemark ?? '')}</td>`,
+    `<td style="${td}">${escapeHtml(it.location ?? '')}</td>`,
+    '</tr>',
+  ].join('')).join('');
   return [
     '<table cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;width:100%;margin:8px 0 16px;">',
     '<thead><tr>',
@@ -282,13 +329,9 @@ function renderItemTable(itemId: string, inv: {
     `<th style="${th}">Vendor</th>`,
     `<th style="${th}">Sidemark</th>`,
     `<th style="${th}">Location</th>`,
-    '</tr></thead><tbody><tr>',
-    `<td style="${td}font-family:monospace;font-size:12px;">${escapeHtml(itemId)}</td>`,
-    `<td style="${td}">${escapeHtml(inv?.description ?? '')}</td>`,
-    `<td style="${td}">${escapeHtml(inv?.vendor ?? '')}</td>`,
-    `<td style="${td}">${escapeHtml(inv?.sidemark ?? '')}</td>`,
-    `<td style="${td}">${escapeHtml(inv?.location ?? '')}</td>`,
-    '</tr></tbody></table>',
+    '</tr></thead><tbody>',
+    rows,
+    '</tbody></table>',
   ].join('');
 }
 

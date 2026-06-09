@@ -4563,7 +4563,7 @@ export function CreateDeliveryOrderModal({
     outline: 'none', fontFamily: 'inherit', boxSizing: 'border-box',
   };
   const label: React.CSSProperties = {
-    display: 'block', fontSize: 11, fontWeight: 600, color: theme.colors.textMuted,
+    display: 'block', fontSize: 11, fontWeight: 700, color: theme.colors.textMuted,
     marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.04em',
   };
   // Selected-items summary table cells (peach-themed to match the
@@ -5177,7 +5177,7 @@ export function CreateDeliveryOrderModal({
                       <button
                         type="button"
                         onClick={() => setPickupFreeItems(prev => prev.filter(i => i.id !== item.id))}
-                        title="Remove ad-hoc item"
+                        title="Remove non-inventory item"
                         style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#991B1B', padding: 4 }}
                       >
                         <Trash2 size={14} />
@@ -5425,7 +5425,7 @@ export function CreateDeliveryOrderModal({
                           fontSize: 13, fontWeight: 700, color: theme.colors.text,
                           textTransform: 'uppercase', letterSpacing: '0.06em',
                         }}>
-                          Ad-Hoc Items
+                          Non-Inventory Items
                         </span>
                         <span style={{
                           fontSize: 9, fontWeight: 700, letterSpacing: '0.5px',
@@ -5448,7 +5448,7 @@ export function CreateDeliveryOrderModal({
                           fontFamily: 'inherit',
                         }}
                       >
-                        <Plus size={13} /> Add Ad-Hoc Item
+                        <Plus size={13} /> Add Non-Inventory Item
                       </button>
                     </div>
                     {deliveryFreeItems.length === 0 ? (
@@ -5527,7 +5527,7 @@ export function CreateDeliveryOrderModal({
                             <button
                               type="button"
                               onClick={() => setDeliveryFreeItems(prev => prev.filter(i => i.id !== item.id))}
-                              title="Remove ad-hoc item"
+                              title="Remove non-inventory item"
                               style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#991B1B', padding: 4 }}
                             >
                               <Trash2 size={14} />

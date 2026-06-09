@@ -49,6 +49,7 @@ import { TransferItemsModal } from '../components/shared/TransferItemsModal';
 import { ReleaseItemsModal } from '../components/shared/ReleaseItemsModal';
 import { StorageCreditModal } from '../components/shared/StorageCreditModal';
 import { SetCodStorageModal } from '../components/shared/SetCodStorageModal';
+import { CollectCodStorageModal } from '../components/shared/CollectCodStorageModal';
 import { useFeatureFlagRow, resolveFlagBackend } from '../contexts/FeatureFlagContext';
 import { CreateTaskModal } from '../components/shared/CreateTaskModal';
 import { AddToWillCallModal } from '../components/shared/AddToWillCallModal';
@@ -887,6 +888,7 @@ export function Inventory() {
   const [showReleaseModal, setShowReleaseModal] = useState(false);
   const [showStorageCreditModal, setShowStorageCreditModal] = useState(false);
   const [showCodStorageModal, setShowCodStorageModal] = useState(false);
+  const [showCollectCodModal, setShowCollectCodModal] = useState(false);
   const [showDeliveryModal, setShowDeliveryModal] = useState(false);
 
   // Detail panel action items — when user triggers action from detail panel, we use these
@@ -2633,8 +2635,15 @@ export function Inventory() {
           {user?.role === 'admin' && (
             <WriteButton label="Credit" variant="ghost" size="sm" onClick={async () => { const items = selectedRows.map(r => r.original); if (!items.length) { showToast('Select items first to credit'); return; } const guard = checkBatchClientGuard(items); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Storage Credit'); return; } setShowStorageCreditModal(true); }} />
           )}
-          {codEnabledFor(selectedRows[0]?.original.clientId) && (user?.role === 'staff' || user?.role === 'admin') && (
+          {codEnabledFor(selectedRows[0]?.original.clientId) && user?.role === 'admin' && (
             <WriteButton label="COD" variant="ghost" size="sm" onClick={async () => { const items = selectedRows.map(r => r.original); if (!items.length) { showToast('Select items first'); return; } const guard = checkBatchClientGuard(items); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Set COD Storage'); return; } setShowCodStorageModal(true); }} />
+          )}
+          {codEnabledFor(selectedRows[0]?.original.clientId) && user?.role === 'admin' && (
+            // NOTE: do NOT filter by row.codStorage — cod_storage is a Supabase-only
+            // column that is only populated on the Supabase-first inventory load path
+            // (absent on the GAS fallback), so the row field is unreliable. The EF
+            // reads cod_storage authoritatively; the modal shows which items qualify.
+            <WriteButton label="Collect COD" variant="ghost" size="sm" onClick={async () => { const items = selectedRows.map(r => r.original); if (!items.length) { showToast('Select items first'); return; } const guard = checkBatchClientGuard(items); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Collect COD Storage'); return; } setShowCollectCodModal(true); }} />
           )}
           {(user?.role === 'staff' || user?.role === 'admin') && (
             <WriteButton
@@ -2828,6 +2837,18 @@ export function Inventory() {
           onSuccess={(n) => { showToast(`COD storage updated on ${n} item${n !== 1 ? 's' : ''}`); setRowSelection({}); setDetailActionItem(null); }}
           applyItemPatch={applyItemPatch}
           clearItemPatch={clearItemPatch}
+        />
+      )}
+
+      {/* ── Collect COD Storage Modal (standalone invoicing, feature-gated) ── */}
+      {showCollectCodModal && codEnabledFor(selectedRows[0]?.original.clientId) && selectedRows.length > 0 && (
+        <CollectCodStorageModal
+          items={selectedRows.map(r => r.original).map(i => ({ itemId: i.itemId, description: i.description }))}
+          clientName={selectedRows[0]?.original.clientName || ''}
+          clientSheetId={selectedRows[0]?.original.clientId || ''}
+          performedBy={user?.email || null}
+          onClose={() => setShowCollectCodModal(false)}
+          onSuccess={(created, total) => { showToast(`COD storage invoiced: $${total.toFixed(2)} on ${created} item${created !== 1 ? 's' : ''}`); setShowCollectCodModal(false); setRowSelection({}); for (const r of selectedRows) entityEvents.emit('inventory', r.original.itemId); }}
         />
       )}
 
