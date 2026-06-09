@@ -1911,7 +1911,7 @@ export function Inventory() {
       // horizontally, never the page.
       margin: isMobile ? '-12px -8px' : '-28px -32px',
       padding: isMobile ? '8px' : '28px 32px',
-      overflowX: isMobile ? 'hidden' : undefined,
+      overflowX: isMobile ? 'clip' : undefined,
       maxWidth: isMobile ? '100vw' : undefined }}>
 
       {/* Print + hover styles */}

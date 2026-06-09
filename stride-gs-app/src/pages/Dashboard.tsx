@@ -503,7 +503,7 @@ function TasksTab({ tasks, onNavigate, indicators, canEditPriority }: { tasks: S
 
       {/* Table */}
       <div style={{ borderRadius: 12, overflow: 'hidden', background: '#fff' }}>
-        <div ref={containerRef} style={{ overflowY: 'auto', overflowX: 'auto', ...scrollSize, WebkitOverflowScrolling: 'touch' }}>
+        <div ref={containerRef} style={{ overflowY: 'auto', overflowX: 'auto', overscrollBehavior: 'contain', ...scrollSize, WebkitOverflowScrolling: 'touch' }}>
           <table className="dash-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
               {table.getHeaderGroups().map(hg => (
@@ -663,7 +663,7 @@ function RepairsTab({ repairs, onNavigate, userRole, indicators }: { repairs: Su
         </div>
       </div>
       <div style={{ borderRadius: 12, overflow: 'hidden', background: '#fff' }}>
-        <div ref={containerRef} style={{ overflowY: 'auto', overflowX: 'auto', ...scrollSize, WebkitOverflowScrolling: 'touch' }}>
+        <div ref={containerRef} style={{ overflowY: 'auto', overflowX: 'auto', overscrollBehavior: 'contain', ...scrollSize, WebkitOverflowScrolling: 'touch' }}>
           <table className="dash-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>{table.getHeaderGroups().map(hg => <tr key={hg.id}>{hg.headers.map(h => <DragHeader key={h.id} h={h} dragColId={dragColId} dragOverColId={dragOverColId} onDragStart={() => setDragColId(h.id)} onDragOver={() => setDragOverColId(h.id)} onDragEnd={() => { if (dragColId && dragOverColId && dragColId !== dragOverColId) { const cur = columnOrder.length ? [...columnOrder] : [...REPAIR_DEFAULT_ORDER]; const from = cur.indexOf(dragColId); const to = cur.indexOf(dragOverColId); if (from !== -1 && to !== -1) { cur.splice(from, 1); cur.splice(to, 0, dragColId); setColumnOrder(cur); } } setDragColId(null); setDragOverColId(null); }} sorted={h.column.getIsSorted()} />)}</tr>)}</thead>
             <tbody>
@@ -751,7 +751,7 @@ function WillCallsTab({ willCalls, onNavigate }: { willCalls: SummaryWillCall[];
         </div>
       </div>
       <div style={{ borderRadius: 12, overflow: 'hidden', background: '#fff' }}>
-        <div ref={containerRef} style={{ overflowY: 'auto', overflowX: 'auto', ...scrollSize, WebkitOverflowScrolling: 'touch' }}>
+        <div ref={containerRef} style={{ overflowY: 'auto', overflowX: 'auto', overscrollBehavior: 'contain', ...scrollSize, WebkitOverflowScrolling: 'touch' }}>
           <table className="dash-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>{table.getHeaderGroups().map(hg => <tr key={hg.id}>{hg.headers.map(h => <DragHeader key={h.id} h={h} dragColId={dragColId} dragOverColId={dragOverColId} onDragStart={() => setDragColId(h.id)} onDragOver={() => setDragOverColId(h.id)} onDragEnd={() => { if (dragColId && dragOverColId && dragColId !== dragOverColId) { const cur = columnOrder.length ? [...columnOrder] : [...WC_DEFAULT_ORDER]; const from = cur.indexOf(dragColId); const to = cur.indexOf(dragOverColId); if (from !== -1 && to !== -1) { cur.splice(from, 1); cur.splice(to, 0, dragColId); setColumnOrder(cur); } } setDragColId(null); setDragOverColId(null); }} sorted={h.column.getIsSorted()} />)}</tr>)}</thead>
             <tbody>
@@ -978,7 +978,7 @@ export function Dashboard() {
   ];
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: isMobile ? 12 : 24, margin: isMobile ? '-12px -8px' : '-28px -32px', padding: isMobile ? '8px' : '28px 32px', minHeight: '100%', background: '#F5F2EE', overflowX: isMobile ? 'hidden' : undefined, maxWidth: isMobile ? '100vw' : undefined }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: isMobile ? 12 : 24, margin: isMobile ? '-12px -8px' : '-28px -32px', padding: isMobile ? '8px' : '28px 32px', minHeight: '100%', background: '#F5F2EE', overflowX: isMobile ? 'clip' : undefined, maxWidth: isMobile ? '100vw' : undefined }}>
       <style>{`
         @keyframes spin { to { transform: rotate(360deg); } }
         /* Tablet/mobile density for the three Dashboard overview tables.

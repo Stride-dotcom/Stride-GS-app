@@ -59,7 +59,7 @@ function makeStyles(isMobile: boolean) {
     // on a phone (flex children shrank to fit instead of the body scrolling).
     // Desktop keeps the bounded layout. The mobile action bar is position:fixed
     // (see below), so the body adds bottom clearance for it.
-    page: { display: 'flex', flexDirection: 'column' as const, height: isMobile ? 'auto' : '100%', minHeight: isMobile ? '100%' : undefined, fontFamily: theme.typography.fontFamily, background: '#F5F2EE', margin: isMobile ? '-12px -8px' : '-28px -32px', padding: isMobile ? '12px 10px' : '28px 32px', overflowX: isMobile ? ('hidden' as const) : undefined, maxWidth: isMobile ? '100vw' : undefined },
+    page: { display: 'flex', flexDirection: 'column' as const, height: isMobile ? 'auto' : '100%', minHeight: isMobile ? '100%' : undefined, fontFamily: theme.typography.fontFamily, background: '#F5F2EE', margin: isMobile ? '-12px -8px' : '-28px -32px', padding: isMobile ? '12px 10px' : '28px 32px', overflowX: isMobile ? ('clip' as const) : undefined, maxWidth: isMobile ? '100vw' : undefined },
     header: { display: 'flex', alignItems: 'center', gap: 10, paddingBottom: 16, marginBottom: 16, flexShrink: 0, flexWrap: 'wrap' as const },
     body: {
       flex: isMobile ? ('none' as const) : 1,
