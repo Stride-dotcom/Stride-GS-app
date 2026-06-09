@@ -1,0 +1,1 @@
+import{r as e}from"./index-B6nbHssc.js";export{e as renderDocUpload};
