@@ -345,13 +345,21 @@ function escapeRegex(s: string): string {
 //   NOTIFICATION_EMAILS  → process env (Edge Function secret of same name),
 //                          comma-split. Same source used by notify-new-order.
 //   PUBLIC_FORM_SETTINGS → public.public_form_settings.alert_emails (singleton row)
-//   CLIENT_EMAIL         → public.clients.notification_contacts (jsonb array of
-//                          {name,email}) for the tenant identified by body.tenantId,
-//                          falling back to public.clients.email when notification_contacts
-//                          is empty or missing. Both fields may contain comma-joined
-//                          email lists in a single string — those are split here.
+//   CLIENT_EMAIL         → public.clients.email (the list surfaced in the app as the
+//                          client's "Notification Emails" field) for the tenant
+//                          identified by body.tenantId. May contain a comma- or
+//                          semicolon-joined list in a single string — split here.
 //                          Requires tenantId to be passed by the caller; without it
 //                          the token expands to [] with a warning.
+//                          NOTE: this token deliberately does NOT read
+//                          clients.notification_contacts (the broader intake-captured
+//                          warehouse-alert list). Per Justin (2026-06-09), repair
+//                          emails — the only templates that use this recipient token —
+//                          must go only to the curated "Notification Emails" field,
+//                          not every contact on the account. Changing this resolution
+//                          affects repair emails only (REPAIR_QUOTE / REPAIR_APPROVED /
+//                          REPAIR_DECLINED / REPAIR_COMPLETE); no other template carries
+//                          {{CLIENT_EMAIL}} in its recipients column.
 //
 // Unrecognized strings that don't look like emails are dropped silently
 // (logged at warn) — better to miss one recipient than to bounce the
@@ -432,46 +440,29 @@ async function expandToken(supabase: SBClient, token: string, tenantId?: string)
       }
       const { data: clientRow } = await supabase
         .from('clients')
-        .select('notification_contacts, email')
+        .select('email')
         .eq('spreadsheet_id', tenantId)
         .maybeSingle();
       if (!clientRow) {
         console.warn(`[send-email] CLIENT_EMAIL token: no clients row for tenant ${tenantId}`);
         return [];
       }
+      // Resolve from clients.email — the list the app surfaces as the
+      // client's "Notification Emails" field. Per Justin (2026-06-09),
+      // repair emails must go ONLY to this curated list, NOT to
+      // clients.notification_contacts (the broader intake-captured contact
+      // list this token used to read first). clients.email may hold a
+      // comma- or semicolon-joined list in a single string — split it here.
       const out: string[] = [];
-      // Primary source: notification_contacts JSONB array of {name, email}.
-      // Each contact's email field MAY itself contain comma-joined addresses
-      // (per the 2026-05-04 split logic — at least one row in prod stores
-      // multiple emails inside a single contact's email field). Splitting
-      // here and again post-resolve in the main path is intentionally
-      // belt-and-suspenders: dedupe handles the overlap.
-      const contacts = (clientRow as { notification_contacts?: unknown }).notification_contacts;
-      if (Array.isArray(contacts)) {
-        for (const c of contacts) {
-          const email = (c && typeof c === 'object' && 'email' in c) ? String((c as { email?: unknown }).email ?? '') : '';
-          if (email) {
-            for (const part of email.split(/[,;]/)) {
-              const trimmed = part.trim();
-              if (trimmed.includes('@')) out.push(trimmed);
-            }
-          }
-        }
-      }
-      // Fallback: clients.email (also comma-joined string in prod). Only
-      // used when notification_contacts produced zero usable emails, to
-      // avoid double-billing the customer with overlapping address lists.
-      if (out.length === 0) {
-        const fallback = String((clientRow as { email?: string }).email ?? '');
-        if (fallback) {
-          for (const part of fallback.split(/[,;]/)) {
-            const trimmed = part.trim();
-            if (trimmed.includes('@')) out.push(trimmed);
-          }
+      const raw = String((clientRow as { email?: string }).email ?? '');
+      if (raw) {
+        for (const part of raw.split(/[,;]/)) {
+          const trimmed = part.trim();
+          if (trimmed.includes('@')) out.push(trimmed);
         }
       }
       if (out.length === 0) {
-        console.warn(`[send-email] CLIENT_EMAIL token: tenant ${tenantId} has no usable emails in notification_contacts or email`);
+        console.warn(`[send-email] CLIENT_EMAIL token: tenant ${tenantId} has no usable emails in clients.email ("Notification Emails")`);
       }
       return out;
     }
