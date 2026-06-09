@@ -114,6 +114,15 @@
 
 ---
 
+## Recent Changes (2026-06-09, delivery: COD Storage fleet rollout + pricing-summary line + instant $ badge — feat/delivery/cod-rollout-pricing)
+
+- **Fleet rollout.** Flipped the `codStorageBilling` feature flag from Justin-Demo-canary (`tenant_scope:['1-nF3…']`) to **fleet-wide** (`tenant_scope=NULL`, `active_backend='supabase'`) so COD Storage is available on ALL accounts. It's a pure UI gate — the SQL (`_compute_storage_charges` cap, `trg_apply_cod_storage_on_receive`) already ran fleet-wide but only acts on columns the flag-gated UI sets, so unscoping just unlocks the UI everywhere (no runaway billing). **Operator follow-up:** `svc_code='COD_STOR'` still needs a QBO item mapping or COD invoices fall back to a default QBO line.
+- **`$` badge now paints instantly** (`src/pages/Inventory.tsx`). Root cause: `useItemIndicators` applies COD only at the END of a 6-query sequential chain (behind the slow `dt_orders` join), and COD was the one badge with no optimistic overlay — so it lagged I/A/R/W/D by a few seconds. Added a COD overlay derived from `inventoryItems.filter(i => i.codStorage)` (the row already carries the flag post-PR #718), unioned into the hook's `codItems` exactly like the other five badges.
+- **COD total in the Estimated Pricing Summary** (`src/components/shared/CreateDeliveryOrderModal.tsx`) — a "COD Storage (collect from customer)" line below the Estimated Total, shown when COD applies + included. Deliberately NOT added to the client's `orderTotal` (end customer pays it). The DT description push already carries the COD block in its Charges Summary (dt-push-order v46); **v47** additionally carries the `cod_storage_*` columns on the P+D **linked-leg** fetch so a pickup-primary's delivery leg renders the block too.
+- Files: `src/pages/Inventory.tsx`, `src/components/shared/CreateDeliveryOrderModal.tsx`, `supabase/functions/dt-push-order/index.ts` (v47). Flag flip via `feature_flags` UPDATE (MCP). Opus review clean; tsc + build clean.
+
+---
+
 ## Recent Changes (2026-06-09, delivery: configurable COD Storage section in the New Delivery Order entry modal — feat/delivery/cod-storage-entry-modal)
 
 - Follow-up to PR #718. The COD Storage line was only visible/editable on the order detail page; in the **New Delivery Order entry modal** it was seeded silently (operator couldn't see or adjust it at entry). Added a visible **COD Storage** section to `CreateDeliveryOrderModal.tsx` that appears when `codStorageBilling` is on for the tenant AND some selected inventory items are COD-flagged AND mode is delivery-of-warehouse-items (`codApplicable`). Shows an "Include COD Storage" checkbox (default checked), cutoff date (defaults to the service date), editable rate ($0.05/cu ft/day), per-item breakdown (item · class · cu ft · from · days · amount), and total.

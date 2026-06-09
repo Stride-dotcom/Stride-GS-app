@@ -6334,6 +6334,23 @@ export function CreateDeliveryOrderModal({
                 <span>Estimated Total</span>
                 <span>{orderTotal != null ? `$${orderTotal.toFixed(2)}` : isCallForQuote ? 'Call for quote' : '—'}</span>
               </div>
+              {/* COD Storage — collected from the END customer at delivery, NOT
+                  part of the client's Estimated Total above. Shown as a separate
+                  line so the operator/driver sees what to collect on-site; it's
+                  pushed to the DT order details (Charges Summary) the same way. */}
+              {codApplicable && codInclude && (codLinePreview?.total ?? 0) > 0 && (
+                <div style={{
+                  display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                  marginTop: 8, paddingTop: 8, borderTop: `1px dashed ${theme.colors.border}`,
+                  fontSize: 13,
+                }}>
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <Coins size={12} color={theme.colors.orange} />
+                    COD Storage <span style={{ fontSize: 11, color: theme.colors.textMuted }}>(collect from customer)</span>
+                  </span>
+                  <span style={{ fontWeight: 700, color: theme.colors.orange }}>${(codLinePreview?.total ?? 0).toFixed(2)}</span>
+                </div>
+              )}
               <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 8, fontStyle: 'italic', lineHeight: 1.45 }}>
                 Pricing is estimated based on the information provided. If additional assembly, labor, or special handling services are required at the time of delivery, rates may be adjusted accordingly.
               </div>

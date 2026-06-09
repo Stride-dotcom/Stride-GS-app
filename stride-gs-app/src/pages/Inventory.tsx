@@ -1227,16 +1227,26 @@ export function Inventory() {
       }
     }
 
-    return { inspOpen, inspDone, inspFailed, asmOpen, asmDone, repOpen, repDone, wcOpen, wcDone, dtOpen, dtDone };
-  }, [tasks, repairs, willCalls, orders]);
+    // COD ($) overlay — inventory items flagged cod_storage=true. Direct
+    // boolean on the row the page already holds, so the $ badge paints
+    // INSTANTLY instead of waiting for the hook's 6-query chain (the hook
+    // applies COD only at the very end, behind the slow dt_orders join, so
+    // without this overlay $ lagged the other badges by a few seconds).
+    const cod = new Set<string>();
+    for (const it of inventoryItems) {
+      if (it.codStorage && it.itemId) cod.add(it.itemId);
+    }
+
+    return { inspOpen, inspDone, inspFailed, asmOpen, asmDone, repOpen, repDone, wcOpen, wcDone, dtOpen, dtDone, cod };
+  }, [tasks, repairs, willCalls, orders, inventoryItems]);
 
   // Union the optimistic overlay with useItemIndicators (the source of truth).
   // Open wins over done in BOTH directions: an item open in EITHER the fresh
   // local overlay OR the hook is orange; it's green only if done somewhere and
-  // open nowhere. inspFailed is the union of both failed sets. codItems comes
-  // solely from the hook (no optimistic local source on this page) and is read
-  // directly off `repairIndicators` at the render site.
-  const { inspOpenItems, inspDoneItems, inspFailedItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems, wcOpenItems, wcDoneItems, dtOpenItems, dtDoneItems } = useMemo(() => {
+  // open nowhere. inspFailed is the union of both failed sets. codItems is the
+  // union of the page's optimistic COD set (instant) and the hook's authoritative
+  // set — COD has no open/done split, so it's a plain presence union.
+  const { inspOpenItems, inspDoneItems, inspFailedItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems, wcOpenItems, wcDoneItems, dtOpenItems, dtDoneItems, codItems } = useMemo(() => {
     const merge = (lo: Set<string>, ld: Set<string>, ho: Set<string>, hd: Set<string>) => {
       const open = new Set<string>(lo);
       for (const id of ho) open.add(id);
@@ -1252,12 +1262,15 @@ export function Inventory() {
     const dt = merge(localOverlay.dtOpen, localOverlay.dtDone, repairIndicators.dtOpenItems, repairIndicators.dtDoneItems);
     const inspFailed = new Set<string>(localOverlay.inspFailed);
     for (const id of repairIndicators.inspFailedItems) inspFailed.add(id);
+    const cod = new Set<string>(localOverlay.cod);
+    for (const id of repairIndicators.codItems) cod.add(id);
     return {
       inspOpenItems: insp.open, inspDoneItems: insp.done, inspFailedItems: inspFailed,
       asmOpenItems: asm.open, asmDoneItems: asm.done,
       repairOpenItems: rep.open, repairDoneItems: rep.done,
       wcOpenItems: wc.open, wcDoneItems: wc.done,
       dtOpenItems: dt.open, dtDoneItems: dt.done,
+      codItems: cod,
     };
   }, [localOverlay, repairIndicators]);
 
@@ -1329,7 +1342,7 @@ export function Inventory() {
               textDecorationColor: 'transparent',
               transition: 'text-decoration-color 0.1s',
             }}>{id}</span>
-            <ItemIdBadges itemId={id} inspOpenItems={inspOpenItems} inspDoneItems={inspDoneItems} inspFailedItems={inspFailedItems} asmOpenItems={asmOpenItems} asmDoneItems={asmDoneItems} repairOpenItems={repairOpenItems} repairDoneItems={repairDoneItems} wcOpenItems={wcOpenItems} wcDoneItems={wcDoneItems} dtOpenItems={dtOpenItems} dtDoneItems={dtDoneItems} codItems={repairIndicators.codItems} />
+            <ItemIdBadges itemId={id} inspOpenItems={inspOpenItems} inspDoneItems={inspDoneItems} inspFailedItems={inspFailedItems} asmOpenItems={asmOpenItems} asmDoneItems={asmDoneItems} repairOpenItems={repairOpenItems} repairDoneItems={repairDoneItems} wcOpenItems={wcOpenItems} wcDoneItems={wcDoneItems} dtOpenItems={dtOpenItems} dtDoneItems={dtDoneItems} codItems={codItems} />
           </div>
         );
       },
@@ -1611,7 +1624,7 @@ export function Inventory() {
       ),
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [showToast, inspOpenItems, inspDoneItems, inspFailedItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems, wcOpenItems, wcDoneItems, dtOpenItems, dtDoneItems, repairIndicators.codItems, applyItemPatch, mergeItemPatch, canEditInventory, canEditClientFields, notesByItemId, notesDetailByItemId]);
+  ], [showToast, inspOpenItems, inspDoneItems, inspFailedItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems, wcOpenItems, wcDoneItems, dtOpenItems, dtDoneItems, codItems, applyItemPatch, mergeItemPatch, canEditInventory, canEditClientFields, notesByItemId, notesDetailByItemId]);
 
   // When navigating from Shipments page, filter table to that shipment
   const tableData = useMemo(() => {
