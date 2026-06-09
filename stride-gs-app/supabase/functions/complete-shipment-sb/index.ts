@@ -317,6 +317,11 @@ Deno.serve(async (req: Request) => {
     const inspName = svcNameByCode['INSP'] || 'Inspection';
     const asmName  = svcNameByCode['ASM']  || 'Assembly';
 
+    // Order Numbering feature (Justin Demo canary): when on, auto-created
+    // INSP/ASM tasks get clean PREFIX-TSK-N ids (matching batch-create-tasks-sb)
+    // instead of the legacy SVC-ITEM-N counter. Resolved once per request.
+    const cleanNumbering = await orderNumberingOn(sb, tenantId);
+
     const taskRows: Array<Record<string, unknown>> = [];
     const taskIdsCreated: string[] = [];
 
@@ -329,16 +334,15 @@ Deno.serve(async (req: Request) => {
         : (item.needsInspection === true || autoInspectionTen);
       const doAssembly = item.needsAssembly === true;
 
-      // Counter: SELECT-then-pick-max per (svc, item). Fresh inventory => 1.
+      // Task ID: clean PREFIX-TSK-N when the feature is on, else the legacy
+      // SELECT-then-pick-max SVC-ITEM-N counter (fresh inventory => 1).
       if (doInspection) {
-        const counter = await nextTaskCounter(sb, tenantId, itemId, 'INSP');
-        const taskId  = `INSP-${itemId}-${counter}`;
+        const taskId = await mintTaskId(sb, tenantId, itemId, 'INSP', cleanNumbering);
         taskRows.push(buildTaskRow(tenantId, taskId, 'INSP', inspName, item, shipmentNo, nowIso));
         taskIdsCreated.push(taskId);
       }
       if (doAssembly) {
-        const counter = await nextTaskCounter(sb, tenantId, itemId, 'ASM');
-        const taskId  = `ASM-${itemId}-${counter}`;
+        const taskId = await mintTaskId(sb, tenantId, itemId, 'ASM', cleanNumbering);
         taskRows.push(buildTaskRow(tenantId, taskId, 'ASM', asmName, item, shipmentNo, nowIso));
         taskIdsCreated.push(taskId);
       }
@@ -617,6 +621,54 @@ function buildTaskRow(
     // it directly (see batch-create-tasks-sb dedup note). Type is the
     // authoritative GAS-shape field.
   };
+}
+
+/**
+ * Resolve whether the `orderNumbering` feature is on for this tenant via the
+ * SECURITY DEFINER `order_numbering_enabled` RPC (MIG-010 per-tenant scope).
+ * Fails safe to false (legacy ids) on any error.
+ */
+async function orderNumberingOn(
+  sb: ReturnType<typeof createClient>,
+  tenantId: string,
+): Promise<boolean> {
+  try {
+    const { data, error } = await sb.rpc('order_numbering_enabled', { p_tenant_id: tenantId });
+    if (error) {
+      console.warn('[complete-shipment-sb] order_numbering_enabled failed:', error.message);
+      return false;
+    }
+    return data === true;
+  } catch (e) {
+    console.warn('[complete-shipment-sb] order_numbering_enabled threw:', e);
+    return false;
+  }
+}
+
+/**
+ * Mint a task id. Clean PREFIX-TSK-N via next_order_id when the feature is on
+ * (and the RPC succeeds); otherwise the legacy SVC-ITEM-N counter. Auto-task
+ * creation is best-effort here, so a transient RPC failure falls back to legacy
+ * rather than dropping the task.
+ */
+async function mintTaskId(
+  sb: ReturnType<typeof createClient>,
+  tenantId: string,
+  itemId: string,
+  svcCode: string,
+  cleanNumbering: boolean,
+): Promise<string> {
+  if (cleanNumbering) {
+    try {
+      const { data, error } = await sb.rpc('next_order_id', { p_tenant_id: tenantId, p_order_type: 'task' });
+      if (!error && typeof data === 'string' && data) return data;
+      if (error) console.warn('[complete-shipment-sb] next_order_id failed, using legacy id:', error.message);
+    } catch (e) {
+      console.warn('[complete-shipment-sb] next_order_id threw, using legacy id:', e);
+    }
+  }
+  const counter = await nextTaskCounter(sb, tenantId, itemId, svcCode);
+  return `${svcCode}-${itemId}-${counter}`;
 }
 
 /**
