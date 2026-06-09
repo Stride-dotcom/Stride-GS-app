@@ -782,6 +782,12 @@ export function CreateDeliveryOrderModal({
   // COD Storage feature gate — resolved against this order's tenant.
   const codFlagRow = useFeatureFlagRow('codStorageBilling');
 
+  // Order Numbering feature gate — resolved against this order's tenant.
+  // When on (Justin Demo canary), delivery order numbers drop the legacy
+  // zero-padding (PREFIX-00096 → PREFIX-96). Existing orders keep their
+  // stored padded identifiers; only new numbers are minted unpadded.
+  const orderNumberingFlagRow = useFeatureFlagRow('orderNumbering');
+
   // If no liveItems were passed (modal opened from Orders page, not Inventory),
   // pull our own inventory. useInventory auto-scopes to accessible clients.
   // Force a refetch on every modal open so room/vendor/etc edits made
@@ -2130,7 +2136,18 @@ export function CreateDeliveryOrderModal({
         `Could not allocate order number (next_order_number RPC failed: ${seqErr?.message ?? 'no data returned'}). Try again, or contact support if the problem persists.`
       );
     }
-    const seqNum: string = seqData; // already zero-padded from the DB function
+    const rawSeq: string = seqData; // zero-padded (lpad 5) from the DB function
+    // Order Numbering canary: strip the leading zeros so new delivery orders
+    // read PREFIX-96 instead of PREFIX-00096. Resolved per MIG-010 against
+    // this order's client tenant. Delivery keeps the global dt_order_number_seq
+    // (no per-tenant restart) so unpadded numbers never collide with existing
+    // padded ones.
+    const orderNumberingOn = !!orderNumberingFlagRow
+      && resolveFlagBackend(orderNumberingFlagRow, clientSheetId || null) === 'supabase';
+    const parsedSeq = parseInt(rawSeq, 10);
+    const seqNum = orderNumberingOn && Number.isFinite(parsedSeq)
+      ? String(parsedSeq)
+      : rawSeq;
     const ref = poNumber.trim().replace(/\s+/g, '-');
     return ref ? `${prefix}-${seqNum}-${ref}` : `${prefix}-${seqNum}`;
   };
