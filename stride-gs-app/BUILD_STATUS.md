@@ -112,6 +112,15 @@
 
 ---
 
+## Recent Changes (2026-06-09, quotes: attach documents/photos to quotes — feat/warehouse/quote-documents, PR #698)
+
+- Clients send floor plans, packing lists, purchase orders, photos, etc. for a quote; these now attach to the quote so anyone reviewing it has full context. New **Documents** card at the bottom of the Quote Builder left column (`src/components/quotes/QuoteDocumentsCard.tsx`), wired in `QuoteBuilder.tsx`. Works both during quote creation and when editing an existing quote (the quote has a stable `crypto.randomUUID` id before the builder mounts — `QuoteTool.openBuilder` calls `createQuote()` first).
+- **Reuses the shared documents module wholesale** — same `public.documents` table, same private `documents` Storage bucket, same RLS, same `DocumentUploadButton` (drag-and-drop / click; images + PDFs + Office/CSV) and `DocumentList` (image thumbnails, PDF first-page previews, file icons, download / open / delete per row). The only new thing is a `quote` value on the `documents.context_type` CHECK constraint.
+- Migration `20260609160000_documents_quote_context.sql` adds `'quote'` to `documents_context_type_check` (mirrors the Session-77 `'client'` addition); `useDocuments.ts` `DocumentContextType` union kept in lockstep. **Applied to prod** via the management API.
+- Tenancy: quote docs stamp `tenant_id = quote.clientSheetId || 'quotes'`. The Quote Tool is **admin-only** (`App.tsx`), and `documents_select_staff`/`documents_write_staff` (table) + the storage bucket policies grant admin full access regardless of tenant. The `'quotes'` sentinel can't match any client's `clientSheetId`, so sentinel rows are never client-readable. Opus code review: 0 Critical/Important. tsc + build clean; React deployed via dedicated clone.
+
+---
+
 ## Recent Changes (2026-06-09, orders: Supabase-generated clean order numbering — feat/orders/sb-order-numbering, PR #695)
 
 - New orders for the **Justin Demo Account** now get clean, client-scoped sequential ids instead of GAS timestamp ids: repairs `PREFIX-RPR-N`, will calls `PREFIX-WC-N`, tasks `PREFIX-TSK-N`, and delivery orders drop the zero-padding (`JAS-00096` → `JAS-96`). `PREFIX` = first 3 A–Z letters of the client name (reuses `buildOrderNumberBase()` in `CreateDeliveryOrderModal.tsx`; **not** `client_name_prefix()`, which uses word-initials). No leading zeros anywhere. **New orders only** — existing rows keep their stored ids (no renumbering). Gated to Justin Demo via a new `orderNumbering` `feature_flags` row using MIG-010 per-tenant scope (UI/behavior gate only — **not** apiRouter routing). Flip `active_backend`→`gas` (or clear `tenant_scope`) to instantly revert every type to legacy ids.
