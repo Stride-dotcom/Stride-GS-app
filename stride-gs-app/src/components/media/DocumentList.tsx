@@ -11,7 +11,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { FileText, Image as ImageIcon, File as FileIcon, Trash2, ExternalLink, Download, Loader2, AlertTriangle } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { fmtDateTime } from '../../lib/constants';
-import { useDocuments, type DocumentContextType, type DocumentRow } from '../../hooks/useDocuments';
+import { useDocuments, type DocumentContextType, type DocumentRow, type UseDocumentsResult } from '../../hooks/useDocuments';
 import { DocumentPreviewModal } from './DocumentPreviewModal';
 
 interface Props {
@@ -22,6 +22,19 @@ interface Props {
   readOnly?: boolean;
   /** Compact row styling (for side panels). */
   compact?: boolean;
+  /** Optional parent-owned `useDocuments` result. When supplied, DocumentList
+   *  renders from it instead of spinning up its OWN second hook instance.
+   *  This avoids the dual-instance desync where a parent that hosts both the
+   *  upload action (its own useDocuments) and this list (a separate
+   *  useDocuments) only updates the uploader's instance: both instances open a
+   *  Supabase Realtime channel with the SAME topic name (`documents_<ctx>_<id>`),
+   *  they collide, and the list's instance never receives the change event —
+   *  so an uploaded doc shows in a header count but never in the list. Passing
+   *  the parent's single instance here makes the optimistic insert + explicit
+   *  refetch flow straight into the list with no Realtime round-trip. The
+   *  internal hook is disabled (`enabled:false`) so there's no duplicate
+   *  fetch/subscription. */
+  source?: UseDocumentsResult;
 }
 
 function iconFor(mime: string | null | undefined) {
@@ -108,10 +121,14 @@ function fmtDate(iso: string | null): string {
   } catch { return iso; }
 }
 
-export function DocumentList({ contextType, contextId, tenantId, readOnly, compact }: Props) {
-  const { documents, loading, error, getSignedUrl, deleteDocument, refetch } = useDocuments({
-    contextType, contextId, tenantId,
+export function DocumentList({ contextType, contextId, tenantId, readOnly, compact, source }: Props) {
+  // Always call the hook (rules of hooks), but disable it when a parent-owned
+  // instance is injected via `source` so we don't open a duplicate fetch /
+  // Realtime subscription. `source ?? internal` then drives the UI.
+  const internal = useDocuments({
+    contextType, contextId, tenantId, enabled: !source,
   });
+  const { documents, loading, error, getSignedUrl, deleteDocument, refetch } = source ?? internal;
   const [opening, setOpening] = useState<string | null>(null);
   const [downloading, setDownloading] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
