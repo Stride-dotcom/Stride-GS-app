@@ -53,11 +53,19 @@ function makeStyles(isMobile: boolean) {
     // the old -14/-12 overflowed it (4px each side) and let the whole page
     // bounce sideways. overflowX:hidden confines horizontal scroll to the
     // queue/cards, never the page.
-    page: { display: 'flex', flexDirection: 'column' as const, height: '100%', fontFamily: theme.typography.fontFamily, background: '#F5F2EE', margin: isMobile ? '-12px -8px' : '-28px -32px', padding: isMobile ? '12px 10px' : '28px 32px', overflowX: isMobile ? ('hidden' as const) : undefined, maxWidth: isMobile ? '100vw' : undefined },
+    // Mobile: natural document flow (height:auto + the page grows; AppLayout
+    // <main> provides the vertical scroll). The desktop "bounded flex column
+    // with an internal-scroll body" pattern made the cards collapse to slivers
+    // on a phone (flex children shrank to fit instead of the body scrolling).
+    // Desktop keeps the bounded layout. The mobile action bar is position:fixed
+    // (see below), so the body adds bottom clearance for it.
+    page: { display: 'flex', flexDirection: 'column' as const, height: isMobile ? 'auto' : '100%', minHeight: isMobile ? '100%' : undefined, fontFamily: theme.typography.fontFamily, background: '#F5F2EE', margin: isMobile ? '-12px -8px' : '-28px -32px', padding: isMobile ? '12px 10px' : '28px 32px', overflowX: isMobile ? ('hidden' as const) : undefined, maxWidth: isMobile ? '100vw' : undefined },
     header: { display: 'flex', alignItems: 'center', gap: 10, paddingBottom: 16, marginBottom: 16, flexShrink: 0, flexWrap: 'wrap' as const },
     body: {
-      flex: 1, overflow: 'auto',
+      flex: isMobile ? ('none' as const) : 1,
+      overflow: isMobile ? ('visible' as const) : 'auto',
       padding: isMobile ? 10 : 16,
+      paddingBottom: isMobile ? 96 : 16,
       display: isMobile ? 'flex' : 'grid',
       flexDirection: isMobile ? ('column' as const) : undefined,
       gridTemplateColumns: isMobile ? undefined : '1fr 380px',
@@ -469,7 +477,7 @@ export function Scanner() {
             </div>
           </div>
 
-          <div style={{ ...s.card, flex: 1, minHeight: 0 }}>
+          <div style={{ ...s.card, flex: isMobile ? undefined : 1, minHeight: isMobile ? undefined : 0 }}>
             <div style={s.cardTitle}>
               Queue ({queue.length})
               {foundCount > 0 && <span style={{ fontSize: 11, fontWeight: 400, color: '#15803D' }}>{foundCount} ready</span>}
@@ -479,7 +487,7 @@ export function Scanner() {
                 <Trash2 size={11} /> Clear all
               </button>
             </div>
-            <div style={{ flex: 1, overflow: 'auto', border: `1px solid ${theme.colors.borderLight}`, borderRadius: 6 }}>
+            <div style={{ flex: isMobile ? undefined : 1, overflow: 'auto', maxHeight: isMobile ? '60vh' : undefined, border: `1px solid ${theme.colors.borderLight}`, borderRadius: 6 }}>
               <div style={s.queueHead}>
                 <span>Item ID</span><span>Client</span><span>Vendor / Sidemark</span><span>Description</span><span>Current Loc</span><span></span>
               </div>
@@ -629,11 +637,11 @@ export function Scanner() {
           Shows the queue count + target location above it for quick confirm. */}
       {isMobile && (
         <div style={{
-          flexShrink: 0,
-          padding: '8px 12px 10px',
+          position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 40,
+          padding: '8px 12px calc(10px + env(safe-area-inset-bottom, 0px))',
           background: '#fff',
           borderTop: `1px solid ${theme.colors.border}`,
-          boxShadow: '0 -2px 10px rgba(0,0,0,0.06)',
+          boxShadow: '0 -2px 10px rgba(0,0,0,0.12)',
           display: 'flex',
           flexDirection: 'column',
           gap: 6,

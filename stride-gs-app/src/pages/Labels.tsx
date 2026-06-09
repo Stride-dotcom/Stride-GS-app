@@ -177,11 +177,18 @@ function makeStyles(isMobile: boolean) {
     // vs <main>'s 8px mobile padding overflowed the viewport by ~24px each side
     // (big sideways page-bounce on a phone) and the 32px padding ate the width.
     // Mobile values now cancel main's padding exactly + overflowX:hidden guard.
-    page: { display: 'flex', flexDirection: 'column' as const, height: '100%', fontFamily: theme.typography.fontFamily, background: '#F5F2EE', margin: isMobile ? '-12px -8px' : '-28px -32px', padding: isMobile ? '12px 10px' : '28px 32px', overflowX: isMobile ? ('hidden' as const) : undefined, maxWidth: isMobile ? '100vw' : undefined },
+    // Mobile: natural document flow (height:auto, page grows, <main> scrolls).
+    // The desktop bounded-flex-column + internal-scroll body collapsed the
+    // input/preview cards to slivers on a phone. Desktop keeps the bounded
+    // layout; the mobile Print bar is position:fixed so the body adds bottom
+    // clearance for it.
+    page: { display: 'flex', flexDirection: 'column' as const, height: isMobile ? 'auto' : '100%', minHeight: isMobile ? '100%' : undefined, fontFamily: theme.typography.fontFamily, background: '#F5F2EE', margin: isMobile ? '-12px -8px' : '-28px -32px', padding: isMobile ? '12px 10px' : '28px 32px', overflowX: isMobile ? ('hidden' as const) : undefined, maxWidth: isMobile ? '100vw' : undefined },
     header: { display: 'flex', alignItems: 'center', gap: 10, paddingBottom: 16, marginBottom: 16, flexShrink: 0, flexWrap: 'wrap' as const },
     body: {
-      flex: 1, overflow: 'auto',
+      flex: isMobile ? ('none' as const) : 1,
+      overflow: isMobile ? ('visible' as const) : 'auto',
       padding: isMobile ? 10 : 16,
+      paddingBottom: isMobile ? 88 : 16,
       display: isMobile ? 'flex' : 'grid',
       flexDirection: isMobile ? ('column' as const) : undefined,
       gridTemplateColumns: isMobile ? undefined : '360px 1fr',
@@ -668,7 +675,7 @@ export function Labels() {
               2. Big Generate/Add button
               3. Settings & fields (collapsible, collapsed by default on mobile)
          */}
-        <div className="no-print" style={{ display: 'flex', flexDirection: 'column', gap: 12, overflow: 'auto' }}>
+        <div className="no-print" style={{ display: 'flex', flexDirection: 'column', gap: 12, overflow: isMobile ? 'visible' : 'auto' }}>
           {/* Input panel — FIRST on mobile so the action is visible */}
           {cfg.kind === 'item' ? (
             <div style={s.card}>
@@ -831,7 +838,7 @@ export function Labels() {
         </div>
 
         {/* RIGHT column — preview */}
-        <div className="labels-preview-container" style={{ background: '#ECECEC', padding: 12, borderRadius: 10, minHeight: '100%', overflow: 'auto' }}>
+        <div className="labels-preview-container" style={{ background: '#ECECEC', padding: 12, borderRadius: 10, minHeight: isMobile ? 'auto' : '100%', overflow: 'auto' }}>
           {printCount === 0 && (
             <div style={{ padding: 60, textAlign: 'center', color: theme.colors.textMuted, fontSize: 13, background: '#fff', borderRadius: 10 }}>
               <EyeOff size={20} style={{ opacity: 0.4, marginBottom: 8 }} />
@@ -866,11 +873,11 @@ export function Labels() {
       {/* Mobile sticky bottom action bar — always-visible Print button */}
       {isMobile && (
         <div className="no-print" style={{
-          flexShrink: 0,
-          padding: '10px 12px',
+          position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 40,
+          padding: '10px 12px calc(10px + env(safe-area-inset-bottom, 0px))',
           background: '#fff',
           borderTop: `1px solid ${theme.colors.border}`,
-          boxShadow: '0 -2px 10px rgba(0,0,0,0.06)',
+          boxShadow: '0 -2px 10px rgba(0,0,0,0.12)',
           display: 'flex',
           gap: 8,
         }}>
