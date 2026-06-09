@@ -119,12 +119,15 @@ cd C:\dev\Stride-GS-app\stride-gs-app && npm install
 cd ..\AppScripts\stride-client-inventory && npm install
 ```
 
-Then copy the 3 gitignored credential files from Dropbox into place:
+Then copy the 4 gitignored credential files from Dropbox into place:
 ```
 Dropbox\Apps\GS Inventory\credentials\.credentials.json  →  AppScripts\stride-client-inventory\admin\
 Dropbox\Apps\GS Inventory\credentials\client_secret.json →  AppScripts\stride-client-inventory\admin\
 Dropbox\Apps\GS Inventory\credentials\.sync-config.json  →  AppScripts\stride-client-inventory\admin\
+Dropbox\Apps\GS Inventory\credentials\.env               →  stride-gs-app\.env
 ```
+
+The `.env` in Dropbox is the **complete** file with all four `VITE_` vars (`VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `VITE_API_URL`, `VITE_API_TOKEN`). Without it, `npm run build` silently inlines `VITE_SUPABASE_URL = undefined` and the live bundle crashes at module load (see the worktree `.env` note above). The API URL/token pair is the build-time login fallback — localStorage (Settings → Integrations) still takes precedence at runtime (`src/lib/api.ts`).
 
 ---
 
