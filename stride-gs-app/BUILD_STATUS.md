@@ -143,6 +143,19 @@
 - Still a provisional client-side estimate (no dedup) for the DT description push; `OrderCodStorageCard` on the order page recomputes authoritatively via `collect-cod-storage-sb` (with dedup) and remains the sole billing path. Also tweaked the order-page card's `dirty` check so a *disabled* COD line isn't flagged as unsaved just because its live total differs from the persisted 0. Files: `src/components/shared/CreateDeliveryOrderModal.tsx`, `src/components/shared/OrderCodStorageCard.tsx`. No migration, no EF change. Opus review clean; tsc + build clean.
 
 ---
+## Recent Changes (2026-06-09, billing: INSPECTION billing uses the TRUE piece count — fix/billing/insp-qty)
+
+**Bug:** Inspection (INSP) task completion always billed "Inspection × 1" regardless of how many pieces the item represented. A carton holding N pieces (inventory qty=N) — or one declared as 1 piece but inspected as 7 (item 64028) — billed qty=1/total=$25 instead of qty=N/total=N×$25. RCVG / ASM / REPAIR / WC / every other service code correctly stays **1 per item ID** (only inspection is per-piece).
+
+**Fix (INSP-scoped, both backends):**
+- **GAS `handleCompleteTask_`** (StrideAPI.gs v38.271.0, React path) + **`processTaskCompletionById_`** (Triggers.gs v4.8.1, sheet-checkbox path): for INSP, billQty = the staff-adjusted `public.tasks.qty` when > 1 (read from Supabase via new `api_fetchTaskQty_`, since the Tasks sheet doesn't mirror it), else the inventory item's qty, else 1. Qty cell + Total = rate × billQty. Non-INSP unchanged (qty 1).
+- **SB `complete_task_atomic`** (migration `20260609160200`): qty multiplier now gated to INSP only (`v_eff_qty` = tasks.qty for INSP, else 1) — closes a latent over-bill where a non-INSP task carrying qty>1 (the shared qty editor / split grouped_qty) billed qty×rate.
+- **SB task creation** now seeds `tasks.qty` from inventory.qty for INSP: `batch-create-tasks-sb` (new `fetchInventoryQty`), `complete-shipment-sb buildTaskRow`, `transfer-items-sb` auto-INSP.
+- **Backfill** (migration `20260609160000`): open INSP tasks at qty=1 with inventory qty>1 → set to inventory count (so pending completions bill right).
+- **UI**: `BillingPreviewCard` qty/rate inputs gained focus guards so a realtime refetch can't clobber an in-progress edit (the "I changed it and it reverted to $25" report); `TaskDetailPanel` only offers the qty editor for INSP tasks.
+- **Existing wrong rows**: 4 already-completed Unbilled INSP rows (64028→7, 63978→4, 64038→4, 64101→6, all rate $25) corrected durably at deploy via the GAS `updateBillingRow` API (writes the Billing_Ledger sheet + mirror — a Supabase-only fix would be reverted by the next billing resync).
+
+Files: `AppScripts/stride-api/StrideAPI.gs`, `AppScripts/stride-client-inventory/src/Triggers.gs`, `supabase/functions/{batch-create-tasks-sb,complete-shipment-sb,transfer-items-sb}/index.ts`, `supabase/migrations/20260609160000_backfill_insp_task_qty.sql`, `supabase/migrations/20260609160200_complete_task_atomic_insp_only_qty.sql`, `src/components/shared/{BillingPreviewCard,TaskDetailPanel}.tsx`.
 
 ## Recent Changes (2026-06-09, repairs: automatic repair emails go ONLY to the client's "Notification Emails" list — fix/repairs/notification-emails-only)
 
