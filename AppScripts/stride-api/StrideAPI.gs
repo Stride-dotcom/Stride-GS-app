@@ -1,4 +1,5 @@
 /* ===================================================
+   StrideAPI.gs — v38.269.0 — 2026-06-09 PST — [BILLING] fix: transfer storage cutover now bills the SOURCE for the pre-transfer holding window (Option A), matching the Transfer modal. handleTransferItems_'s storage backfill (section 2.5) previously created the receive_date → transfer_date-1 STOR-TRANSFER rows on the DESTINATION ("destination owns storage end-to-end", v38.245.1) — so on a normal client→client transfer the NEW owner was billed for storage that accrued before they owned the item (reported: Brume→Jodie). Now the backfill is written to the SOURCE ledger with the SOURCE's rate/free-days/discount; the destination bills from transfer_date forward via its own _compute (v_eff_recv=transfer_date) so NO destination backfill is created. Operator decision 2026-06-09: universal source-pays (when the source is the non-paying Needs-ID-Holding account, very high free days → $0 backfill → that limbo window is left unbilled, accepted). No double-bill: the source's stale Unbilled per-item STOR is still voided before the backfill recreates the full holding window; PAID (Invoiced/Billed) ranges on either ledger are deduped. No change to _compute_storage_charges, the v38.182 atomic invoice counter, or half-write detection. The admin retroactive-backfill tool (~line 49117) still bills the destination — left as-is (not the live transfer path; bulk historical out of scope). Companion: one-off Brume→Jodie correction.
    StrideAPI.gs — v38.268.0 — 2026-06-09 PST — [EMAIL] fix: api_sendTemplateEmail_ no longer leaks literal repair tokens. The shared Supabase repair templates (PR #711) use {{ITEM_NOUN}} + {{ITEM_ID_LABEL}} to pluralize multi-item repairs; the SB edge functions supply count-aware values but the GAS senders did not, so a GAS-side send/resend rendered the literal placeholder to the customer (reported: "Repair Quote Requested: Seva Home {{ITEM_ID_LABEL}} 63982"). Fix: (a) default {{ITEM_NOUN}}="item" / {{ITEM_ID_LABEL}}="Item ID" (GAS sends are always single-item) before substitution, and (b) a SAFETY NET that strips any leftover {{UPPERCASE_TOKEN}} after substitution so no unsupplied token can ever reach a customer. Mirror change in the per-client Emails.gs sendTemplateEmail_ (v4.9.0), the live sender of the reported resend. No schema change, no billing logic touched, no change to the v38.182 atomic invoice counter.
    StrideAPI.gs — v38.267.0 — 2026-06-08 PST — [BILLING] fix: voiding a storage invoice now makes the storage re-billable (void-reprice). handleCommitStorageRows_'s finalized-summary scan DROPPED 'void' from its lock condition (was invoiced/billed/void) — a VOIDED blank-sidemark summary previously locked the whole tenant's window forever, so voided storage could never be re-committed. Now only invoiced/billed summaries lock (and only when they lack per-item storage_billing_items detail, per v38.266.0). Companion SB migrations: 20260608236000 drops 'void' from _compute_storage_charges preview dedup source (b) so voided-summary storage reappears in Preview Storage (matches the authoritative per-item source (a), which already treats void as re-billable); 20260608236100 applies BOTH per-item-defer + drop-void to generate_storage_charges (the DORMANT SB-commit RPC, flag=gas, not reachable today — defensive parity). The per-item legacy task-range subtraction keeps 'void' (legacy path, conservative). No double-bill: source (a) / sbiAlreadyBilled / uq_sbi_active_item_period unchanged — an item billed via a still-Invoiced summary stays excluded per item; only genuinely-voided storage reappears (operator reviews before invoicing). No change to the v38.182 atomic invoice counter or half-write detection.
    StrideAPI.gs — v38.266.0 — 2026-06-08 PST — [BILLING] fix: storage partial-selection no longer strands unchecked rows. handleCommitStorageRows_'s finalized-summary gate (tenantWindowLockedNote / lockedSidemarks) refused to re-commit ANY item in a window once a STOR-SUMMARY was finalized — for a separate_by_sidemark=FALSE client the single BLANK-sidemark summary locks the WHOLE tenant, so unchecking some rows + invoicing the rest left the unchecked items permanently un-billable (revenue loss). Fix: read storage_billing_items FIRST (now also selecting summary_ledger_row_id), build sbiFinalizedSummaries (summaries that carry FINALIZED per-item rows), and skip the coarse summary lock for those — the precise per-item sbiAlreadyBilled guard already blocks exactly the items that summary billed, so the unchecked items commit. The lock still fires for a summary with NO per-item detail (Supabase blip during its commit), preserving the double-bill fallback; !sbiActive leaves the set empty → legacy whole-tenant lock. Companion SB migration 20260608235000 applies the SAME rule to the PREVIEW dedup (_compute_storage_charges source (b) gains AND NOT EXISTS finalized storage_billing_items for the summary) so the unchecked rows reappear in Preview Storage. Companion React: the Storage Preview banner shows the selected subset count + total alongside the available total. No change to dollar totals on a full commit, the v38.182 atomic invoice counter, half-write detection, or the per-item double-bill guards (storage_billing_items + uq_sbi_active_item_period untouched).
@@ -23853,12 +23854,12 @@ function handleTransferItems_(sourceClientSheetId, payload) {
         var bStatus = String(bRow[bStatusCol - 1] || "").trim();
         if (bStatus !== "Unbilled") continue;
 
-        // v38.245.1 (2026-05-28): STOR rows on source — void without copying.
-        // Destination owns storage end-to-end: the at-transfer backfill below
-        // (lines ~23582) creates Unbilled STOR on destination for receive_date
-        // → transfer_date - 1, and the monthly storage gen picks up from
-        // transfer_date forward via the Transfer Date cutover. Copying source
-        // STOR onto destination would double-bill the holding period.
+        // v38.269.0: STOR rows on source — void the stale Unbilled per-item STOR
+        // (don't copy to the destination). The section-2.5 backfill below now
+        // recreates the full holding window (receive_date → transfer_date - 1) on
+        // the SOURCE, so these would overlap it; voiding first keeps the source's
+        // storage = exactly that backfill. The destination bills from
+        // transfer_date forward via its own monthly storage gen.
         var bSvcCodePre = bSvcCodeCol ? String(bRow[bSvcCodeCol - 1] || "").trim().toUpperCase() : "";
         if (bSvcCodePre === "STOR") {
           srcBillVoids.push(bi + 1);
@@ -23927,31 +23928,31 @@ function handleTransferItems_(sourceClientSheetId, payload) {
     warnings.push("Billing_Ledger sheets not found on source or destination — billing rows not transferred");
   }
 
-  // ── 2.5 STORAGE BACKFILL — bill destination for the holding period ─────────
+  // ── 2.5 STORAGE BACKFILL — bill the SOURCE for the holding period ──────────
   //
-  // Scenario this exists for: items arrive under "Needs ID Holding" (or the wrong
-  // account) at the start of one billing month and don't get attributed to the
-  // real customer until the next month. The monthly storage-gen run won't catch
-  // those days because (a) the holding account has very high free-storage-days
-  // and never bills, and (b) post-transfer the source-side cutover is still
-  // attributed to the (non-paying) holding account. So the entire holding
-  // window is lost revenue unless an operator manually creates one-off rows.
+  // v38.269.0 (Option A — source/destination split at the Transfer Date cutover,
+  // matching the Transfer modal text): the SOURCE physically held the items from
+  // receive_date → transfer_date - 1, so the SOURCE is billed for that window.
+  // The destination's monthly storage-gen already bills from transfer_date
+  // forward (_compute sets v_eff_recv = transfer_date), so NO destination
+  // backfill is created here.
   //
-  // Solution: at transfer time, generate Unbilled STOR rows on the DESTINATION
-  // covering receive_date → transfer_date - 1, applying destination's free days
-  // and storage discount. Dedup against periods already PAID (Invoiced/Billed)
-  // on either source or destination — voided periods are fair game because
-  // payment never happened.
+  // Prior behaviour (v38.245.1, "destination owns storage end-to-end") billed
+  // this window to the DESTINATION — built for the Needs-ID-Holding workflow but
+  // it charged the wrong party on normal client→client transfers (Brume→Jodie,
+  // 2026-06-09). Operator decision: universal source-pays. Accepted trade-off —
+  // when the SOURCE is the non-paying Needs-ID-Holding account (very high free
+  // days) its backfill computes to $0, so that limbo window is left unbilled.
   //
-  // Independent of the Transfer Date sheet-write fix above: we use the local
-  // `transferDate` variable, not the sheet cell, so this works even when the
-  // bulk sync's old field omission left transfer_date empty in Supabase.
+  // NOTE: the locals below (destFreeDays / destClassVols / sbDestBl*) keep their
+  // "dest"-ish names to minimise the diff but operate on the SOURCE here. Dedup
+  // against PAID (Invoiced/Billed) ranges on EITHER ledger — voided periods are
+  // fair game. Uses the local `transferDate` variable, not the sheet cell.
   var storageBackfillRows = 0;
-  if (destBilling) {
+  if (srcBilling) {
     try {
-      var destSettingsForStor = destSettings; // alias, already loaded above
-      var destFreeDays = Number(destSettingsForStor["FREE_STORAGE_DAYS"] || 0) || 0;
-      var destClassVols = api_loadClassVolumes_(destSS);
+      var destFreeDays = Number(srcSettings["FREE_STORAGE_DAYS"] || 0) || 0; // SOURCE free days
+      var destClassVols = api_loadClassVolumes_(srcSS);                      // SOURCE class volumes
 
       var sbInvHdr = api_getHeaderMap_(srcInv);
       var sbInvItem  = sbInvHdr["Item ID"];
@@ -24001,11 +24002,11 @@ function handleTransferItems_(sourceClientSheetId, payload) {
       _collectPaid(srcBilling, srcBlMap2);
       _collectPaid(destBilling, destBlMap2);
 
-      // Reload source inventory data fresh — the rows we marked Transferred
-      // above might have stale getValues snapshots.
-      var sbDestBlHeaders = destBilling.getRange(1, 1, 1, destBilling.getLastColumn()).getValues()[0];
+      // Backfill rows append to the SOURCE Billing_Ledger (sbDestBl* names kept
+      // to minimise the diff; here they map the SOURCE ledger).
+      var sbDestBlHeaders = srcBilling.getRange(1, 1, 1, srcBilling.getLastColumn()).getValues()[0];
       var sbDestBlWidth = sbDestBlHeaders.length;
-      var sbDestBlMap = destBlMap2;
+      var sbDestBlMap = srcBlMap2;
       var sbCutoff = api_addDays_(transferDate, -1); // last day to bill on holding side
 
       var sbAppendRows = [];
@@ -24021,7 +24022,7 @@ function handleTransferItems_(sourceClientSheetId, payload) {
         var sbDesc  = sbInvDesc ? String(sbInvRow[sbInvDesc - 1] || "").trim() : "";
         var sbShip  = sbInvShip ? String(sbInvRow[sbInvShip - 1] || "").trim() : "";
 
-        // Apply destination's free days from receive_date — held days inside
+        // Apply the SOURCE's free days from receive_date — held days inside
         // the free window are not billable.
         var sbBillableStart = api_addDays_(sbRecv, destFreeDays);
         if (sbBillableStart.getTime() > sbCutoff.getTime()) continue;
@@ -24051,9 +24052,9 @@ function handleTransferItems_(sourceClientSheetId, payload) {
         }
         if (!sbPeriods.length) continue; // fully paid already
 
-        // Look up STOR rate for the class. Mirrors handleGenerateStorageCharges_.
-        var sbRateInfo = api_lookupRate_(destSS, "STOR", sbClass, {
-          itemId: sbItemId, clientName: destClientName, tenantId: destId,
+        // Look up the SOURCE's STOR rate for the class (the source held it).
+        var sbRateInfo = api_lookupRate_(srcSS, "STOR", sbClass, {
+          itemId: sbItemId, clientName: sourceClientName, tenantId: sourceClientSheetId,
           eventSource: "transfer_storage_backfill"
         });
         var sbBaseRate = sbRateInfo.rate || 0;
@@ -24063,7 +24064,7 @@ function handleTransferItems_(sourceClientSheetId, payload) {
           warnings.push("STOR backfill skipped for " + sbItemId + " — no rate for class " + sbClass);
           continue;
         }
-        var sbRate = api_applyDiscount_(destSettings, sbRawRate, "Storage Charges");
+        var sbRate = api_applyDiscount_(srcSettings, sbRawRate, "Storage Charges");
         sbRate = Math.round(sbRate * 100) / 100;
 
         for (var sbP = 0; sbP < sbPeriods.length; sbP++) {
@@ -24087,7 +24088,7 @@ function handleTransferItems_(sourceClientSheetId, payload) {
           var sbRow = new Array(sbDestBlWidth).fill("");
           if (sbDestBlMap["Status"])      sbRow[sbDestBlMap["Status"] - 1]      = "Unbilled";
           if (sbDestBlMap["Invoice #"])   sbRow[sbDestBlMap["Invoice #"] - 1]   = "";
-          if (sbDestBlMap["Client"])      sbRow[sbDestBlMap["Client"] - 1]      = destClientName;
+          if (sbDestBlMap["Client"])      sbRow[sbDestBlMap["Client"] - 1]      = sourceClientName;
           if (sbDestBlMap["Date"])        sbRow[sbDestBlMap["Date"] - 1]        = sbPer.end;
           if (sbDestBlMap["Svc Code"])    sbRow[sbDestBlMap["Svc Code"] - 1]    = "STOR";
           if (sbDestBlMap["Svc Name"])    sbRow[sbDestBlMap["Svc Name"] - 1]    = "Storage";
@@ -24109,8 +24110,8 @@ function handleTransferItems_(sourceClientSheetId, payload) {
       }
 
       if (sbAppendRows.length) {
-        var sbDestLast = api_getLastDataRow_(destBilling);
-        destBilling.getRange(sbDestLast + 1, 1, sbAppendRows.length, sbDestBlWidth).setValues(sbAppendRows);
+        var sbDestLast = api_getLastDataRow_(srcBilling);
+        srcBilling.getRange(sbDestLast + 1, 1, sbAppendRows.length, sbDestBlWidth).setValues(sbAppendRows);
         storageBackfillRows = sbAppendRows.length;
       }
     } catch (sbErr) {
