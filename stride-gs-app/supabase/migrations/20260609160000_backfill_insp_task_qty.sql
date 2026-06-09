@@ -15,9 +15,14 @@
 --     deliberately 1-per-ID; only inspection is per-piece.
 --   * Open tasks only — never re-touch a task whose billing already landed
 --     (a Completed/Cancelled task's ledger row is immutable here).
---   * Only rows still at the default qty=1 AND whose inventory qty > 1 — so a
---     deliberate staff qty edit is never clobbered, and single-piece items
---     (the overwhelming majority) are a no-op.
+--   * Only rows still at qty=1 AND whose inventory qty > 1 — so any staff edit
+--     to a value OTHER than 1 is never clobbered, and single-piece items (the
+--     overwhelming majority) are a no-op. The one edge this does NOT preserve
+--     is a DELIBERATE qty=1 on a multi-piece carton (inspector found 1 good
+--     piece of N); that's indistinguishable from the un-populated default, so
+--     it gets reset to the inventory count and the inspector re-adjusts on the
+--     Billing Preview before completion. Acceptable: open tasks only, and the
+--     "found fewer" case is rare vs. the systemic under-bill being fixed.
 --
 -- No schema change (data-only UPDATE); no parity_dryrun mirror impact; no
 -- change to the v38.182 atomic invoice counter or any billing handler.

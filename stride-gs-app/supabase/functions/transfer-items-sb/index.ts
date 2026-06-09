@@ -333,12 +333,12 @@ Deno.serve(async (req: Request) => {
           // task and immediately see what they're inspecting.
           const { data: invCtx } = await sb
             .from('inventory')
-            .select('item_id, vendor, description, location, sidemark, shipment_number')
+            .select('item_id, vendor, description, location, sidemark, shipment_number, qty')
             .eq('tenant_id', destId)
             .in('item_id', uninspectedIds);
           const ctxById = new Map<string, {
             vendor: string; description: string; location: string;
-            sidemark: string; shipment_number: string;
+            sidemark: string; shipment_number: string; qty: number;
           }>();
           for (const row of (invCtx ?? []) as Array<{
             item_id: string;
@@ -347,13 +347,16 @@ Deno.serve(async (req: Request) => {
             location: string | null;
             sidemark: string | null;
             shipment_number: string | null;
+            qty: number | string | null;
           }>) {
+            const q = Math.round(Number(row.qty));
             ctxById.set(String(row.item_id), {
               vendor:          String(row.vendor          ?? '').trim(),
               description:     String(row.description     ?? '').trim(),
               location:        String(row.location        ?? '').trim(),
               sidemark:        String(row.sidemark        ?? '').trim(),
               shipment_number: String(row.shipment_number ?? '').trim(),
+              qty:             (Number.isFinite(q) && q > 0) ? q : 1,
             });
           }
 
@@ -385,7 +388,7 @@ Deno.serve(async (req: Request) => {
               taskId = `${prefix}${max + 1}`;
             }
             const ctx = ctxById.get(itemId) ?? {
-              vendor: '', description: '', location: '', sidemark: '', shipment_number: '',
+              vendor: '', description: '', location: '', sidemark: '', shipment_number: '', qty: 1,
             };
             newTaskRows.push({
               tenant_id:       destId,
@@ -401,6 +404,9 @@ Deno.serve(async (req: Request) => {
               created:         nowIso,
               item_notes:      'Auto-created on transfer (destination requires inspection)',
               billed:          false,
+              // INSP task → default qty to the item's true piece count (carton
+              // of N → bill "Inspection × N"); staff can adjust before billing.
+              qty:             ctx.qty,
               updated_at:      nowIso,
             });
             newTaskIds.push(taskId);
