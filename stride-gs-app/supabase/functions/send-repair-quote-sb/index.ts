@@ -387,6 +387,15 @@ Deno.serve(async (req: Request) => {
     // Comma-joined list of every item on the repair — drives the subject line
     // and the {{ITEM_ID}} body token (header) so all items are shown.
     const itemIdsLabel = orderedItemIds.join(', ');
+    // Count-aware grammar tokens so the body reads naturally for multi-item
+    // repairs: the REPAIR_QUOTE template's header sentence ("… — {{ITEM_NOUN}}
+    // {{ITEM_ID}}") and the summary-card label ("{{ITEM_ID_LABEL}}") pluralize
+    // when the quote covers more than one item. A client replied confused
+    // ("one chair or both?") when a 2-item quote read "item 64001"; these make
+    // it read "items 64001, 64002".
+    const isMultiItem  = orderedItemIds.length > 1;
+    const itemNoun     = isMultiItem ? 'items' : 'item';
+    const itemIdLabel  = isMultiItem ? 'Item IDs' : 'Item ID';
 
     const itemTableHtml  = renderItemTable(orderedItems);
     const quoteLinesHtml = renderQuoteLines(quoteLines);
@@ -424,6 +433,8 @@ Deno.serve(async (req: Request) => {
               CLIENT_NAME:           clientName,
               REPAIR_ID:             repairId,
               ITEM_ID:               itemIdsLabel,
+              ITEM_NOUN:             itemNoun,
+              ITEM_ID_LABEL:         itemIdLabel,
               ITEM_TABLE_HTML:       itemTableHtml,
               QUOTE_LINE_ITEMS_HTML: quoteLinesHtml,
               // Token values are RAW numbers — the template surrounds each
