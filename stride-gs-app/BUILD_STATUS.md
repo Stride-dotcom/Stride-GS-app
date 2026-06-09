@@ -114,6 +114,16 @@
 
 ---
 
+## Recent Changes (2026-06-09, repairs: automatic repair emails go ONLY to the client's "Notification Emails" list — fix/repairs/notification-emails-only)
+
+- **Report:** Justin — repair auto-emails (quote ready / quote sent / approved / declined / complete) were going to *all* emails associated with the account; they should go only to the client's **"Notification Emails"** list.
+- **Root cause (Supabase path — the live path for real clients; repair cluster is SB-primary fleet-wide since 2026-05-14):** the four customer-facing repair templates resolve recipients to `info@stridenw.com,{{CLIENT_EMAIL}}`. The `{{CLIENT_EMAIL}}` recipient token in `supabase/functions/send-email/index.ts` resolved against **`clients.notification_contacts`** first (the broad intake-captured warehouse-alert contact list), falling back to `clients.email`. But the field the app surfaces as **"Notification Emails"** (`OnboardClientModal.tsx:465`) writes to **`clients.email`**, *not* `notification_contacts` — so repairs blasted a different/broader list than the one staff curate. `{{CLIENT_EMAIL}}` is used as a recipient token by the repair templates only (verified — `doc_quote_template_seed` references it in the PDF *body*, not `recipients`), so this token was repair-specific in practice.
+- **Fix:** `send-email`'s `CLIENT_EMAIL` token now resolves from **`clients.email`** (the "Notification Emails" field) only — comma/semicolon split — and no longer reads `notification_contacts`. `info@stridenw.com` stays (it is hardcoded in each template's `recipients` column, not the token), so Stride keeps its internal copy. Per Justin's 3 decisions (2026-06-09): use the app "Notification Emails" field; keep `info@stridenw.com`; Supabase-only (GAS repair handlers left as-is — dormant fallback).
+- Single-file change: `stride-gs-app/supabase/functions/send-email/index.ts`. No template edit, no migration, no React/`src` change. tsc + build clean (React unaffected; change is in a Deno edge function). Opus code review clean.
+- **⚠️ DEPLOY STILL NEEDED:** `supabase functions deploy send-email` (not deployed this session per instructions). Until deployed, repairs keep hitting `notification_contacts`.
+
+---
+
 ## Recent Changes (2026-06-09, delivery: COD Storage on delivery orders — appears automatically + bills for real — feat/delivery/cod-storage-on-order)
 
 - **Bug:** the COD Storage add-on line on delivery orders (PR #644) never appeared, and even when seeded its "Mark as Collected" never created billing rows. Two root causes:
