@@ -110,6 +110,12 @@
 
 ---
 
+## Recent Changes (2026-06-09, media: PDF first-page thumbnails in the documents list — feat/media/pdf-thumbnails, PR #688)
+
+- The documents list showed thumbnails for image docs but a generic icon for PDFs (e.g. the auto-archived receiving docs). Justin: "there is no preview" — for PDFs in the **list row** (the click-to-open inline preview from #668 already works). `DocThumb` (`src/components/media/DocumentList.tsx`) now renders a PDF's **first page** to a 40×40 thumbnail via **lazy-loaded `pdfjs-dist` v6** (`await import('pdfjs-dist')` + worker via `?url` → separate chunk that only loads when a PDF row mounts; main bundle unchanged ~3.19 MB). Fetches the signed URL → renders page 1 to a canvas → data-URL background (anchored `center top` so the letterhead shows); falls back to the type icon on any error (a corrupt PDF can't crash the row). Leak-safe (`cancelled` flag), `pdf.cleanup()` called. Covers all existing + new PDFs — no backend/schema/backfill. Opus locked-in code-review: Looks good, 0 Critical/Important (lazy chunk, benign worker-init race, fallback-to-icon, transitive `@napi-rs/canvas` is `optional`/Node-only → not bundled). React-only, read-only. tsc + build clean; React deployed via canonical clone.
+
+---
+
 ## Recent Changes (2026-06-09, server-side PDF render — fixes 322 blank auto-archived docs — feat/docs/server-side-render, PR #686)
 
 - **Every auto-archived doc PDF was blank** — 322 of them (~3 KB each) across shipment/task/repair/will-call. The manual "print" button renders perfectly (browser-native engine), but the unattended auto-archive used **html2canvas (html2pdf.js)**, which can't render the doc templates (cross-origin Wix logo, fonts, layout) → empty pages. Justin asked for the durable, off-GAS fix (one engine, one template).
