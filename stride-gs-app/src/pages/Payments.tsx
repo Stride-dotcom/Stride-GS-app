@@ -1973,7 +1973,7 @@ export function Payments() {
           <div style={{ padding: '14px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: `1px solid ${theme.colors.borderLight}` }}>
             <span style={{ fontSize: 14, fontWeight: 600 }}>Stax Customers</span>
             <span style={{ fontSize: 11, color: theme.colors.textMuted }}>
-              Derived from clients with a Stax Customer ID \u2014 edit on the client record.
+              Derived from clients with a Stax Customer ID{' \u2014 '}edit on the client record.
             </span>
           </div>
           {customers.length === 0 ? (

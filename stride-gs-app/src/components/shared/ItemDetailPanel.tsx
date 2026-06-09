@@ -479,7 +479,7 @@ function ItemHistory({ itemId, tasks, repairs, willCalls, billing, moves, shipme
               <div style={{ flex: 1 }}>
                 <div>
                   <span style={{ fontWeight: isTransfer ? 600 : 400, color: isTransfer ? '#1E293B' : '#475569' }}>{m.fromLocation || '\u2014'}</span>
-                  <span style={{ color: '#E85D2D', fontWeight: 700, margin: '0 4px' }}>\u2192</span>
+                  <span style={{ color: '#E85D2D', fontWeight: 700, margin: '0 4px' }}>{'\u2192'}</span>
                   <span style={{ fontWeight: isTransfer ? 600 : 400, color: isTransfer ? '#1E293B' : '#475569' }}>{m.toLocation || '\u2014'}</span>
                   <span style={{
                     display: 'inline-block', padding: '1px 6px', borderRadius: 8, fontSize: 9, fontWeight: 700, marginLeft: 6,
@@ -532,7 +532,7 @@ function ItemHistory({ itemId, tasks, repairs, willCalls, billing, moves, shipme
                   {(r.finalAmount ?? r.approvedAmount) != null
                     ? `$${Number(r.finalAmount ?? r.approvedAmount).toFixed(2)}`
                     : r.quoteAmount != null ? `$${Number(r.quoteAmount).toFixed(2)}` : ''}
-                  {r.repairVendor && <> \u00b7 {r.repairVendor}</>}
+                  {r.repairVendor && <>{' \u00b7 '}{r.repairVendor}</>}
                 </div>
               </div>
             </div>
@@ -566,7 +566,7 @@ function ItemHistory({ itemId, tasks, repairs, willCalls, billing, moves, shipme
           <div key={b.ledgerRowId || i} style={histRowStyle}>
             <div style={histDateStyle}>{fmtDate(b.date)}</div>
             <div style={{ flex: 1 }}>
-              <span style={{ fontSize: 12 }}>{b.svcCode || ''} \u00b7 {b.svcName || SERVICE_CODES[b.svcCode] || ''}</span>
+              <span style={{ fontSize: 12 }}>{b.svcCode || ''}{' \u00b7 '}{b.svcName || SERVICE_CODES[b.svcCode] || ''}</span>
             </div>
             <div style={{ fontWeight: 600, fontSize: 12, whiteSpace: 'nowrap' }}>
               {b.total != null ? `$${Number(b.total).toFixed(2)}` : '\u2014'}
