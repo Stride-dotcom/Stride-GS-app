@@ -6,8 +6,16 @@
 **Live:** https://www.mystridehub.com
 **Repo:** https://github.com/Stride-dotcom/Stride-GS-app
 **Clone:** `git clone https://github.com/Stride-dotcom/Stride-GS-app.git C:\dev\Stride-GS-app`
-**Local path:** `C:\dev\Stride-GS-app` — this is the ONLY canonical location. Do NOT edit from Dropbox.
+**Local path:** `C:\dev\Stride-GS-app` — this is the ONLY canonical location.
 **Supabase:** `uqplppugeickmamycpuz` — `https://uqplppugeickmamycpuz.supabase.co`
+
+> ## ⚠️ DO NOT work from the Dropbox folder
+>
+> **Clone the repo from GitHub to your local machine:**
+> ```
+> git clone https://github.com/Stride-dotcom/Stride-GS-app.git C:\dev\Stride-GS-app
+> ```
+> The Dropbox folder contains only shared onboarding docs and is **NOT a working code repository.**
 
 ---
 
