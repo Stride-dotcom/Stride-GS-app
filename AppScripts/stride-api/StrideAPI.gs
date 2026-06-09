@@ -1,4 +1,5 @@
 /* ===================================================
+   StrideAPI.gs — v38.271.0 — 2026-06-09 PST — [BILLING] fix: INSPECTION task completion now bills the TRUE piece count (Qty × rate), not a hardcoded Qty 1. handleCompleteTask_ wrote every task-completion billing row with "Qty": 1 and Total = appliedRate regardless of how many pieces were inspected — so a carton holding N pieces billed "Inspection × 1 @ $25 = $25" instead of "× N". Fix is scoped to INSP ONLY: billQty = the staff-adjusted public.tasks.qty when > 1 (read from Supabase via new api_fetchTaskQty_ — that count lives Supabase-only; the per-tenant Tasks sheet does not mirror it, so e.g. item 64028 declared as 1 piece but inspected as 7 must read the task qty, not inventory), else the inventory item's qty, else 1. billQty feeds both the Qty cell and Total = appliedRate × billQty (custom-price path multiplies too — per-piece semantics). EVERY OTHER service code stays Qty 1 per item ID (RCVG / ASM / REPAIR / WC / MNRTU / etc. are deliberately 1-per-ID — only inspection is per-piece). SB-side parity: complete_task_atomic gated to multiply by tasks.qty for INSP only (migration 20260609160200) + tasks.qty populated from inventory.qty at INSP task creation (batch-create-tasks-sb, complete-shipment-sb, transfer-items-sb) + a backfill migration for open INSP tasks. No schema change, no change to the v38.182 atomic invoice counter, half-write detection, or any non-inspection billing.
    StrideAPI.gs — v38.270.0 — 2026-06-09 PST — [BILLING/MIGRATION] feat: __writeThroughReverseBilling_ supports op=delete — the SB-native storage commit (commit-storage-charges-sb → commit_storage_rows) removes the stale Unbilled STOR-SUMMARY rows it deleted from public.billing off the per-tenant Billing_Ledger sheet (e.g. blank→sidemark transitions). Finds the row by Ledger Row ID and deletes it, HARD-GUARDED to NEVER delete an Invoiced/Billed row (returns skipped) — only Unbilled/Void/blank; idempotent no-op (skipped) when already absent. Fleet-rollout prerequisite for the commitStorageCharges cutover (the SB commit could previously only insert/update the sheet mirror, stranding stale summaries that GAS invoicing on non-canary tenants could wrongly pick up). Companion: commit_storage_rows returns deletedLedgerIds; the EF fires op=delete for each before mirroring the new summaries. No change to dollar totals, the v38.182 atomic invoice counter, half-write detection, or any insert/update reverse-writethrough path.
    StrideAPI.gs — v38.269.0 — 2026-06-09 PST — [BILLING] fix: transfer storage cutover now bills the SOURCE for the pre-transfer holding window (Option A), matching the Transfer modal. handleTransferItems_'s storage backfill (section 2.5) previously created the receive_date → transfer_date-1 STOR-TRANSFER rows on the DESTINATION ("destination owns storage end-to-end", v38.245.1) — so on a normal client→client transfer the NEW owner was billed for storage that accrued before they owned the item (reported: Brume→Jodie). Now the backfill is written to the SOURCE ledger with the SOURCE's rate/free-days/discount; the destination bills from transfer_date forward via its own _compute (v_eff_recv=transfer_date) so NO destination backfill is created. Operator decision 2026-06-09: universal source-pays (when the source is the non-paying Needs-ID-Holding account, very high free days → $0 backfill → that limbo window is left unbilled, accepted). No double-bill: the source's stale Unbilled per-item STOR is still voided before the backfill recreates the full holding window; PAID (Invoiced/Billed) ranges on either ledger are deduped. No change to _compute_storage_charges, the v38.182 atomic invoice counter, or half-write detection. The admin retroactive-backfill tool (~line 49117) still bills the destination — left as-is (not the live transfer path; bulk historical out of scope). Companion: one-off Brume→Jodie correction.
    StrideAPI.gs — v38.268.0 — 2026-06-09 PST — [EMAIL] fix: api_sendTemplateEmail_ no longer leaks literal repair tokens. The shared Supabase repair templates (PR #711) use {{ITEM_NOUN}} + {{ITEM_ID_LABEL}} to pluralize multi-item repairs; the SB edge functions supply count-aware values but the GAS senders did not, so a GAS-side send/resend rendered the literal placeholder to the customer (reported: "Repair Quote Requested: Seva Home {{ITEM_ID_LABEL}} 63982"). Fix: (a) default {{ITEM_NOUN}}="item" / {{ITEM_ID_LABEL}}="Item ID" (GAS sends are always single-item) before substitution, and (b) a SAFETY NET that strips any leftover {{UPPERCASE_TOKEN}} after substitution so no unsupplied token can ever reach a customer. Mirror change in the per-client Emails.gs sendTemplateEmail_ (v4.9.0), the live sender of the reported resend. No schema change, no billing logic touched, no change to the v38.182 atomic invoice counter.
@@ -19085,6 +19086,37 @@ function api_findInventoryItem_(ss, itemId) {
 
 // ─── Complete Task Handler ─────────────────────────────────────────────────────
 
+// Read public.tasks.qty (the staff-adjustable inspection piece count, set on
+// the React Billing Preview and stored Supabase-only) for one task. Returns a
+// positive integer, or 0 when unset / not found / on any error — callers fall
+// back to the inventory qty. Best-effort, never throws into the hot completion
+// path. Mirrors the GET pattern used by the addons fetch above.
+function api_fetchTaskQty_(clientSheetId, taskId) {
+  try {
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key || !clientSheetId || !taskId) return 0;
+    var getUrl = url + "/rest/v1/tasks"
+               + "?select=qty"
+               + "&tenant_id=eq." + encodeURIComponent(clientSheetId)
+               + "&task_id=eq." + encodeURIComponent(taskId)
+               + "&limit=1";
+    var resp = UrlFetchApp.fetch(getUrl, {
+      method: "GET",
+      headers: { "Authorization": "Bearer " + key, "apikey": key },
+      muteHttpExceptions: true
+    });
+    var code = resp.getResponseCode();
+    if (code < 200 || code >= 300) return 0;
+    var rows = JSON.parse(resp.getContentText()) || [];
+    if (!rows.length) return 0;
+    var q = Math.round(Number(rows[0].qty));
+    return (isNaN(q) || q < 1) ? 0 : q;
+  } catch (e) {
+    return 0;
+  }
+}
+
 function handleCompleteTask_(clientSheetId, payload) {
   if (!clientSheetId) return errorResponse_("clientSheetId is required", "INVALID_PARAMS");
   if (!payload || !payload.taskId) return errorResponse_("taskId is required in payload", "INVALID_PARAMS");
@@ -19233,9 +19265,27 @@ function handleCompleteTask_(clientSheetId, payload) {
       if (!invItem) {
         warnings.push("Inventory item not found for " + itemId + " — billing skipped");
       } else {
+        // v38.269.0 — INSPECTION tasks bill the TRUE piece count (Qty × rate),
+        // not a hardcoded 1. Every other service code stays Qty 1 per item ID
+        // (RCVG / ASM / REPAIR / WC / etc. are deliberately 1-per-ID — only
+        // inspection is per-piece). The authoritative count is the TASK's qty
+        // when staff adjusted it on the Billing Preview (e.g. a carton declared
+        // as 1 piece but the inspector found 7) — that edit lives in
+        // public.tasks.qty (Supabase), which the per-tenant Tasks sheet does
+        // NOT mirror, so we read it directly. Fall back to the inventory item's
+        // qty when the task qty is still the default 1 (un-adjusted) or the
+        // read fails. Mirrors complete_task_atomic, which bills the SB
+        // tasks.qty on the canary path. billQty feeds the Qty cell + Total.
+        var isInspection = (String(svcCode || "").trim().toUpperCase() === "INSP");
+        var billQty = 1;
+        if (isInspection) {
+          var invQ = (Number(invItem.qty) > 0) ? Math.round(Number(invItem.qty)) : 1;
+          var sbTaskQty = api_fetchTaskQty_(clientSheetId, taskId);
+          billQty = (sbTaskQty && sbTaskQty > 1) ? sbTaskQty : invQ;
+        }
         var rateData = api_lookupRate_(ss, svcCode, invItem.itemClass, {
           itemId: itemId, clientName: clientName, tenantId: clientSheetId,
-          qty: 1, eventSource: "task_complete",
+          qty: billQty, eventSource: "task_complete",
           ledgerRowId: svcCode + "-TASK-" + taskId
         });
         var isPASS = (result === "Pass");
@@ -19260,7 +19310,7 @@ function handleCompleteTask_(clientSheetId, payload) {
                 appliedRate = api_applyDiscount_(settings, appliedRate, rateData.category);
               }
               var missingRate = (!hasCustomPrice && appliedRate <= 0);
-              var total = missingRate ? "Missing Rate" : appliedRate;
+              var total = missingRate ? "Missing Rate" : (appliedRate * billQty);
               var billMap = api_getHeaderMap_(billSheet);
               // v38.198.0 — Idempotent write keyed on Ledger Row ID. If the
               // task was previously completed (and reopened, voiding the
@@ -19279,7 +19329,7 @@ function handleCompleteTask_(clientSheetId, payload) {
                 "Item ID":      itemId,
                 "Description":  invItem.description,
                 "Class":        invItem.itemClass,
-                "Qty":          1,
+                "Qty":          billQty,
                 "Rate":         missingRate ? 0 : appliedRate,
                 "Total":        total,
                 "Task ID":      taskId,

@@ -1,5 +1,6 @@
 /* ===================================================
-   Triggers.gs — v4.8.0 — 2026-05-09 PST — onClientEdit now propagates Inventory.Sidemark + Inventory.Reference manual sheet edits to (a) open Tasks rows, (b) open Repairs rows, and (c) Billing_Ledger Unbilled rows on customized-schema clients (column-presence guarded — default-schema clients silently skip the Billing_Ledger write because they have no Sidemark / Reference column there per Decision #18; CB13 Unbilled Reports' Inventory fallback handles them at invoice-generation time). Without this, manual sheet edits to those two fields silently drifted vs. the React-app inline-edit path which already propagates Sidemark/Reference via handleUpdateInventoryItem_'s SYNC_FIELDS map. Closes the gap raised by the transfer-then-reset-sidemark scenario for operators / Justin who edit Inventory directly on the sheet. Mirrors the helper api_propagateInvFieldsToBilling_ added to StrideAPI v38.201.1 in the same shipping pair.
+   Triggers.gs — v4.8.1 — 2026-06-09 PST — [BILLING] fix: processTaskCompletionById_ (sheet-checkbox task completion) now bills INSPECTION tasks at the inventory item's TRUE qty (Qty × rate) instead of a hardcoded Qty 1 — a carton of 6 inspected pieces now bills "Inspection × 6" not "× 1". Scoped to INSP only; every other svc code stays 1-per-ID. Mirrors handleCompleteTask_ in StrideAPI.gs v38.271.0 so the React-app path and the direct-sheet path agree.
+   v4.8.0 — 2026-05-09 PST — onClientEdit now propagates Inventory.Sidemark + Inventory.Reference manual sheet edits to (a) open Tasks rows, (b) open Repairs rows, and (c) Billing_Ledger Unbilled rows on customized-schema clients (column-presence guarded — default-schema clients silently skip the Billing_Ledger write because they have no Sidemark / Reference column there per Decision #18; CB13 Unbilled Reports' Inventory fallback handles them at invoice-generation time). Without this, manual sheet edits to those two fields silently drifted vs. the React-app inline-edit path which already propagates Sidemark/Reference via handleUpdateInventoryItem_'s SYNC_FIELDS map. Closes the gap raised by the transfer-then-reset-sidemark scenario for operators / Justin who edit Inventory directly on the sheet. Mirrors the helper api_propagateInvFieldsToBilling_ added to StrideAPI v38.201.1 in the same shipping pair.
    v4.7.1 — 2026-04-16 PST — Repair quote "VIEW INSPECTION PHOTOS" points to Source Task folder
    v4.7.1: FIX — processRepairQuoteById_ was falling back to the Item folder
            for the {{PHOTOS_BUTTON}} URL because the Source Task ID column
@@ -842,10 +843,16 @@ function processTaskCompletionById_(srcSs, taskId, resultValue) {
     if (shouldBill) {
       var clientName = String(SH_getSetting_(srcSs, "CLIENT_NAME") || "");
       var missingRate = (rateData.rate === 0);
+      // INSPECTION bills the inventory item's TRUE qty (carton of 6 pieces →
+      // Qty 6 × rate). Every other svc code stays Qty 1 per item ID. Mirrors
+      // handleCompleteTask_ in StrideAPI.gs v38.271.0. SH_writeBillingRow_
+      // computes Total = rate × qty, so passing qty here is sufficient.
+      var isInspection = (String(svcCode || "").trim().toUpperCase() === "INSP");
+      var billQty = isInspection ? (Number(invItem.qty) > 0 ? Math.round(Number(invItem.qty)) : 1) : 1;
       var billingResult = SH_writeBillingRow_(srcSs, {
         status: "Unbilled", client: clientName, date: now,
         svcCode: svcCode, svcName: rateData.svcName || svcCode, category: rateData.category || "",
-        itemId: itemId, description: invItem.description, itemClass: invItem.itemClass, qty: 1,
+        itemId: itemId, description: invItem.description, itemClass: invItem.itemClass, qty: billQty,
         rate: missingRate ? 0 : rateData.rate,
         totalOverride: missingRate ? "Missing Rate" : null,
         taskId: taskId, repairId: "", shipNo: shipNo,

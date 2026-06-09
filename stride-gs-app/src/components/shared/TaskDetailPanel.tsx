@@ -1128,7 +1128,16 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
             visible={canEditAddons}
             editable={canEditAddons && isOpen && !completed}
             onUpdatePrimaryRate={handleUpdatePrimaryRate}
-            onUpdatePrimaryQty={handleUpdatePrimaryQty}
+            // Qty is editable for INSPECTION tasks ONLY — inspection is the one
+            // per-piece service (carton of N pieces → "Inspection × N"). Every
+            // other service code bills exactly 1 per item ID, so we don't offer
+            // a qty editor for them (and the SB RPC ignores tasks.qty for
+            // non-INSP regardless — see complete_task_atomic v2026-06-09).
+            onUpdatePrimaryQty={
+              String(task.svcCode || task.serviceCode || task.type || '').toUpperCase().startsWith('INSP')
+                ? handleUpdatePrimaryQty
+                : undefined
+            }
             onAddAddon={async (input) => { await addAddon(input); }}
             onUpdateAddon={async (id, patch) => { await updateAddon(id, patch); }}
             onDeleteAddon={async (id) => { await deleteAddon(id); }}

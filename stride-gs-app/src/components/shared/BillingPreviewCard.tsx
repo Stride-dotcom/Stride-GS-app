@@ -184,10 +184,17 @@ export function BillingPreviewCard({
 
   // Local edit state — synced from props on catalog/customPrice change so
   // external updates (override cleared elsewhere, catalog edited) reflect.
+  // rateEditing freezes that resync while the operator is typing: a realtime
+  // task refetch (or the optimistic mirror) can deliver a stale rate mid-edit
+  // and, because the rate autosaves on a 600ms debounce, the resync would both
+  // yank the field back to the catalog rate AND let the debounced save persist
+  // that catalog value as "no override" — the "I changed the rate and it
+  // reverted to $25" bug. Same guard as the qty field below + EditableCell.
   const [primaryRateDraft, setPrimaryRateDraft] = useState(String(effectivePrimaryRate));
+  const [rateEditing, setRateEditing] = useState(false);
   useEffect(() => {
-    setPrimaryRateDraft(String(effectivePrimaryRate));
-  }, [effectivePrimaryRate]);
+    if (!rateEditing) setPrimaryRateDraft(String(effectivePrimaryRate));
+  }, [effectivePrimaryRate, rateEditing]);
 
   const primaryRateNum = Number(primaryRateDraft);
   const primaryRate = isNaN(primaryRateNum) ? 0 : primaryRateNum;
@@ -201,9 +208,16 @@ export function BillingPreviewCard({
   // per item from wcItems.
   const initialPrimaryQty = Math.max(1, Math.round(Number(primaryQty ?? 1)) || 1);
   const [primaryQtyDraft, setPrimaryQtyDraft] = useState(String(initialPrimaryQty));
+  // Don't clobber an in-progress qty edit when the prop changes underneath us.
+  // A realtime task refetch can deliver a stale primaryQty (e.g. the old qty
+  // before the operator's edit has persisted) mid-typing; without this guard
+  // the resync below would yank the field back to that stale value while the
+  // operator is still editing (the "I typed 6 and it jumped back to 1" bug).
+  // Same focus-guard pattern as Billing.tsx's EditableCell.
+  const [qtyEditing, setQtyEditing] = useState(false);
   useEffect(() => {
-    setPrimaryQtyDraft(String(initialPrimaryQty));
-  }, [initialPrimaryQty]);
+    if (!qtyEditing) setPrimaryQtyDraft(String(initialPrimaryQty));
+  }, [initialPrimaryQty, qtyEditing]);
   const primaryQtyNum = Math.max(1, Math.round(Number(primaryQtyDraft)) || 1);
 
   // ── Will Call: per-item × class projection ──────────────────────────────
@@ -478,6 +492,9 @@ export function BillingPreviewCard({
                       // Local-only update — defer persistence to onQtyBlur
                       // so each keystroke isn't a network round-trip. Same
                       // pattern the addon rows use for their qty inputs.
+                      // qtyEditing freezes the prop→draft resync so a realtime
+                      // refetch can't clobber what's being typed.
+                      setQtyEditing(true);
                       setPrimaryQtyDraft(v);
                     }}
                     onQtyBlur={() => {
@@ -486,16 +503,18 @@ export function BillingPreviewCard({
                         void onUpdatePrimaryQty(n);
                       }
                       setPrimaryQtyDraft(String(n));
+                      setQtyEditing(false);
                     }}
                     rate={primaryRate}
                     rateEditable={editable && !!onUpdatePrimaryRate}
                     rateDraft={primaryRateDraft}
                     onRateChange={(v) => {
+                      setRateEditing(true);
                       setPrimaryRateDraft(v);
                       const num = Number(v);
                       if (!isNaN(num)) schedulePrimarySave(num);
                     }}
-                    onRateBlur={flushPrimarySave}
+                    onRateBlur={() => { flushPrimarySave(); setRateEditing(false); }}
                     total={primaryTotal}
                     hasError={primary.missing && !primaryIsOverride}
                     badge={primaryIsOverride ? 'Override' : null}
