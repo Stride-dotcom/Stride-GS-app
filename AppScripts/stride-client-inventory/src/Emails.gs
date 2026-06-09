@@ -1,5 +1,6 @@
 /* ===================================================
-   Emails.gs — v4.8.2 — 2026-05-01 PST — sendTemplateEmail_ self-heal also rewrites route-style /#/<entity>/<id> URLs to query-param form with &client=, defending future templates against the "Task Not Found" deep-link regression
+   Emails.gs — v4.9.0 — 2026-06-09 PST — sendTemplateEmail_ now (a) defaults the count-aware repair tokens {{ITEM_NOUN}}="item" / {{ITEM_ID_LABEL}}="Item ID" (singular — the GAS sheet-resend path is one item per Repairs row) so the shared Supabase repair templates (PR #711) never render them literally, and (b) strips any leftover {{TOKEN}} a sender didn't supply as a permanent safety net against future template-token leaks (the {{ITEM_ID_LABEL}} resend bug)
+   v4.8.2: 2026-05-01 PST — sendTemplateEmail_ self-heal also rewrites route-style /#/<entity>/<id> URLs to query-param form with &client=, defending future templates against the "Task Not Found" deep-link regression
    v4.8.1: Doc fallback header HTML: explicit widths so logo+name stays left
    v4.8.1: getDefaultDocHtml_ — DOC_RECEIVING, DOC_TASK_WORK_ORDER,
            DOC_REPAIR_WORK_ORDER, DOC_WILL_CALL_RELEASE outer header tables
@@ -261,6 +262,17 @@ tokens = tokens || {};
 // {{INVENTORY_URL}} — link to this client spreadsheet
 if (!tokens["{{INVENTORY_URL}}"]) tokens["{{INVENTORY_URL}}"] = ss.getUrl() || "";
 
+// v4.9.0: Count-aware repair grammar tokens (PR #711). The shared Supabase
+// repair templates (REPAIR_QUOTE / REPAIR_QUOTE_REQUEST / REPAIR_APPROVED /
+// REPAIR_DECLINED / REPAIR_COMPLETE) use {{ITEM_NOUN}} + {{ITEM_ID_LABEL}}
+// to pluralize for multi-item repairs; the SB edge functions supply
+// count-aware values. This GAS path (sheet menu resend) is always
+// single-item (one Repairs row), so default to the singular forms — without
+// this they render LITERALLY to the customer ("Seva Home {{ITEM_ID_LABEL}}
+// 63982" — the reported bug).
+if (!tokens["{{ITEM_NOUN}}"]) tokens["{{ITEM_NOUN}}"] = "item";
+if (!tokens["{{ITEM_ID_LABEL}}"]) tokens["{{ITEM_ID_LABEL}}"] = "Item ID";
+
 // v4.8.0: Auto-generate entity deep-link tokens from IDs (mirror of StrideAPI.gs
 // v38.107.0 api_sendTemplateEmail_). Every entity-specific token gets a matching
 // deep-link URL in query-param style with &client=<spreadsheetId>. Per CLAUDE.md
@@ -302,6 +314,15 @@ var safe = String(value !== undefined && value !== null ? value : "");
 subject = subject.split(token).join(safe);
 htmlBody = htmlBody.split(token).join(safe);
 }
+
+// v4.9.0: SAFETY NET — strip any leftover {{TOKEN}} the caller didn't supply
+// so a customer never sees a literal placeholder. This is how
+// {{ITEM_ID_LABEL}} leaked on a repair-quote-request resend: a template
+// gained a new token before every sender passed it. Scoped to the UPPERCASE
+// token convention ({{A-Z0-9_}}) so legitimate double-braces elsewhere are
+// untouched; runs after substitution so only genuinely-unsupplied tokens go.
+subject  = subject.replace(/\{\{[A-Z0-9_]+\}\}/g, "");
+htmlBody = htmlBody.replace(/\{\{[A-Z0-9_]+\}\}/g, "");
 
 // v4.8.0: STRIP HARDCODED CTAs — templates historically shipped with a hardcoded
 // "View …" button AND we auto-inject one below, producing two CTAs per email.
