@@ -161,8 +161,10 @@ Deno.serve(async (req: Request) => {
       clientsProcessed?: number;
       skippedItems?: unknown;
       committedSummaries?: Array<Record<string, unknown>>;
+      deletedLedgerIds?: Array<{ tenantId?: string; ledgerRowId?: string }>;
     };
     const summaries = Array.isArray(result.committedSummaries) ? result.committedSummaries : [];
+    const deletedLedgers = Array.isArray(result.deletedLedgerIds) ? result.deletedLedgerIds : [];
 
     // Batch-level audit (mirrors the recompute branch's audit shape).
     await sb.from('entity_audit_log').insert({
@@ -179,52 +181,75 @@ Deno.serve(async (req: Request) => {
       warnings.push(`Audit log insert failed: ${e instanceof Error ? e.message : String(e)}`);
     });
 
-    // Mirror committed summaries to each tenant's Billing_Ledger sheet.
+    // Mirror to each tenant's Billing_Ledger sheet (only GAS can write sheets):
+    // first DELETE the stale Unbilled rows the RPC removed from public.billing
+    // (writeThroughReverse op=delete — GAS-side guarded to never delete a
+    // finalized row), then INSERT/refresh the committed summaries. Best-effort —
+    // a sheet failure never fails the SB-authoritative commit (lands in
+    // gs_sync_events + warnings for the Failed Operations drawer).
     const gasUrl   = Deno.env.get('GAS_API_URL');
     const gasToken = Deno.env.get('GAS_API_TOKEN');
     let mirroredCount = 0;
+    let deletedCount  = 0;
     const ledgerIds = summaries
       .map((s) => String((s.ledgerRowId as string | undefined) ?? ''))
       .filter((id) => id.length > 0);
-    if (ledgerIds.length === 0) {
-      // nothing committed (all groups locked or zero-total) — pass result through.
+    if (deletedLedgers.length === 0 && ledgerIds.length === 0) {
+      // nothing committed or deleted (all groups locked / zero-total) — pass through.
     } else if (!gasUrl || !gasToken) {
       warnings.push('GAS_API_URL / GAS_API_TOKEN not configured — Billing_Ledger sheet mirror skipped');
     } else {
-      // Re-fetch the committed summary rows in full public.billing shape to mirror.
-      const { data: billRows, error: readErr } = await sb
-        .from('billing')
-        .select('tenant_id, ledger_row_id, status, client_name, date, svc_code, svc_name, category, item_id, description, item_class, qty, rate, total, task_id, shipment_number, item_notes, sidemark')
-        .in('ledger_row_id', ledgerIds);
-      if (readErr) {
-        warnings.push(`Read-back for sheet mirror failed: ${readErr.message}`);
-      } else {
-        for (const row of (billRows ?? []) as Array<Record<string, unknown>>) {
-          const rowId    = String(row.ledger_row_id ?? '');
-          const tenantId = String(row.tenant_id ?? '');
-          const payload  = { tenantId, table: 'billing', op: 'insert', rowId, row, requestId: `${requestId}:${rowId}` };
-          try {
-            const res = await fetch(`${gasUrl}?action=writeThroughReverse&token=${encodeURIComponent(gasToken)}`, {
-              method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
-            });
-            const text = await res.text();
-            let parsed: { success?: boolean; error?: string } = {};
-            try { parsed = JSON.parse(text); } catch { parsed = { error: `non-JSON: ${text.slice(0, 200)}` }; }
-            if (!res.ok || !parsed.success) {
-              const errMsg = parsed.error ?? `HTTP ${res.status}`;
-              warnings.push(`Sheet mirror failed for ${rowId}: ${errMsg}`);
-              await sb.from('gs_sync_events').insert({
-                tenant_id: tenantId, entity_type: 'billing', entity_id: rowId,
-                action_type: 'writethrough_reverse', sync_status: 'sync_failed',
-                requested_by: callerEmail || 'commit-storage-charges-sb',
-                request_id: `${requestId}:${rowId}`, payload,
-                error_message: String(errMsg).slice(0, 1000),
-              }).then(() => {}, () => {});
-            } else {
-              mirroredCount++;
-            }
-          } catch (mirrorEx) {
-            warnings.push(`Sheet mirror threw for ${rowId}: ${mirrorEx instanceof Error ? mirrorEx.message : String(mirrorEx)}`);
+      // One reverse-writethrough call (op=insert carries `row`; op=delete doesn't).
+      const fireReverse = async (
+        op: 'insert' | 'delete', tenantId: string, rowId: string, row?: Record<string, unknown>,
+      ): Promise<boolean> => {
+        const reqId = `${requestId}:${op === 'delete' ? 'del:' : ''}${rowId}`;
+        const payload: Record<string, unknown> = { tenantId, table: 'billing', op, rowId, requestId: reqId };
+        if (row) payload.row = row;
+        try {
+          const res = await fetch(`${gasUrl}?action=writeThroughReverse&token=${encodeURIComponent(gasToken)}`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+          });
+          const text = await res.text();
+          let parsed: { success?: boolean; error?: string } = {};
+          try { parsed = JSON.parse(text); } catch { parsed = { error: `non-JSON: ${text.slice(0, 200)}` }; }
+          if (!res.ok || !parsed.success) {
+            const errMsg = parsed.error ?? `HTTP ${res.status}`;
+            warnings.push(`Sheet ${op} failed for ${rowId}: ${errMsg}`);
+            await sb.from('gs_sync_events').insert({
+              tenant_id: tenantId, entity_type: 'billing', entity_id: rowId,
+              action_type: 'writethrough_reverse', sync_status: 'sync_failed',
+              requested_by: callerEmail || 'commit-storage-charges-sb',
+              request_id: reqId, payload,
+              error_message: String(errMsg).slice(0, 1000),
+            }).then(() => {}, () => {});
+            return false;
+          }
+          return true;
+        } catch (ex) {
+          warnings.push(`Sheet ${op} threw for ${rowId}: ${ex instanceof Error ? ex.message : String(ex)}`);
+          return false;
+        }
+      };
+
+      // 1. DELETE stale Unbilled summaries the RPC removed (e.g. blank→sidemark).
+      for (const d of deletedLedgers) {
+        const rowId    = String(d.ledgerRowId ?? '');
+        const tenantId = String(d.tenantId ?? '');
+        if (rowId && tenantId && await fireReverse('delete', tenantId, rowId)) deletedCount++;
+      }
+
+      // 2. INSERT/refresh the committed summaries (re-fetched in full billing shape).
+      if (ledgerIds.length > 0) {
+        const { data: billRows, error: readErr } = await sb
+          .from('billing')
+          .select('tenant_id, ledger_row_id, status, client_name, date, svc_code, svc_name, category, item_id, description, item_class, qty, rate, total, task_id, shipment_number, item_notes, sidemark')
+          .in('ledger_row_id', ledgerIds);
+        if (readErr) {
+          warnings.push(`Read-back for sheet mirror failed: ${readErr.message}`);
+        } else {
+          for (const row of (billRows ?? []) as Array<Record<string, unknown>>) {
+            if (await fireReverse('insert', String(row.tenant_id ?? ''), String(row.ledger_row_id ?? ''), row)) mirroredCount++;
           }
         }
       }
@@ -237,6 +262,7 @@ Deno.serve(async (req: Request) => {
       skippedItems:       result.skippedItems,
       committedSummaries: summaries,
       mirroredCount,
+      deletedCount,
       warnings:           warnings.length > 0 ? warnings : undefined,
     });
   }
