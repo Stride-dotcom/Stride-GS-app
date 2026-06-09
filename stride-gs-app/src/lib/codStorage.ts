@@ -244,3 +244,132 @@ export async function markCodStorageCollected(
   const row = Array.isArray(data) ? data[0] : data;
   return row as MarkCollectedResult;
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// Standalone COD Storage invoicing (independent of delivery orders).
+//
+// Backed by the collect-cod-storage-sb Edge Function, which is the
+// authoritative compute path (React never computes billing — it only renders
+// the EF's dry-run preview). See supabase/functions/collect-cod-storage-sb.
+// ────────────────────────────────────────────────────────────────────────
+
+/** One item's line in a standalone COD collection (mirrors the EF's ItemResult). */
+export interface CodCollectionItem {
+  itemId: string;
+  inventoryId: string | null;
+  itemClass: string;
+  sidemark: string;
+  description: string;
+  cubicFeet: number;
+  codStartDate: string | null;
+  periodStart: string | null;
+  periodEnd: string;
+  eligibleDays: number;
+  alreadyCollectedDays: number;
+  billableDays: number;
+  amount: number;
+  ledgerRowId: string | null;
+  status: 'billable' | 'fully_collected' | 'already_invoiced' | 'no_cod' | 'no_cubic';
+}
+
+export interface CodCollectionResult {
+  success: boolean;
+  dryRun: boolean;
+  periodEnd: string;
+  rate: number;
+  items: CodCollectionItem[];
+  summary: {
+    itemsBillable: number;
+    itemsTotal: number;
+    total: number;
+    daysAlreadyCollected: number;
+    created?: number;
+    skipped?: number;
+    errors?: { itemId: string; error: string }[];
+  };
+  error?: string;
+}
+
+async function invokeCollect(body: Record<string, unknown>): Promise<CodCollectionResult> {
+  const { data, error } = await supabase.functions.invoke<CodCollectionResult>(
+    'collect-cod-storage-sb',
+    { body },
+  );
+  if (error) throw new Error(error.message);
+  if (!data) throw new Error('Empty response from collect-cod-storage-sb');
+  if (data.success === false && data.error) throw new Error(data.error);
+  return data;
+}
+
+/** Dry-run preview: compute the per-item breakdown + dedup without writing. */
+export function previewCodCollection(
+  tenantId: string, itemIds: string[], cutoffDate: string, rate: number,
+): Promise<CodCollectionResult> {
+  return invokeCollect({ tenantId, itemIds, cutoffDate, rate, dryRun: true });
+}
+
+/** Commit: create the Unbilled COD_STOR billing rows + record + advance dates. */
+export function collectCodStorage(
+  tenantId: string, itemIds: string[], cutoffDate: string, rate: number,
+  notes: string | null, callerEmail: string | null,
+): Promise<CodCollectionResult> {
+  return invokeCollect({
+    tenantId, itemIds, cutoffDate, rate,
+    notes: notes || '', callerEmail: callerEmail || '', dryRun: false,
+  });
+}
+
+// ── Delivery-order add-on dedup ─────────────────────────────────────────
+// The delivery-order COD line (OrderCodStorageCard) must not re-collect days
+// a standalone collection already invoiced. These helpers read the durable
+// storage_billing_items ledger and subtract already-collected days.
+
+export interface CollectedRange { itemId: string; start: string; end: string }
+
+/** Fetch already-recorded (non-Void) COD/storage day-ranges for these items. */
+export async function fetchCollectedCodRanges(
+  tenantId: string, itemIds: string[],
+): Promise<CollectedRange[]> {
+  const ids = itemIds.filter(Boolean);
+  if (!tenantId || ids.length === 0) return [];
+  const { data, error } = await supabase
+    .from('storage_billing_items')
+    .select('item_id, period_start, period_end, status')
+    .eq('tenant_id', tenantId)
+    .in('item_id', ids)
+    .neq('status', 'Void');
+  if (error) return [];
+  return (data ?? []).map((r) => ({
+    itemId: String((r as { item_id: string }).item_id),
+    start: String((r as { period_start: string }).period_start),
+    end: String((r as { period_end: string }).period_end),
+  }));
+}
+
+/**
+ * Count days in [startIso, cutoffIso] already covered by one of `ranges`
+ * (day-set subtraction), and the first uncollected day. Mirrors the EF's
+ * subtractCollected so the delivery preview matches the standalone math.
+ */
+export function uncollectedInWindow(
+  startIso: string, cutoffIso: string, ranges: { start: string; end: string }[],
+): { uncollectedDays: number; alreadyCollectedDays: number; firstUncollected: string | null } {
+  const eligible = daysInclusive(startIso, cutoffIso);
+  const s = Date.parse(startIso + 'T00:00:00Z');
+  const e = Date.parse(cutoffIso + 'T00:00:00Z');
+  if (!Number.isFinite(s) || !Number.isFinite(e) || e < s) {
+    return { uncollectedDays: 0, alreadyCollectedDays: eligible, firstUncollected: null };
+  }
+  const spans = ranges
+    .map((r) => ({ s: Date.parse(r.start + 'T00:00:00Z'), e: Date.parse(r.end + 'T00:00:00Z') }))
+    .filter((sp) => Number.isFinite(sp.s) && Number.isFinite(sp.e));
+  let uncollected = 0;
+  let first: string | null = null;
+  for (let d = s; d <= e; d += 86400000) {
+    if (!spans.some((sp) => d >= sp.s && d <= sp.e)) {
+      uncollected++;
+      if (!first) first = new Date(d).toISOString().slice(0, 10);
+    }
+  }
+  return { uncollectedDays: uncollected, alreadyCollectedDays: eligible - uncollected, firstUncollected: first };
+}
