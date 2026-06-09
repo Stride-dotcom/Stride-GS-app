@@ -3,9 +3,10 @@ import { useLocation } from 'react-router-dom';
 import {
   useReactTable, getCoreRowModel, getSortedRowModel,
   flexRender, createColumnHelper,
-  type SortingState, type VisibilityState,
+  type SortingState, type VisibilityState, type ColumnSizingState,
 } from '@tanstack/react-table';
 import { useTablePreferences } from '../hooks/useTablePreferences';
+import { ColumnManagerMenu, moveColumnInOrder } from '../components/shared/ColumnManagerMenu';
 import { Plus, Copy, X, Check, Truck, Package, AlertTriangle, Printer, ClipboardPaste, ChevronDown, ChevronRight, ChevronUp, Zap, Settings2, Camera, FileText as DocIcon, Loader2, Save, Upload } from 'lucide-react';
 import { theme } from '../styles/theme';
 import { AutocompleteSelect } from '../components/shared/AutocompleteSelect';
@@ -191,8 +192,8 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
     columnOrder, setColumnOrder,
   } = useTablePreferences('receiving', [], {}, DEFAULT_RCV_COL_ORDER);
   const [sorting, setSorting] = useState<SortingState>([]);
-  const [dragColId, setDragColId] = useState<string | null>(null);
-  const [dragOverColId, setDragOverColId] = useState<string | null>(null);
+  const [columnSizing, setColumnSizing] = useState<ColumnSizingState>({});
+  const [colToggleRect, setColToggleRect] = useState<DOMRect | null>(null);
   const [showColToggle, setShowColToggle] = useState(false);
 
   const [client, setClient] = useState('');
@@ -1436,39 +1437,21 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
   const table = useReactTable({
     data: tableData,
     columns,
-    state: { sorting, columnVisibility, columnOrder },
+    state: { sorting, columnVisibility, columnOrder, columnSizing },
     onSortingChange: setSorting,
     onColumnVisibilityChange: (updater: VisibilityState | ((prev: VisibilityState) => VisibilityState)) => {
       setColumnVisibility(typeof updater === 'function' ? updater(columnVisibility) : updater);
     },
     onColumnOrderChange: setColumnOrder,
+    onColumnSizingChange: setColumnSizing,
+    columnResizeMode: 'onChange',
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),
     enableMultiSort: true,
   });
 
   // ── Drag-to-reorder column headers ────────────────────────────────────────
-  function onHeaderDragStart(e: React.DragEvent<HTMLTableCellElement>, colId: string) {
-    setDragColId(colId);
-    e.dataTransfer.effectAllowed = 'move';
-  }
-  function onHeaderDragOver(e: React.DragEvent<HTMLTableCellElement>, colId: string) {
-    e.preventDefault();
-    setDragOverColId(colId);
-  }
-  function onHeaderDrop(e: React.DragEvent<HTMLTableCellElement>, targetColId: string) {
-    e.preventDefault();
-    if (!dragColId || targetColId === dragColId) return;
-    const order = [...columnOrder];
-    const from = order.indexOf(dragColId);
-    const to = order.indexOf(targetColId);
-    if (from === -1 || to === -1) return;
-    order.splice(from, 1);
-    order.splice(to, 0, dragColId);
-    setColumnOrder(order);
-    setDragColId(null);
-    setDragOverColId(null);
-  }
+  // Column reorder is now via the Columns menu (ColumnManagerMenu ▲/▼).
 
   const reset = useCallback(() => {
     setClient(''); setClientSheetId(''); setCarrier(''); setTracking('');
@@ -1948,25 +1931,23 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
             {/* Column visibility toggle */}
             <div style={{ position: 'relative' }}>
               <button
-                onClick={() => setShowColToggle(p => !p)}
+                onClick={e => { setColToggleRect(e.currentTarget.getBoundingClientRect()); setShowColToggle(p => !p); }}
                 style={{ padding: '5px 10px', fontSize: 11, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: showColToggle ? '#F3F4F6' : '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary, display: 'flex', alignItems: 'center', gap: 4 }}
               >
                 <Settings2 size={13} /> Columns
               </button>
-              {showColToggle && (
-                <div style={{ position: 'absolute', top: 'calc(100% + 4px)', right: 0, zIndex: 300, background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 8, padding: '8px 12px', boxShadow: '0 4px 16px rgba(0,0,0,0.12)', minWidth: 150 }}>
-                  <div style={{ fontSize: 10, fontWeight: 600, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 }}>Show / Hide</div>
-                  {TOGGLEABLE_RCV_COLS.map(colId => {
-                    const col = table.getColumn(colId);
-                    if (!col) return null;
-                    return (
-                      <label key={colId} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '3px 0', cursor: 'pointer', fontSize: 12, color: theme.colors.textPrimary, userSelect: 'none' }}>
-                        <input type="checkbox" checked={col.getIsVisible()} onChange={() => col.toggleVisibility()} style={{ accentColor: theme.colors.orange, cursor: 'pointer' }} />
-                        {RCV_COL_LABELS[colId]}
-                      </label>
-                    );
-                  })}
-                </div>
+              {showColToggle && colToggleRect && (
+                <ColumnManagerMenu
+                  anchorRect={colToggleRect}
+                  toggleableIds={TOGGLEABLE_RCV_COLS}
+                  labels={RCV_COL_LABELS}
+                  visibility={columnVisibility}
+                  onToggle={id => setColumnVisibility(v => ({ ...v, [id]: v[id] === false }))}
+                  columnOrder={columnOrder.length ? columnOrder : DEFAULT_RCV_COL_ORDER}
+                  onMove={(id, dir) => moveColumnInOrder(id, dir, setColumnOrder, DEFAULT_RCV_COL_ORDER, ['expand', 'rowNum', 'actions'])}
+                  onClose={() => setShowColToggle(false)}
+                  onResetWidths={() => setColumnSizing({})}
+                />
               )}
             </div>
           </div>
@@ -2014,13 +1995,12 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
         )}
 
         <div style={{ overflowX: 'auto', maxHeight: isMobile ? 'calc(100dvh - 320px)' : 'calc(100dvh - 440px)', minHeight: isMobile ? 200 : undefined, WebkitOverflowScrolling: 'touch' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: isMobile ? 800 : 1000 }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed', minWidth: isMobile ? 800 : table.getTotalSize() }}>
             <thead>
               {table.getHeaderGroups().map(hg => (
                 <tr key={hg.id}>
                   {hg.headers.map(header => {
                     const colId = header.column.id;
-                    const canDrag = colId !== 'expand' && colId !== 'rowNum' && colId !== 'actions';
                     const canSort = header.column.getCanSort();
                     const sorted = header.column.getIsSorted();
                     const center = ['expand', 'rowNum', 'needsInspection', 'needsAssembly', 'actions'].includes(colId);
@@ -2030,16 +2010,11 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
                         style={{
                           ...th,
                           width: header.getSize(),
+                          boxSizing: 'border-box',
                           textAlign: center ? 'center' : 'left',
-                          opacity: dragColId === colId ? 0.45 : 1,
-                          background: dragOverColId === colId ? '#F3F4F6' : '#fff',
-                          cursor: canDrag ? 'grab' : 'default',
+                          background: '#fff',
+                          cursor: 'default',
                         }}
-                        draggable={canDrag}
-                        onDragStart={canDrag ? e => onHeaderDragStart(e, colId) : undefined}
-                        onDragOver={canDrag ? e => onHeaderDragOver(e, colId) : undefined}
-                        onDrop={canDrag ? e => onHeaderDrop(e, colId) : undefined}
-                        onDragEnd={() => { setDragColId(null); setDragOverColId(null); }}
                       >
                         {canSort ? (
                           <div
@@ -2051,6 +2026,14 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
                           </div>
                         ) : (
                           flexRender(header.column.columnDef.header, header.getContext())
+                        )}
+                        {header.column.getCanResize() && (
+                          <div
+                            onMouseDown={e => { e.stopPropagation(); header.getResizeHandler()(e); }}
+                            onTouchStart={e => { e.stopPropagation(); header.getResizeHandler()(e); }}
+                            onClick={e => e.stopPropagation()}
+                            style={{ position: 'absolute', right: 0, top: 0, height: '100%', width: 8, cursor: 'col-resize', touchAction: 'none', userSelect: 'none', background: header.column.getIsResizing() ? theme.colors.orange : 'transparent', zIndex: 5 }}
+                          />
                         )}
                       </th>
                     );
