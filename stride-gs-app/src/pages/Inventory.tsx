@@ -711,13 +711,12 @@ export function Inventory() {
   useLocations(apiConfigured);
   const { tasks, refetch: refetchTasks, addOptimisticTask, removeOptimisticTask } = useTasks(apiConfigured && clientFilter.length > 0, selectedSheetId);
   const { repairs, addOptimisticRepair, removeOptimisticRepair } = useRepairs(apiConfigured && clientFilter.length > 0, selectedSheetId);
-  // Supabase-backed indicator sets. We only consume its repair sets here:
-  // useItemIndicators expands the repair_items join (PR #616) so EVERY item on
-  // a batch repair is badged, not just the primary. The page's own inline
-  // derivation below stamps only the primary item (the `repairs` row carries a
-  // single item_id), which is why secondary items on a batch repair showed no
-  // R badge here even after #616 fixed the hook. We union the two below so the
-  // primary keeps its instant/optimistic badge AND secondaries get badged.
+  // Supabase-backed indicator sets — the SINGLE SOURCE OF TRUTH for every
+  // badge type (I/A/R/W/D/$). The hook owns the canonical derivation: batch
+  // repair_items expansion (PR #616), the DT delivery (D) badge, and COD ($).
+  // The page's optimistic overlay below is unioned INTO these sets (open wins)
+  // so a just-created task/repair/WC badges instantly, but the hook always
+  // wins for authoritative state once its realtime echo lands.
   const repairIndicators = useItemIndicators(selectedSheetId);
   const { willCalls, addOptimisticWc, removeOptimisticWc } = useWillCalls(apiConfigured && clientFilter.length > 0, selectedSheetId);
   const { orders } = useOrders();
@@ -1149,13 +1148,20 @@ export function Inventory() {
     }
   }, [apiConfigured, showToast, refetch, addOptimisticRepair, removeOptimisticRepair, user?.email]);
 
-  // Session 71+: Build item-level task/repair/WC/DT indicator sets from already-loaded data.
-  // Cancelled tasks / repairs / will-calls and Cancelled DT orders produce NO badge —
-  // without these skips, every non-Completed status falls through to the else-branch
-  // and paints the item orange (the pattern that left badges lingering on cancelled
-  // entities until item-by-item cleanup). Mirrors the same skip logic in
-  // hooks/useItemIndicators.ts so the two derivations stay in sync.
-  const { inspOpenItems, inspDoneItems, inspFailedItems, asmOpenItems, asmDoneItems, repairOpenItems: inlineRepairOpenItems, repairDoneItems: inlineRepairDoneItems, wcOpenItems, wcDoneItems, dtOpenItems, dtDoneItems } = useMemo(() => {
+  // Session 71+: OPTIMISTIC OVERLAY ONLY. useItemIndicators (the hook above,
+  // `repairIndicators`) is the SINGLE SOURCE OF TRUTH for every badge type —
+  // it owns the canonical derivation including batch repair_items expansion
+  // (PR #616), the DT delivery (D) badge, and COD ($). This block does NOT
+  // re-implement that logic as a competing source; it only derives optimistic
+  // open/done sets from the page's already-loaded (and optimistically-updated
+  // via addOptimisticTask/Repair/Wc) in-memory data so a just-created entity
+  // badges INSTANTLY, before the Supabase round-trip the hook reads from lands.
+  // It is unioned INTO the hook below (open wins, never subtracts), so it can
+  // only ADD a transient badge — it can't diverge from or override the hook's
+  // authoritative state once the realtime echo arrives. Cancelled entities are
+  // skipped here exactly as the hook skips them, so the overlay can't resurrect
+  // a cancelled badge during the optimistic window.
+  const localOverlay = useMemo(() => {
     const inspOpen = new Set<string>();
     const inspDone = new Set<string>();
     const inspFailed = new Set<string>();
@@ -1185,7 +1191,7 @@ export function Inventory() {
       else { repOpen.add(r.itemId); repDone.delete(r.itemId); }
     }
 
-    // Will call indicators — Released → green, Cancelled → no badge, everything else → orange
+    // Will call overlay — Released → green, Cancelled → no badge, else → orange
     const wcOpen = new Set<string>();
     const wcDone = new Set<string>();
     for (const wc of willCalls) {
@@ -1201,11 +1207,8 @@ export function Inventory() {
       }
     }
 
-    // DT delivery order indicators — completed → green, cancelled → no badge,
-    // everything else (draft/review/open) → orange. dt_order_items soft-removed
-    // rows (removed_at IS NOT NULL) are already filtered out upstream in
-    // fetchDtOrdersFromSupabase, so deletes propagate to the D badge on the
-    // next fetch without any extra logic here.
+    // DT delivery order overlay — completed → green, cancelled → no badge,
+    // everything else (draft/review/open) → orange.
     const dtOpen = new Set<string>();
     const dtDone = new Set<string>();
     for (const order of orders) {
@@ -1222,24 +1225,39 @@ export function Inventory() {
       }
     }
 
-    return { inspOpenItems: inspOpen, inspDoneItems: inspDone, inspFailedItems: inspFailed, asmOpenItems: asmOpen, asmDoneItems: asmDone, repairOpenItems: repOpen, repairDoneItems: repDone, wcOpenItems: wcOpen, wcDoneItems: wcDone, dtOpenItems: dtOpen, dtDoneItems: dtDone };
+    return { inspOpen, inspDone, inspFailed, asmOpen, asmDone, repOpen, repDone, wcOpen, wcDone, dtOpen, dtDone };
   }, [tasks, repairs, willCalls, orders]);
 
-  // Union the page-local repair badge sets (instant + optimistic, but PRIMARY
-  // item only — the `repairs` row carries one item_id) with useItemIndicators'
-  // Supabase sets, which expand the repair_items join so every item on a batch
-  // repair is badged. Open wins over done: an item open in EITHER source is
-  // orange; it's green only if done in some source and open in none. This is
-  // the fix for PR #616's R badge regressing here — the hook was fixed but this
-  // page's parallel derivation still stamped only the primary item.
-  const { repairOpenItems, repairDoneItems } = useMemo(() => {
-    const open = new Set<string>(inlineRepairOpenItems);
-    for (const id of repairIndicators.repairOpenItems) open.add(id);
-    const done = new Set<string>();
-    for (const id of inlineRepairDoneItems) if (!open.has(id)) done.add(id);
-    for (const id of repairIndicators.repairDoneItems) if (!open.has(id)) done.add(id);
-    return { repairOpenItems: open, repairDoneItems: done };
-  }, [inlineRepairOpenItems, inlineRepairDoneItems, repairIndicators.repairOpenItems, repairIndicators.repairDoneItems]);
+  // Union the optimistic overlay with useItemIndicators (the source of truth).
+  // Open wins over done in BOTH directions: an item open in EITHER the fresh
+  // local overlay OR the hook is orange; it's green only if done somewhere and
+  // open nowhere. inspFailed is the union of both failed sets. codItems comes
+  // solely from the hook (no optimistic local source on this page) and is read
+  // directly off `repairIndicators` at the render site.
+  const { inspOpenItems, inspDoneItems, inspFailedItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems, wcOpenItems, wcDoneItems, dtOpenItems, dtDoneItems } = useMemo(() => {
+    const merge = (lo: Set<string>, ld: Set<string>, ho: Set<string>, hd: Set<string>) => {
+      const open = new Set<string>(lo);
+      for (const id of ho) open.add(id);
+      const done = new Set<string>();
+      for (const id of ld) if (!open.has(id)) done.add(id);
+      for (const id of hd) if (!open.has(id)) done.add(id);
+      return { open, done };
+    };
+    const insp = merge(localOverlay.inspOpen, localOverlay.inspDone, repairIndicators.inspOpenItems, repairIndicators.inspDoneItems);
+    const asm = merge(localOverlay.asmOpen, localOverlay.asmDone, repairIndicators.asmOpenItems, repairIndicators.asmDoneItems);
+    const rep = merge(localOverlay.repOpen, localOverlay.repDone, repairIndicators.repairOpenItems, repairIndicators.repairDoneItems);
+    const wc = merge(localOverlay.wcOpen, localOverlay.wcDone, repairIndicators.wcOpenItems, repairIndicators.wcDoneItems);
+    const dt = merge(localOverlay.dtOpen, localOverlay.dtDone, repairIndicators.dtOpenItems, repairIndicators.dtDoneItems);
+    const inspFailed = new Set<string>(localOverlay.inspFailed);
+    for (const id of repairIndicators.inspFailedItems) inspFailed.add(id);
+    return {
+      inspOpenItems: insp.open, inspDoneItems: insp.done, inspFailedItems: inspFailed,
+      asmOpenItems: asm.open, asmDoneItems: asm.done,
+      repairOpenItems: rep.open, repairDoneItems: rep.done,
+      wcOpenItems: wc.open, wcDoneItems: wc.done,
+      dtOpenItems: dt.open, dtDoneItems: dt.done,
+    };
+  }, [localOverlay, repairIndicators]);
 
   // Latest public entity_note per visible item, batched so the Notes
   // column can show collaborative notes without per-row queries. Falls
@@ -1591,7 +1609,7 @@ export function Inventory() {
       ),
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [showToast, inspOpenItems, inspDoneItems, inspFailedItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems, repairIndicators.codItems, applyItemPatch, mergeItemPatch, canEditInventory, canEditClientFields, notesByItemId, notesDetailByItemId]);
+  ], [showToast, inspOpenItems, inspDoneItems, inspFailedItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems, wcOpenItems, wcDoneItems, dtOpenItems, dtDoneItems, repairIndicators.codItems, applyItemPatch, mergeItemPatch, canEditInventory, canEditClientFields, notesByItemId, notesDetailByItemId]);
 
   // When navigating from Shipments page, filter table to that shipment
   const tableData = useMemo(() => {
