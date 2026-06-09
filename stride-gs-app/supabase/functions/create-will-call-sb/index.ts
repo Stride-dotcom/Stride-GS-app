@@ -156,7 +156,7 @@ Deno.serve(async (req: Request) => {
 
   // 5. Generate WC number + compute per-item fees
   const now = new Date();
-  const wcNumber = generateWcNumber(now);
+  const wcNumber = await mintWcNumber(sb, tenantId, now);
   const status   = body.estDate ? 'Scheduled' : 'Pending';
 
   let totalFee = 0;
@@ -259,6 +259,31 @@ Deno.serve(async (req: Request) => {
 });
 
 // ── Helpers ─────────────────────────────────────────────────────────────
+
+/**
+ * Mint the WC number. When the `orderNumbering` feature is on for this tenant
+ * (Justin Demo canary), the SECURITY DEFINER `next_order_id` RPC returns a
+ * clean client-scoped number (PREFIX-WC-N, no leading zeros). When off it
+ * returns null and we fall back to the legacy WC-MMddyyHHmmss timestamp id.
+ * The reverse-writethrough below pushes whichever id we pick to the sheet.
+ */
+async function mintWcNumber(
+  sb: ReturnType<typeof createClient>,
+  tenantId: string,
+  now: Date,
+): Promise<string> {
+  try {
+    const { data, error } = await sb.rpc('next_order_id', {
+      p_tenant_id: tenantId,
+      p_order_type: 'will_call',
+    });
+    if (error) console.warn('[create-will-call-sb] next_order_id failed, using legacy id:', error.message);
+    else if (typeof data === 'string' && data) return data;
+  } catch (e) {
+    console.warn('[create-will-call-sb] next_order_id threw, using legacy id:', e);
+  }
+  return generateWcNumber(now);
+}
 
 function generateWcNumber(d: Date): string {
   // Mirrors GAS: "WC-MMddyyHHmmss" in script TZ. We use UTC for

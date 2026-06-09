@@ -6,31 +6,42 @@ import { DeepLink, type DeepLinkKind } from './DeepLink';
  * converted to deep-link anchors that open in a new tab.
  *
  * Detected patterns:
- *   Task IDs:    INSP-XXX-N, ASM-XXX-N, MNRTU-XXX-N, RUSH-XXX-N, DISP-XXX-N, etc.
- *   Repair IDs:  RPR-XXX-N
- *   WC Numbers:  WC-XXXXX (5+ digit WC numbers)
+ *   Legacy task IDs:    INSP-XXX-N, ASM-XXX-N, MNRTU-XXX-N, RUSH-XXX-N, DISP-XXX-N, etc.
+ *   Legacy repair IDs:  RPR-XXX-N
+ *   Legacy WC Numbers:  WC-XXXXX (5+ digit WC numbers)
+ *   Clean order IDs:    PREFIX-RPR-N / PREFIX-WC-N / PREFIX-TSK-N (orderNumbering
+ *                       feature — type token is the MIDDLE segment, e.g. JAS-RPR-12)
  *
  * Everything else is rendered as plain text (preserving whitespace/newlines).
  *
  * v38.9.0 / Task linkification in Item Notes.
  */
 
-// Match entity IDs used across the system:
-//   Task IDs:   2-6 uppercase letters, dash, digits, dash, digits (e.g. INSP-123-1, ASM-59374-285)
+// Match entity IDs used across the system. The first alternative matches the
+// clean orderNumbering format (PREFIX-RPR/WC/TSK-N) FIRST so it captures the
+// whole id (otherwise the legacy alternative below would mis-match the inner
+// `WC-7` of `JAS-WC-7`). The second alternative is the legacy token-first form:
+//   Task IDs:   2-6 uppercase letters, dash, digits, dash, digits (e.g. INSP-123-1)
 //   Repair IDs: RPR-digits-digits
 //   WC numbers: WC-digits (5+ digits, e.g. WC-032426)
-const ENTITY_ID_REGEX = /\b((?:INSP|ASM|MNRTU|RUSH|DISP|WC|WCPU|REPAIR|RPR|STOR|RCVG)-[\w]+-?\d*)\b/g;
+const ENTITY_ID_REGEX = /\b([A-Za-z]{1,4}-(?:RPR|WC|TSK)-\d+|(?:INSP|ASM|MNRTU|RUSH|DISP|WC|WCPU|REPAIR|RPR|STOR|RCVG)-[\w]+-?\d*)\b/g;
+
+// Clean orderNumbering ids carry the type token in the MIDDLE segment
+// (PREFIX-TOKEN-N); legacy ids carry it FIRST. Resolve the token accordingly.
+const CLEAN_ORDER_ID = /^[A-Za-z]{1,4}-(RPR|WC|TSK)-\d+$/;
 
 function getDeepLinkKind(id: string): DeepLinkKind | null {
-  const prefix = id.split('-')[0].toUpperCase();
-  switch (prefix) {
+  const cleanMatch = CLEAN_ORDER_ID.exec(id.toUpperCase());
+  const token = cleanMatch ? cleanMatch[1] : id.split('-')[0].toUpperCase();
+  switch (token) {
     case 'RPR':
     case 'REPAIR':
       return 'repair';
     case 'WC':
     case 'WCPU':
       return 'willcall';
-    // All task-type prefixes → tasks page
+    // All task-type tokens → tasks page
+    case 'TSK':
     case 'INSP':
     case 'ASM':
     case 'MNRTU':

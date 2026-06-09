@@ -95,6 +95,12 @@ Deno.serve(async (req: Request) => {
   }
   const sb = createClient(supabaseUrl, serviceKey);
 
+  // Order Numbering feature (Justin Demo canary): when on, each new task gets
+  // a clean client-scoped id (PREFIX-TSK-N, no leading zeros) from the
+  // next_order_id RPC instead of the legacy SVC-ITEM-N counter. Resolved once
+  // per request; off → legacy path (no extra per-task RPC round trips).
+  const cleanNumbering = await orderNumberingOn(sb, tenantId);
+
   // Resolve service name from svc_code via service_catalog (mirrors
   // api_lookupSvcName_). Best-effort — falls back to svcCode itself if
   // the catalog lookup fails.
@@ -111,6 +117,11 @@ Deno.serve(async (req: Request) => {
   const now = new Date();
   const skipped: Array<{ itemId: string; svcCode: string; reason: string }> = [];
   const taskIds: string[] = [];
+  // Carries the originating svcCode alongside each generated taskId so the
+  // audit log records the real service code. The legacy id encoded it as the
+  // first segment (taskId.split('-')[0]); the clean PREFIX-TSK-N id does not,
+  // so we can no longer parse it back out of the id.
+  const taskMeta: Array<{ taskId: string; svcCode: string }> = [];
   const toInsert: Array<Record<string, unknown>> = [];
 
   // Compute due date for a given svcCode per the precedence rule
@@ -147,13 +158,29 @@ Deno.serve(async (req: Request) => {
         continue;
       }
 
-      // Generate Task ID: SVC-ITEM-N
-      const counterKey = `${itemId}|${svcCode}`;
-      if (counterCache[counterKey] == null) {
-        counterCache[counterKey] = await maxExistingCounter(sb, tenantId, itemId, svcCode);
+      // Generate Task ID. Clean SB-generated id (PREFIX-TSK-N) when the
+      // orderNumbering feature is on for this tenant; legacy SVC-ITEM-N
+      // counter otherwise.
+      let taskId: string;
+      if (cleanNumbering) {
+        const { data: cleanId, error: cleanErr } = await sb.rpc('next_order_id', {
+          p_tenant_id: tenantId,
+          p_order_type: 'task',
+        });
+        if (cleanErr || typeof cleanId !== 'string' || !cleanId) {
+          console.error('[batch-create-tasks-sb] next_order_id failed:', cleanErr?.message);
+          return json({ error: `Task number allocation failed: ${cleanErr?.message ?? 'no id returned'}` }, 500);
+        }
+        taskId = cleanId;
+      } else {
+        // Generate Task ID: SVC-ITEM-N
+        const counterKey = `${itemId}|${svcCode}`;
+        if (counterCache[counterKey] == null) {
+          counterCache[counterKey] = await maxExistingCounter(sb, tenantId, itemId, svcCode);
+        }
+        counterCache[counterKey] += 1;
+        taskId = `${svcCode}-${itemId}-${counterCache[counterKey]}`;
       }
-      counterCache[counterKey] += 1;
-      const taskId = `${svcCode}-${itemId}-${counterCache[counterKey]}`;
 
       const dueDateIso = computeDueDate(svcCode);
 
@@ -178,6 +205,7 @@ Deno.serve(async (req: Request) => {
       });
 
       taskIds.push(taskId);
+      taskMeta.push({ taskId, svcCode });
       openMap[dedupKey] = true; // prevent intra-batch dupes
     }
   }
@@ -192,12 +220,12 @@ Deno.serve(async (req: Request) => {
   }
 
   // Audit-log per task (best-effort; mirrors GAS api_auditLog_ wrap)
-  const auditPromises = taskIds.map(taskId => sb.from('entity_audit_log').insert({
+  const auditPromises = taskMeta.map(({ taskId, svcCode }) => sb.from('entity_audit_log').insert({
     entity_type:   'task',
     entity_id:     taskId,
     tenant_id:     tenantId,
     action:        'create',
-    changes:       { svcCode: taskId.split('-')[0], requestId },
+    changes:       { svcCode, requestId },
     performed_by:  callerEmail || 'batch-create-tasks-sb',
     source:        'supabase',
   }).then(() => {}, () => {}));
@@ -216,6 +244,28 @@ Deno.serve(async (req: Request) => {
 });
 
 // ── Helpers ─────────────────────────────────────────────────────────────
+
+/**
+ * Resolve whether the `orderNumbering` feature is on for this tenant via the
+ * SECURITY DEFINER `order_numbering_enabled` RPC (MIG-010 per-tenant scope).
+ * Fails safe to false (legacy SVC-ITEM-N ids) on any error.
+ */
+async function orderNumberingOn(
+  sb: ReturnType<typeof createClient>,
+  tenantId: string,
+): Promise<boolean> {
+  try {
+    const { data, error } = await sb.rpc('order_numbering_enabled', { p_tenant_id: tenantId });
+    if (error) {
+      console.warn('[batch-create-tasks-sb] order_numbering_enabled failed:', error.message);
+      return false;
+    }
+    return data === true;
+  } catch (e) {
+    console.warn('[batch-create-tasks-sb] order_numbering_enabled threw:', e);
+    return false;
+  }
+}
 
 async function resolveSvcNames(
   sb: ReturnType<typeof createClient>,
