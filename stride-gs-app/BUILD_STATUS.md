@@ -110,6 +110,14 @@
 
 ---
 
+## Recent Changes (2026-06-09, server-side PDF render — fixes 322 blank auto-archived docs — feat/docs/server-side-render, PR #686)
+
+- **Every auto-archived doc PDF was blank** — 322 of them (~3 KB each) across shipment/task/repair/will-call. The manual "print" button renders perfectly (browser-native engine), but the unattended auto-archive used **html2canvas (html2pdf.js)**, which can't render the doc templates (cross-origin Wix logo, fonts, layout) → empty pages. Justin asked for the durable, off-GAS fix (one engine, one template).
+- **Fix — render the same shared HTML template through real headless Chrome, server-side:** new **`render-doc-pdf` Edge Function** (`supabase/functions/render-doc-pdf/index.ts`, `verify_jwt=true`) receives `{html}`, reads the Cloudflare API token from the **service-role-only `public.app_config`** table (migration `20260609170000`; RLS enabled, **no policies**, revoked from anon/authenticated → browser can't read it), POSTs to **Cloudflare Browser Rendering `/pdf`** (real headless Chrome), returns PDF bytes. `src/lib/docRenderer.ts` `renderHtmlToPdfBlob` now calls the EF instead of html2canvas (same `Blob` contract → dedupe/upload/insert/**retry-queue** unchanged); removed the `html2pdf` import (**bundle −731 KB**, html2canvas chunk gone). The `print` action is untouched. **EF + migration already deployed/applied to prod via MCP + smoke-tested (real 17 KB PDF); React deploys on merge.**
+- Cloudflare: **Workers free tier covers current volume** (no Paid upgrade needed yet); CF account `75746d1a…`; token stored in `app_config` (insert was out-of-band — never in git). **Token was shared in chat once → rotate when convenient.** Opus locked-in code-review: Ship it, 0 Critical/Important (token store sealed, EF validation + error-mapping never leaks the token, React contract + throw-on-failure keeps the retry queue). **Follow-ups:** backfill the 322 existing blanks via the new engine; `npm uninstall html2pdf.js` (dead dep; chip spawned); optionally point `print` at the EF for literal one-engine.
+
+---
+
 ## Recent Changes (2026-06-08, documentation audit + mobile Inventory table + catch-up log — docs/audit-refresh)
 
 **Doc-audit pass** reconciling all project docs to the live state of `origin/source` (HEAD = PR #674). Updated **MIGRATION_STATUS.md** (new 2026-06-08 Migration Scorecard: 9 fleet-primary + 54 Justin-Demo-canary + 4 decoy rows + 0 GAS-only handlers; QBO-secrets blocker cleared; per-function table marked SUPERSEDED), **CLAUDE.md** (current counts + Supabase-authoritative-on-demo note), **CODE_MAP.md** (mobile Inventory), and **Session_History.md**. No code change. Also fixed the stale "What's Built" counts in this file (Pages 33→40, Hooks 61→75, Shared Components 60→75, Edge Functions 6→110, migrations 57→241).

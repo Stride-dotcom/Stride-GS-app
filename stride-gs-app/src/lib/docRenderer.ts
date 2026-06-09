@@ -5,10 +5,9 @@
  *   1. Fetch the HTML template from `public.email_templates` (per-tab cache).
  *   2. Substitute every `{{TOKEN}}` against the provided map.
  *   3. Dispatch on `options.action`:
- *      - `print`    → open in popup window, fire window.print()
- *      - `download` → render to a hidden host node, html2pdf.js → blob,
- *                     trigger a saveAs download
- *      - `upload`   → render to blob (same as download), upload to the
+ *      - `print`    → open in popup window, fire window.print() (browser-native)
+ *      - `download` → render to a PDF blob server-side, trigger a saveAs download
+ *      - `upload`   → render to a blob (same as download), upload to the
  *                     `documents` bucket + insert a `public.documents`
  *                     row. On failure, enqueue for retry via
  *                     docUploadQueue.
@@ -18,14 +17,13 @@
  * document type means: add a row to `email_templates`, add a
  * `buildXTokens` helper, call `renderDoc('DOC_X', tokens, opts)`.
  *
- * html2pdf.js fidelity caveat: html2canvas does NOT honor `@media print`
- * rules and can render web fonts inconsistently on first paint. Visual
- * parity with the print-button output is *close*, not pixel-identical.
- * For doc-quality output prefer `print`; `download`/`upload` are for
- * archive/sharing where small font-fallback differences are acceptable.
+ * PDF engine: `download`/`upload` render via the `render-doc-pdf` Edge Function
+ * (Cloudflare Browser Rendering = real headless Chrome) — see
+ * `renderHtmlToPdfBlob`. This replaced a client-side html2pdf.js/html2canvas
+ * path that produced BLANK PDFs for every auto-archived doc. `print` still uses
+ * the browser's own engine. All three now render the same HTML faithfully.
  */
 import { supabase } from './supabase';
-import html2pdf from 'html2pdf.js';
 import { esc } from './docTokens';
 import { enqueueUpload, findExistingAutoDoc, type QueuedUpload } from './docUploadQueue';
 
@@ -96,38 +94,50 @@ function openPrintWindow(html: string, title: string): void {
 // ─── Blob render (download + upload share this) ──────────────────────────────
 
 /**
- * Render HTML to a PDF Blob via html2pdf.js. Builds a detached host
- * div, runs html2canvas → jsPDF, returns the Blob. Host node is removed
- * before resolve so we don't leak DOM.
+ * Render HTML to a PDF Blob via the `render-doc-pdf` Edge Function, which
+ * rasterizes through Cloudflare Browser Rendering — a REAL headless Chrome.
  *
- * Letter format with 0.4" margins matches what the GAS-generated docs
- * historically produced for receiving/work-order/release prints.
+ * This REPLACED a client-side html2pdf.js / html2canvas path that produced
+ * blank PDFs: html2canvas can't reliably render the doc templates (cross-origin
+ * logo, fonts, table layout), so every auto-archived doc came out empty (322 of
+ * them, ~3 KB each, across all entity types). Headless Chrome renders the same
+ * HTML faithfully — the same engine the print button uses. The PRINT action is
+ * unchanged (still the browser's native print dialog); only the programmatic
+ * download + auto-archive blobs route through the server now.
+ *
+ * `fileName` is no longer needed here (the EF doesn't name the file; callers
+ * own the storage key / download name) — kept in the signature for callers.
  */
-async function renderHtmlToPdfBlob(html: string, fileName: string): Promise<Blob> {
-  // Mount detached, off-screen. html2pdf.js needs the node attached to
-  // the DOM so layout computes correctly; positioning it absolute at
-  // -10000 keeps it invisible and out of the live layout.
-  const host = document.createElement('div');
-  host.style.cssText = 'position:absolute;left:-10000px;top:0;width:8.5in;background:#fff;';
-  host.innerHTML = html;
-  document.body.appendChild(host);
+async function renderHtmlToPdfBlob(html: string, _fileName: string): Promise<Blob> {
+  const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/render-doc-pdf`;
+  const anon = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
+  // Prefer the signed-in user's JWT; fall back to anon (both pass verify_jwt).
+  const { data: { session } } = await supabase.auth.getSession();
+  const bearer = session?.access_token || anon;
 
-  try {
-    const worker = html2pdf()
-      .set({
-        margin: 0.4,
-        filename: fileName.endsWith('.pdf') ? fileName : `${fileName}.pdf`,
-        image: { type: 'jpeg', quality: 0.95 },
-        html2canvas: { scale: 2, useCORS: true, logging: false },
-        jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' },
-      })
-      .from(host);
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${bearer}`,
+      apikey: anon,
+    },
+    body: JSON.stringify({ html }),
+  });
 
-    const blob: Blob = await worker.outputPdf('blob');
-    return blob;
-  } finally {
-    host.remove();
+  if (!resp.ok) {
+    let detail = '';
+    try { detail = JSON.stringify(await resp.json()); } catch { /* non-JSON body */ }
+    throw new Error(`render-doc-pdf failed: ${resp.status} ${detail}`.trim());
   }
+
+  const blob = await resp.blob();
+  // Guard: a misconfigured EF could 200 with a JSON error body. Real output is
+  // application/pdf — reject a JSON blob so the caller's retry/queue kicks in.
+  if (blob.type && blob.type.includes('json')) {
+    throw new Error('render-doc-pdf returned a non-PDF (JSON) response');
+  }
+  return blob;
 }
 
 function triggerDownload(blob: Blob, fileName: string): void {
