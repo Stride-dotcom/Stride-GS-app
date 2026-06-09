@@ -1539,7 +1539,7 @@ function ContactDetailPanel({ email, onClose }: { email: string; onClose: () => 
       {ct.suppressed && (
         <div style={{ marginBottom: 16, padding: 12, background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8 }}>
           <div style={{ fontSize: 11, fontWeight: 700, color: '#DC2626', marginBottom: 4 }}>Suppressed</div>
-          <div style={{ fontSize: 12, color: '#991B1B' }}>Reason: {ct.suppressionReason || 'Manual'} \u00b7 Date: {fmtDate(ct.suppressionDate)}</div>
+          <div style={{ fontSize: 12, color: '#991B1B' }}>Reason: {ct.suppressionReason || 'Manual'}{' \u00b7 '}Date: {fmtDate(ct.suppressionDate)}</div>
           {ct.manualReleaseNote && <div style={{ fontSize: 12, color: '#991B1B', marginTop: 4 }}>Release Note: {ct.manualReleaseNote}</div>}
         </div>
       )}
@@ -2131,7 +2131,7 @@ function LogsTab() {
       {!isLoading && !err && (
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 8 }}>
           <span style={{ fontSize: 11, color: theme.colors.textMuted }}>
-            Page {page} of {totalPages} \u00b7 {total.toLocaleString()} entries
+            Page {page} of {totalPages}{' \u00b7 '}{total.toLocaleString()} entries
           </span>
           <div style={{ display: 'flex', gap: 4 }}>
             <button disabled={page <= 1} onClick={() => setPage(p => p - 1)} style={{
