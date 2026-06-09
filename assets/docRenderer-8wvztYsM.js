@@ -1,0 +1,1 @@
+import{r as e}from"./index-CyubmZ0i.js";export{e as renderDocUpload};
