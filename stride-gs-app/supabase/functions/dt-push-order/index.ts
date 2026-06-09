@@ -1,5 +1,10 @@
 /**
- * dt-push-order — Supabase Edge Function (Phase 2c) — v46 2026-06-05 PST
+ * dt-push-order — Supabase Edge Function (Phase 2c) — v47 2026-06-09 PST
+ *
+ * v47: Carry the cod_storage_* columns on the LINKED-leg fetch too, so a
+ *      pickup_and_delivery delivery leg pushed via its linked row still renders
+ *      the "COD STORAGE (collect from customer)" block in the DT description.
+ *      (Standalone delivery orders already carried it via the primary fetch.)
  *
  * v46: COD Storage summary in the STRIDE APP section. When the order carries
  *      a COD storage line (cod_storage_enabled, some items are cod_storage),
@@ -1741,7 +1746,7 @@ Deno.serve(async (req: Request) => {
     // works the same either direction.
     const { data: linkedOrder, error: linkedErr } = await supabase
       .from('dt_orders')
-      .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_phone2, contact_email, local_service_date, dt_scheduled_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, order_notes, driver_notes, internal_notes, pickup_notes, delivery_notes, service_time_minutes, review_status, pushed_to_dt_at, billing_method, order_total, base_delivery_fee, extra_items_count, extra_items_fee, accessorials_json, accessorials_total, billing_review_status, paid_at, paid_amount, paid_method, linked_pickup_driver_name')
+      .select('id, tenant_id, dt_identifier, is_pickup, order_type, linked_order_id, contact_name, contact_address, contact_city, contact_state, contact_zip, contact_phone, contact_phone2, contact_email, local_service_date, dt_scheduled_date, window_start_local, window_end_local, po_number, sidemark, client_reference, details, order_notes, driver_notes, internal_notes, pickup_notes, delivery_notes, service_time_minutes, review_status, pushed_to_dt_at, billing_method, order_total, base_delivery_fee, extra_items_count, extra_items_fee, accessorials_json, accessorials_total, billing_review_status, paid_at, paid_amount, paid_method, linked_pickup_driver_name, cod_storage_enabled, cod_storage_total, cod_storage_rate, cod_storage_item_count, cod_storage_period_start, cod_storage_cutoff_date')
       .eq('id', orderTyped.linked_order_id)
       .maybeSingle();
 
