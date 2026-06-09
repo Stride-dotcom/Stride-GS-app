@@ -767,7 +767,7 @@ export function Tasks() {
             <thead>{table.getHeaderGroups().map(hg => <tr key={hg.id}>{hg.headers.map(h => {
               const canResize = h.column.getCanResize();
               return <th key={h.id}
-                style={{ ...th, width: h.getSize(), position: 'relative', boxSizing: 'border-box', color: h.column.getIsSorted() ? theme.colors.orange : theme.colors.textMuted, background: '#fff', cursor: h.column.getCanSort() ? 'pointer' : 'default', ...(h.id === 'select' ? { position: 'sticky' as const, left: 0, zIndex: 3 } : {}) }}
+                style={{ ...th, width: h.getSize(), boxSizing: 'border-box', color: h.column.getIsSorted() ? theme.colors.orange : theme.colors.textMuted, background: '#fff', cursor: h.column.getCanSort() ? 'pointer' : 'default', ...(h.id === 'select' ? { left: 0, zIndex: 3 } : {}) }}
                 onClick={h.column.getCanSort() ? (e: React.MouseEvent) => h.column.toggleSorting(undefined, e.shiftKey) : undefined}
               ><div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>{h.isPlaceholder ? null : flexRender(h.column.columnDef.header, h.getContext())}{h.column.getCanSort() && (h.column.getIsSorted() === 'asc' ? <ChevronUp size={13} color={theme.colors.orange} /> : h.column.getIsSorted() === 'desc' ? <ChevronDown size={13} color={theme.colors.orange} /> : <ArrowUpDown size={13} color={theme.colors.textMuted} />)}</div>
                 {canResize && (
