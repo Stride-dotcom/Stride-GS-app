@@ -350,22 +350,33 @@ Deno.serve(async (req: Request) => {
             .map(r => String((r as { name: string | null }).name ?? '').trim())
             .find(s => s.length > 0) || 'Inspection';
 
+          // Order Numbering feature (Justin Demo canary): when on for the
+          // DESTINATION tenant, the auto-INSP task gets a clean PREFIX-TSK-N id
+          // (scoped to destId). Resolved once. Off → legacy INSP-{itemId}-N.
+          const cleanNumbering = await orderNumberingOn(sb, destId);
+
           // Per-item counter: max existing INSP-{itemId}-N across any tenant + 1.
           // Same algorithm as nextTaskCounter in complete-shipment-sb.
           const newTaskRows: Array<Record<string, unknown>> = [];
           const newTaskIds: string[] = [];
           for (const itemId of uninspectedIds) {
-            const prefix = `INSP-${itemId}-`;
-            const { data: existing } = await sb
-              .from('tasks')
-              .select('task_id')
-              .like('task_id', `${prefix}%`);
-            let max = 0;
-            for (const r of (existing ?? []) as Array<{ task_id: string }>) {
-              const n = Number(String(r.task_id ?? '').slice(prefix.length));
-              if (Number.isFinite(n) && n > max) max = n;
+            const cleanId = cleanNumbering ? await cleanTaskId(sb, destId) : null;
+            let taskId: string;
+            if (cleanId) {
+              taskId = cleanId;
+            } else {
+              const prefix = `INSP-${itemId}-`;
+              const { data: existing } = await sb
+                .from('tasks')
+                .select('task_id')
+                .like('task_id', `${prefix}%`);
+              let max = 0;
+              for (const r of (existing ?? []) as Array<{ task_id: string }>) {
+                const n = Number(String(r.task_id ?? '').slice(prefix.length));
+                if (Number.isFinite(n) && n > max) max = n;
+              }
+              taskId = `${prefix}${max + 1}`;
             }
-            const taskId = `${prefix}${max + 1}`;
             const ctx = ctxById.get(itemId) ?? {
               vendor: '', description: '', location: '', sidemark: '', shipment_number: '',
             };
@@ -602,6 +613,46 @@ async function mirrorSourceTransferToSheet(
   } catch (e) {
     console.warn('[transfer-items-sb] mirror threw for', itemId, e);
   }
+}
+
+/**
+ * Resolve whether the `orderNumbering` feature is on for this tenant via the
+ * SECURITY DEFINER `order_numbering_enabled` RPC (MIG-010 per-tenant scope).
+ * Fails safe to false (legacy ids) on any error.
+ */
+async function orderNumberingOn(
+  sb: ReturnType<typeof createClient>,
+  tenantId: string,
+): Promise<boolean> {
+  try {
+    const { data, error } = await sb.rpc('order_numbering_enabled', { p_tenant_id: tenantId });
+    if (error) {
+      console.warn('[transfer-items-sb] order_numbering_enabled failed:', error.message);
+      return false;
+    }
+    return data === true;
+  } catch (e) {
+    console.warn('[transfer-items-sb] order_numbering_enabled threw:', e);
+    return false;
+  }
+}
+
+/**
+ * Mint a clean PREFIX-TSK-N task id for the given tenant via next_order_id, or
+ * null on RPC error (caller falls back to the legacy counter).
+ */
+async function cleanTaskId(
+  sb: ReturnType<typeof createClient>,
+  tenantId: string,
+): Promise<string | null> {
+  try {
+    const { data, error } = await sb.rpc('next_order_id', { p_tenant_id: tenantId, p_order_type: 'task' });
+    if (!error && typeof data === 'string' && data) return data;
+    if (error) console.warn('[transfer-items-sb] next_order_id failed, using legacy id:', error.message);
+  } catch (e) {
+    console.warn('[transfer-items-sb] next_order_id threw, using legacy id:', e);
+  }
+  return null;
 }
 
 function json(body: unknown, status = 200): Response {
