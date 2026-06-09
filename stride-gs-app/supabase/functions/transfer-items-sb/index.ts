@@ -294,14 +294,30 @@ Deno.serve(async (req: Request) => {
       if (destAutoInspection) {
         const transferIds = toTransfer.map(t => t.itemId);
 
+        // Resolve the friendly INSP service name (matches receiving flow).
+        // Used both for the dedup query below and the new task's `type`.
+        const { data: catRows } = await sb
+          .from('service_catalog')
+          .select('code, name')
+          .eq('code', 'INSP');
+        const inspName = (catRows ?? [])
+          .map(r => String((r as { name: string | null }).name ?? '').trim())
+          .find(s => s.length > 0) || 'Inspection';
+
         // Items that already have a Completed INSP task — anywhere in the
         // tasks table. Item ID is the join key (preserved across transfers).
+        // Match the UNION of legacy + clean ids: legacy tasks are reliably
+        // `task_id LIKE 'INSP-%'` (the `type` column is inconsistent — ~907
+        // rows say 'INSP', ~7 say 'Inspection'), while clean orderNumbering
+        // tasks are `PREFIX-TSK-N` with `type` = the service name. Filtering on
+        // EITHER alone misses one population (id-prefix → misses clean ids;
+        // type → misses 907 legacy rows). The OR catches both.
         const { data: inspectedRows } = await sb
           .from('tasks')
           .select('item_id')
           .in('item_id', transferIds)
-          .like('task_id', 'INSP-%')
-          .eq('status', 'Completed');
+          .eq('status', 'Completed')
+          .or(`task_id.like.INSP-*,type.eq.${inspName}`);
         const inspectedSet = new Set<string>(
           (inspectedRows ?? [])
             .map(r => String((r as { item_id: string | null }).item_id ?? '').trim())
@@ -340,15 +356,6 @@ Deno.serve(async (req: Request) => {
               shipment_number: String(row.shipment_number ?? '').trim(),
             });
           }
-
-          // Resolve the friendly INSP service name (matches receiving flow).
-          const { data: catRows } = await sb
-            .from('service_catalog')
-            .select('code, name')
-            .eq('code', 'INSP');
-          const inspName = (catRows ?? [])
-            .map(r => String((r as { name: string | null }).name ?? '').trim())
-            .find(s => s.length > 0) || 'Inspection';
 
           // Order Numbering feature (Justin Demo canary): when on for the
           // DESTINATION tenant, the auto-INSP task gets a clean PREFIX-TSK-N id

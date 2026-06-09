@@ -111,16 +111,18 @@ export function TransferItemsModal({
       try {
         const itemIdsArr = [...selectedIds];
         // Items previously inspected anywhere (item_id is preserved across
-        // transfers). Filter by Task ID prefix instead of `type` because the
-        // type column carries the friendly service name ("Inspection") in some
-        // rows and the code ("INSP") in others — the task_id format is the one
-        // load-bearing invariant.
+        // transfers). Match the UNION of legacy + clean ids: legacy INSP tasks
+        // are reliably `task_id LIKE 'INSP-%'` (the `type` column is
+        // inconsistent — most rows say "INSP", a few say "Inspection"), while
+        // clean orderNumbering tasks are `PREFIX-TSK-N` with `type =
+        // "Inspection"`. Filtering on either alone misses one population, so we
+        // OR them. (Mirrors the dedup in transfer-items-sb.)
         const { data: doneRows } = await supabase
           .from('tasks')
           .select('item_id')
           .in('item_id', itemIdsArr)
-          .like('task_id', 'INSP-%')
-          .eq('status', 'Completed');
+          .eq('status', 'Completed')
+          .or('task_id.like.INSP-*,type.eq.Inspection');
         const inspectedIds = new Set<string>(
           (doneRows ?? [])
             .map(r => String((r as { item_id: string | null }).item_id ?? '').trim())
