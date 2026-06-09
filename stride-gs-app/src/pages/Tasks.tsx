@@ -9,6 +9,7 @@ import {
   createColumnHelper,
   type ColumnFiltersState,
   type RowSelectionState,
+  type ColumnSizingState,
   type FilterFn,
 } from '@tanstack/react-table';
 import {
@@ -51,6 +52,7 @@ import { useIsMobile } from '../hooks/useIsMobile';
 import { mobileChipsRow } from '../styles/mobileTable';
 import { FloatingActionMenu, type FABAction } from '../components/shared/FloatingActionMenu';
 import { CheckSquare, XCircle, UserCog } from 'lucide-react';
+import { ColumnManagerMenu, moveColumnInOrder } from '../components/shared/ColumnManagerMenu';
 
 type TaskStatus = 'Open' | 'In Progress' | 'Completed' | 'Cancelled';
 const ALL_STATUSES: TaskStatus[] = ['Open', 'In Progress', 'Completed', 'Cancelled'];
@@ -428,9 +430,10 @@ export function Tasks() {
   useEffect(() => { if (!tasksLoading && refreshing) setRefreshing(false); }, [tasksLoading, refreshing]);
   const [batchGuardClients, setBatchGuardClients] = useState<string[] | null>(null);
   const [batchGuardAction, setBatchGuardAction] = useState('');
-  const [dragColId, setDragColId] = useState<string | null>(null);
-  const [dragOverColId, setDragOverColId] = useState<string | null>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
+  // Local (non-persisted) column widths, mirroring Inventory's resize. The
+  // Columns menu's "Reset widths" clears this.
+  const [columnSizing, setColumnSizing] = useState<ColumnSizingState>({});
+  const [colToggleRect, setColToggleRect] = useState<DOMRect | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const showToast = useCallback((msg: string) => { setToast(msg); setTimeout(() => setToast(null), 3000); }, []);
 
@@ -652,11 +655,13 @@ export function Tasks() {
     // change after a patch swaps DOM nodes between items and optimistic
     // edits flash on the wrong line for one frame.
     getRowId: row => row.taskId,
-    state: { sorting, columnFilters, globalFilter, columnVisibility: colVis, rowSelection: rowSel, columnOrder: columnOrder.length ? columnOrder : DEFAULT_COL_ORDER },
+    state: { sorting, columnFilters, globalFilter, columnVisibility: colVis, rowSelection: rowSel, columnOrder: columnOrder.length ? columnOrder : DEFAULT_COL_ORDER, columnSizing },
     onSortingChange: setSorting, onColumnFiltersChange: setColumnFilters,
     onGlobalFilterChange: setGlobalFilter, onColumnVisibilityChange: setColVis,
     onRowSelectionChange: setRowSel,
     onColumnOrderChange: (updater) => setColumnOrder(typeof updater === 'function' ? updater(columnOrder.length ? columnOrder : DEFAULT_COL_ORDER) : updater),
+    onColumnSizingChange: setColumnSizing,
+    columnResizeMode: 'onChange',
     getCoreRowModel: getCoreRowModel(), getSortedRowModel: getSortedRowModel(),
     getFilteredRowModel: getFilteredRowModel(),
     enableMultiSort: true,
@@ -668,7 +673,9 @@ export function Tasks() {
   useScrollRestoration('tasks', containerRef, allRows.length > 0);
 
   const selCount = Object.keys(rowSel).length;
-  useEffect(() => { const h = (e: MouseEvent) => { if (menuRef.current && !menuRef.current.contains(e.target as Node)) setShowCols(false); }; document.addEventListener('mousedown', h); return () => document.removeEventListener('mousedown', h); }, []);
+  // Columns menu (ColumnManagerMenu) is a portal and closes itself on outside
+  // click, so the old menuRef outside-click effect is gone (it would have
+  // mis-fired on clicks inside the portaled menu).
 
   const chip = (active: boolean): React.CSSProperties => ({ padding: '8px 16px', borderRadius: 100, fontSize: 11, fontWeight: 600, letterSpacing: '1px', textTransform: 'uppercase', cursor: 'pointer', border: active ? 'none' : '1px solid rgba(0,0,0,0.08)', background: active ? '#1C1C1C' : '#fff', color: active ? '#fff' : '#666', transition: 'all 0.15s', whiteSpace: 'nowrap', fontFamily: 'inherit' });
   const th: React.CSSProperties = { padding: '14px 12px', textAlign: 'left', fontWeight: 600, fontSize: 10, color: '#888', textTransform: 'uppercase', letterSpacing: '2px', borderBottom: 'none', position: 'sticky', top: 0, background: '#F5F2EE', zIndex: 2, cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' };
@@ -707,9 +714,21 @@ export function Tasks() {
         <div style={{ position: 'relative', flex: '1 1 200px', maxWidth: 320 }}><Search size={15} color={theme.colors.textMuted} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)' }} /><input value={globalFilter} onChange={e => setGlobalFilter(e.target.value)} placeholder="Search all columns..." style={{ width: '100%', padding: '10px 16px 10px 36px', fontSize: 13, border: '1px solid rgba(0,0,0,0.08)', borderRadius: 100, outline: 'none', background: '#fff', fontFamily: 'inherit' }} /></div>
         <select value={af} onChange={e => setAf(e.target.value)} style={{ padding: '7px 12px', fontSize: 13, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', fontFamily: 'inherit', color: theme.colors.text, cursor: 'pointer' }}><option value="">All Assigned</option>{ALL_ASSIGNED.map(a => <option key={a} value={a}>{a}</option>)}</select>
         <div style={{ flex: 1 }} />
-        <div style={{ position: 'relative' }} ref={menuRef}>
-          <button onClick={() => setShowCols(v => !v)} style={{ padding: '7px 12px', fontSize: 12, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: theme.colors.textSecondary }}><Settings2 size={14} /> Columns</button>
-          {showCols && <div style={{ position: 'absolute', top: '100%', right: 0, marginTop: 4, background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 10, padding: 8, zIndex: 50, boxShadow: '0 4px 20px rgba(0,0,0,0.1)', minWidth: 180 }}>{TOGGLEABLE.map(id => <label key={id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px', fontSize: 12, cursor: 'pointer', borderRadius: 4 }}><input type="checkbox" checked={colVis[id] !== false} onChange={() => setColVis(v => ({ ...v, [id]: v[id] === false }))} style={{ accentColor: theme.colors.orange }} />{COL_LABELS[id]}</label>)}</div>}
+        <div style={{ position: 'relative' }}>
+          <button onClick={e => { setColToggleRect(e.currentTarget.getBoundingClientRect()); setShowCols(v => !v); }} style={{ padding: '7px 12px', fontSize: 12, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: theme.colors.textSecondary }}><Settings2 size={14} /> Columns</button>
+          {showCols && colToggleRect && (
+            <ColumnManagerMenu
+              anchorRect={colToggleRect}
+              toggleableIds={TOGGLEABLE}
+              labels={COL_LABELS}
+              visibility={colVis}
+              onToggle={id => setColVis(v => ({ ...v, [id]: v[id] === false }))}
+              columnOrder={columnOrder.length ? columnOrder : DEFAULT_COL_ORDER}
+              onMove={(id, dir) => moveColumnInOrder(id, dir, setColumnOrder, DEFAULT_COL_ORDER)}
+              onClose={() => setShowCols(false)}
+              onResetWidths={() => setColumnSizing({})}
+            />
+          )}
         </div>
         <button onClick={() => toCSV(data, 'stride-tasks.csv')} style={{ padding: '7px 12px', fontSize: 12, fontWeight: 500, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'inherit', color: theme.colors.textSecondary }}><Download size={14} /> Export</button>
         <button onClick={() => { setRefreshing(true); refetchTasks(); }} title="Refresh data" style={{ padding: '7px 8px', fontSize: 12, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', color: (refreshing || tasksLoading) ? theme.colors.orange : theme.colors.textSecondary, transition: 'color 0.2s' }}><RefreshCw size={14} style={(refreshing || tasksLoading) ? { animation: 'spin 1s linear infinite' } : undefined} /></button>
@@ -744,24 +763,22 @@ export function Tasks() {
       {clientFilter.length === 0 && <div style={{ padding: '40px 20px', textAlign: 'center', color: '#9CA3AF', fontSize: 13 }}>Select one or more clients to load data.</div>}
       <div style={{ border: `1px solid ${theme.colors.border}`, borderRadius: isMobile ? 8 : 12, overflow: 'hidden', background: '#fff' }}>
         <div ref={containerRef} style={{ overflowY: 'auto', overflowX: 'auto', maxHeight: isMobile ? 'calc(100dvh - 200px)' : 'calc(100dvh - 280px)', minHeight: isMobile ? 200 : undefined, WebkitOverflowScrolling: 'touch' }}>
-          <table style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0, minWidth: isMobile ? 700 : undefined }}>
+          <table style={{ width: '100%', borderCollapse: 'separate', borderSpacing: 0, tableLayout: 'fixed', minWidth: isMobile ? 700 : table.getTotalSize() }}>
             <thead>{table.getHeaderGroups().map(hg => <tr key={hg.id}>{hg.headers.map(h => {
-              const isDragTarget = dragOverColId === h.id && dragColId !== h.id;
+              const canResize = h.column.getCanResize();
               return <th key={h.id}
-                draggable={h.id !== 'select' && h.id !== 'actions'}
-                onDragStart={() => setDragColId(h.id)}
-                onDragOver={e => { e.preventDefault(); setDragOverColId(h.id); }}
-                onDragEnd={() => {
-                  if (dragColId && dragOverColId && dragColId !== dragOverColId) {
-                    const cur = columnOrder.length ? [...columnOrder] : [...DEFAULT_COL_ORDER];
-                    const from = cur.indexOf(dragColId); const to = cur.indexOf(dragOverColId);
-                    if (from !== -1 && to !== -1) { cur.splice(from, 1); cur.splice(to, 0, dragColId); setColumnOrder(cur); }
-                  }
-                  setDragColId(null); setDragOverColId(null);
-                }}
-                style={{ ...th, width: h.getSize(), color: h.column.getIsSorted() ? theme.colors.orange : theme.colors.textMuted, background: isDragTarget ? theme.colors.orangeLight : '#fff', cursor: h.id !== 'select' && h.id !== 'actions' ? 'grab' : 'default', borderLeft: isDragTarget ? `2px solid ${theme.colors.orange}` : undefined, ...(h.id === 'select' ? { position: 'sticky' as const, left: 0, zIndex: 3 } : {}) }}
+                style={{ ...th, width: h.getSize(), boxSizing: 'border-box', color: h.column.getIsSorted() ? theme.colors.orange : theme.colors.textMuted, background: '#fff', cursor: h.column.getCanSort() ? 'pointer' : 'default', ...(h.id === 'select' ? { left: 0, zIndex: 3 } : {}) }}
                 onClick={h.column.getCanSort() ? (e: React.MouseEvent) => h.column.toggleSorting(undefined, e.shiftKey) : undefined}
-              ><div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>{h.isPlaceholder ? null : flexRender(h.column.columnDef.header, h.getContext())}{h.column.getCanSort() && (h.column.getIsSorted() === 'asc' ? <ChevronUp size={13} color={theme.colors.orange} /> : h.column.getIsSorted() === 'desc' ? <ChevronDown size={13} color={theme.colors.orange} /> : <ArrowUpDown size={13} color={theme.colors.textMuted} />)}</div></th>;
+              ><div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>{h.isPlaceholder ? null : flexRender(h.column.columnDef.header, h.getContext())}{h.column.getCanSort() && (h.column.getIsSorted() === 'asc' ? <ChevronUp size={13} color={theme.colors.orange} /> : h.column.getIsSorted() === 'desc' ? <ChevronDown size={13} color={theme.colors.orange} /> : <ArrowUpDown size={13} color={theme.colors.textMuted} />)}</div>
+                {canResize && (
+                  <div
+                    onMouseDown={e => { e.stopPropagation(); h.getResizeHandler()(e); }}
+                    onTouchStart={e => { e.stopPropagation(); h.getResizeHandler()(e); }}
+                    onClick={e => e.stopPropagation()}
+                    style={{ position: 'absolute', right: 0, top: 0, height: '100%', width: 8, cursor: 'col-resize', touchAction: 'none', userSelect: 'none', background: h.column.getIsResizing() ? theme.colors.orange : 'transparent', zIndex: 5 }}
+                  />
+                )}
+              </th>;
             })}</tr>)}</thead>
             <tbody>
               {virtualRows.length > 0 && <tr style={{ height: virtualRows[0].start }}><td colSpan={table.getVisibleFlatColumns().length} /></tr>}
