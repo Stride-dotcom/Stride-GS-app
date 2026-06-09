@@ -219,9 +219,20 @@ Deno.serve(async (req: Request) => {
       .filter((x): x is InventoryRow => !!x);
 
     const primary = orderedItems[0];
-    const primaryItemId   = primary?.item_id ?? itemIds[0];
     const primarySidemark = primary?.sidemark ?? '';
     const primaryLocation = primary?.location ?? '';
+
+    // Multi-item repairs: a single quote request can cover N items. The
+    // subject and the body header ({{ITEM_ID}}) must list ALL of them — not
+    // just the primary — so the customer sees every item the request covers.
+    // Mirrors the multi-item rendering in send-repair-quote-sb (PR #689/#692).
+    // Use the caller's full itemIds (not orderedItems, which drops any item
+    // missing from inventory) so every requested ID is shown.
+    const itemIdsLabel = itemIds.join(', ');
+    // Count-aware grammar tokens so the body/subject read naturally for
+    // multi-item requests: "{{ITEM_ID_LABEL}}" → "Item ID" | "Item IDs".
+    const isMultiItem = itemIds.length > 1;
+    const itemIdLabel = isMultiItem ? 'Item IDs' : 'Item ID';
 
     const itemTableHtml = renderItemsTable(orderedItems);
 
@@ -264,7 +275,8 @@ Deno.serve(async (req: Request) => {
         tokens: {
           CLIENT_NAME:     clientName,
           REPAIR_ID:       repairId,
-          ITEM_ID:         primaryItemId,
+          ITEM_ID:         itemIdsLabel,
+          ITEM_ID_LABEL:   itemIdLabel,
           SIDEMARK:        primarySidemark,
           LOCATION:        primaryLocation,
           ITEM_TABLE_HTML: itemTableHtml,
