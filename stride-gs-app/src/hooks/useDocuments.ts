@@ -16,8 +16,11 @@ import { useAuth } from '../contexts/AuthContext';
 // Session-73 Phase A migration defined: shipment | item | task | repair | willcall | claim.
 // Session-77 added 'client' — per-client docs (intake packets, COI renewals,
 // tax-exemption updates) ride the same module as entity docs.
+// 2026-06-09 added 'quote' — files clients send for a quote (floor plans,
+// packing lists, purchase orders) attach to the quote via the same module
+// (migration 20260609160000_documents_quote_context.sql).
 export type DocumentContextType =
-  | 'shipment' | 'item' | 'task' | 'repair' | 'willcall' | 'claim' | 'client' | 'dt_order';
+  | 'shipment' | 'item' | 'task' | 'repair' | 'willcall' | 'claim' | 'client' | 'dt_order' | 'quote';
 
 export interface DocumentRow {
   id: string;
