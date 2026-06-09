@@ -8,10 +8,12 @@
  *
  * Feature-gated to the Justin Demo tenant via useFeatureFlag('codStorageBilling').
  *
- * All writes go through SECURITY DEFINER RPCs (admin/staff gated) because
- * public.inventory has no browser UPDATE policy:
- *   • set_cod_storage            — set/clear the flag on inventory items
- *   • mark_cod_storage_collected — Phase 6 collection record
+ * Flag writes go through the set_cod_storage SECURITY DEFINER RPC (admin/staff
+ * gated) because public.inventory has no browser UPDATE policy. The actual
+ * collection/billing — for BOTH the standalone Inventory "Collect COD" action
+ * and the delivery-order COD line — goes through the collect-cod-storage-sb
+ * Edge Function (previewCodCollection / collectCodStorage below), the single
+ * authoritative compute path (React never computes billing).
  */
 import { supabase } from './supabase';
 
@@ -111,34 +113,6 @@ export function serializeCodDetails(items: CodStorageLineItem[], rate: number): 
   }));
 }
 
-export interface RecomputedCodLine {
-  details: CodStorageDetail[];
-  itemCount: number;
-  total: number;
-  periodStart: string | null;
-}
-
-/**
- * Recompute a COD line from its persisted detail rows when the cutoff or rate
- * changes (OrderPage editing). Self-contained — each detail row already carries
- * cubic_feet + start_date, so no inventory re-fetch is needed.
- */
-export function recomputeCodLineFromDetails(
-  details: CodStorageDetail[],
-  cutoffIso: string,
-  rate: number,
-): RecomputedCodLine {
-  let total = 0;
-  let periodStart: string | null = null;
-  const out = details.map(d => {
-    const days = daysInclusive(d.start_date, cutoffIso);
-    const amount = round2((d.cubic_feet || 0) * (rate || 0) * days);
-    total += amount;
-    if (!periodStart || (d.start_date && d.start_date < periodStart)) periodStart = d.start_date;
-    return { ...d, end_date: cutoffIso, days, rate, amount };
-  });
-  return { details: out, itemCount: out.length, total: round2(total), periodStart };
-}
 
 /**
  * Compute the COD Storage collection line for a delivery order.
@@ -223,28 +197,6 @@ export async function setCodStorage(
   return typeof data === 'number' ? data : (itemIds.length);
 }
 
-export interface MarkCollectedResult {
-  collected_at: string;
-  items_recorded: number;
-  total_recorded: number;
-}
-
-/** Phase 6: mark a delivery order's COD storage as collected. */
-export async function markCodStorageCollected(
-  orderId: string,
-  notes: string | null,
-  collectedBy: string | null,
-): Promise<MarkCollectedResult> {
-  const { data, error } = await supabase.rpc('mark_cod_storage_collected', {
-    p_order_id: orderId,
-    p_notes: notes || null,
-    p_collected_by: collectedBy || null,
-  });
-  if (error) throw new Error(error.message);
-  const row = Array.isArray(data) ? data[0] : data;
-  return row as MarkCollectedResult;
-}
-
 // ────────────────────────────────────────────────────────────────────────
 // Standalone COD Storage invoicing (independent of delivery orders).
 //
@@ -319,57 +271,7 @@ export function collectCodStorage(
   });
 }
 
-// ── Delivery-order add-on dedup ─────────────────────────────────────────
-// The delivery-order COD line (OrderCodStorageCard) must not re-collect days
-// a standalone collection already invoiced. These helpers read the durable
-// storage_billing_items ledger and subtract already-collected days.
-
-export interface CollectedRange { itemId: string; start: string; end: string }
-
-/** Fetch already-recorded (non-Void) COD/storage day-ranges for these items. */
-export async function fetchCollectedCodRanges(
-  tenantId: string, itemIds: string[],
-): Promise<CollectedRange[]> {
-  const ids = itemIds.filter(Boolean);
-  if (!tenantId || ids.length === 0) return [];
-  const { data, error } = await supabase
-    .from('storage_billing_items')
-    .select('item_id, period_start, period_end, status')
-    .eq('tenant_id', tenantId)
-    .in('item_id', ids)
-    .neq('status', 'Void');
-  if (error) return [];
-  return (data ?? []).map((r) => ({
-    itemId: String((r as { item_id: string }).item_id),
-    start: String((r as { period_start: string }).period_start),
-    end: String((r as { period_end: string }).period_end),
-  }));
-}
-
-/**
- * Count days in [startIso, cutoffIso] already covered by one of `ranges`
- * (day-set subtraction), and the first uncollected day. Mirrors the EF's
- * subtractCollected so the delivery preview matches the standalone math.
- */
-export function uncollectedInWindow(
-  startIso: string, cutoffIso: string, ranges: { start: string; end: string }[],
-): { uncollectedDays: number; alreadyCollectedDays: number; firstUncollected: string | null } {
-  const eligible = daysInclusive(startIso, cutoffIso);
-  const s = Date.parse(startIso + 'T00:00:00Z');
-  const e = Date.parse(cutoffIso + 'T00:00:00Z');
-  if (!Number.isFinite(s) || !Number.isFinite(e) || e < s) {
-    return { uncollectedDays: 0, alreadyCollectedDays: eligible, firstUncollected: null };
-  }
-  const spans = ranges
-    .map((r) => ({ s: Date.parse(r.start + 'T00:00:00Z'), e: Date.parse(r.end + 'T00:00:00Z') }))
-    .filter((sp) => Number.isFinite(sp.s) && Number.isFinite(sp.e));
-  let uncollected = 0;
-  let first: string | null = null;
-  for (let d = s; d <= e; d += 86400000) {
-    if (!spans.some((sp) => d >= sp.s && d <= sp.e)) {
-      uncollected++;
-      if (!first) first = new Date(d).toISOString().slice(0, 10);
-    }
-  }
-  return { uncollectedDays: uncollected, alreadyCollectedDays: eligible - uncollected, firstUncollected: first };
-}
+// Delivery-order dedup against already-collected days is now handled
+// server-side by collect-cod-storage-sb (subtractCollected) — both the
+// standalone Collect COD and the delivery-order COD line go through the same
+// EF dry-run, so the day-set subtraction lives in one place.
