@@ -39,11 +39,17 @@ export function QuoteDocumentsCard({ quote }: Props) {
   // is admin/staff-only and documents_write_staff / documents_select_staff grant
   // full access regardless, so uploads + the list always work here.
   const tenantId = quote.clientSheetId || 'quotes';
-  const { documents, uploadDocument } = useDocuments({
+  // ONE useDocuments instance owns the upload AND backs the list below (passed
+  // to DocumentList via `source`). Two separate instances would each open a
+  // Realtime channel with the same topic name, collide, and leave the list
+  // stuck on "No documents attached yet" after an upload even though the
+  // header count updated — the bug this card hit on first ship.
+  const docs = useDocuments({
     contextType: 'quote',
     contextId: quote.id,
     tenantId,
   });
+  const { documents, uploadDocument } = docs;
   const [uploading, setUploading] = useState(false);
 
   const handleUpload = async (files: File[]) => {
@@ -71,7 +77,7 @@ export function QuoteDocumentsCard({ quote }: Props) {
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         <DocumentUploadButton onUpload={handleUpload} uploading={uploading} />
-        <DocumentList contextType="quote" contextId={quote.id} tenantId={tenantId} />
+        <DocumentList contextType="quote" contextId={quote.id} tenantId={tenantId} source={docs} />
       </div>
     </div>
   );
