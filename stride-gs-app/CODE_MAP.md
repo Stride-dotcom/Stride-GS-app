@@ -312,3 +312,15 @@ Standalone quote builder with PDF generation and Supabase-backed storage.
 | `src/pages/DetailPanelMockup.tsx` | Design mockup, not in routed nav |
 | `src/pages/PublicRates.tsx` | Public-facing rate sheet |
 | `src/pages/PublicPhotoGallery.tsx` | No-auth shared photo/document gallery (`#/shared/attachments/:shareId`, `#/shared/photos/:shareId`); doc bytes served via the `get-shared-doc` Edge Function (`supabase/functions/get-shared-doc/index.ts` — service-role share-gated proxy, deploy with `--no-verify-jwt`); photo bytes via anon signed URLs |
+
+## Order Numbering (clean SB-generated ids — Justin Demo canary)
+
+| Layer | File |
+|---|---|
+| Migration | `supabase/migrations/20260609120000_sb_order_numbering.sql` — `order_sequences` table + `next_order_number(tenant,type)` atomic increment + `order_client_prefix` + `order_numbering_enabled` (flag resolver) + `next_order_id` composer; gates `create_repair_quote_request`; seeds `orderNumbering` flag |
+| Repairs | clean id minted inside the `create_repair_quote_request` RPC (used by `supabase/functions/request-repair-quote-sb`) |
+| Will Calls | `supabase/functions/create-will-call-sb/index.ts` — `mintWcNumber()` calls `next_order_id`, legacy fallback |
+| Tasks | `supabase/functions/batch-create-tasks-sb/index.ts` — `orderNumberingOn()` + per-task `next_order_id`, legacy fallback |
+| Delivery | `src/components/shared/CreateDeliveryOrderModal.tsx` — `buildOrderNumberBase()` strips lpad when flag on (keeps global `dt_order_number_seq`) |
+| Linkification | `src/components/shared/LinkifiedText.tsx` — recognizes `PREFIX-RPR/WC/TSK-N` (token in middle segment) |
+| Flag | `feature_flags.orderNumbering` (UI/behavior gate, NOT apiRouter routing; `tenant_scope=[justinDemo]`) |
