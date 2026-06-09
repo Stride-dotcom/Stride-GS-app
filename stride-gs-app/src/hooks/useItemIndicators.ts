@@ -1,10 +1,13 @@
 /**
- * useItemIndicators — Lightweight Supabase query for I/A/R/W badges.
- * Returns open/done Sets of item IDs that have inspection tasks, assembly tasks, repairs,
- * or will calls.
+ * useItemIndicators — Lightweight Supabase query for I/A/R/W/D/$ badges.
+ * SINGLE SOURCE OF TRUTH for every item-indicator badge. Returns open/done Sets
+ * of item IDs that have inspection tasks, assembly tasks, repairs, will calls,
+ * or DispatchTrack delivery orders, plus the COD-storage ($) set.
  * Open = in-progress/active (orange badge). Done = completed (green badge).
  * Cancelled/declined items produce no badge entry.
- * Used by any page that shows an Item ID column to render (I), (A), (R), (W) badges.
+ * Used by any page that shows an Item ID column to render (I), (A), (R), (W),
+ * (D), ($) badges — pages call the hook and pass the result straight to
+ * <ItemIdBadges>; they MUST NOT re-derive badge state locally.
  *
  * Query is tenant-scoped and cached per client filter. ~50ms from Supabase.
  *
@@ -16,6 +19,7 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
 import { entityEvents } from '../lib/entityEvents';
+import { fetchDtStatusesFromSupabase } from '../lib/supabaseQueries';
 
 export interface ItemIndicators {
   /** INSP tasks that are open or in progress */
@@ -36,6 +40,10 @@ export interface ItemIndicators {
   wcOpenItems: Set<string>;
   /** v2026-04-23 — Will Call items in Released → green W */
   wcDoneItems: Set<string>;
+  /** v2026-06-09 — DT delivery order items on an open/draft/review order → orange D */
+  dtOpenItems: Set<string>;
+  /** v2026-06-09 — DT delivery order items on a completed order → green D */
+  dtDoneItems: Set<string>;
   /** v2026-06-08 — Inventory items flagged cod_storage=true → amber "$" badge */
   codItems: Set<string>;
   loaded: boolean;
@@ -46,6 +54,7 @@ const EMPTY: ItemIndicators = {
   asmOpenItems: new Set(), asmDoneItems: new Set(),
   repairOpenItems: new Set(), repairDoneItems: new Set(),
   wcOpenItems: new Set(), wcDoneItems: new Set(),
+  dtOpenItems: new Set(), dtDoneItems: new Set(),
   codItems: new Set(),
   loaded: false,
 };
@@ -96,6 +105,8 @@ export function useItemIndicators(clientSheetIds?: string | string[]): ItemIndic
     const repDone = new Set<string>();
     const wcOpen = new Set<string>();
     const wcDone = new Set<string>();
+    const dtOpen = new Set<string>();
+    const dtDone = new Set<string>();
     const cod = new Set<string>();
 
     try {
@@ -224,6 +235,45 @@ export function useItemIndicators(clientSheetIds?: string | string[]): ItemIndic
           if (c.item_id) cod.add(c.item_id);
         }
       }
+
+      // v2026-06-09 — DT delivery order indicators (D badge). A dt_orders row
+      // can carry many items (dt_order_items join). We bucket by the order's
+      // status CATEGORY: completed → green D, cancelled → no badge, everything
+      // else (draft / open / review / exception) → orange D. The category
+      // derivation MIRRORS fetchDtOrdersFromSupabase so the D badge can't drift
+      // from the Orders page: review_status==='draft' is 'draft' (orange); only
+      // a real DT status_id can yield 'completed' or 'cancelled' — app-side
+      // review buckets (pending/approved/etc.) are never those, so the
+      // status-map lookup with an 'open' fallback is a faithful subset.
+      // Soft-removed lines (dt_order_items.removed_at NOT NULL) are excluded so
+      // a D badge drops on the next fetch when DT no longer carries the line.
+      const dtStatuses = await fetchDtStatusesFromSupabase();
+      const dtStatusCat = new Map<number, string>(dtStatuses.map(s => [s.id, s.category]));
+      let dq = supabase
+        .from('dt_orders')
+        .select('status_id, review_status, dt_order_items(dt_item_code)')
+        .is('dt_order_items.removed_at', null);
+      if (Array.isArray(clientSheetIds) && clientSheetIds.length > 0) {
+        dq = dq.in('tenant_id', clientSheetIds);
+      } else if (typeof clientSheetIds === 'string') {
+        dq = dq.eq('tenant_id', clientSheetIds);
+      }
+      const { data: dtOrders } = await dq.range(0, 49999);
+      if (dtOrders && !ctx.cancelled) {
+        for (const o of dtOrders as { status_id: number | null; review_status: string | null; dt_order_items: { dt_item_code: string | null }[] | null }[]) {
+          const category = o.review_status === 'draft'
+            ? 'draft'
+            : (o.status_id != null ? dtStatusCat.get(o.status_id) ?? 'open' : 'open');
+          if (category === 'cancelled') continue; // no D badge for cancelled orders
+          const done = category === 'completed';
+          for (const it of o.dt_order_items ?? []) {
+            const id = it.dt_item_code;
+            if (!id) continue;
+            if (done) { if (!dtOpen.has(id)) dtDone.add(id); }
+            else { dtOpen.add(id); dtDone.delete(id); } // open wins over done
+          }
+        }
+      }
     } catch { /* best-effort */ }
 
     if (!ctx.cancelled) {
@@ -232,6 +282,7 @@ export function useItemIndicators(clientSheetIds?: string | string[]): ItemIndic
         asmOpenItems: asmOpen, asmDoneItems: asmDone,
         repairOpenItems: repOpen, repairDoneItems: repDone,
         wcOpenItems: wcOpen, wcDoneItems: wcDone,
+        dtOpenItems: dtOpen, dtDoneItems: dtDone,
         codItems: cod,
         loaded: true,
       });
@@ -256,7 +307,7 @@ export function useItemIndicators(clientSheetIds?: string | string[]): ItemIndic
   useEffect(() => {
     if (!key) return;
     return entityEvents.subscribe((type) => {
-      if (type === 'task' || type === 'repair' || type === 'will_call' || type === 'inventory') {
+      if (type === 'task' || type === 'repair' || type === 'will_call' || type === 'inventory' || type === 'order') {
         void fetchIndicators();
       }
     });
