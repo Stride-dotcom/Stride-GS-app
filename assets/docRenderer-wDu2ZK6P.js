@@ -1,1 +1,0 @@
-import{r as e}from"./index-CHZXZ9JV.js";export{e as renderDocUpload};
