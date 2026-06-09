@@ -2911,6 +2911,15 @@ export function CreateDeliveryOrderModal({
       // to the service date; rate to $0.05/cuft/day. The OrderPage owns
       // subsequent editing (cutoff/rate/recalc/remove) + collection, so we
       // only seed these on INSERT (see below) to avoid clobbering edits.
+      //
+      // This is a PROVISIONAL estimate for the DispatchTrack description push
+      // (so the driver sees a "COD STORAGE: collect $X" line if the order is
+      // pushed before anyone opens it). It is computed client-side WITHOUT
+      // dedup against already-collected days, so it can over-state if some of
+      // these items were partially collected via the standalone Collect COD.
+      // OrderCodStorageCard recomputes authoritatively (collect-cod-storage-sb
+      // dry-run, with dedup) on first OrderPage open, and the actual billing
+      // only ever happens through that EF — so the estimate is never billed.
       const codFeatureOn = !!codFlagRow && resolveFlagBackend(codFlagRow, clientSheetId || null) === 'supabase';
       const codCutoff = serviceDate || todayIso();
       const codLine = (codFeatureOn && mode === 'delivery' && itemsSource === 'warehouse')
