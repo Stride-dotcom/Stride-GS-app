@@ -246,11 +246,17 @@ Deno.serve(async (req: Request) => {
       if (existingStatus === 'Invoiced' || existingStatus === 'Billed') {
         skipped.push(r.itemId);
         // Still ensure the sbi record + start-date advance are in place.
-        await upsertSbi(sb, tenantId, r, ledgerRowId, rate);
-        await advanceStartDate(sb, tenantId, r.itemId, nextStart);
+        const sbiErr = await upsertSbi(sb, tenantId, r, ledgerRowId, rate);
+        if (sbiErr) errors.push({ itemId: r.itemId, error: `sbi: ${sbiErr}` });
+        const advErr = await advanceStartDate(sb, tenantId, r.itemId, nextStart);
+        if (advErr) errors.push({ itemId: r.itemId, error: `start-date: ${advErr}` });
         continue;
       }
 
+      // Three-storage-layer model: this writes public.billing (React reads it)
+      // + mirrors the per-tenant Billing_Ledger sheet via writeThroughReverse
+      // below. The CB Consolidated_Ledger is reached later, at invoice time,
+      // by the normal invoicing path — NOT here (the row is Unbilled).
       const row = {
         tenant_id:       tenantId,
         ledger_row_id:   ledgerRowId,
@@ -288,8 +294,13 @@ Deno.serve(async (req: Request) => {
         if (insErr) { errors.push({ itemId: r.itemId, error: insErr.message }); continue; }
       }
 
-      await upsertSbi(sb, tenantId, r, ledgerRowId, rate);
-      await advanceStartDate(sb, tenantId, r.itemId, nextStart);
+      // Record the durable dedup ledger row FIRST — if it fails, the billing
+      // row exists but dedup would be broken, so surface it as an error and
+      // do NOT advance the start date (a re-run will then re-detect & repair).
+      const sbiErr = await upsertSbi(sb, tenantId, r, ledgerRowId, rate);
+      if (sbiErr) { errors.push({ itemId: r.itemId, error: `sbi: ${sbiErr}` }); continue; }
+      const advErr = await advanceStartDate(sb, tenantId, r.itemId, nextStart);
+      if (advErr) errors.push({ itemId: r.itemId, error: `start-date: ${advErr}` });
 
       await sb.from('entity_audit_log').insert({
         entity_type:  'inventory',
@@ -326,9 +337,15 @@ Deno.serve(async (req: Request) => {
 
 async function upsertSbi(
   sb: ReturnType<typeof createClient>, tenantId: string, r: ItemResult, ledgerRowId: string, rate: number,
-): Promise<void> {
-  // ON CONFLICT (tenant_id, item_id, period_start, period_end) WHERE status<>'Void'
-  await sb.from('storage_billing_items').upsert({
+): Promise<string | null> {
+  // The dedup uniqueness is a PARTIAL index (WHERE status <> 'Void'), which
+  // CANNOT be a PostgREST `onConflict` target (Postgres can't infer a partial
+  // arbiter from a bare column list — 42P10; see the storage_billing_items
+  // migration comment). So we replicate the index predicate by hand: find the
+  // single active (non-Void) row for this (tenant,item,period) and UPDATE it,
+  // else INSERT. supabase-js resolves with {error}; it never rejects — so the
+  // error must be read from the value, not a catch.
+  const fields = {
     tenant_id:             tenantId,
     sidemark:              r.sidemark,
     item_id:               r.itemId,
@@ -340,17 +357,32 @@ async function upsertSbi(
     amount:                r.amount,
     summary_ledger_row_id: ledgerRowId,
     status:                SBI_COLLECTED,
-  }, { onConflict: 'tenant_id,item_id,period_start,period_end', ignoreDuplicates: false })
-    .then(() => {}, (e: unknown) => { console.warn('[collect-cod-storage-sb] sbi upsert:', e); });
+  };
+  const { data: existing, error: selErr } = await sb
+    .from('storage_billing_items')
+    .select('id')
+    .eq('tenant_id', tenantId).eq('item_id', r.itemId)
+    .eq('period_start', r.periodStart as string).eq('period_end', r.periodEnd)
+    .neq('status', 'Void')
+    .maybeSingle();
+  if (selErr) return selErr.message;
+
+  if (existing) {
+    const { error } = await sb.from('storage_billing_items')
+      .update(fields).eq('id', (existing as { id: string }).id);
+    return error ? error.message : null;
+  }
+  const { error } = await sb.from('storage_billing_items').insert(fields);
+  return error ? error.message : null;
 }
 
 async function advanceStartDate(
   sb: ReturnType<typeof createClient>, tenantId: string, itemId: string, nextStart: string,
-): Promise<void> {
-  await sb.from('inventory')
+): Promise<string | null> {
+  const { error } = await sb.from('inventory')
     .update({ cod_storage_start_date: nextStart })
-    .eq('tenant_id', tenantId).eq('item_id', itemId)
-    .then(() => {}, (e: unknown) => { console.warn('[collect-cod-storage-sb] start-date advance:', e); });
+    .eq('tenant_id', tenantId).eq('item_id', itemId);
+  return error ? error.message : null;
 }
 
 async function mirror(

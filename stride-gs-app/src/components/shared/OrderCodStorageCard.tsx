@@ -39,7 +39,7 @@ interface Props {
 }
 
 export function OrderCodStorageCard({ order, performedBy, canEdit }: Props) {
-  const details = order.codStorageDetails ?? [];
+  const details = useMemo(() => order.codStorageDetails ?? [], [order.codStorageDetails]);
   const collected = !!order.codStorageCollectedAt;
 
   const [enabled, setEnabled] = useState(order.codStorageEnabled);
