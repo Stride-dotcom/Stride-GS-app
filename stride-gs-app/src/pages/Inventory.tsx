@@ -548,9 +548,13 @@ interface ColumnToggleMenuProps {
   visibility: VisibilityState;
   onToggle: (id: string) => void;
   onClose: () => void;
+  /** Current persisted column order (drives the row sequence + up/down). */
+  columnOrder: string[];
+  /** Reorder a column one step up (-1) or down (+1). */
+  onMove: (id: string, dir: -1 | 1) => void;
 }
 
-function ColumnToggleMenu({ anchorRect, visibility, onToggle, onClose }: ColumnToggleMenuProps) {
+function ColumnToggleMenu({ anchorRect, visibility, onToggle, onClose, columnOrder, onMove }: ColumnToggleMenuProps) {
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -586,30 +590,49 @@ function ColumnToggleMenu({ anchorRect, visibility, onToggle, onClose }: ColumnT
       }}>
         Columns
       </div>
-      {TOGGLEABLE_COLS.map(colId => {
-        const visible = visibility[colId] !== false;
-        return (
-          <button key={colId} onClick={() => onToggle(colId)} style={{
-            display: 'flex', alignItems: 'center', gap: 8, width: '100%',
-            padding: '6px 14px', background: 'none', border: 'none', cursor: 'pointer',
-            fontSize: theme.typography.sizes.sm, color: theme.colors.textPrimary,
-            textAlign: 'left',
-          }}
-            onMouseEnter={e => (e.currentTarget.style.background = theme.colors.bgSubtle)}
-            onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-          >
-            <span style={{
-              width: 15, height: 15, borderRadius: theme.radii.sm, flexShrink: 0,
-              border: `2px solid ${visible ? theme.colors.primary : theme.colors.borderDefault}`,
-              background: visible ? theme.colors.primary : 'transparent',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-            }}>
-              {visible && <span style={{ width: 7, height: 7, borderRadius: 1, background: '#fff' }} />}
-            </span>
-            {COL_LABELS[colId]}
-          </button>
-        );
-      })}
+      {(() => {
+        // Render rows in the user's saved column order (toggleable columns
+        // only), appending any toggleable column not yet present in the order
+        // array. Up/down arrows reorder; the checkbox shows/hides. This is the
+        // replacement for the old header drag-to-reorder.
+        const ordered = [
+          ...columnOrder.filter(c => TOGGLEABLE_COLS.includes(c)),
+          ...TOGGLEABLE_COLS.filter(c => !columnOrder.includes(c)),
+        ];
+        const moveBtn = (disabled: boolean): React.CSSProperties => ({
+          width: 22, height: 22, display: 'flex', alignItems: 'center', justifyContent: 'center',
+          border: 'none', borderRadius: theme.radii.sm, background: 'none',
+          cursor: disabled ? 'default' : 'pointer', color: disabled ? theme.colors.borderDefault : theme.colors.textMuted,
+          fontSize: 9, padding: 0, flexShrink: 0,
+        });
+        return ordered.map((colId, i) => {
+          const visible = visibility[colId] !== false;
+          return (
+            <div key={colId} style={{ display: 'flex', alignItems: 'center', gap: 2, padding: '2px 8px 2px 14px' }}
+              onMouseEnter={e => (e.currentTarget.style.background = theme.colors.bgSubtle)}
+              onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+            >
+              <button onClick={() => onToggle(colId)} style={{
+                display: 'flex', alignItems: 'center', gap: 8, flex: 1,
+                padding: '4px 0', background: 'none', border: 'none', cursor: 'pointer',
+                fontSize: theme.typography.sizes.sm, color: theme.colors.textPrimary, textAlign: 'left',
+              }}>
+                <span style={{
+                  width: 15, height: 15, borderRadius: theme.radii.sm, flexShrink: 0,
+                  border: `2px solid ${visible ? theme.colors.primary : theme.colors.borderDefault}`,
+                  background: visible ? theme.colors.primary : 'transparent',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                }}>
+                  {visible && <span style={{ width: 7, height: 7, borderRadius: 1, background: '#fff' }} />}
+                </span>
+                {COL_LABELS[colId]}
+              </button>
+              <button onClick={() => onMove(colId, -1)} disabled={i === 0} title="Move up" style={moveBtn(i === 0)}>▲</button>
+              <button onClick={() => onMove(colId, 1)} disabled={i === ordered.length - 1} title="Move down" style={moveBtn(i === ordered.length - 1)}>▼</button>
+            </div>
+          );
+        });
+      })()}
     </div>,
     document.body
   );
@@ -976,8 +999,6 @@ export function Inventory() {
   const [toast, setToast] = useState<string | null>(null);
   const [batchGuardClients, setBatchGuardClients] = useState<string[] | null>(null);
   const [batchGuardAction, setBatchGuardAction] = useState('');
-  const [dragColId, setDragColId] = useState<string | null>(null);
-  const [dragOverColId, setDragOverColId] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   useEffect(() => { if (!inventoryLoading && refreshing) setRefreshing(false); }, [inventoryLoading, refreshing]);
   const [colorSidemarks, setColorSidemarks] = useState(() => localStorage.getItem('stride_colorSidemarks') === 'true');
@@ -1701,31 +1722,38 @@ export function Inventory() {
     }
   }
 
-  // Column drag handlers
-  function onHeaderDragStart(e: React.DragEvent, colId: string) {
-    if (colId === 'select' || colId === 'actions') { e.preventDefault(); return; }
-    setDragColId(colId);
-    e.dataTransfer.effectAllowed = 'move';
+  // REPLACE (not toggle) — used by the mobile status dropdown, which is a
+  // single-select control. setStatusChip toggles (multi-select chip
+  // semantics), so reusing it on the dropdown would ADD a second status and
+  // the value would collapse to "All" while two were filtered. Here we set
+  // the column filter outright and re-seed the persisted store to match
+  // (clear → add-one; both persisted setters are functional updaters, so the
+  // toggle sees the cleared [] and yields exactly [status]).
+  function setStatusSingle(status: InventoryStatus | null) {
+    clearPersistedStatus();
+    if (status !== null) togglePersistedStatus(status);
+    table.getColumn('status')?.setFilterValue(status === null ? undefined : [status]);
   }
 
-  function onHeaderDragOver(e: React.DragEvent, colId: string) {
-    if (!dragColId || colId === 'select' || colId === 'actions' || colId === dragColId) return;
-    e.preventDefault();
-    setDragOverColId(colId);
-  }
-
-  function onHeaderDrop(e: React.DragEvent, targetColId: string) {
-    e.preventDefault();
-    if (!dragColId || targetColId === dragColId) return;
-    const order = [...columnOrder];
-    const from = order.indexOf(dragColId);
-    const to = order.indexOf(targetColId);
-    if (from === -1 || to === -1) return;
-    order.splice(from, 1);
-    order.splice(to, 0, dragColId);
-    setColumnOrder(order);
-    setDragColId(null);
-    setDragOverColId(null);
+  // Column reordering — driven by the Columns menu (up/down), replacing the
+  // old header drag-and-drop. Header drag was removed because (a) the native
+  // `draggable` th hijacked the resize-handle mousedown, making column-resize
+  // grab erratically/jump, and (b) HTML5 drag doesn't work on touch. The menu
+  // approach works on every device and frees the resize handler.
+  function moveColumn(colId: string, dir: -1 | 1) {
+    if (colId === 'select' || colId === 'actions') return;
+    setColumnOrder(prev => {
+      const order = prev.length ? [...prev] : [...DEFAULT_COL_ORDER];
+      const from = order.indexOf(colId);
+      if (from === -1) return prev;
+      const to = from + dir;
+      // Don't let a column cross the pinned 'select' (first) / 'actions' (last).
+      const target = order[to];
+      if (to < 0 || to >= order.length || target === 'select' || target === 'actions') return prev;
+      order.splice(from, 1);
+      order.splice(to, 0, colId);
+      return order;
+    });
   }
 
   // Row shift+click selection
@@ -1808,12 +1836,11 @@ export function Inventory() {
     borderRight: colId === 'actions' ? `1px solid ${theme.colors.borderSubtle}` : undefined,
     textAlign: colId === 'qty' ? 'center' : 'left',
     userSelect: 'none',
-    cursor: colId === 'select' || colId === 'actions' ? 'default' : 'grab',
-    background: dragOverColId === colId ? theme.colors.primaryLight : '#F5F2EE',
+    cursor: 'default',
+    background: '#F5F2EE',
     verticalAlign: 'middle',
     whiteSpace: 'nowrap',
     boxSizing: 'border-box',
-    outline: dragOverColId === colId ? `2px solid ${theme.colors.primary}` : undefined,
   });
 
   const tdStyle = (colId: string, isSelected: boolean): React.CSSProperties => ({
@@ -1857,7 +1884,17 @@ export function Inventory() {
   }
 
   return (
-    <div style={{ fontFamily: theme.typography.fontFamily, display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, background: '#F5F2EE', margin: isMobile ? '-14px -12px' : '-28px -32px', padding: isMobile ? '12px' : '28px 32px' }}>
+    <div style={{ fontFamily: theme.typography.fontFamily, display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, background: '#F5F2EE',
+      // Bleed to the screen edges. The negative margin must EXACTLY cancel
+      // AppLayout <main>'s padding (mobile 12/8, desktop 28/32) — a mismatch
+      // (was -14/-12 vs 8) pushed the root wider than the viewport and let the
+      // whole page bounce-scroll sideways on a phone. overflowX:hidden is the
+      // belt-and-suspenders guard so only the items-table container scrolls
+      // horizontally, never the page.
+      margin: isMobile ? '-12px -8px' : '-28px -32px',
+      padding: isMobile ? '8px' : '28px 32px',
+      overflowX: isMobile ? 'hidden' : undefined,
+      maxWidth: isMobile ? '100vw' : undefined }}>
 
       {/* Print + hover styles */}
       <style>{`
@@ -1895,18 +1932,22 @@ export function Inventory() {
       </div>
 
       {/* ── Page Title (v2 small inline branding) ── */}
-      <div className="no-print" style={{ marginBottom: 16 }}>
-        <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: '2px', color: '#1C1C1C' }}>
-          STRIDE LOGISTICS · INVENTORY
+      {/* Hidden on mobile: the TopBar already shows context, and on a phone
+          this banner just eats vertical space the items table needs. */}
+      {!isMobile && (
+        <div className="no-print" style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: '2px', color: '#1C1C1C' }}>
+            STRIDE LOGISTICS · INVENTORY
+          </div>
         </div>
-      </div>
+      )}
       {/* 2026-05-28 fix — removed `no-print` from this wrapper. It was
           swallowing the table during print (the @media print rule sets
           display:none on .no-print), leaving the print preview with only
           the header above. The inner toolbars / filters / pagination
           rows each carry their own `no-print` (see ~1874, 1880, 2087,
           2115, 2434, 2443) so they still hide correctly. */}
-      <div style={{ background: '#FFFFFF', borderRadius: 20, padding: 24, border: '1px solid rgba(0,0,0,0.04)', display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
+      <div style={{ background: '#FFFFFF', borderRadius: isMobile ? 10 : 20, padding: isMobile ? 8 : 24, border: '1px solid rgba(0,0,0,0.04)', display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
 
       <SyncBanner syncing={refreshing} label={clientFilter.length === 1 ? clientFilter[0] : clientFilter.length > 1 ? `${clientFilter.length} clients` : undefined} />
 
@@ -2125,7 +2166,30 @@ export function Inventory() {
         </div>
       )}
 
-      {/* ── Status chips ── */}
+      {/* ── Status filter ── */}
+      {/* Mobile: a single compact dropdown instead of a wrapping row of big
+          pills (which ate 2-3 lines of vertical space the items table needs).
+          Desktop keeps the pill row. The dropdown is single-select among the
+          known statuses (the common case); multi-status filtering stays a
+          desktop affordance. */}
+      {isMobile ? (
+        <div className="no-print" style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+          <select
+            value={statusFilterValue.length === 1 ? statusFilterValue[0] : ''}
+            onChange={e => setStatusSingle(e.target.value ? (e.target.value as InventoryStatus) : null)}
+            style={{
+              flex: 1, padding: '10px 12px', borderRadius: 10,
+              border: '1px solid rgba(0,0,0,0.12)', background: '#fff',
+              fontSize: 14, fontFamily: 'inherit', fontWeight: 600, color: '#1C1C1C',
+            }}
+          >
+            <option value="">All Statuses ({pillCountFor(null)})</option>
+            {ALL_STATUSES.map(s => (
+              <option key={s} value={s}>{s} ({pillCountFor(s)})</option>
+            ))}
+          </select>
+        </div>
+      ) : (
       <div className="no-print" style={{ ...mobileChipsRow(isMobile), alignItems: 'center', gap: 6, marginBottom: 10 }}>
         {[null, ...ALL_STATUSES].map(s => {
           const isActive = s === null
@@ -2189,6 +2253,7 @@ export function Inventory() {
           </div>
         )}
       </div>
+      )}
 
       {/* ── Empty state when no clients selected ── */}
       {clientFilter.length === 0 && <div style={{ padding: '40px 20px', textAlign: 'center', color: '#9CA3AF', fontSize: 13 }}>Select one or more clients to load data.</div>}
@@ -2213,8 +2278,14 @@ export function Inventory() {
           ? { flex: '0 0 auto',
               height: `min(${rowDisplay * 40 + 60}px, calc(100dvh - 180px))`,
               maxHeight: `min(${rowDisplay * 40 + 60}px, calc(100dvh - 180px))` }
-          : { flex: 1, minHeight: isMobile ? 200 : 0,
-              maxHeight: isMobile ? 'calc(100dvh - 180px)' : 'calc(100dvh - 280px)' }),
+          : isMobile
+          // Explicit tall height on mobile. flex:1 collapsed to ~3 rows here
+          // because AppLayout's <main> is overflow:auto (not a height-bounded
+          // flex column), so the flex chain had no height to distribute. A
+          // fixed viewport-relative height fills the screen and shows many
+          // rows; the sticky thead keeps headers visible while scrolling.
+          ? { flex: '0 0 auto', height: 'calc(100dvh - 150px)', maxHeight: 'calc(100dvh - 150px)' }
+          : { flex: 1, minHeight: 0, maxHeight: 'calc(100dvh - 280px)' }),
         overflowX: isPrinting ? 'visible' : 'auto',
         overflowY: isPrinting ? 'visible' : 'auto',
         border: `1px solid ${theme.colors.borderDefault}`,
@@ -2249,27 +2320,18 @@ export function Inventory() {
                   const sorted = header.column.getIsSorted();
                   const sortIdx = header.column.getSortIndex();
                   const hasFilter = columnFilters.some(f => f.id === colId);
-                  const isDragOver = dragOverColId === colId;
 
                   return (
                     <th
                       key={header.id}
                       style={{
                         ...headerCellStyle(colId),
-                        background: isDragOver ? '#EBF0FF' : '#F5F2EE',
-                        outline: isDragOver ? `2px solid ${theme.colors.primary}` : undefined,
-                        outlineOffset: -2,
                         width: header.getSize(),
                         boxSizing: 'border-box',
                         position: 'sticky',
                         top: 0,
                         zIndex: 4,
                       }}
-                      draggable={colId !== 'select' && colId !== 'actions'}
-                      onDragStart={e => onHeaderDragStart(e, colId)}
-                      onDragOver={e => onHeaderDragOver(e, colId)}
-                      onDrop={e => onHeaderDrop(e, colId)}
-                      onDragEnd={() => { setDragColId(null); setDragOverColId(null); }}
                     >
                       <div style={{ display: 'flex', alignItems: 'center', gap: 4, height: '100%' }}>
                         {/* Sort click target */}
@@ -2338,16 +2400,23 @@ export function Inventory() {
                         )}
                       </div>
 
-                      {/* Resize handle */}
+                      {/* Resize handle. stopPropagation + a wider 8px grab
+                          target make the drag reliable now that the header is
+                          no longer `draggable` (the native drag used to steal
+                          the mousedown, so resize only "caught" after release
+                          and then jumped). touchAction:none keeps a touch-drag
+                          from scrolling the table instead of resizing. */}
                       {header.column.getCanResize() && (
                         <div
-                          onMouseDown={header.getResizeHandler()}
-                          onTouchStart={header.getResizeHandler()}
+                          onMouseDown={e => { e.stopPropagation(); header.getResizeHandler()(e); }}
+                          onTouchStart={e => { e.stopPropagation(); header.getResizeHandler()(e); }}
+                          onClick={e => e.stopPropagation()}
                           style={{
                             position: 'absolute', right: 0, top: 0,
-                            height: '100%', width: 4, cursor: 'col-resize',
+                            height: '100%', width: 8, cursor: 'col-resize',
+                            touchAction: 'none',
                             background: header.column.getIsResizing() ? theme.colors.primary : 'transparent',
-                            zIndex: 1,
+                            zIndex: 5,
                           }}
                           onMouseEnter={e => (e.currentTarget.style.background = theme.colors.borderDefault)}
                           onMouseLeave={e => { if (!header.column.getIsResizing()) e.currentTarget.style.background = 'transparent'; }}
@@ -2611,6 +2680,8 @@ export function Inventory() {
             }));
           }}
           onClose={() => setShowColToggle(false)}
+          columnOrder={columnOrder.length ? columnOrder : DEFAULT_COL_ORDER}
+          onMove={moveColumn}
         />
       )}
 
