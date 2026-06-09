@@ -31,27 +31,61 @@ function iconFor(mime: string | null | undefined) {
   return <FileIcon size={14} />;
 }
 
-/** Row thumbnail: image docs lazily fetch a signed URL and show the actual
- *  image; everything else shows the type icon. One signed-URL call per image
- *  row (documents live in a private bucket). */
+/** Row thumbnail. Image docs show the actual image (signed URL); PDF docs
+ *  render their first page to a small bitmap via pdf.js (lazy-loaded — the lib
+ *  is a separate chunk that only loads when a PDF row mounts); everything else
+ *  shows the type icon. One signed-URL fetch per image/PDF row (documents live
+ *  in a private bucket). Falls back to the icon on any render error. */
 function DocThumb({ doc, getSignedUrl }: {
   doc: DocumentRow;
   getSignedUrl: (storageKey: string, expiresInSeconds?: number) => Promise<string | null>;
 }) {
-  const isImage = (doc.mime_type || '').toLowerCase().startsWith('image/');
+  const mime = (doc.mime_type || '').toLowerCase();
+  const isImage = mime.startsWith('image/');
+  const isPdf = mime.includes('pdf');
   const [thumb, setThumb] = useState<string | null>(null);
+
   useEffect(() => {
-    if (!isImage) return;
+    if (!isImage && !isPdf) return;
     let cancelled = false;
-    void getSignedUrl(doc.storage_key).then(u => { if (!cancelled && u) setThumb(u); });
+    (async () => {
+      const signed = await getSignedUrl(doc.storage_key);
+      if (cancelled || !signed) return;
+      if (isImage) { setThumb(signed); return; }
+      // PDF → render page 1 to a bitmap. pdf.js (+ its worker) load lazily.
+      try {
+        const pdfjs = await import('pdfjs-dist');
+        if (!pdfjs.GlobalWorkerOptions.workerSrc) {
+          pdfjs.GlobalWorkerOptions.workerSrc =
+            (await import('pdfjs-dist/build/pdf.worker.min.mjs?url')).default;
+        }
+        const buf = await (await fetch(signed)).arrayBuffer();
+        if (cancelled) return;
+        const pdf = await pdfjs.getDocument({ data: buf }).promise;
+        const page = await pdf.getPage(1);
+        const base = page.getViewport({ scale: 1 });
+        const vp = page.getViewport({ scale: (96 * 2) / base.width }); // ~96px wide @2x
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.ceil(vp.width);
+        canvas.height = Math.ceil(vp.height);
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        await page.render({ canvasContext: ctx, viewport: vp }).promise;
+        if (cancelled) return;
+        setThumb(canvas.toDataURL('image/png'));
+        try { pdf.cleanup(); } catch { /* noop */ }
+      } catch { /* fall back to the icon */ }
+    })();
     return () => { cancelled = true; };
-  }, [isImage, doc.storage_key, getSignedUrl]);
+  }, [isImage, isPdf, doc.storage_key, getSignedUrl]);
+
   const box: React.CSSProperties = {
     width: 40, height: 40, borderRadius: 6, flexShrink: 0,
     border: `1px solid ${theme.v2.colors.border}`,
   };
-  if (isImage && thumb) {
-    return <div style={{ ...box, background: `#F3F4F6 url(${thumb}) center/cover` }} aria-hidden />;
+  if (thumb) {
+    // PDFs are portrait — anchor to top so the header/logo shows in the crop.
+    return <div style={{ ...box, background: `#F3F4F6 url(${thumb}) center top / cover` }} aria-hidden />;
   }
   return (
     <div style={{ ...box, display: 'flex', alignItems: 'center', justifyContent: 'center', background: theme.v2.colors.bgCard, color: theme.v2.colors.accent }} aria-hidden>
