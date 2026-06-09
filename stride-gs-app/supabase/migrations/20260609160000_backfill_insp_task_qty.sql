@@ -8,7 +8,7 @@
 -- task-creation paths now set qty from inventory.qty for INSP
 -- (batch-create-tasks-sb, complete-shipment-sb buildTaskRow). This one-time
 -- backfill fixes already-OPEN INSP tasks so the NEXT completion bills the
--- correct quantity, matching the GAS fix in StrideAPI.gs v38.269.0.
+-- correct quantity, matching the GAS fix in StrideAPI.gs v38.271.0.
 --
 -- Scope guards (all required — this touches money-adjacent data):
 --   * INSP only (type IN 'INSP'/'Inspection') — every other task type is

@@ -14,7 +14,7 @@
 --   (b) v_total uses v_eff_qty
 --   (c) the billing INSERT qty column uses v_eff_qty
 -- The addon INSERT keeps v_addon.quantity (add-ons carry their own quantity).
--- Mirrors StrideAPI.gs v38.269.0 (GAS handleCompleteTask_ gates billQty on INSP).
+-- Mirrors StrideAPI.gs v38.271.0 (GAS handleCompleteTask_ gates billQty on INSP).
 -- Idempotent CREATE OR REPLACE; signature + grants preserved.
 
 CREATE OR REPLACE FUNCTION public.complete_task_atomic(
@@ -179,7 +179,7 @@ BEGIN
   -- INSPECTION is the ONLY per-piece service: bill tasks.qty × rate. Every
   -- other service code bills exactly 1 per item ID regardless of tasks.qty
   -- (the qty editor is shared across task types and split stamps grouped_qty,
-  -- but only inspection multiplies). Matches StrideAPI.gs v38.269.0.
+  -- but only inspection multiplies). Matches StrideAPI.gs v38.271.0.
   v_eff_qty := CASE WHEN v_upper_code IN ('INSP', 'INSPECTION')
                     THEN GREATEST(1, COALESCE(v_task.qty, 1))
                     ELSE 1 END;
