@@ -173,7 +173,11 @@ function useQrDataUrls(payloads: string[], size: number, enabled: boolean) {
 // ── Styles ─────────────────────────────────────────────────────────────
 function makeStyles(isMobile: boolean) {
   return {
-    page: { display: 'flex', flexDirection: 'column' as const, height: '100%', fontFamily: theme.typography.fontFamily, background: '#F5F2EE', margin: '-28px -32px', padding: '28px 32px' },
+    // Was desktop-only margin/padding on ALL sizes: the -32px horizontal margin
+    // vs <main>'s 8px mobile padding overflowed the viewport by ~24px each side
+    // (big sideways page-bounce on a phone) and the 32px padding ate the width.
+    // Mobile values now cancel main's padding exactly + overflowX:hidden guard.
+    page: { display: 'flex', flexDirection: 'column' as const, height: '100%', fontFamily: theme.typography.fontFamily, background: '#F5F2EE', margin: isMobile ? '-12px -8px' : '-28px -32px', padding: isMobile ? '12px 10px' : '28px 32px', overflowX: isMobile ? ('hidden' as const) : undefined, maxWidth: isMobile ? '100vw' : undefined },
     header: { display: 'flex', alignItems: 'center', gap: 10, paddingBottom: 16, marginBottom: 16, flexShrink: 0, flexWrap: 'wrap' as const },
     body: {
       flex: 1, overflow: 'auto',
@@ -611,7 +615,7 @@ export function Labels() {
   return (
     <div style={s.page}>
       <div style={s.header} className="no-print">
-        <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: '2px', color: '#1C1C1C' }}>STRIDE LOGISTICS · LABELS</div>
+        <div style={{ fontSize: isMobile ? 14 : 20, fontWeight: 700, letterSpacing: isMobile ? '1px' : '2px', color: '#1C1C1C' }}>{isMobile ? 'LABELS' : 'STRIDE LOGISTICS · LABELS'}</div>
         <span style={{ fontSize: 11, color: theme.colors.textMuted, marginLeft: 12 }}>
           {sizeDef.label} · {printCount} label{printCount !== 1 ? 's' : ''}
         </span>
@@ -622,17 +626,17 @@ export function Labels() {
         )}
       </div>
 
-      {/* Dark KPI strip */}
-      <div className="no-print" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 20, flexShrink: 0 }}>
+      {/* Dark KPI strip — 2×2 on mobile so the four stats stay legible. */}
+      <div className="no-print" style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)', gap: isMobile ? 8 : 16, marginBottom: isMobile ? 12 : 20, flexShrink: 0 }}>
         {[
           { label: 'Label Size', value: sizeDef.label, color: '#fff' },
           { label: 'Labels To Print', value: printCount, color: '#4ADE80' },
           { label: 'QR Code', value: cfg.showQr ? 'On' : 'Off', color: cfg.showQr ? '#60A5FA' : 'rgba(255,255,255,0.45)' },
           { label: 'Mode', value: cfg.kind === 'item' ? 'Item' : 'Location', color: '#E8692A' },
         ].map(c => (
-          <div key={c.label} style={{ background: '#1C1C1C', borderRadius: 20, padding: '20px 22px' }}>
-            <div style={{ fontSize: 10, fontWeight: 600, color: 'rgba(255,255,255,0.55)', textTransform: 'uppercase', letterSpacing: '2px', marginBottom: 10 }}>{c.label}</div>
-            <div style={{ fontSize: 22, fontWeight: 300, color: c.color, lineHeight: 1 }}>{c.value}</div>
+          <div key={c.label} style={{ background: '#1C1C1C', borderRadius: isMobile ? 14 : 20, padding: isMobile ? '12px 14px' : '20px 22px' }}>
+            <div style={{ fontSize: isMobile ? 9 : 10, fontWeight: 600, color: 'rgba(255,255,255,0.55)', textTransform: 'uppercase', letterSpacing: isMobile ? '1px' : '2px', marginBottom: isMobile ? 6 : 10 }}>{c.label}</div>
+            <div style={{ fontSize: isMobile ? 18 : 22, fontWeight: 300, color: c.color, lineHeight: 1 }}>{c.value}</div>
           </div>
         ))}
       </div>
