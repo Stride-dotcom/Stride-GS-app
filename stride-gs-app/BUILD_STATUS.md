@@ -114,6 +114,14 @@
 
 ---
 
+## Recent Changes (2026-06-09, orders: clean numbering for auto-created tasks + inspection dedup fix — feat/orders/order-numbering-autotasks, PR #704)
+
+- Follow-up to PR #695. The two remaining legacy task-id minters now honor the `orderNumbering` feature so the Justin Demo canary stops seeing mixed formats: **`complete-shipment-sb`** (auto INSP/ASM tasks on `receiveShipment`, scoped to the shipment's tenant) and **`transfer-items-sb`** (auto INSP task on `transferItems`, scoped to the destination tenant). Both mint `PREFIX-TSK-N` via `next_order_id` when the feature is on, else the legacy `SVC-ITEM-N` counter. Unlike `batch-create-tasks-sb` (which fails closed), these **fall back to legacy on RPC error** — auto-task creation is best-effort and a transient blip shouldn't drop the task or fail the operation.
+- **Inspection-dedup correctness fix (the important part).** Gating auto-INSP-on-transfer surfaced a latent bug: the "already inspected" guard matched `task_id LIKE 'INSP-%'`, which clean `PREFIX-TSK-N` ids don't satisfy → duplicate inspection task on transfer once the feature is on. But switching to `type='Inspection'` alone is **worse** — verified live: **778** completed inspections match by id-prefix, **0** by `type` (the `type` column says `'INSP'` on ~907 rows). Fix matches the **union** in both the EF and the React pre-check (`src/components/shared/TransferItemsModal.tsx`): `task_id LIKE 'INSP-%' OR type = <inspName>` — catches legacy (id) and clean (type) inspections.
+- `process-wc-release-sb` / `release-items-sb` mint no order numbers (partial-release child-WC deferred; their `WC-...` strings are billing `ledger_row_id`s) — no change. Repairs fully covered by #695's RPC. No migration (SQL shipped in #695). Opus code-review caught the dedup bug; re-verified against prod counts. tsc + build clean. Deployed: `complete-shipment-sb` v5 + `transfer-items-sb` v6 (verify_jwt preserved) via supabase CLI; React deployed from canonical clone.
+
+---
+
 ## Recent Changes (2026-06-09, quotes: attach documents/photos to quotes — feat/warehouse/quote-documents, PR #698)
 
 - Clients send floor plans, packing lists, purchase orders, photos, etc. for a quote; these now attach to the quote so anyone reviewing it has full context. New **Documents** card at the bottom of the Quote Builder left column (`src/components/quotes/QuoteDocumentsCard.tsx`), wired in `QuoteBuilder.tsx`. Works both during quote creation and when editing an existing quote (the quote has a stable `crypto.randomUUID` id before the builder mounts — `QuoteTool.openBuilder` calls `createQuote()` first).
