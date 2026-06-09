@@ -2635,11 +2635,15 @@ export function Inventory() {
           {user?.role === 'admin' && (
             <WriteButton label="Credit" variant="ghost" size="sm" onClick={async () => { const items = selectedRows.map(r => r.original); if (!items.length) { showToast('Select items first to credit'); return; } const guard = checkBatchClientGuard(items); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Storage Credit'); return; } setShowStorageCreditModal(true); }} />
           )}
-          {codEnabledFor(selectedRows[0]?.original.clientId) && (user?.role === 'staff' || user?.role === 'admin') && (
+          {codEnabledFor(selectedRows[0]?.original.clientId) && user?.role === 'admin' && (
             <WriteButton label="COD" variant="ghost" size="sm" onClick={async () => { const items = selectedRows.map(r => r.original); if (!items.length) { showToast('Select items first'); return; } const guard = checkBatchClientGuard(items); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Set COD Storage'); return; } setShowCodStorageModal(true); }} />
           )}
-          {codEnabledFor(selectedRows[0]?.original.clientId) && (user?.role === 'staff' || user?.role === 'admin') && (
-            <WriteButton label="Collect COD" variant="ghost" size="sm" onClick={async () => { const items = selectedRows.map(r => r.original).filter(i => i.codStorage); if (!items.length) { showToast('Select COD-flagged items first'); return; } const guard = checkBatchClientGuard(items); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Collect COD Storage'); return; } setShowCollectCodModal(true); }} />
+          {codEnabledFor(selectedRows[0]?.original.clientId) && user?.role === 'admin' && (
+            // NOTE: do NOT filter by row.codStorage — cod_storage is a Supabase-only
+            // column that is only populated on the Supabase-first inventory load path
+            // (absent on the GAS fallback), so the row field is unreliable. The EF
+            // reads cod_storage authoritatively; the modal shows which items qualify.
+            <WriteButton label="Collect COD" variant="ghost" size="sm" onClick={async () => { const items = selectedRows.map(r => r.original); if (!items.length) { showToast('Select items first'); return; } const guard = checkBatchClientGuard(items); if (guard) { setBatchGuardClients(guard); setBatchGuardAction('Collect COD Storage'); return; } setShowCollectCodModal(true); }} />
           )}
           {(user?.role === 'staff' || user?.role === 'admin') && (
             <WriteButton
@@ -2839,7 +2843,7 @@ export function Inventory() {
       {/* ── Collect COD Storage Modal (standalone invoicing, feature-gated) ── */}
       {showCollectCodModal && codEnabledFor(selectedRows[0]?.original.clientId) && selectedRows.length > 0 && (
         <CollectCodStorageModal
-          items={selectedRows.map(r => r.original).filter(i => i.codStorage).map(i => ({ itemId: i.itemId, description: i.description }))}
+          items={selectedRows.map(r => r.original).map(i => ({ itemId: i.itemId, description: i.description }))}
           clientName={selectedRows[0]?.original.clientName || ''}
           clientSheetId={selectedRows[0]?.original.clientId || ''}
           performedBy={user?.email || null}
