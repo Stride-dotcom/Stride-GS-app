@@ -51,8 +51,9 @@ const ACTION_LABELS: Record<string, { label: string; color: string }> = {
   transfer: { label: 'Transferred', color: '#0891B2' },
   assign: { label: 'Assigned', color: '#B45309' },
   status_change: { label: 'Status Changed', color: '#6D28D9' },
-  cod_storage_set:     { label: 'COD Storage On',  color: '#CA8A04' },
-  cod_storage_removed: { label: 'COD Storage Off', color: '#6B7280' },
+  cod_storage_set:       { label: 'COD Storage On',   color: '#CA8A04' },
+  cod_storage_removed:   { label: 'COD Storage Off',  color: '#6B7280' },
+  cod_storage_collected: { label: 'COD Storage Paid', color: '#15803D' },
   // dt_order app-side actions
   approve:            { label: 'Approved',           color: '#15803D' },
   reject:             { label: 'Rejected',           color: '#DC2626' },

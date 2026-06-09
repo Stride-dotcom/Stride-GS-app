@@ -36,7 +36,7 @@ import { supabase } from '../../lib/supabase';
 import { entityEvents } from '../../lib/entityEvents';
 import {
   previewCodCollection,
-  collectCodStorage,
+  markCodStorageCollected,
   COD_STORAGE_DEFAULT_RATE,
   todayIso,
   type CodCollectionResult,
@@ -85,7 +85,12 @@ export function OrderCodStorageCard({ order, performedBy, canEdit }: Props) {
     [order.items],
   );
 
-  const persistedCutoff = order.codStorageCutoffDate || order.localServiceDate || todayIso();
+  // Auto-follow the requested delivery date: the cutoff tracks localServiceDate
+  // (so the COD amount stays correct as more storage days accrue while waiting
+  // to schedule) until the order is collected. Falls back to a saved cutoff or
+  // today when there's no service date yet. (Operator can still hand-edit the
+  // cutoff in-session; it re-syncs to the delivery date when that date changes.)
+  const persistedCutoff = order.localServiceDate || order.codStorageCutoffDate || todayIso();
   // A persisted COD decision exists once the line has been saved/collected
   // (cutoff or total written). Until then, default the include checkbox to ON.
   const hasPersisted = order.codStorageCutoffDate != null || order.codStorageTotal != null;
@@ -215,31 +220,44 @@ export function OrderCodStorageCard({ order, performedBy, canEdit }: Props) {
     }
   };
 
-  // Commit: create the billing rows + mark collected (same path as the
-  // standalone Collect COD), then stamp the collection onto the order.
+  // Mark Paid — collect-on-delivery model (like will-call COD). Records the
+  // durable dedup ledger + stamps the order collected/paid + writes an item
+  // activity row, but creates NO billing row / no QBO invoice. For a
+  // customer-collect order it settles EVERYTHING owed in one action (delivery
+  // charges + COD storage), so the DT re-push shows the customer paid in full.
   const handleCollect = async () => {
     if (collecting || billableItems.length === 0) return;
     setCollecting(true);
     setCollectError(null);
     try {
-      const res = await collectCodStorage(
-        order.tenantId || '', itemIds, cutoff, rate, collectNotes.trim() || null, performedBy,
-      );
-      if (res.summary.errors && res.summary.errors.length > 0) {
-        setCollectError(res.summary.errors.map((e) => `${e.itemId}: ${e.error}`).join('; '));
-        return;
-      }
+      // 1. Persist the current line so the RPC reads the right details + amount.
+      const patch = buildSummaryPatch();
       const { error: upErr } = await supabase
         .from('dt_orders')
-        .update({
-          ...buildSummaryPatch(res),
-          cod_storage_enabled: true,
-          cod_storage_collected_at: new Date().toISOString(),
-          cod_storage_collected_by: performedBy,
-          cod_storage_collection_notes: collectNotes.trim() || null,
-        })
+        .update({ ...patch, cod_storage_enabled: true })
         .eq('id', order.id);
       if (upErr) { setCollectError(upErr.message); return; }
+
+      // 2. Mark collected/paid: dedup ledger (storage_billing_items) + stamps
+      //    cod_storage_collected_* + per-item activity row. No billing row.
+      await markCodStorageCollected(order.id, collectNotes.trim() || null, performedBy);
+
+      // 3. Unified settle: a customer-collect order is paid in full at the door,
+      //    so record delivery charges + COD storage as paid. (Client-paid
+      //    deliveries leave the order's own paid_* alone — only COD is collected
+      //    from the end customer.)
+      if (order.billingMethod === 'customer_collect') {
+        const nowIso = new Date().toISOString();
+        const paidAmount = (order.orderTotal ?? 0) + (patch.cod_storage_total ?? total);
+        const { error: paidErr } = await supabase
+          .from('dt_orders')
+          .update({
+            paid_at: nowIso, paid_amount: paidAmount, paid_method: 'COD',
+            payment_collected: true, payment_collected_at: nowIso,
+          })
+          .eq('id', order.id);
+        if (paidErr) { setCollectError(paidErr.message); return; }
+      }
       entityEvents.emit('dt_order', order.id);
       setShowCollect(false);
     } catch (err) {
@@ -295,7 +313,7 @@ export function OrderCodStorageCard({ order, performedBy, canEdit }: Props) {
             </div>
           )}
           <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 6 }}>
-            Unbilled COD_STOR billing row{(order.codStorageItemCount ?? 0) !== 1 ? 's' : ''} created — flows through the normal invoicing path to QBO.
+            Collected from the customer at delivery (no invoice). Recorded on the order + item activity and pushed to DispatchTrack as paid.
           </div>
         </div>
       ) : (
@@ -366,7 +384,7 @@ export function OrderCodStorageCard({ order, performedBy, canEdit }: Props) {
                   );
                 })}
                 <div style={{ display: 'flex', fontSize: 13, padding: '8px 10px', borderTop: `2px solid ${theme.colors.border}`, fontWeight: 700, background: '#FAFAF9' }}>
-                  <span style={{ flex: 1 }}>Total due{billableItems.length > 0 ? ` (${billableItems.length} item${billableItems.length !== 1 ? 's' : ''})` : ''}</span>
+                  <span style={{ flex: 1 }}>Total to collect{billableItems.length > 0 ? ` (${billableItems.length} item${billableItems.length !== 1 ? 's' : ''})` : ''}</span>
                   <span>{fmtCurrency(total)}</span>
                 </div>
               </div>
@@ -397,14 +415,21 @@ export function OrderCodStorageCard({ order, performedBy, canEdit }: Props) {
               {saved && <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, color: '#15803D' }}><CheckCircle2 size={14} /> Saved</span>}
               {dirty && <WriteButton label={saving ? 'Saving...' : 'Save'} variant="secondary" size="sm" disabled={saving} onClick={handleSave} />}
               {enabled && billableItems.length > 0 && !showCollect && (
-                <WriteButton label="Collect COD Storage" variant="primary" size="sm" onClick={() => setShowCollect(true)} />
+                <WriteButton label="Mark Paid" variant="primary" size="sm" onClick={() => setShowCollect(true)} />
               )}
             </div>
           )}
 
-          {/* Collect form */}
+          {/* Mark-paid form */}
           {showCollect && (
             <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${theme.colors.border}` }}>
+              {order.billingMethod === 'customer_collect' && (
+                <div style={{ fontSize: 11, color: '#92400E', background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: 8, padding: 8, marginBottom: 8 }}>
+                  This is a customer-collect order — marking paid settles the delivery charges
+                  ({fmtCurrency(order.orderTotal ?? 0)}) <strong>and</strong> COD storage ({fmtCurrency(total)}) =
+                  {' '}<strong>{fmtCurrency((order.orderTotal ?? 0) + total)}</strong> collected.
+                </div>
+              )}
               <label style={labelCss}>Payment details (optional)</label>
               <textarea value={collectNotes} onChange={e => setCollectNotes(e.target.value)} rows={2}
                 placeholder="e.g., Collected $X cash on delivery / Zelle ref…"
@@ -414,7 +439,7 @@ export function OrderCodStorageCard({ order, performedBy, canEdit }: Props) {
               )}
               <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
                 <WriteButton label="Cancel" variant="secondary" size="sm" onClick={() => setShowCollect(false)} />
-                <WriteButton label={collecting ? 'Collecting...' : `Create Invoice ${fmtCurrency(total)}`} variant="primary" size="sm" disabled={collecting} onClick={handleCollect} />
+                <WriteButton label={collecting ? 'Marking paid...' : `Mark Paid ${fmtCurrency(total)}`} variant="primary" size="sm" disabled={collecting} onClick={handleCollect} />
               </div>
             </div>
           )}

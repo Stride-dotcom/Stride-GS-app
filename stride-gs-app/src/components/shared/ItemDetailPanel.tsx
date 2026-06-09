@@ -360,8 +360,9 @@ const AUDIT_ACTION_LABELS: Record<string, { label: string; color: string }> = {
   transfer: { label: 'Transferred', color: '#0891B2' },
   assign: { label: 'Assigned', color: '#B45309' },
   status_change: { label: 'Status Changed', color: '#6D28D9' },
-  cod_storage_set:     { label: 'COD Storage On',  color: '#CA8A04' },
-  cod_storage_removed: { label: 'COD Storage Off', color: '#6B7280' },
+  cod_storage_set:       { label: 'COD Storage On',   color: '#CA8A04' },
+  cod_storage_removed:   { label: 'COD Storage Off',  color: '#6B7280' },
+  cod_storage_collected: { label: 'COD Storage Paid', color: '#15803D' },
 };
 
 interface AuditEntry {
@@ -431,7 +432,7 @@ function ItemHistory({ itemId, tasks, repairs, willCalls, billing, moves, shipme
   // this a COD-feature change rather than surfacing the item's full
   // edit/release/transfer audit (which is fetched but was never rendered).
   const codAudit = (itemId ? (auditByEntity[itemId] || []) : []).filter(
-    e => e.action === 'cod_storage_set' || e.action === 'cod_storage_removed'
+    e => e.action === 'cod_storage_set' || e.action === 'cod_storage_removed' || e.action === 'cod_storage_collected'
   );
 
   return (
@@ -760,7 +761,7 @@ export function ItemDetailPanel({
     });
   }, [item.itemId]);
 
-  const historyCount = (hasShipment ? 1 : 0) + combinedMoves.length + itemTasks.length + itemRepairs.length + itemWillCalls.length + itemBilling.length + (auditByEntity[item.itemId] || []).filter(e => e.action === 'cod_storage_set' || e.action === 'cod_storage_removed').length;
+  const historyCount = (hasShipment ? 1 : 0) + combinedMoves.length + itemTasks.length + itemRepairs.length + itemWillCalls.length + itemBilling.length + (auditByEntity[item.itemId] || []).filter(e => e.action === 'cod_storage_set' || e.action === 'cod_storage_removed' || e.action === 'cod_storage_collected').length;
 
   // Can this user edit?
   const canEditBasic = !!clientSheetId; // all roles can edit basic fields

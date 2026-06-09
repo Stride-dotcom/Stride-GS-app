@@ -116,6 +116,17 @@
 
 ---
 
+## Recent Changes (2026-06-09, delivery: COD Storage is now MARK-PAID, not invoiced — feat/delivery/cod-mark-paid)
+
+- **Model change (per Justin):** the delivery-order COD storage line is now collected as a **mark-paid (collect-on-delivery)** event like will-call COD — **NO QBO/billing row**. (The standalone Inventory "Collect COD" path still invoices — different use case: billing warehouse storage with no delivery.) The order-page COD card's button changed from "Collect COD Storage" (→ `collect-cod-storage-sb` EF → Unbilled `COD_STOR` billing rows) to **"Mark Paid"**, which calls the `mark_cod_storage_collected` RPC (records the `storage_billing_items` dedup ledger + stamps `cod_storage_collected_*`, no billing).
+- **Unified settle:** on a `customer_collect` order, Mark Paid settles **everything owed at the door** — delivery charges + COD storage — stamping `paid_at/paid_amount = orderTotal + codTotal /paid_method='COD'/payment_collected`. Both the COD card AND `OrderDetailPanel`'s "Mark Paid" now do this (OrderDetailPanel was delivery-only → would have diverged on amount; fixed to also mark COD collected + include it in `paid_amount`).
+- **Auto-follow date:** the COD cutoff now tracks the **requested delivery date** (`localServiceDate`) until collected, so the amount stays correct while you wait to schedule (no manual cutoff bump).
+- **DT push v48:** when `cod_storage_collected_at` is set, the COD block flips from "COD STORAGE (collect from customer) … Amount due = $X" to "(collected from customer) … PAID = $X", so a re-push after marking paid shows it settled. For customer-collect orders the `[PAID via COD — $total]` line reflects delivery+COD.
+- **Item Activity:** the collection now shows in the item Activity tab as **"COD Storage Paid"** (migration `20260609210000` adds a per-item `entity_audit_log` row inside `mark_cod_storage_collected`; `ItemDetailPanel` + `EntityHistory` label maps + filters updated). Previously the `cod_storage_collected` event was written but filtered out.
+- Files: `src/components/shared/OrderCodStorageCard.tsx`, `OrderDetailPanel.tsx`, `ItemDetailPanel.tsx`, `EntityHistory.tsx`, `src/lib/codStorage.ts` (re-added `markCodStorageCollected` wrapper), `supabase/functions/dt-push-order/index.ts` (v48), migration `20260609210000_cod_storage_collected_activity.sql` (applied). Opus review: 1 Important (dual-mark-paid divergence) fixed; tsc + build clean.
+
+---
+
 ## Recent Changes (2026-06-09, delivery: COD Storage fleet rollout + pricing-summary line + instant $ badge — feat/delivery/cod-rollout-pricing)
 
 - **Fleet rollout.** Flipped the `codStorageBilling` feature flag from Justin-Demo-canary (`tenant_scope:['1-nF3…']`) to **fleet-wide** (`tenant_scope=NULL`, `active_backend='supabase'`) so COD Storage is available on ALL accounts. It's a pure UI gate — the SQL (`_compute_storage_charges` cap, `trg_apply_cod_storage_on_receive`) already ran fleet-wide but only acts on columns the flag-gated UI sets, so unscoping just unlocks the UI everywhere (no runaway billing). **Operator follow-up:** `svc_code='COD_STOR'` still needs a QBO item mapping or COD invoices fall back to a default QBO line.
