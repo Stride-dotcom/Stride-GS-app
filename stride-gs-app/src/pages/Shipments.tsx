@@ -572,7 +572,7 @@ export function Shipments() {
   const monthItems = data.filter(r => (r.receivedDate || '').slice(0, 7) === monthStart).reduce((sum, r) => sum + r.itemCount, 0);
 
   return (
-    <div style={{ fontFamily: theme.typography.fontFamily, background: '#F5F2EE', margin: isMobile ? '-12px -8px' : '-28px -32px', padding: isMobile ? '8px' : '28px 32px', minHeight: '100%', overflowX: isMobile ? 'hidden' : undefined, maxWidth: isMobile ? '100vw' : undefined }}>
+    <div style={{ fontFamily: theme.typography.fontFamily, background: '#F5F2EE', margin: isMobile ? '-12px -8px' : '-28px -32px', padding: isMobile ? '8px' : '28px 32px', minHeight: '100%', overflowX: isMobile ? 'clip' : undefined, maxWidth: isMobile ? '100vw' : undefined }}>
       {/* Loading state */}
       {hasApi && apiLoading && data.length === 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: 300, gap: 12 }}>

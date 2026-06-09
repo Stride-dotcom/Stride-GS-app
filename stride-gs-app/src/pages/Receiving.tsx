@@ -1557,7 +1557,7 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
   }
 
   return (
-    <div style={{ position: 'relative', background: '#F5F2EE', margin: isMobile ? '-12px -8px' : '-28px -32px', padding: isMobile ? '8px' : '28px 32px', minHeight: '100%', overflowX: isMobile ? 'hidden' : undefined, maxWidth: isMobile ? '100vw' : undefined }}>
+    <div style={{ position: 'relative', background: '#F5F2EE', margin: isMobile ? '-12px -8px' : '-28px -32px', padding: isMobile ? '8px' : '28px 32px', minHeight: '100%', overflowX: isMobile ? 'clip' : undefined, maxWidth: isMobile ? '100vw' : undefined }}>
       <ProcessingOverlay
         visible={submitting}
         message="Hold tight — completing your shipment"
