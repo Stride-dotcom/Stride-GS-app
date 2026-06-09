@@ -1722,6 +1722,19 @@ export function Inventory() {
     }
   }
 
+  // REPLACE (not toggle) — used by the mobile status dropdown, which is a
+  // single-select control. setStatusChip toggles (multi-select chip
+  // semantics), so reusing it on the dropdown would ADD a second status and
+  // the value would collapse to "All" while two were filtered. Here we set
+  // the column filter outright and re-seed the persisted store to match
+  // (clear → add-one; both persisted setters are functional updaters, so the
+  // toggle sees the cleared [] and yields exactly [status]).
+  function setStatusSingle(status: InventoryStatus | null) {
+    clearPersistedStatus();
+    if (status !== null) togglePersistedStatus(status);
+    table.getColumn('status')?.setFilterValue(status === null ? undefined : [status]);
+  }
+
   // Column reordering — driven by the Columns menu (up/down), replacing the
   // old header drag-and-drop. Header drag was removed because (a) the native
   // `draggable` th hijacked the resize-handle mousedown, making column-resize
@@ -2163,7 +2176,7 @@ export function Inventory() {
         <div className="no-print" style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
           <select
             value={statusFilterValue.length === 1 ? statusFilterValue[0] : ''}
-            onChange={e => setStatusChip(e.target.value ? (e.target.value as InventoryStatus) : null)}
+            onChange={e => setStatusSingle(e.target.value ? (e.target.value as InventoryStatus) : null)}
             style={{
               flex: 1, padding: '10px 12px', borderRadius: 10,
               border: '1px solid rgba(0,0,0,0.12)', background: '#fff',
