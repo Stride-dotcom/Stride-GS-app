@@ -95,7 +95,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   const isActive = !['Complete', 'Cancelled', 'Declined'].includes(effectiveStatus);
 
   // (I)(A)(R) indicator badges for the Item card below.
-  const { inspOpenItems, inspDoneItems, inspFailedItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems, wcOpenItems, wcDoneItems, codItems } = useItemIndicators(repair.clientSheetId);
+  const { inspOpenItems, inspDoneItems, inspFailedItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems, wcOpenItems, wcDoneItems, dtOpenItems, dtDoneItems, codItems } = useItemIndicators(repair.clientSheetId);
 
   const [repairNotes, setRepairNotes] = useState(repair.repairNotes || '');
   const [showResultPrompt, setShowResultPrompt] = useState<'fail' | null>(null);
@@ -1174,6 +1174,8 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
                   repairDoneItems={repairDoneItems}
                   wcOpenItems={wcOpenItems}
                   wcDoneItems={wcDoneItems}
+                  dtOpenItems={dtOpenItems}
+                  dtDoneItems={dtDoneItems}
                   codItems={codItems}
                 />
                 {repair.vendor ? <span>{` — ${repair.vendor}`}</span> : null}
@@ -2660,6 +2662,8 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
             repairDoneItems={repairDoneItems}
             wcOpenItems={wcOpenItems}
             wcDoneItems={wcDoneItems}
+            dtOpenItems={dtOpenItems}
+            dtDoneItems={dtDoneItems}
             codItems={codItems}
           />
         ) : undefined}

@@ -54,6 +54,8 @@ import { generateOrderPdf } from '../lib/orderPdf';
 import { logDtOrderAudit } from '../lib/dtOrderAudit';
 import { ConfirmDialog } from '../components/shared/ConfirmDialog';
 import { summarizeDtChanges, DT_GROUP_LABEL, type DtFieldGroup, type DtChangeSummary } from '../lib/dtSelectivePush';
+import { useItemIndicators } from '../hooks/useItemIndicators';
+import { ItemIdBadges } from '../components/shared/ItemIdBadges';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -513,6 +515,12 @@ function DetailsTab({
 }) {
   const codFlagRow = useFeatureFlagRow('codStorageBilling');
   const codStorageOn = !!codFlagRow && resolveFlagBackend(codFlagRow, order.tenantId) === 'supabase';
+  // Item indicator badges (I/A/R/W/D/$) next to each line's Stride item code,
+  // tenant-scoped to this order's client. Lets the team see at a glance whether
+  // any item on the delivery has an active task / repair / will call / COD flag
+  // (or another open delivery) without leaving the order. Single source of
+  // truth — same hook every other page uses; no local badge derivation here.
+  const indicators = useItemIndicators(order.tenantId ?? undefined);
   const addressLine = [order.contactAddress, order.contactCity, order.contactState, order.contactZip].filter(Boolean).join(', ');
   // Identify the P+D partner — when this row is the delivery leg of a
   // pair, the partner is the pickup leg (and vice versa). Drives the
@@ -989,7 +997,24 @@ function DetailsTab({
                             )}
                           </div>
                           {item.dtItemCode && (
-                            <div style={{ fontSize: 10, color: EP.textMuted, fontFamily: 'monospace' }}>{item.dtItemCode}</div>
+                            <div style={{ display: 'flex', alignItems: 'center', fontSize: 10, color: EP.textMuted, fontFamily: 'monospace' }}>
+                              {item.dtItemCode}
+                              <ItemIdBadges
+                                itemId={item.dtItemCode}
+                                inspOpenItems={indicators.inspOpenItems}
+                                inspDoneItems={indicators.inspDoneItems}
+                                inspFailedItems={indicators.inspFailedItems}
+                                asmOpenItems={indicators.asmOpenItems}
+                                asmDoneItems={indicators.asmDoneItems}
+                                repairOpenItems={indicators.repairOpenItems}
+                                repairDoneItems={indicators.repairDoneItems}
+                                wcOpenItems={indicators.wcOpenItems}
+                                wcDoneItems={indicators.wcDoneItems}
+                                dtOpenItems={indicators.dtOpenItems}
+                                dtDoneItems={indicators.dtDoneItems}
+                                codItems={indicators.codItems}
+                              />
+                            </div>
                           )}
                           {/* v2026-05-13 — per-item picked-up indicator.
                               Stamped on the delivery item by stamp-pickup-on-linked-delivery
