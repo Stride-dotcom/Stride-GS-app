@@ -67,7 +67,7 @@ const COL_LABELS: Record<string, string> = {
   clientName: 'Client', description: 'Description', reference: 'Reference', status: 'Status',
   quoteAmount: 'Quote $', approvedAmount: 'Approved $', repairVendor: 'Repair Tech',
   assignedTo: 'Assigned', createdDate: 'Created', quoteSentDate: 'Quote Sent',
-  approvedDate: 'Approved Date', completedDate: 'Completed', notes: 'Notes',
+  completedDate: 'Completed', notes: 'Notes',
 };
 const TOGGLEABLE = Object.keys(COL_LABELS);
 
