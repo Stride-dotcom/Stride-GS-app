@@ -344,22 +344,51 @@ Deno.serve(async (req: Request) => {
       .maybeSingle();
     const clientName  = (clientRow as { name?: string } | null)?.name?.trim()  || 'Client';
 
-    // Inventory overlay for ITEM_TABLE_HTML
-    const itemId = String(existing.item_id ?? '').trim();
+    // Multi-item repairs: the full item list lives in public.repair_items
+    // (parent repairs.item_id is only the denormalized "primary"). A single
+    // quote can cover N items, so the subject, the body header ({{ITEM_ID}})
+    // and the item-detail table must list ALL of them — not just the primary.
+    // Pre-fix, only existing.item_id was referenced, so a batch repair's email
+    // showed one item ID everywhere. This mirrors the multi-item rendering in
+    // request-repair-quote-sb and the work-order print fix (PR #613).
+    const primaryItemId = String(existing.item_id ?? '').trim();
+    const { data: repairItemRows } = await supabase
+      .from('repair_items')
+      .select('item_id, created_at')
+      .eq('tenant_id', tenantId)
+      .eq('repair_id', repairId)
+      .order('created_at', { ascending: true });
+    const repairItemIds = ((repairItemRows as { item_id: string }[] | null) ?? [])
+      .map(r => String(r.item_id ?? '').trim())
+      .filter(Boolean);
+    // Order: primary first (matches the deep-link / back-compat expectation),
+    // then any remaining repair_items in insertion order, de-duplicated.
+    // Legacy single-item repairs predate repair_items — the primary fallback
+    // keeps them rendering exactly one row.
+    const orderedItemIds = Array.from(new Set([primaryItemId, ...repairItemIds].filter(Boolean)));
+
     interface InventoryRow {
       item_id: string; description: string | null; vendor: string | null;
-      sidemark: string | null; location: string | null; item_class: string | null;
-      qty: number | null;
+      sidemark: string | null; location: string | null;
     }
-    const { data: invRow } = itemId
+    const { data: invRows } = orderedItemIds.length > 0
       ? await supabase
           .from('inventory')
-          .select('item_id, description, vendor, sidemark, location, item_class, qty')
-          .eq('tenant_id', tenantId).eq('item_id', itemId).maybeSingle()
+          .select('item_id, description, vendor, sidemark, location')
+          .eq('tenant_id', tenantId).in('item_id', orderedItemIds)
       : { data: null };
-    const inv = invRow as InventoryRow | null;
+    const invByItemId = new Map<string, InventoryRow>();
+    for (const r of ((invRows as InventoryRow[] | null) ?? [])) invByItemId.set(r.item_id, r);
+    // Preserve orderedItemIds order; synthesize a bare row for any item that's
+    // missing from inventory so its ID still appears in the table.
+    const orderedItems: InventoryRow[] = orderedItemIds.map(id =>
+      invByItemId.get(id) ?? { item_id: id, description: null, vendor: null, sidemark: null, location: null });
 
-    const itemTableHtml  = renderItemTable(itemId, inv);
+    // Comma-joined list of every item on the repair — drives the subject line
+    // and the {{ITEM_ID}} body token (header) so all items are shown.
+    const itemIdsLabel = orderedItemIds.join(', ');
+
+    const itemTableHtml  = renderItemTable(orderedItems);
     const quoteLinesHtml = renderQuoteLines(quoteLines);
     const appDeepLink    = `${APP_URL}/#/repairs?open=${encodeURIComponent(repairId)}&client=${encodeURIComponent(tenantId)}`;
 
@@ -373,7 +402,7 @@ Deno.serve(async (req: Request) => {
       // REVISED prefix mirrors GAS handleSendRepairQuote_ — the customer
       // mailbox sees the same "REVISED — ..." subject regardless of
       // which backend serviced the request.
-      const subjectOverride = `${isRevision ? 'REVISED — ' : ''}Repair Quote Ready: ${itemId} $${formatMoney(grandTotal)}`;
+      const subjectOverride = `${isRevision ? 'REVISED — ' : ''}Repair Quote Ready: ${itemIdsLabel} $${formatMoney(grandTotal)}`;
       // Bump the idempotency key on a revision so send-email's
       // per-template dedup doesn't drop the resend when nothing else
       // changed in the tokens.
@@ -394,7 +423,7 @@ Deno.serve(async (req: Request) => {
             tokens: {
               CLIENT_NAME:           clientName,
               REPAIR_ID:             repairId,
-              ITEM_ID:               itemId,
+              ITEM_ID:               itemIdsLabel,
               ITEM_TABLE_HTML:       itemTableHtml,
               QUOTE_LINE_ITEMS_HTML: quoteLinesHtml,
               // Token values are RAW numbers — the template surrounds each
@@ -472,13 +501,22 @@ function formatMoney(n: number): string {
   return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-function renderItemTable(itemId: string, inv: {
-  description: string | null; vendor: string | null;
-  sidemark: string | null; location: string | null; qty: number | null;
-} | null): string {
-  if (!itemId) return '';
+function renderItemTable(items: {
+  item_id: string; description: string | null; vendor: string | null;
+  sidemark: string | null; location: string | null;
+}[]): string {
+  if (items.length === 0) return '';
   const td = 'padding:6px 10px;border-bottom:1px solid #E5E7EB;font-size:13px;color:#1F2937;vertical-align:top;';
   const th = 'padding:8px 10px;background:#F9FAFB;border-bottom:2px solid #D1D5DB;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:#374151;text-align:left;';
+  const rows = items.map(it => [
+    '<tr>',
+    `<td style="${td}font-family:monospace;font-size:12px;">${escapeHtml(it.item_id ?? '')}</td>`,
+    `<td style="${td}">${escapeHtml(it.description ?? '')}</td>`,
+    `<td style="${td}">${escapeHtml(it.vendor ?? '')}</td>`,
+    `<td style="${td}">${escapeHtml(it.sidemark ?? '')}</td>`,
+    `<td style="${td}">${escapeHtml(it.location ?? '')}</td>`,
+    '</tr>',
+  ].join('')).join('');
   return [
     '<table cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;width:100%;margin:8px 0 16px;">',
     '<thead><tr>',
@@ -487,13 +525,9 @@ function renderItemTable(itemId: string, inv: {
     `<th style="${th}">Vendor</th>`,
     `<th style="${th}">Sidemark</th>`,
     `<th style="${th}">Location</th>`,
-    '</tr></thead><tbody><tr>',
-    `<td style="${td}font-family:monospace;font-size:12px;">${escapeHtml(itemId)}</td>`,
-    `<td style="${td}">${escapeHtml(inv?.description ?? '')}</td>`,
-    `<td style="${td}">${escapeHtml(inv?.vendor ?? '')}</td>`,
-    `<td style="${td}">${escapeHtml(inv?.sidemark ?? '')}</td>`,
-    `<td style="${td}">${escapeHtml(inv?.location ?? '')}</td>`,
-    '</tr></tbody></table>',
+    '</tr></thead><tbody>',
+    rows,
+    '</tbody></table>',
   ].join('');
 }
 
