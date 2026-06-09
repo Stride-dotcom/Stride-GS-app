@@ -198,6 +198,40 @@ export async function setCodStorage(
 }
 
 // ────────────────────────────────────────────────────────────────────────
+// Delivery-order COD Storage — MARK PAID (collect-on-delivery model).
+//
+// Unlike the standalone Inventory "Collect COD" path (which invoices via the
+// collect-cod-storage-sb EF → QBO), the delivery-order line is collected from
+// the end customer AT DELIVERY, like a will-call COD amount. Marking it paid
+// records the durable storage_billing_items dedup ledger + stamps the order's
+// cod_storage_collected_* (and an item activity row), but creates NO billing
+// row / no QBO invoice. The mark_cod_storage_collected RPC is SECURITY DEFINER
+// (admin/staff) because the dedup write + inventory reads bypass browser RLS.
+// ────────────────────────────────────────────────────────────────────────
+
+export interface MarkCollectedResult {
+  collected_at: string;
+  items_recorded: number;
+  total_recorded: number;
+}
+
+/** Mark a delivery order's COD storage as collected/paid (no billing row). */
+export async function markCodStorageCollected(
+  orderId: string,
+  notes: string | null,
+  collectedBy: string | null,
+): Promise<MarkCollectedResult> {
+  const { data, error } = await supabase.rpc('mark_cod_storage_collected', {
+    p_order_id: orderId,
+    p_notes: notes || null,
+    p_collected_by: collectedBy || null,
+  });
+  if (error) throw new Error(error.message);
+  const row = Array.isArray(data) ? data[0] : data;
+  return row as MarkCollectedResult;
+}
+
+// ────────────────────────────────────────────────────────────────────────
 // Standalone COD Storage invoicing (independent of delivery orders).
 //
 // Backed by the collect-cod-storage-sb Edge Function, which is the
