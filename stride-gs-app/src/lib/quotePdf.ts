@@ -155,7 +155,9 @@ function buildLineItemsRows(calc: CalcResult, quote: Quote): string {
       : String(agg.qty);
     parts.push(
       '<tr>' +
-      '<td>' + escHtml(agg.name) + (agg.code ? ' <span style="color:#94A3B8;font-size:9pt;">' + escHtml(agg.code) + '</span>' : '') + '</td>' +
+      // Service NAME only — the internal service code (RCVG / INSP / ASM / …)
+      // is intentionally omitted from the customer-facing PDF.
+      '<td>' + escHtml(agg.name) + '</td>' +
       '<td></td>' +
       '<td class="num"></td>' +
       '<td class="num">' + escHtml(qtyCell) + '</td>' +
@@ -289,7 +291,7 @@ function generateFallbackHtml(
       ? `${agg.qty} ${itemLabelFb} × ${durationLabelFb}`
       : String(agg.qty);
     linesHtml += `<tr>
-      <td style="padding:6px 12px;border-bottom:1px solid #E2E8F0;font-size:12px">${escHtml(agg.name)}${agg.code ? ` <span style="color:#94A3B8">${escHtml(agg.code)}</span>` : ''}</td>
+      <td style="padding:6px 12px;border-bottom:1px solid #E2E8F0;font-size:12px">${escHtml(agg.name)}</td>
       <td style="padding:6px 12px;border-bottom:1px solid #E2E8F0;font-size:12px"></td>
       <td style="padding:6px 12px;border-bottom:1px solid #E2E8F0;font-size:12px;text-align:right"></td>
       <td style="padding:6px 12px;border-bottom:1px solid #E2E8F0;font-size:12px;text-align:right">${escHtml(qtyCellFb)}</td>
