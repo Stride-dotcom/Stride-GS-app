@@ -9,6 +9,7 @@ import { getPanelContainerStyle, panelBackdropStyle } from './panelStyles';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { useResizablePanel } from '../../hooks/useResizablePanel';
 import { supabase } from '../../lib/supabase';
+import { markCodStorageCollected } from '../../lib/codStorage';
 import type { DtOrderForUI, DtOrderItemForUI } from '../../lib/supabaseQueries';
 import { createPortal } from 'react-dom';
 import { generateOrderPdf } from '../../lib/orderPdf';
@@ -511,6 +512,20 @@ export function OrderDetailPanel({ order, onClose, onUpdated }: Props) {
                             <button
                               onClick={async () => {
                                 const nowIso = new Date().toISOString();
+                                // One Mark Paid settles EVERYTHING owed at the door: delivery
+                                // charges + any uncollected COD storage. Mark COD collected
+                                // (dedup ledger + item activity + DT "PAID") so this matches
+                                // the COD card's "Mark Paid" — they can't diverge on amount.
+                                const hasUncollectedCod =
+                                  !!order.codStorageEnabled && !order.codStorageCollectedAt && (order.codStorageTotal ?? 0) > 0;
+                                if (hasUncollectedCod) {
+                                  try {
+                                    const { data: authData } = await supabase.auth.getUser();
+                                    await markCodStorageCollected(order.id, null, authData?.user?.email ?? null);
+                                  } catch { /* non-fatal — the paid stamp below still records the amount */ }
+                                }
+                                const codAmt = hasUncollectedCod ? (order.codStorageTotal ?? 0) : 0;
+                                const paidAmount = order.orderTotal != null ? order.orderTotal + codAmt : (codAmt || null);
                                 // Write BOTH the legacy payment_collected* columns (read by
                                 // existing UI) and paid_at/paid_amount/paid_method (read by
                                 // dt-webhook-ingest, dt-sync-statuses, dt-push-order to
@@ -521,7 +536,7 @@ export function OrderDetailPanel({ order, onClose, onUpdated }: Props) {
                                   payment_collected_at: nowIso,
                                   payment_notes: `Marked paid ${new Date().toLocaleDateString('en-US')}`,
                                   paid_at: nowIso,
-                                  paid_amount: order.orderTotal ?? null,
+                                  paid_amount: paidAmount,
                                   paid_method: 'manual',
                                 }).eq('id', order.id);
                                 if (!error) onUpdated?.();
