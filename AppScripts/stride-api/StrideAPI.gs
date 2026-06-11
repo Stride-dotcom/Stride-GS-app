@@ -1,6 +1,6 @@
 /* ===================================================
    StrideAPI.gs — v38.273.0 — 2026-06-11 PST — [REPAIRS/MIGRATION] fix: __writeThroughReverseRepairs_ now auto-creates the multi-line quote columns before mirroring. The SB-primary send-repair-quote-sb writes quote_lines_json + the 7 quote total columns to public.repairs, then fires this reverse-writethrough to mirror them onto the per-tenant Repairs sheet. But the writer SKIPPED any column missing on the sheet (the `if (!col) continue` mapping guard) — and on a Repairs sheet predating the v38.123.0 multi-line columns (Quote Lines JSON / Quote Subtotal / Quote Taxable Subtotal / Quote Tax Area ID / Quote Tax Area Name / Quote Tax Rate / Quote Tax Amount / Quote Grand Total) the mirror silently dropped them. The very next full-client-sync (sbRepairRow_) then read those now-missing sheet cells as blank and pushed them back, NULLING quote_lines_json/subtotal/grand_total in Supabase while quote_amount (a column that DOES exist) survived — so a freshly-sent multi-line quote lost its breakdown and the React Quote Builder fell back to the legacy single-amount display (reported: RPR-63981-1781198414542, item 63981, quote_amount=210 but quote_lines_json=null). Fix: when the reverse payload carries any of the 8 quote columns, api_ensureColumn_ each missing one (matching what the legacy handleSendRepairQuote_ already does) and re-read the header map before mapping targets, so the mirror actually persists them and the sync round-trip stops clobbering the SB row. Non-destructive (appends missing headers, idempotent no-op when present); no change to the insert path, the v38.182 atomic invoice counter, half-write detection, or any billing logic.
-   StrideAPI.gs — v38.274.0 — 2026-06-11 PST — [CLIENTS/MIGRATION] fix: the CB→Supabase client sync no longer clobbers APP-AUTHORITATIVE client settings from a stale CB Clients cell. Root cause of the auto-inspect-on-receipt failure (Brume, 2026-06): the app/intake writes settings like AUTO_INSPECTION straight to public.clients (the source of truth) and mirrors them OUT to the CB sheet via __writeThroughReverseClients_, but the 5-minute reconcileNextClient_ cron (resyncClientToSupabase_) AND the admin handleBulkSyncClientsToSupabase_ both read the FULL CB row back and upsert it, overwriting fresh app values whenever the CB cell lagged (observed: a client's auto_inspection flipping true→false within minutes). Fix: new APP_AUTHORITATIVE_CLIENT_COLS_ list + stripAppAuthoritativeClientCols_() helper strips 11 columns (auto_inspection, separate_by_sidemark, enable_notifications, enable_shipment_email, enable_receiving_billing, auto_charge, payment_terms, free_storage_days, discount_storage_pct, discount_services_pct, shipment_note) from BOTH CB→SB upsert paths. supabaseUpsert_ uses Prefer:resolution=merge-duplicates, so omitted columns are PRESERVED on the UPDATE path → Supabase stays authoritative for app-edited settings. Sheet-authoritative columns (identity, folder IDs, web_app_url, stax/qb IDs, parent_client, notes, active) still sync CB→SB as before. Behavior change: direct CB-Clients-sheet edits to those 11 settings no longer propagate to Supabase — edit them in the app (which writes SB + mirrors to the sheet). No schema change, no billing logic touched, no change to the v38.182 atomic invoice counter or half-write detection.
+   StrideAPI.gs — v38.274.0 — 2026-06-11 PST — [CLIENTS/MIGRATION] fix: the CB→Supabase client sync no longer clobbers APP-AUTHORITATIVE client settings from a stale CB Clients cell. Root cause of the auto-inspect-on-receipt failure (Brume, 2026-06): the app/intake writes settings like AUTO_INSPECTION straight to public.clients (the source of truth) and mirrors them OUT to the CB sheet via __writeThroughReverseClients_, but the 5-minute reconcileNextClient_ cron (resyncClientToSupabase_) AND the admin handleBulkSyncClientsToSupabase_ both read the FULL CB row back and upsert it, overwriting fresh app values whenever the CB cell lagged (observed: a client's auto_inspection flipping true→false within minutes). Fix: new APP_AUTHORITATIVE_CLIENT_COLS_ list + stripAppAuthoritativeClientCols_() helper strips 11 columns (auto_inspection, separate_by_sidemark, enable_notifications, enable_shipment_email, enable_receiving_billing, auto_charge, payment_terms, free_storage_days, discount_storage_pct, discount_services_pct, shipment_note) from BOTH CB→SB upsert paths — but ONLY for clients that ALREADY exist in Supabase (existence-gated via api_isKnownTenantId_ in the cron / a batched id prefetch in the bulk sync). A brand-new client — e.g. handleOnboardClient_'s first sync to SB goes through resyncClientToSupabase_ — is written in FULL so its onboarding values land instead of DB defaults. supabaseUpsert_ uses Prefer:resolution=merge-duplicates, so on the UPDATE path the omitted columns are PRESERVED → Supabase stays authoritative for app-edited settings. Sheet-authoritative columns (identity, folder IDs, web_app_url, stax/qb IDs, parent_client, notes, active) still sync CB→SB as before. Behavior change: direct CB-Clients-sheet edits to those 11 settings no longer propagate to Supabase — edit them in the app (which writes SB + mirrors to the sheet). No schema change, no billing logic touched, no change to the v38.182 atomic invoice counter or half-write detection.
    StrideAPI.gs — v38.272.0 — 2026-06-10 PST — [BILLING] fix: RUSH task completion now bills the TRUE piece count (Qty × rate) too, joining INSP. Same per-piece rule as v38.271.0 but extended to svc code RUSH: a rush inspection of a carton holding N pieces bills "Rush × N", not "× 1". billQty = staff-adjusted public.tasks.qty when > 1 (via api_fetchTaskQty_), else inventory qty, else 1; feeds the Qty cell + Total = appliedRate × billQty. handleCompleteTask_ gate broadened from (svcCode === INSP) to (svcCode === INSP OR svcCode === RUSH); every OTHER service code still stays Qty 1 per item ID (RCVG / ASM / REPAIR / WC / MNRTU / etc.). SB parity: complete_task_atomic v_eff_qty now multiplies tasks.qty for INSP OR RUSH (migration 20260610120100) + tasks.qty seeded from inventory.qty for RUSH at creation (batch-create-tasks-sb — the only canary path that mints RUSH tasks; complete-shipment-sb only auto-creates INSP/ASM) + a backfill for open RUSH tasks (migration 20260610120000). Mirror sheet-checkbox path in Triggers.gs v4.8.2. No schema change, no change to the v38.182 atomic invoice counter or half-write detection.
    StrideAPI.gs — v38.271.0 — 2026-06-09 PST — [BILLING] fix: INSPECTION task completion now bills the TRUE piece count (Qty × rate), not a hardcoded Qty 1. handleCompleteTask_ wrote every task-completion billing row with "Qty": 1 and Total = appliedRate regardless of how many pieces were inspected — so a carton holding N pieces billed "Inspection × 1 @ $25 = $25" instead of "× N". Fix is scoped to INSP ONLY: billQty = the staff-adjusted public.tasks.qty when > 1 (read from Supabase via new api_fetchTaskQty_ — that count lives Supabase-only; the per-tenant Tasks sheet does not mirror it, so e.g. item 64028 declared as 1 piece but inspected as 7 must read the task qty, not inventory), else the inventory item's qty, else 1. billQty feeds both the Qty cell and Total = appliedRate × billQty (custom-price path multiplies too — per-piece semantics). EVERY OTHER service code stays Qty 1 per item ID (RCVG / ASM / REPAIR / WC / MNRTU / etc. are deliberately 1-per-ID — only inspection is per-piece). SB-side parity: complete_task_atomic gated to multiply by tasks.qty for INSP only (migration 20260609160200) + tasks.qty populated from inventory.qty at INSP task creation (batch-create-tasks-sb, complete-shipment-sb, transfer-items-sb) + a backfill migration for open INSP tasks. No schema change, no change to the v38.182 atomic invoice counter, half-write detection, or any non-inspection billing.
    StrideAPI.gs — v38.270.0 — 2026-06-09 PST — [BILLING/MIGRATION] feat: __writeThroughReverseBilling_ supports op=delete — the SB-native storage commit (commit-storage-charges-sb → commit_storage_rows) removes the stale Unbilled STOR-SUMMARY rows it deleted from public.billing off the per-tenant Billing_Ledger sheet (e.g. blank→sidemark transitions). Finds the row by Ledger Row ID and deletes it, HARD-GUARDED to NEVER delete an Invoiced/Billed row (returns skipped) — only Unbilled/Void/blank; idempotent no-op (skipped) when already absent. Fleet-rollout prerequisite for the commitStorageCharges cutover (the SB commit could previously only insert/update the sheet mirror, stranding stale summaries that GAS invoicing on non-canary tenants could wrongly pick up). Companion: commit_storage_rows returns deletedLedgerIds; the EF fires op=delete for each before mirroring the new summaries. No change to dollar totals, the v38.182 atomic invoice counter, half-write detection, or any insert/update reverse-writethrough path.
@@ -8407,9 +8407,16 @@ function resyncClientToSupabase_(spreadsheetId) {
         shipmentNote: String(obj["CLIENT SHIPMENT NOTE"] || "").trim(),
         active: isActive
       };
-      // v38.273.0 — strip app-authoritative settings so a stale CB cell can't
-      // clobber the app's source-of-truth value in public.clients.
-      supabaseUpsert_("clients", stripAppAuthoritativeClientCols_(sbClientRow_(apiClient)));
+      // v38.273.0 — strip app-authoritative settings ONLY when the client
+      // already exists in Supabase (the clobber case: a stale CB cell would
+      // otherwise overwrite the app's source-of-truth value). For a brand-new
+      // row — handleOnboardClient_ first-syncs a client to SB via this very
+      // function (line ~10520) — write the FULL row so the onboarding values
+      // (auto_inspection, discounts, payment terms, …) land instead of DB
+      // defaults. api_isKnownTenantId_ is the existing exists-in-SB check.
+      var sbRow = sbClientRow_(apiClient);
+      if (api_isKnownTenantId_(rowSid)) stripAppAuthoritativeClientCols_(sbRow);
+      supabaseUpsert_("clients", sbRow);
       return;
     }
   } catch (e) {
@@ -41578,6 +41585,35 @@ function handleBulkSyncClientsToSupabase_() {
     if (data.length < 2) return jsonResponse_({ success: true, synced: 0, skipped: 0 });
 
     var headersUpper = data[0].map(function(h) { return String(h || "").trim().toUpperCase(); });
+
+    // v38.273.0 — Pre-fetch the set of clients that ALREADY exist in Supabase.
+    // Existing rows get app-authoritative settings stripped (don't clobber the
+    // app's source-of-truth from a stale CB cell); brand-new rows get the FULL
+    // CB values so a never-synced client still lands complete. One batched read
+    // beats a per-row existence check. On prefetch failure we fall back to
+    // full-row writes (the pre-v38.273.0 behavior) rather than risk dropping
+    // settings for a new client.
+    var existingSbIds = {};
+    try {
+      var _sbUrl = prop_("SUPABASE_URL");
+      var _sbKey = prop_("SUPABASE_SERVICE_ROLE_KEY");
+      if (_sbUrl && _sbKey) {
+        var _idResp = UrlFetchApp.fetch(_sbUrl + "/rest/v1/clients?select=spreadsheet_id", {
+          method: "GET",
+          headers: { "Authorization": "Bearer " + _sbKey, "apikey": _sbKey },
+          muteHttpExceptions: true
+        });
+        if (_idResp.getResponseCode() >= 200 && _idResp.getResponseCode() < 300) {
+          var _idRows = JSON.parse(_idResp.getContentText() || "[]");
+          for (var _r = 0; _r < _idRows.length; _r++) {
+            existingSbIds[String(_idRows[_r].spreadsheet_id || "").trim()] = true;
+          }
+        }
+      }
+    } catch (eIds) {
+      Logger.log("handleBulkSyncClientsToSupabase_ existing-id prefetch failed (writing full rows): " + eIds);
+    }
+
     var rows = [];
     var skipped = 0;
     for (var i = 1; i < data.length; i++) {
@@ -41590,9 +41626,10 @@ function handleBulkSyncClientsToSupabase_() {
       if (!sid || !name) { skipped++; continue; }
       var active = obj["ACTIVE"];
       var isActive = !(active === false || active === "FALSE" || active === "No");
-      // v38.273.0 — strip app-authoritative settings (same rationale as
-      // resyncClientToSupabase_): Supabase owns these; don't overwrite from CB.
-      rows.push(stripAppAuthoritativeClientCols_(sbClientRow_({
+      // v38.273.0 — strip app-authoritative settings for EXISTING clients only
+      // (same rationale as resyncClientToSupabase_): Supabase owns these; don't
+      // overwrite from a possibly-stale CB cell. New clients keep full values.
+      var bulkRow = sbClientRow_({
         name: name,
         spreadsheetId: sid,
         email: String(obj["CLIENT EMAIL"] || "").trim(),
@@ -41618,7 +41655,9 @@ function handleBulkSyncClientsToSupabase_() {
         notes: String(obj["NOTES"] || "").trim(),
         shipmentNote: String(obj["CLIENT SHIPMENT NOTE"] || "").trim(),
         active: isActive
-      })));
+      });
+      if (existingSbIds[sid]) stripAppAuthoritativeClientCols_(bulkRow);
+      rows.push(bulkRow);
     }
 
     // Batch upsert (chunked internally by supabaseBatchUpsert_)
