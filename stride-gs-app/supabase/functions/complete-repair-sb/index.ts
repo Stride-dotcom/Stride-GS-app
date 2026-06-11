@@ -252,15 +252,32 @@ Deno.serve(async (req: Request) => {
       item_id: string; description: string | null; vendor: string | null;
       sidemark: string | null; location: string | null; item_class: string | null;
     }
+    // D5 (BATCH_WORK_ITEMS_QA.md): the table also carries each item's own
+    // Pass/Fail + work notes (per-item rows written by the BatchWorkItems
+    // module). Items without a per-item result (legacy repairs, non-canary
+    // tenants completing without the module) fall back to the PARENT result
+    // so single-item repairs keep reading correctly.
     const { data: repairItemRows } = await supabase
       .from('repair_items')
-      .select('item_id, created_at')
+      .select('item_id, created_at, item_status, item_result, item_notes')
       .eq('tenant_id', tenantId)
       .eq('repair_id', repairId)
       .order('created_at', { ascending: true });
-    const repairItemIds = ((repairItemRows as { item_id: string }[] | null) ?? [])
-      .map(r => String(r.item_id ?? '').trim())
-      .filter(Boolean);
+    const repairItemMeta = new Map<string, { result: string; notes: string }>();
+    for (const r of ((repairItemRows as Array<{
+      item_id: string; item_status: string | null; item_result: string | null; item_notes: string | null;
+    }> | null) ?? [])) {
+      const id = String(r.item_id ?? '').trim();
+      if (!id) continue;
+      const status = String(r.item_status ?? '').trim();
+      const legacy = String(r.item_result ?? '').trim().toLowerCase();
+      const result = (status === 'Pass' || status === 'Fail') ? status
+        : legacy === 'passed' ? 'Pass'
+        : legacy === 'failed' ? 'Fail'
+        : '';
+      repairItemMeta.set(id, { result, notes: String(r.item_notes ?? '').trim() });
+    }
+    const repairItemIds = Array.from(repairItemMeta.keys());
     // Primary first (deep-link / back-compat), then remaining repair_items in
     // insertion order, de-duplicated. Legacy single-item repairs predate
     // repair_items — the primary fallback keeps them rendering one row.
@@ -275,9 +292,17 @@ Deno.serve(async (req: Request) => {
     const invByItemId = new Map<string, InventoryRow>();
     for (const r of ((invRows as InventoryRow[] | null) ?? [])) invByItemId.set(r.item_id, r);
     // Preserve orderedItemIds order; synthesize a bare row for any item missing
-    // from inventory so its ID still appears in the table.
-    const orderedItems: InventoryRow[] = orderedItemIds.map(id =>
-      invByItemId.get(id) ?? { item_id: id, description: null, vendor: null, sidemark: null, location: null, item_class: null });
+    // from inventory so its ID still appears in the table. Each row carries
+    // its per-item Result (fallback: the parent resultValue) + work notes.
+    const orderedItems = orderedItemIds.map(id => {
+      const inv = invByItemId.get(id) ?? { item_id: id, description: null, vendor: null, sidemark: null, location: null, item_class: null };
+      const meta = repairItemMeta.get(id);
+      return {
+        ...inv,
+        result: meta?.result || resultValue,
+        notes:  meta?.notes ?? '',
+      };
+    });
 
     // Comma-joined list of every item — drives the subject and {{ITEM_ID}}.
     const itemIdsLabel = orderedItemIds.join(', ');
@@ -371,17 +396,29 @@ function formatMoney(n: number): string {
 function renderItemTable(items: {
   item_id: string; description: string | null; vendor: string | null;
   sidemark: string | null; location: string | null; item_class: string | null;
+  /** Per-item Pass/Fail — D5: each row carries its own result since mixed
+   *  outcomes are possible. Caller pre-applies the parent-result fallback. */
+  result: string;
+  /** Per-item work notes (repair_items.item_notes) — client-visible. */
+  notes: string;
 }[]): string {
   if (items.length === 0) return '';
   const td = 'padding:6px 10px;border-bottom:1px solid #E5E7EB;font-size:13px;color:#1F2937;vertical-align:top;';
   const th = 'padding:8px 10px;background:#F9FAFB;border-bottom:2px solid #D1D5DB;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:#374151;text-align:left;';
+  const resultCell = (result: string): string => {
+    const r = String(result || '').trim();
+    if (r === 'Pass') return `<span style="color:#15803D;font-weight:700;">&#10003; Pass</span>`;
+    if (r === 'Fail') return `<span style="color:#B91C1C;font-weight:700;">&#10007; Fail</span>`;
+    return '&mdash;';
+  };
   const rows = items.map(it => [
     '<tr>',
     `<td style="${td}font-family:monospace;font-size:12px;">${escapeHtml(it.item_id ?? '')}</td>`,
     `<td style="${td}">${escapeHtml(it.description ?? '')}</td>`,
     `<td style="${td}">${escapeHtml(it.vendor ?? '')}</td>`,
     `<td style="${td}">${escapeHtml(it.sidemark ?? '')}</td>`,
-    `<td style="${td}">${escapeHtml(it.location ?? '')}</td>`,
+    `<td style="${td}white-space:nowrap;">${resultCell(it.result)}</td>`,
+    `<td style="${td}">${it.notes ? escapeHtml(it.notes) : '&mdash;'}</td>`,
     '</tr>',
   ].join('')).join('');
   return [
@@ -391,7 +428,8 @@ function renderItemTable(items: {
     `<th style="${th}">Description</th>`,
     `<th style="${th}">Vendor</th>`,
     `<th style="${th}">Sidemark</th>`,
-    `<th style="${th}">Location</th>`,
+    `<th style="${th}">Result</th>`,
+    `<th style="${th}">Notes</th>`,
     '</tr></thead><tbody>',
     rows,
     '</tbody></table>',
