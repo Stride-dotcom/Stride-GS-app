@@ -71,7 +71,7 @@ export interface UsePhotosResult {
   uploadPhoto: (
     file: File,
     photoType?: PhotoType,
-    override?: { entityType: EntityType; entityId: string },
+    override?: { entityType: EntityType; entityId: string; itemId?: string | null },
   ) => Promise<Photo | null>;
   setPrimaryPhoto: (photoId: string) => Promise<boolean>;
   toggleNeedsAttention: (photoId: string, needsAttention: boolean) => Promise<boolean>;
@@ -258,10 +258,13 @@ export function usePhotos({ entityType, entityId, tenantId, enabled = true, item
   const uploadPhoto = useCallback(async (
     file: File,
     photoType: PhotoType = 'general',
-    override?: { entityType: EntityType; entityId: string },
+    override?: { entityType: EntityType; entityId: string; itemId?: string | null },
   ): Promise<Photo | null> => {
     // Override lets callers (e.g. an item-page Photos tab filtered to "Repair")
     // direct the upload at a related entity instead of the hook's host entity.
+    // override.itemId (BatchWorkItems) additionally stamps a per-call parent
+    // item — a batch panel hosts ONE hook scoped to the batch entity but
+    // uploads against whichever item card the user clicked.
     const targetType: EntityType = override?.entityType ?? entityType;
     const targetId = override?.entityId ?? entityId;
     if (!effectiveTenantId || !targetId) {
@@ -308,7 +311,8 @@ export function usePhotos({ entityType, entityId, tenantId, enabled = true, item
     // entityId. For task/repair/etc., the caller passes parent itemId
     // via the hook option.
     const resolvedItemId =
-      targetType === 'inventory' ? targetId
+      override?.itemId !== undefined ? override.itemId
+      : targetType === 'inventory' ? targetId
       : entityType === 'inventory' ? entityId
       : (itemId || null);
     const { data, error: insErr } = await supabase
