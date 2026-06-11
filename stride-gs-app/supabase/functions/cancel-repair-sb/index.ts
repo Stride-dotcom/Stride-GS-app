@@ -111,9 +111,17 @@ Deno.serve(async (req: Request) => {
     // — both filters are required to defend against a leaked tenant_id
     // somehow reaching a different tenant's repair_id (very unlikely
     // given the global RPR-{itemId}-{millis} format, but cheap to enforce).
+    // Capture the pre-cancel status into status_before_cancel so
+    // reopen-cancelled-repair-sb can restore it instead of a blanket
+    // "Pending Quote". The idempotency guard above already returned for an
+    // existing 'Cancelled' row, so existing.status here is never 'Cancelled'.
     const { error: updErr } = await supabase
       .from('repairs')
-      .update({ status: 'Cancelled', updated_at: new Date().toISOString() })
+      .update({
+        status:               'Cancelled',
+        status_before_cancel: String(existing.status ?? '').trim() || null,
+        updated_at:           new Date().toISOString(),
+      })
       .eq('tenant_id', tenantId)
       .eq('repair_id', repairId);
     if (updErr) {
@@ -155,7 +163,7 @@ Deno.serve(async (req: Request) => {
             table: 'repairs',
             op:    'update',
             rowId: repairId,
-            row:   { status: 'Cancelled' },
+            row:   { status: 'Cancelled', status_before_cancel: String(existing.status ?? '').trim() },
             requestId,
           }),
         });

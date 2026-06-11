@@ -19,7 +19,7 @@ import { WriteButton } from './WriteButton';
 import { ProcessingOverlay } from './ProcessingOverlay';
 import { BillingPreviewCard } from './BillingPreviewCard';
 import { useEntityAddons } from '../../hooks/useEntityAddons';
-import { postSendRepairQuote, postSendRepairQuoteSb, postRespondToRepairQuote, postRespondRepairQuoteSb, postCompleteRepair, postCompleteRepairSb, postStartRepair, postStartRepairSb, postCancelRepair, postCancelRepairSb, postUpdateRepairNotes, postReopenRepair, postCorrectRepairResult, postVoidRepairQuote, isApiConfigured } from '../../lib/api';
+import { postSendRepairQuote, postSendRepairQuoteSb, postRespondToRepairQuote, postRespondRepairQuoteSb, postCompleteRepair, postCompleteRepairSb, postStartRepair, postStartRepairSb, postCancelRepair, postCancelRepairSb, postReopenCancelledRepairSb, postUpdateRepairNotes, postReopenRepair, postCorrectRepairResult, postVoidRepairQuote, isApiConfigured } from '../../lib/api';
 import { useFeatureFlag, useFeatureFlagRow, resolveFlagBackend } from '../../contexts/FeatureFlagContext';
 import { BatchWorkItems } from './BatchWorkItems';
 import type { BatchStatusSummary } from '../../hooks/useBatchWorkItems';
@@ -55,6 +55,9 @@ interface Props {
 
 const STATUS_CFG: Record<string, { bg: string; color: string }> = {
   'Pending Quote': { bg: '#FEF3C7', color: '#B45309' }, 'Quote Sent': { bg: '#EFF6FF', color: '#1D4ED8' },
+  // Revised — display-only label for a Quote Sent repair whose quote was
+  // edited + resent (quoteRevised). Amber to read as "changed".
+  'Revised': { bg: '#FFEDD5', color: '#C2410C' },
   'Approved': { bg: '#F0FDF4', color: '#15803D' }, 'Declined': { bg: '#FEF2F2', color: '#DC2626' },
   'In Progress': { bg: '#EDE9FE', color: '#7C3AED' }, 'Complete': { bg: '#F0FDF4', color: '#15803D' },
   'Cancelled': { bg: '#F3F4F6', color: '#6B7280' },
@@ -101,6 +104,17 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   useEffect(() => { setEffectiveStatus(repair.status); }, [repair.status]);
   const sc = STATUS_CFG[effectiveStatus] || STATUS_CFG['Pending Quote'];
   const isActive = !['Complete', 'Cancelled', 'Declined'].includes(effectiveStatus);
+
+  // "Revised" is a display-only relabel of a Quote Sent repair whose quote
+  // was edited + resent (quoteRevised). The underlying status stays
+  // 'Quote Sent', so every approve/decline/edit gate keeps working — only the
+  // header badge changes. Tracked locally so a Save & Resend this session
+  // flips it immediately, before the parent refetch lands.
+  const [revised, setRevised] = useState<boolean>(repair.quoteRevised === true);
+  useEffect(() => { setRevised(repair.quoteRevised === true); }, [repair.quoteRevised]);
+  const showRevised = effectiveStatus === 'Quote Sent' && revised;
+  const statusLabel = showRevised ? 'Revised' : effectiveStatus;
+  const scLabel = STATUS_CFG[statusLabel] || sc;
 
   // (I)(A)(R) indicator badges for the Item card below.
   const { inspOpenItems, inspDoneItems, inspFailedItems, asmOpenItems, asmDoneItems, repairOpenItems, repairDoneItems, wcOpenItems, wcDoneItems, dtOpenItems, dtDoneItems, codItems } = useItemIndicators(repair.clientSheetId);
@@ -452,6 +466,35 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
     setReopenLoading(false);
   };
 
+  // Reopen (un-cancel) a Cancelled repair. SB-first via reopen-cancelled-
+  // repair-sb — restores the pre-cancel status (or Pending Quote). Separate
+  // from handleReopenRepairClick (which handles Complete/In Progress and has
+  // billing-void semantics); a cancelled repair never created billing.
+  const handleReopenCancelledClick = async () => {
+    if (!isApiConfigured() || !repair.clientSheetId) return;
+    if (effectiveStatus !== 'Cancelled') return;
+    if (typeof window !== 'undefined' && !window.confirm(
+      'Reopen this cancelled repair?\n\nIt returns to its pre-cancel status (or Pending Quote if that wasn’t recorded).'
+    )) return;
+    setReopenLoading(true);
+    setReopenError(null);
+    try {
+      const resp = await postReopenCancelledRepairSb({ tenantId: repair.clientSheetId, repairId: repair.repairId });
+      if (resp.ok) {
+        if (resp.newStatus) {
+          setEffectiveStatus(resp.newStatus);
+          applyRepairPatch?.(repair.repairId, { status: resp.newStatus as Repair['status'] });
+        }
+        onRepairUpdated?.();
+      } else {
+        setReopenError(resp.error || 'Failed to reopen repair');
+      }
+    } catch {
+      setReopenError('Network error — please try again');
+    }
+    setReopenLoading(false);
+  };
+
   const handleCorrectRepairResultClick = async (newResult: 'Pass' | 'Fail') => {
     if (!isApiConfigured() || !repair.clientSheetId) return;
     setCorrectRepairResultLoading(true);
@@ -623,6 +666,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
 
     if (demoMode) {
       setEffectiveStatus('Quote Sent');
+      setRevised(isRevision);
       if (isEditFlow) {
         setIsEditingQuote(false);
         setEditMode(null);
@@ -656,6 +700,9 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
       quoteTaxRate: totals.taxRate,
       quoteTaxAmount: totals.taxAmount,
       quoteGrandTotal: totals.grand,
+      // isRevision (Save & Resend / Save Draft on an already-sent quote) marks
+      // it Revised; a first send clears the flag. Mirrors the server write.
+      quoteRevised: isRevision,
     });
     setSubmitting(true);
     try {
@@ -679,6 +726,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
           setSubmitError(resp.error || 'Failed to send repair quote.');
         } else {
           setEffectiveStatus('Quote Sent');
+          setRevised(isRevision);
           if (isEditFlow) {
             // Edit-after-sent path: leave the read-only summary in place,
             // surface a small confirmation pill instead of the close-out
@@ -741,6 +789,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
           });
         } else {
           setEffectiveStatus('Quote Sent');
+          setRevised(isRevision);
           if (isEditFlow) {
             setIsEditingQuote(false);
             setEditMode(null);
@@ -791,6 +840,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
       } else {
         // Reset local state so the builder is empty and ready.
         setEffectiveStatus('Pending Quote');
+        setRevised(false);
         setQuoteLines([{ svcCode: 'REPAIR', svcName: 'Repair', qty: '1', rate: '', taxable: true }]);
         setSubmitResult(null);
         setRespondResult(null);
@@ -800,7 +850,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
           quoteSubtotal: undefined, quoteTaxableSubtotal: undefined,
           quoteTaxAreaId: undefined, quoteTaxAreaName: undefined,
           quoteTaxRate: undefined, quoteTaxAmount: undefined,
-          quoteGrandTotal: undefined,
+          quoteGrandTotal: undefined, quoteRevised: false,
         });
         onRepairUpdated?.();
       }
@@ -1571,7 +1621,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   const headerTotalIsGrand = repair.quoteGrandTotal != null;
   const belowIdContent = (
     <div style={{ display: 'flex', gap: 6 }}>
-      <Badge t={effectiveStatus} bg={sc.bg} color={sc.color} />
+      <Badge t={statusLabel} bg={scLabel.bg} color={scLabel.color} />
       {headerTotal != null && (
         <span
           title={headerTotalIsGrand
@@ -2156,6 +2206,23 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
         </div>
       )}
 
+      {/* Reopen a Cancelled repair (admin/staff). Cancelled is terminal/
+          inactive, so it falls through here rather than the active footer. */}
+      {canStaffEdit && effectiveStatus === 'Cancelled' && (
+        <div style={{ marginBottom: 8 }}>
+          {reopenError && (
+            <div style={{ fontSize: 11, color: '#DC2626', marginBottom: 6, padding: '4px 8px', background: '#FEF2F2', borderRadius: 6 }}>{reopenError}</div>
+          )}
+          <button
+            onClick={handleReopenCancelledClick}
+            disabled={reopenLoading}
+            style={{ width: '100%', padding: '10px', fontSize: 13, fontWeight: 600, border: `1px solid ${theme.colors.orange}`, borderRadius: 8, background: '#fff', cursor: reopenLoading ? 'wait' : 'pointer', fontFamily: 'inherit', color: theme.colors.orange, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
+          >
+            <Undo2 size={14} /> {reopenLoading ? 'Reopening…' : 'Reopen Repair'}
+          </button>
+        </div>
+      )}
+
       {(!isActive || completed) && !submitResult && (
         <button onClick={onClose} style={{ width: '100%', padding: '10px', fontSize: 13, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 8, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>Close</button>
       )}
@@ -2615,6 +2682,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   const fabActions: FABAction[] = [
     ...(active ? [{ label: 'Cancel Repair', icon: <XCircle size={16} />, onClick: () => { void cancelRepair(); } }] : []),
     ...(canStaffEdit && (s === 'Complete' || s === 'In Progress') ? [{ label: 'Reopen', icon: <Undo2 size={16} />, onClick: handleReopenRepairClick }] : []),
+    ...(canStaffEdit && s === 'Cancelled' ? [{ label: 'Reopen', icon: <Undo2 size={16} />, onClick: handleReopenCancelledClick }] : []),
     ...(s === 'Pending Quote' ? [{ label: 'Send Quote', icon: <Send size={16} />, onClick: handleSendQuote, color: theme.colors.orange }] : []),
     ...(s === 'Quote Sent' ? [
       { label: 'Decline', icon: <XCircle size={16} />, onClick: () => handleRespond('Decline'), color: '#B91C1C' },
@@ -2661,6 +2729,12 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
       {canStaffEdit && (s === 'Complete' || s === 'In Progress') && (
         <button onClick={handleReopenRepairClick} disabled={submitting} style={{ ...rpLight, opacity: submitting ? 0.6 : 1, cursor: submitting ? 'progress' : 'pointer' }}>
           {submitting && <BtnSpinner size={11} />} Reopen
+        </button>
+      )}
+      {/* Reopen (un-cancel) — admin/staff on a Cancelled repair */}
+      {canStaffEdit && s === 'Cancelled' && (
+        <button onClick={handleReopenCancelledClick} disabled={reopenLoading} style={{ ...rpLight, opacity: reopenLoading ? 0.6 : 1, cursor: reopenLoading ? 'progress' : 'pointer' }}>
+          {reopenLoading && <BtnSpinner size={11} />} Reopen
         </button>
       )}
       {/* State-aware primary actions */}

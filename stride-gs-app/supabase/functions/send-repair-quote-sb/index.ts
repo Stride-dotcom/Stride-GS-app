@@ -93,10 +93,11 @@ Deno.serve(async (req: Request) => {
     const repairId: string  = String(body.repairId ?? '').trim();
     const requestId: string = String(body.requestId ?? '').trim() || crypto.randomUUID();
     const notes: string     = String(body.notes ?? '').trim();
-    // Edit-quote-after-sent flow (mirrors GAS handleSendRepairQuote_
-    // v38.249.0). isRevision bypasses the same-lines idempotency skip
-    // and prefixes the email subject with "REVISED — "; skipEmail
-    // (Save Draft) persists the updated quote without firing the email.
+    // Edit-quote-after-sent flow (mirrors GAS handleSendRepairQuote_).
+    // isRevision bypasses the same-lines idempotency skip, sets
+    // quote_revised=true (drives the "Revised" badge), and titles the email
+    // "Revised Repair Quote: …"; skipEmail (Save Draft) persists the
+    // updated quote without firing the email.
     const isRevision: boolean = body.isRevision === true;
     const skipEmail:  boolean = body.skipEmail  === true;
 
@@ -214,6 +215,11 @@ Deno.serve(async (req: Request) => {
       .from('repairs')
       .update({
         status:                 'Quote Sent',
+        // Mark the quote as Revised on the edit-after-sent flow. Status stays
+        // 'Quote Sent' so every approve/decline/edit gate keeps working; the
+        // flag drives the "Revised" status badge + "Revised Repair Quote"
+        // email. A first send (isRevision=false) writes false.
+        quote_revised:          isRevision,
         quote_amount:           grandTotal,  // back-compat with single-amount readers
         quote_sent_date:        nextQuoteSentDate,
         quote_lines_json:       quoteLines.map(({ amount: _a, ...rest }) => rest),
@@ -263,6 +269,7 @@ Deno.serve(async (req: Request) => {
       rowId: repairId,
       row:   {
         status:                 'Quote Sent',
+        quote_revised:          isRevision,
         quote_amount:           grandTotal,
         quote_sent_date:        nextQuoteSentDate,
         // Stringify quote_lines_json before sending — the GAS writer
@@ -408,10 +415,13 @@ Deno.serve(async (req: Request) => {
     let emailSent = false;
     let emailError: string | undefined;
     if (!skipEmail) {
-      // REVISED prefix mirrors GAS handleSendRepairQuote_ — the customer
-      // mailbox sees the same "REVISED — ..." subject regardless of
-      // which backend serviced the request.
-      const subjectOverride = `${isRevision ? 'REVISED — ' : ''}Repair Quote Ready: ${itemIdsLabel} $${formatMoney(grandTotal)}`;
+      // A revision reads "Revised Repair Quote: …" so the customer mailbox
+      // shows it's an updated quote; a first send reads "Repair Quote Ready: …".
+      // Mirrors GAS handleSendRepairQuote_ so the subject is identical
+      // regardless of which backend serviced the request.
+      const subjectOverride = isRevision
+        ? `Revised Repair Quote: ${itemIdsLabel} $${formatMoney(grandTotal)}`
+        : `Repair Quote Ready: ${itemIdsLabel} $${formatMoney(grandTotal)}`;
       // Bump the idempotency key on a revision so send-email's
       // per-template dedup doesn't drop the resend when nothing else
       // changed in the tokens.

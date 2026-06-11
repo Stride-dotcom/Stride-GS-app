@@ -55,6 +55,9 @@ const DEFAULT_COL_ORDER = [
 const STATUS_CFG: Record<string, { bg: string; text: string }> = {
   'Pending Quote': { bg: '#FEF3C7', text: '#B45309' },
   'Quote Sent':    { bg: '#EFF6FF', text: '#1D4ED8' },
+  // Revised is a display-only label for a Quote Sent repair whose quote was
+  // edited + resent (quoteRevised flag) — amber to read as "changed".
+  'Revised':       { bg: '#FFEDD5', text: '#C2410C' },
   'Approved':      { bg: '#F0FDF4', text: '#15803D' },
   'Declined':      { bg: '#FEF2F2', text: '#DC2626' },
   'In Progress':   { bg: '#EDE9FE', text: '#7C3AED' },
@@ -91,7 +94,7 @@ function cols(completerMap: Map<string, CompleterRecord>, batchItemMap: Map<stri
     col.display({ id: 'select', header: ({ table }) => <input type="checkbox" checked={table.getIsAllPageRowsSelected()} onChange={table.getToggleAllPageRowsSelectedHandler()} style={{ cursor: 'pointer', accentColor: theme.colors.orange }} />, cell: ({ row }) => <input type="checkbox" checked={row.getIsSelected()} onChange={row.getToggleSelectedHandler()} style={{ cursor: 'pointer', accentColor: theme.colors.orange }} />, size: 40, enableSorting: false }),
     col.accessor('repairId', { header: 'Repair ID', size: 100, cell: i => <span style={{ fontWeight: 600, fontSize: 12 }}>{i.getValue()}</span> }),
     col.accessor('sourceTaskId', { header: 'Source Task', size: 100, cell: i => <span style={{ color: theme.colors.textSecondary, fontSize: 12 }}>{i.getValue() || '\u2014'}</span> }),
-    col.accessor('status', { header: 'Status', size: 120, filterFn: mf, cell: i => <Badge t={i.getValue()} c={STATUS_CFG[i.getValue()]} /> }),
+    col.accessor('status', { header: 'Status', size: 120, filterFn: mf, cell: i => { const lbl = (i.getValue() === 'Quote Sent' && i.row.original.quoteRevised) ? 'Revised' : i.getValue(); return <Badge t={lbl} c={STATUS_CFG[lbl] || STATUS_CFG[i.getValue()]} />; } }),
     col.accessor('itemId', { header: 'Item', size: 110, cell: i => { const id = i.getValue(); const ind = (window as any).__itemIndicators; const batchIds = batchItemMap.get(i.row.original.repairId); if (batchIds && batchIds.length > 1) { return <span title={batchIds.join(', ')} style={{ color: theme.colors.textSecondary, fontSize: 12, fontWeight: 600 }}>{batchIds.length} items</span>; } return <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}><span style={{ color: theme.colors.textSecondary, fontSize: 12 }}>{id}</span>{ind && <ItemIdBadges itemId={id} inspOpenItems={ind.inspOpenItems} inspDoneItems={ind.inspDoneItems} inspFailedItems={ind.inspFailedItems} asmOpenItems={ind.asmOpenItems} asmDoneItems={ind.asmDoneItems} repairOpenItems={ind.repairOpenItems} repairDoneItems={ind.repairDoneItems} wcOpenItems={ind.wcOpenItems} wcDoneItems={ind.wcDoneItems} dtOpenItems={ind.dtOpenItems} dtDoneItems={ind.dtDoneItems} codItems={ind.codItems} />}</div>; } }),
     // Session 74: warehouse location — mirrored from inventory so the
     // Repairs table matches what's on the Tasks table. Useful for

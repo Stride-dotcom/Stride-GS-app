@@ -1,4 +1,5 @@
 /* ===================================================
+   StrideAPI.gs — v38.276.0 — 2026-06-11 PST — [REPAIRS] feat: repair reopen (un-cancel) + revised-quote support. Two new SB-authoritative repair columns mirrored through __writeThroughReverseRepairs_: status_before_cancel and quote_revised (added to REVERSE_REPAIR_FIELDS_ + the api_ensureColumn_ list so older Repairs sheets get the columns and the mirror stops getting silently skipped; the forward sync sbRepairRow_ deliberately does NOT project them so a sheet round-trip never nulls them back). (1) Reopen: cancel-repair-sb now stamps status_before_cancel with the pre-cancel status, and a new SB-first reopen-cancelled-repair-sb EF restores it (or 'Pending Quote' when blank/non-restorable) and clears the column. handleCancelRepair_ mirrors the same capture into a 'Status Before Cancel' sheet cell for parity (dormant — cancelRepair is fleet-SB). (2) Revised quote: send-repair-quote-sb's edit-after-sent flow (isRevision=true) now sets quote_revised=true and titles the email 'Revised Repair Quote: …' (was 'REVISED — Repair Quote Ready'); status stays 'Quote Sent' so every approve/decline/edit gate is unchanged. handleSendRepairQuote_ writes the 'Quote Revised' sheet cell + matching subject for parity. No schema change to billing, no change to the v38.182 atomic invoice counter or half-write detection.
    StrideAPI.gs — v38.275.0 — 2026-06-11 PST — [MIGRATION] fix: extend the v38.274.0 repairs stale-write guard (version check) to ALL status-mirroring reverse-writethrough writers — tasks, will_calls, inventory — so the status-revert race is eliminated fleet-wide, not just for repairs. Same class as the 2026-06-02 completeTask revert (PR #596) and the 2026-06-11 repair revert (PR #739): two status-changing actions on one entity fire writeThroughReverse mirror calls that can land OUT OF ORDER, a delayed mirror re-stamps the sheet Status cell to a stale value, and the next api_fullClientSync_ upserts that stale cell onto public.<table>, reverting the newer action. New generic helper api_sbLiveStatus_(table, idField, idValue, tenantId) re-reads the LIVE SB status (api_sbRepairStatus_ now delegates to it). tasks (__writeThroughReverseTasks_) + will_calls (__writeThroughReverseWillCalls_): when an UPDATE payload touches Status, OVERRIDE the payload value with live SB truth before writing (covers start/cancel/reopen/batch-cancel/update-task and cancel/update/remove-items WC respectively — no EF changes needed). inventory (__writeThroughReverseInventory_): SKIP-on-stale instead of override (its status path has slot-ledger + open-work auto-cancel side effects and a paired Release Date cell, so writing partial stale data or re-firing side effects would be worse than the revert) — when live SB status differs from the payload, skip the whole Status/Release Date/side-effect block and let the authoritative action's own mirror carry it. All paths fail-open (null SB read keeps prior behavior) and preserve legitimate backward transitions (reopen, hold->active) because SB already holds the new value at read time. Audited the full REVERSE_WRITETHROUGH_TABLES_ set: shipments mirrors no status column (dock columns are SB-only), will_call_items status is a sheet no-op, billing/stax use a different lifecycle already protected by hard guards, and addons/invoice_tracking/entity_notes/item_photos/clients/stax_charges carry no racing status mirror — none need the guard. No schema change, no change to the v38.182 atomic invoice counter, half-write detection, or any billing math.
    StrideAPI.gs — v38.274.0 — 2026-06-11 PST — [REPAIRS/MIGRATION] fix: __writeThroughReverseRepairs_ stale-write guard (version check) stops a delayed startRepair mirror from reverting a completed repair. completeRepair + startRepair are fleet-wide SB; each fires writeThroughReverse to mirror status onto the per-tenant Repairs sheet. When staff Start then quickly Complete a repair, the two mirror HTTP calls can land out of order — a slow start-repair-sb write arriving AFTER complete-repair-sb stamps the sheet Status cell back to 'In Progress', and the next api_fullClientSync_ reads that stale cell and upserts it onto public.repairs, reverting the completion (reported JUS-RPR-1; same class as the 2026-06-02 completeTask revert, PR #596). Fix: public.repairs is authoritative for the fleet-wide SB repair cluster, so when an update payload touches Status the writer re-reads the LIVE SB status via new helper api_sbRepairStatus_ and writes THAT instead of the payload value — the sheet converges to SB truth and a stale in-flight payload can no longer clobber it. Legitimate backward transitions (re-quote to 'Pending Quote', reopen to 'In Progress') are preserved because SB already holds the new value at read time. Fail-open: a failed SB read falls back to the payload value (prior behavior). Status-only override; every other mirrored field still writes its payload value. No schema change, no change to the v38.182 atomic invoice counter or half-write detection.
    StrideAPI.gs — v38.273.0 — 2026-06-11 PST — [REPAIRS/MIGRATION] fix: __writeThroughReverseRepairs_ now auto-creates the multi-line quote columns before mirroring. The SB-primary send-repair-quote-sb writes quote_lines_json + the 7 quote total columns to public.repairs, then fires this reverse-writethrough to mirror them onto the per-tenant Repairs sheet. But the writer SKIPPED any column missing on the sheet (the `if (!col) continue` mapping guard) — and on a Repairs sheet predating the v38.123.0 multi-line columns (Quote Lines JSON / Quote Subtotal / Quote Taxable Subtotal / Quote Tax Area ID / Quote Tax Area Name / Quote Tax Rate / Quote Tax Amount / Quote Grand Total) the mirror silently dropped them. The very next full-client-sync (sbRepairRow_) then read those now-missing sheet cells as blank and pushed them back, NULLING quote_lines_json/subtotal/grand_total in Supabase while quote_amount (a column that DOES exist) survived — so a freshly-sent multi-line quote lost its breakdown and the React Quote Builder fell back to the legacy single-amount display (reported: RPR-63981-1781198414542, item 63981, quote_amount=210 but quote_lines_json=null). Fix: when the reverse payload carries any of the 8 quote columns, api_ensureColumn_ each missing one (matching what the legacy handleSendRepairQuote_ already does) and re-read the header map before mapping targets, so the mirror actually persists them and the sync round-trip stops clobbering the SB row. Non-destructive (appends missing headers, idempotent no-op when present); no change to the insert path, the v38.182 atomic invoice counter, half-write detection, or any billing logic.
@@ -4112,7 +4113,14 @@ var REVERSE_REPAIR_FIELDS_ = {
   "created_by":              "Created By",
   "item_notes":              "Item Notes",
   "task_notes":              "Task Notes",
-  "source_task_id":          "Source Task ID"
+  "source_task_id":          "Source Task ID",
+  // Reopen (un-cancel) + revised-quote support. status_before_cancel is
+  // stamped by cancel-repair-sb and cleared by reopen-cancelled-repair-sb;
+  // quote_revised is set by send-repair-quote-sb's edit-after-sent flow.
+  // Both are SB-authoritative — the forward sync (sbRepairRow_) does not
+  // project them, so this mirror never gets nulled back on a sheet round-trip.
+  "status_before_cancel":    "Status Before Cancel",
+  "quote_revised":           "Quote Revised"
 };
 
 function __writeThroughReverseRepairs_(ss, payload) {
@@ -4163,7 +4171,11 @@ function __writeThroughReverseRepairs_(ss, payload) {
   var QUOTE_REVERSE_KEYS_ = [
     "quote_lines_json", "quote_subtotal", "quote_taxable_subtotal",
     "quote_tax_area_id", "quote_tax_area_name", "quote_tax_rate",
-    "quote_tax_amount", "quote_grand_total"
+    "quote_tax_amount", "quote_grand_total",
+    // Reopen + revised-quote columns — same null-back-prevention rationale:
+    // create them when the SB mirror carries them so the cell actually
+    // persists instead of being silently skipped on an older sheet template.
+    "status_before_cancel", "quote_revised"
   ];
   var ensuredAnyColumn = false;
   for (var qk = 0; qk < QUOTE_REVERSE_KEYS_.length; qk++) {
@@ -20827,6 +20839,7 @@ function handleSendRepairQuote_(clientSheetId, payload) {
   api_ensureColumn_(repSheet, "Quote Tax Rate");
   api_ensureColumn_(repSheet, "Quote Tax Amount");
   api_ensureColumn_(repSheet, "Quote Grand Total");
+  api_ensureColumn_(repSheet, "Quote Revised");
 
   var repMap = api_getHeaderMap_(repSheet);
   var idCol  = repMap["Repair ID"];
@@ -20905,6 +20918,11 @@ function handleSendRepairQuote_(clientSheetId, payload) {
     if (repMap["Quote Tax Amount"])       repSheet.getRange(repRow, repMap["Quote Tax Amount"]).setValue(taxAmount);
     if (repMap["Quote Grand Total"])      repSheet.getRange(repRow, repMap["Quote Grand Total"]).setValue(grandTotal);
 
+    // ─── WRITE: Quote Revised flag (true only on edit-after-sent resend) ────
+    // Status stays "Quote Sent" so approve/decline/edit gates keep working;
+    // this flag is what drives the "Revised" badge + email title.
+    if (repMap["Quote Revised"]) repSheet.getRange(repRow, repMap["Quote Revised"]).setValue(isRevision === true);
+
     // ─── WRITE: Status → "Quote Sent" (only if was Pending Quote or empty) ──
     var currentStatus = getFresh("Status");
     if (currentStatus === "Pending Quote" || currentStatus === "") {
@@ -20982,9 +21000,9 @@ function handleSendRepairQuote_(clientSheetId, payload) {
       var taxRateFmt    = (Math.round(taxRate * 100) / 100).toFixed(2) + "%";
       var taxAreaLabel  = taxAreaName || "—";
 
-      // v38.249.0 — REVISED prefix on the subject when the operator
-      // clicked "Save & Resend" on an existing Quote Sent repair.
-      var emailSubject = (isRevision ? "REVISED — " : "") + "Repair Quote Ready: " + itemId + " $" + grandFmt;
+      // "Revised Repair Quote" title when the operator clicked "Save & Resend"
+      // on an existing Quote Sent repair; "Repair Quote Ready" on a first send.
+      var emailSubject = (isRevision ? "Revised Repair Quote: " : "Repair Quote Ready: ") + itemId + " $" + grandFmt;
       var emailResult = api_sendTemplateEmail_(settings, "REPAIR_QUOTE", allRecip,
         emailSubject,
         {
@@ -33199,6 +33217,14 @@ function handleCancelRepair_(clientSheetId, payload) {
     var currentStatus = statusCol ? String(sheet.getRange(repairRow, statusCol).getValue() || "").trim() : "";
     if (currentStatus === "Complete") return errorResponse_("Cannot cancel a completed repair", "INVALID_STATUS");
     if (currentStatus === "Cancelled") return jsonResponse_({ success: true, repairId: repairId, skipped: true, message: "Repair already cancelled" });
+
+    // Capture the pre-cancel status so a later reopen can restore it
+    // (parity with cancel-repair-sb / reopen-cancelled-repair-sb).
+    api_ensureColumn_(sheet, "Status Before Cancel");
+    repairMap = api_getHeaderMap_(sheet);
+    if (repairMap["Status Before Cancel"]) {
+      sheet.getRange(repairRow, repairMap["Status Before Cancel"]).setValue(currentStatus);
+    }
 
     // Set status
     if (statusCol) sheet.getRange(repairRow, statusCol).setValue("Cancelled");
