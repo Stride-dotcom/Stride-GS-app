@@ -43,7 +43,7 @@
 
 import { supabase } from './supabase';
 import { getActiveBackendForKey } from '../contexts/FeatureFlagContext';
-import { getCallerEmail } from './api';
+import { getCallerEmail, extractEdgeError } from './api';
 import type { ApiResponse } from './api';
 
 // ── Map: GAS action name → SB Edge Function slug + feature_flag key ─────
@@ -422,9 +422,16 @@ export async function invokeSupabaseHandler<T>(
   }
 
   if (error) {
+    // The real EF reason (e.g. INVALID_STATUS, BILLING_LOCKED) lives in
+    // error.context (a Response), NOT error.message — which on a non-2xx is the
+    // generic "Edge Function returned a non-2xx status code". Unwrap it so every
+    // SB-routed action (cancel/reopen/batch-cancel/update task, cancel/update WC,
+    // etc.) surfaces a specific, friendly message instead of the opaque string
+    // (extractEdgeError, PR #734). Fail-safe fallback when no body is present.
+    const { message } = await extractEdgeError(error, `Couldn’t reach the ${ef} service. Please try again.`);
     return {
       data: null,
-      error: error.message || `Edge Function ${ef} failed`,
+      error: message,
       ok: false,
       requestId,
     };
