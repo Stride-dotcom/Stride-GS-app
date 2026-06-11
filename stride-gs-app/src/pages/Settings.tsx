@@ -2435,9 +2435,9 @@ export function Settings() {
           // (`=== true` coerced undefined → false), and (b) bypassed the EF's
           // audit log + sheet mirror. Booleans are sent only when the form
           // actually carries them; absent = leave the saved value untouched.
-          billingContactName: data.billingContactName || '',
-          billingEmail:       data.billingEmail        || '',
-          billingAddress:     data.billingAddress      || '',
+          ...(typeof data.billingContactName === 'string' ? { billingContactName: data.billingContactName } : {}),
+          ...(typeof data.billingEmail === 'string' ? { billingEmail: data.billingEmail } : {}),
+          ...(typeof data.billingAddress === 'string' ? { billingAddress: data.billingAddress } : {}),
           ...(typeof data.paymentMethodRequired === 'boolean' ? { paymentMethodRequired: data.paymentMethodRequired } : {}),
           ...(typeof data.endCustomerPaysStorage === 'boolean' ? { endCustomerPaysStorage: data.endCustomerPaysStorage } : {}),
           syncToSheet: true,

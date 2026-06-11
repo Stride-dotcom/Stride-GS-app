@@ -76,6 +76,7 @@ const BOOL_FIELDS = new Set([
   'payment_method_required', 'end_customer_pays_storage',
 ]);
 const NUM_FIELDS = new Set(['free_storage_days', 'discount_storage_pct', 'discount_services_pct']);
+const NULL_WHEN_EMPTY = new Set(['billing_contact_name', 'billing_email', 'billing_address']);
 
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
@@ -96,6 +97,10 @@ Deno.serve(async (req: Request) => {
     if (BOOL_FIELDS.has(col)) val = val === true || val === 'true' || val === 'TRUE';
     else if (NUM_FIELDS.has(col)) val = val === null || val === '' ? null : Number(val);
     else val = val === null ? null : String(val);
+    // Billing contacts store NULL for "not set", never '' — the QBO
+    // billing-contact backfill targets `billing_email is.null`, and an
+    // empty string would silently exclude a row from that sweep.
+    if (NULL_WHEN_EMPTY.has(col) && val === '') val = null;
     updates[col] = val;
     echoUpdated[key] = val;
   }
