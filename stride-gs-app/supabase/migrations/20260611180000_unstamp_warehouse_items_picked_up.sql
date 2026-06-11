@@ -8,8 +8,8 @@
 --
 -- A delivery item with inventory_id set rides from our warehouse and is
 -- never picked up on a pickup leg, so picked_up_at / pickup_return_codes
--- / pickup_delivered_quantity on such a row is bogus by definition.
--- This repair clears those three fields for every affected row.
+-- / pickup_delivered_quantity / pickup_item_note on such a row is bogus
+-- by definition. This repair clears those fields for every affected row.
 --
 -- Affected at time of fix (2026-06-11): JOD-00168-D (20), JAS-00096-ROZE-D
 -- (8), LIG-00146-D (3), MRS-00047-D (1) = 32 rows.

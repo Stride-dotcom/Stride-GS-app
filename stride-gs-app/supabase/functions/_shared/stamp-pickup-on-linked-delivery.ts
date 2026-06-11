@@ -103,10 +103,15 @@ interface DeliveryItemRow {
   id: string;
   parent_pickup_item_id: string | null;
   pickup_leg_id: string | null;
-  /** Warehouse-origin marker. When set, this delivery item rides from
-   *  our warehouse (selected from inventory in CreateDeliveryOrderModal,
-   *  `inventory_id: i.inventoryRowId`) and was NOT picked up on any
-   *  pickup leg. Picked-up items leave this NULL. */
+  /** Warehouse-origin marker. When set, this delivery item resolved to
+   *  an inventory row — either selected from inventory in
+   *  CreateDeliveryOrderModal (`inventory_id: i.inventoryRowId`) or
+   *  auto-stamped by the dt_order_items_resolve_inventory_id_trg
+   *  BEFORE-INSERT/UPDATE trigger when dt_item_code matches an inventory
+   *  item_id (migration 20260512230000). Either way it is warehouse
+   *  stock, not a picked-up piece, so it was NOT picked up on any leg.
+   *  Picked-up items round-trip through DT with a hex-UUID-prefix code
+   *  that never resolves to inventory, so they leave this NULL. */
   inventory_id: string | null;
   dt_item_code: string | null;
   quantity: number | null;
@@ -289,8 +294,9 @@ export async function stampPickupOnLinkedDelivery(
   // clause matched (rows already stamped this run don't double-count).
   //
   // Warehouse guard (2026-06-11): the blanket pass NEVER stamps an item
-  // with `inventory_id` set. Such items ride from our warehouse (added
-  // from inventory in CreateDeliveryOrderModal) and were not picked up
+  // with `inventory_id` set. Such items resolved to warehouse inventory
+  // (set in CreateDeliveryOrderModal or by the resolve_inventory_id
+  // trigger when dt_item_code matches an inventory item_id) and were not picked up
   // on any leg, so the `!anyLegTagged → stamp all` legacy fallback must
   // not touch them. Without this guard a pickup_and_delivery order that
   // mixes a few picked-up items with many warehouse items stamps EVERY
