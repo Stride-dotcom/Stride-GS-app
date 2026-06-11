@@ -4,8 +4,12 @@
  *
  * Behavior mirrors GAS handleRespondToRepairQuote_:
  *   • Approve → status 'Approved', approved=true. Idempotent on
- *     existing.approved=true (returns skipped:true).
- *   • Decline → status 'Declined'. Idempotent on existing.status='Declined'.
+ *     existing.approved=true (returns skipped:true) — but the skip path
+ *     SELF-HEALS: it re-asserts the SB status if a forward sync reverted it
+ *     to a pre-decision state, and re-fires the sheet mirror, so a customer
+ *     retry converges both stores (RPR-63950 incident). No duplicate email.
+ *   • Decline → status 'Declined'. Idempotent on existing.status='Declined'
+ *     (skip path re-fires the sheet mirror too).
  *   • Source status check: typically 'Quote Sent' but GAS doesn't gate
  *     on it — the idempotency guard is the only protection. We mirror
  *     that: any source status with a non-approved/non-declined state
@@ -81,18 +85,41 @@ Deno.serve(async (req: Request) => {
     // Idempotency — same as GAS:
     //   Approve: skip if approved=true
     //   Decline: skip if status='Declined'
+    //
+    // The skip paths SELF-HEAL instead of returning a pure no-op
+    // (RPR-63950 incident, 2026-06-11): the first Approve committed to SB
+    // but its sheet mirror was lost, the retry hit this skip and returned
+    // without mirroring, so the sheet stayed 'Quote Sent' forever and every
+    // forward full-client-sync re-upserted that stale status onto
+    // public.repairs — reverting the approval. Now a retry (a) re-asserts
+    // the SB status when it was reverted back to a pre-decision state, and
+    // (b) re-fires the sheet mirror, converging both stores. No email —
+    // the customer-facing send stays once-only.
     if (decision === 'Approve' && existing.approved === true) {
+      let healedStatus = String(existing.status ?? '').trim();
+      if (healedStatus === 'Quote Sent' || healedStatus === 'Pending Quote' || healedStatus === '') {
+        const { error: healErr } = await supabase
+          .from('repairs')
+          .update({ status: 'Approved', updated_at: new Date().toISOString() })
+          .eq('tenant_id', tenantId)
+          .eq('repair_id', repairId);
+        if (!healErr) healedStatus = 'Approved';
+      }
+      const heal = await mirrorRepairStatus(supabase, tenantId, repairId,
+        { status: healedStatus, approved: true }, requestId, callerEmail);
       return json({
         ok: true, repairId, decision, newStatus,
         skipped: true, message: 'Repair already approved',
-        mirrorOk: true, emailSent: false,
+        mirrorOk: heal.mirrorOk, mirrorError: heal.mirrorError, emailSent: false,
       });
     }
     if (decision === 'Decline' && existing.status === 'Declined') {
+      const heal = await mirrorRepairStatus(supabase, tenantId, repairId,
+        { status: 'Declined' }, requestId, callerEmail);
       return json({
         ok: true, repairId, decision, newStatus,
         skipped: true, message: 'Repair already declined',
-        mirrorOk: true, emailSent: false,
+        mirrorOk: heal.mirrorOk, mirrorError: heal.mirrorError, emailSent: false,
       });
     }
 
@@ -120,53 +147,15 @@ Deno.serve(async (req: Request) => {
       source:       'edge',
     });
 
-    // ── 4. Reverse writethrough — just status (writer covers it) ─────
-    let mirrorOk = true;
-    let mirrorError: string | undefined;
-    try {
-      const gasUrl = Deno.env.get('GAS_API_URL');
-      const gasToken = Deno.env.get('GAS_API_TOKEN');
-      if (gasUrl && gasToken) {
-        const mirrorRes = await fetch(`${gasUrl}?action=writeThroughReverse&token=${encodeURIComponent(gasToken)}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            tenantId,
-            table: 'repairs',
-            op:    'update',
-            rowId: repairId,
-            row:   { status: newStatus },
-            requestId,
-          }),
-        });
-        const text = await mirrorRes.text();
-        let parsed: { success?: boolean; error?: string } = {};
-        try { parsed = JSON.parse(text); } catch { parsed = { error: `non-JSON: ${text.slice(0, 200)}` }; }
-        if (!mirrorRes.ok || !parsed.success) {
-          mirrorOk = false;
-          mirrorError = parsed.error ?? `HTTP ${mirrorRes.status}`;
-        }
-      } else {
-        mirrorOk = false;
-        mirrorError = 'GAS_API_URL or GAS_API_TOKEN not configured';
-      }
-    } catch (e) {
-      mirrorOk = false;
-      mirrorError = e instanceof Error ? e.message : String(e);
-    }
-    if (!mirrorOk) {
-      await supabase.from('gs_sync_events').insert({
-        tenant_id:     tenantId,
-        entity_type:   'repair',
-        entity_id:     repairId,
-        action_type:   'writethrough_reverse',
-        sync_status:   'sync_failed',
-        requested_by:  `respond-repair-quote-sb:${callerEmail}`,
-        request_id:    requestId,
-        payload:       { table: 'repairs', op: 'update', rowId: repairId, row: { status: newStatus } },
-        error_message: (mirrorError ?? 'unknown').slice(0, 1000),
-      }).then(() => {}, () => {});
-    }
+    // ── 4. Reverse writethrough — status + (on Approve) the Approved
+    // checkbox. Pre-fix only status was mirrored, so the sheet's Approved
+    // cell stayed false even after a successful approval (observed on
+    // RPR-63950: SB approved=true, sheet Approved=false).
+    const mirrorRow: Record<string, unknown> = decision === 'Approve'
+      ? { status: newStatus, approved: true }
+      : { status: newStatus };
+    const { mirrorOk, mirrorError } = await mirrorRepairStatus(
+      supabase, tenantId, repairId, mirrorRow, requestId, callerEmail);
 
     // ── 5. Email tokens ──────────────────────────────────────────────
     const { data: clientRow } = await supabase
@@ -294,6 +283,64 @@ Deno.serve(async (req: Request) => {
     return json({ ok: false, error: String(err) }, 500);
   }
 });
+
+/**
+ * Fire the reverse writethrough that mirrors repair fields onto the
+ * per-tenant Repairs sheet. Best-effort: failure logs to gs_sync_events
+ * (FailedOperationsDrawer pickup) and is reported in the return value, but
+ * never throws. Used by the main Approve/Decline path AND the idempotent
+ * skip paths (which previously returned without mirroring — the gap that
+ * left RPR-63950's sheet permanently stale).
+ */
+async function mirrorRepairStatus(
+  supabase: ReturnType<typeof createClient>,
+  tenantId: string,
+  repairId: string,
+  row: Record<string, unknown>,
+  requestId: string,
+  callerEmail: string,
+): Promise<{ mirrorOk: boolean; mirrorError?: string }> {
+  let mirrorOk = true;
+  let mirrorError: string | undefined;
+  try {
+    const gasUrl = Deno.env.get('GAS_API_URL');
+    const gasToken = Deno.env.get('GAS_API_TOKEN');
+    if (gasUrl && gasToken) {
+      const mirrorRes = await fetch(`${gasUrl}?action=writeThroughReverse&token=${encodeURIComponent(gasToken)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tenantId, table: 'repairs', op: 'update', rowId: repairId, row, requestId }),
+      });
+      const text = await mirrorRes.text();
+      let parsed: { success?: boolean; error?: string } = {};
+      try { parsed = JSON.parse(text); } catch { parsed = { error: `non-JSON: ${text.slice(0, 200)}` }; }
+      if (!mirrorRes.ok || !parsed.success) {
+        mirrorOk = false;
+        mirrorError = parsed.error ?? `HTTP ${mirrorRes.status}`;
+      }
+    } else {
+      mirrorOk = false;
+      mirrorError = 'GAS_API_URL or GAS_API_TOKEN not configured';
+    }
+  } catch (e) {
+    mirrorOk = false;
+    mirrorError = e instanceof Error ? e.message : String(e);
+  }
+  if (!mirrorOk) {
+    await supabase.from('gs_sync_events').insert({
+      tenant_id:     tenantId,
+      entity_type:   'repair',
+      entity_id:     repairId,
+      action_type:   'writethrough_reverse',
+      sync_status:   'sync_failed',
+      requested_by:  `respond-repair-quote-sb:${callerEmail}`,
+      request_id:    requestId,
+      payload:       { table: 'repairs', op: 'update', rowId: repairId, row },
+      error_message: (mirrorError ?? 'unknown').slice(0, 1000),
+    }).then(() => {}, () => {});
+  }
+  return { mirrorOk, mirrorError };
+}
 
 function formatCurrency(n: number): string {
   return `$${formatMoney(n)}`;

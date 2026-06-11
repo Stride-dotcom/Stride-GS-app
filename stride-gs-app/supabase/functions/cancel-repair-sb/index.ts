@@ -95,14 +95,45 @@ Deno.serve(async (req: Request) => {
       return json({ ok: false, error: `Repair ${repairId} not found in tenant ${tenantId}` }, 404);
     }
 
-    // Idempotent: already Cancelled → return ok without re-firing audit
-    // log or reverse writethrough. Matches the legacy GAS handler's
-    // implicit behavior (it would UPDATE to the same value, but skipping
-    // the round-trip is cleaner).
+    // Idempotent: already Cancelled → return ok without re-firing the audit
+    // log. The reverse writethrough DOES re-fire (cheap, idempotent on the
+    // sheet side): if the first cancel's mirror was lost, the sheet would
+    // otherwise stay stale forever — a retry used to skip the mirror, the
+    // same gap that left RPR-63950's sheet on 'Quote Sent' after a committed
+    // approval (2026-06-11). Converging here makes a retry self-healing.
     if (existing.status === 'Cancelled') {
+      let skipMirrorOk = true;
+      let skipMirrorError: string | undefined;
+      try {
+        const gasUrl = Deno.env.get('GAS_API_URL');
+        const gasToken = Deno.env.get('GAS_API_TOKEN');
+        if (gasUrl && gasToken) {
+          const mirrorRes = await fetch(`${gasUrl}?action=writeThroughReverse&token=${encodeURIComponent(gasToken)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              tenantId, table: 'repairs', op: 'update', rowId: repairId,
+              row: { status: 'Cancelled' }, requestId,
+            }),
+          });
+          const text = await mirrorRes.text();
+          let parsed: { success?: boolean; error?: string } = {};
+          try { parsed = JSON.parse(text); } catch { parsed = { error: `non-JSON: ${text.slice(0, 200)}` }; }
+          if (!mirrorRes.ok || !parsed.success) {
+            skipMirrorOk = false;
+            skipMirrorError = parsed.error ?? `HTTP ${mirrorRes.status}`;
+          }
+        } else {
+          skipMirrorOk = false;
+          skipMirrorError = 'GAS_API_URL or GAS_API_TOKEN not configured';
+        }
+      } catch (e) {
+        skipMirrorOk = false;
+        skipMirrorError = e instanceof Error ? e.message : String(e);
+      }
       return json({
         ok: true, repairId, alreadyCancelled: true,
-        mirrorOk: true,
+        mirrorOk: skipMirrorOk, mirrorError: skipMirrorError,
       });
     }
 

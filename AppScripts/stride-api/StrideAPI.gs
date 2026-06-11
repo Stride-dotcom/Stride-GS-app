@@ -1,4 +1,5 @@
 /* ===================================================
+   StrideAPI.gs — v38.277.0 — 2026-06-11 PST — [REPAIRS/MIGRATION] fix: the FORWARD sheet→SB repair sync no longer reverts SB-authoritative fields — closes the RPR-63950 approve-revert (customer Approve committed to public.repairs, the sheet mirror was lost, and every api_fullClientSync_ 'repair' scope — e.g. the one transferItems fires — re-upserted the sheet's stale 'Quote Sent' onto SB, reverting the approval TWICE, incl. once after the operator manually fixed it) and the 42-repair quote_lines_json null-back across 21 tenants (sheets predating the multi-line quote columns hold blank/missing cells; every bulk sync re-NULLed the SB breakdown — v38.273.0's lazy ensureColumn only protects the repair whose own quote-send mirror runs post-fix). Same status-revert class as PR #739/#740 but on the FORWARD path those PRs didn't cover. (1) New SB_AUTHORITATIVE_REPAIR_COLS_ (status, quote_amount, quote_sent_date, the 8 multi-line quote cols, repair_result, final_amount, completed_date, start_date) + api_bulkUpsertRepairsSbAware_: both BULK sheet→SB paths (api_fullClientSync_ 'repair' scope + handleBulkSyncToSupabase_) now prefetch the tenant's existing SB repair_ids (one PostgREST GET, fail-open to full rows) and upsert existing rows WITHOUT those columns (merge-duplicates preserves SB truth); new-to-SB rows still land in full so sheet-side creates (handleBatchRequestRepairQuote_) keep working. (2) Single-entity propagation (resyncEntityToSupabase_ / resyncEntitiesBatchToSupabase_ via api_writeThrough_) stays UNstripped — it carries a handler's own fresh write — but gains api_omitQuoteColsMissingOnSheet_: when the tenant's sheet lacks the quote COLUMNS entirely, omit those keys (preserve SB) while present-but-blank cells still propagate (handleVoidRepairQuote_'s clears must reach SB). (3) doPost reopenRepair case adds api_writeThrough_ like every other repair action — its status change previously reached SB only via the now-stripped bulk sync. (4) handleBulkSyncToSupabase_ repairs stale-delete REMOVED (matches the v38.220.0 api_fullClientSync_ decision; the sweep would delete legitimate SB-only multi-item repairs — the 2026-05-14 Seva RPR-63280 class). Trade-off documented: direct hand-edits in the Repairs sheet to the stripped columns no longer propagate to SB — correct repair status/quote data in the app. Companion EF deploys: respond-repair-quote-sb (idempotent-skip now self-heals SB status + re-fires the sheet mirror — the retry path that previously returned without mirroring, leaving the sheet permanently stale; main-path mirror now also carries approved=true), cancel-repair-sb + reopen-cancelled-repair-sb (skip paths now converge the sheet). No billing math, invoice counter, or half-write detection changes.
    StrideAPI.gs — v38.276.0 — 2026-06-11 PST — [REPAIRS] feat: repair reopen (un-cancel) + revised-quote support. Two new SB-authoritative repair columns mirrored through __writeThroughReverseRepairs_: status_before_cancel and quote_revised (added to REVERSE_REPAIR_FIELDS_ + the api_ensureColumn_ list so older Repairs sheets get the columns and the mirror stops getting silently skipped; the forward sync sbRepairRow_ deliberately does NOT project them so a sheet round-trip never nulls them back). (1) Reopen: cancel-repair-sb now stamps status_before_cancel with the pre-cancel status, and a new SB-first reopen-cancelled-repair-sb EF restores it (or 'Pending Quote' when blank/non-restorable) and clears the column. handleCancelRepair_ mirrors the same capture into a 'Status Before Cancel' sheet cell for parity (dormant — cancelRepair is fleet-SB). (2) Revised quote: send-repair-quote-sb's edit-after-sent flow (isRevision=true) now sets quote_revised=true and titles the email 'Revised Repair Quote: …' (was 'REVISED — Repair Quote Ready'); status stays 'Quote Sent' so every approve/decline/edit gate is unchanged. handleSendRepairQuote_ writes the 'Quote Revised' sheet cell + matching subject for parity. No schema change to billing, no change to the v38.182 atomic invoice counter or half-write detection.
    StrideAPI.gs — v38.275.0 — 2026-06-11 PST — [MIGRATION] fix: extend the v38.274.0 repairs stale-write guard (version check) to ALL status-mirroring reverse-writethrough writers — tasks, will_calls, inventory — so the status-revert race is eliminated fleet-wide, not just for repairs. Same class as the 2026-06-02 completeTask revert (PR #596) and the 2026-06-11 repair revert (PR #739): two status-changing actions on one entity fire writeThroughReverse mirror calls that can land OUT OF ORDER, a delayed mirror re-stamps the sheet Status cell to a stale value, and the next api_fullClientSync_ upserts that stale cell onto public.<table>, reverting the newer action. New generic helper api_sbLiveStatus_(table, idField, idValue, tenantId) re-reads the LIVE SB status (api_sbRepairStatus_ now delegates to it). tasks (__writeThroughReverseTasks_) + will_calls (__writeThroughReverseWillCalls_): when an UPDATE payload touches Status, OVERRIDE the payload value with live SB truth before writing (covers start/cancel/reopen/batch-cancel/update-task and cancel/update/remove-items WC respectively — no EF changes needed). inventory (__writeThroughReverseInventory_): SKIP-on-stale instead of override (its status path has slot-ledger + open-work auto-cancel side effects and a paired Release Date cell, so writing partial stale data or re-firing side effects would be worse than the revert) — when live SB status differs from the payload, skip the whole Status/Release Date/side-effect block and let the authoritative action's own mirror carry it. All paths fail-open (null SB read keeps prior behavior) and preserve legitimate backward transitions (reopen, hold->active) because SB already holds the new value at read time. Audited the full REVERSE_WRITETHROUGH_TABLES_ set: shipments mirrors no status column (dock columns are SB-only), will_call_items status is a sheet no-op, billing/stax use a different lifecycle already protected by hard guards, and addons/invoice_tracking/entity_notes/item_photos/clients/stax_charges carry no racing status mirror — none need the guard. No schema change, no change to the v38.182 atomic invoice counter, half-write detection, or any billing math.
    StrideAPI.gs — v38.274.0 — 2026-06-11 PST — [REPAIRS/MIGRATION] fix: __writeThroughReverseRepairs_ stale-write guard (version check) stops a delayed startRepair mirror from reverting a completed repair. completeRepair + startRepair are fleet-wide SB; each fires writeThroughReverse to mirror status onto the per-tenant Repairs sheet. When staff Start then quickly Complete a repair, the two mirror HTTP calls can land out of order — a slow start-repair-sb write arriving AFTER complete-repair-sb stamps the sheet Status cell back to 'In Progress', and the next api_fullClientSync_ reads that stale cell and upserts it onto public.repairs, reverting the completion (reported JUS-RPR-1; same class as the 2026-06-02 completeTask revert, PR #596). Fix: public.repairs is authoritative for the fleet-wide SB repair cluster, so when an update payload touches Status the writer re-reads the LIVE SB status via new helper api_sbRepairStatus_ and writes THAT instead of the payload value — the sheet converges to SB truth and a stale in-flight payload can no longer clobber it. Legitimate backward transitions (re-quote to 'Pending Quote', reopen to 'In Progress') are preserved because SB already holds the new value at read time. Fail-open: a failed SB read falls back to the payload value (prior behavior). Status-only override; every other mirrored field still writes its payload value. No schema change, no change to the v38.182 atomic invoice counter or half-write detection.
@@ -7844,6 +7845,149 @@ function sbTaskRow_(tenantId, task) {
 }
 
 /**
+ * v38.277.0 — SB-authoritative repair columns. The repair cluster is
+ * fleet-wide SB-primary (startRepair, cancelRepair, sendRepairQuote,
+ * respondRepairQuote, requestRepairQuote, completeRepair, updateRepair):
+ * the -sb Edge Functions write these columns to public.repairs FIRST and
+ * mirror them onto the per-tenant Repairs sheet via writeThroughReverse.
+ * The BULK sheet→SB re-reads (api_fullClientSync_ 'repair' scope +
+ * handleBulkSyncToSupabase_) must therefore NOT copy a possibly-stale
+ * sheet cell back over them for rows that already exist in SB — that's
+ * the revert vector behind two incidents on 2026-06-11:
+ *   • RPR-63950 (Cohesively Curated): customer Approve committed to SB,
+ *     the sheet mirror was lost, and every subsequent full sync (e.g. the
+ *     20:37 transferItems sync) re-upserted the sheet's stale 'Quote Sent'
+ *     onto public.repairs — reverting the approval, twice (incl. once
+ *     AFTER the operator manually fixed SB). Same class as JUS-RPR-1
+ *     (PR #739) but on the FORWARD path, which PR #739/#740 didn't cover.
+ *   • The 42-repair quote_lines_json null-back across 21 tenants: sheets
+ *     predating the multi-line quote columns hold blank cells, and every
+ *     full sync re-NULLed the SB breakdown (v38.273.0 only protects the
+ *     repair whose own quote-send mirror runs post-fix).
+ *
+ * Rows NOT yet in SB still upsert the FULL row (sheet-side creates — e.g.
+ * handleBatchRequestRepairQuote_ — must keep landing in SB complete).
+ * Single-entity propagation paths (resyncEntityToSupabase_ /
+ * api_writeThrough_ right after a GAS handler's own sheet write) are
+ * deliberately NOT stripped — those carry the handler's fresh intent.
+ * Trade-off: hand-edits made directly in the Repairs sheet to these
+ * columns no longer reach Supabase — correct them in the app (SB) instead.
+ */
+var SB_AUTHORITATIVE_REPAIR_COLS_ = [
+  "status", "quote_amount", "quote_sent_date", "quote_lines_json",
+  "quote_subtotal", "quote_taxable_subtotal", "quote_tax_area_id",
+  "quote_tax_area_name", "quote_tax_rate", "quote_tax_amount",
+  "quote_grand_total", "repair_result", "final_amount",
+  "completed_date", "start_date"
+];
+
+/**
+ * Fetch the set of repair_ids that already exist in public.repairs for a
+ * tenant. Returns a {repairId: true} map, or null on any failure — callers
+ * fail open to the pre-v38.277 behavior (full-row upsert for every row).
+ */
+function api_fetchSbRepairIdSet_(tenantId) {
+  try {
+    var sel = supabaseSelect_(
+      "repairs",
+      "tenant_id=eq." + encodeURIComponent(tenantId) + "&limit=10000",
+      "repair_id"
+    );
+    if (!sel.ok) return null;
+    // Truncation guard: supabaseSelect_ is a single un-paginated GET. If we
+    // got exactly the limit back, the set may be incomplete — a truncated
+    // set would silently misclassify the missing repairs as "new" and give
+    // them full-row upserts (the revert vector this exists to kill). Fail
+    // open instead: null → caller upserts everything in full (pre-fix
+    // behavior) and we log loudly. No tenant is near 10000 repairs today.
+    if (sel.rows.length >= 10000) {
+      Logger.log("api_fetchSbRepairIdSet_: hit the 10000-row ceiling for tenant " + tenantId + " — failing open to full-row upserts. Paginate this fetch before any tenant grows past the cap.");
+      return null;
+    }
+    var map = {};
+    for (var i = 0; i < sel.rows.length; i++) {
+      var rid = String(sel.rows[i].repair_id || "").trim();
+      if (rid) map[rid] = true;
+    }
+    return map;
+  } catch (e) {
+    Logger.log("api_fetchSbRepairIdSet_ error (non-fatal, fail-open): " + e);
+    return null;
+  }
+}
+
+/**
+ * Return a copy of an sbRepairRow_ object without the SB-authoritative
+ * columns, for merge-duplicates upserts against rows that already exist in
+ * SB (omitted keys are preserved server-side). tenant_id/repair_id (the
+ * conflict key) always stay.
+ */
+function api_stripSbAuthoritativeRepairCols_(row) {
+  var out = {};
+  for (var k in row) {
+    if (SB_AUTHORITATIVE_REPAIR_COLS_.indexOf(k) === -1) out[k] = row[k];
+  }
+  return out;
+}
+
+/**
+ * v38.277.0 — Omit the multi-line quote columns from an sbRepairRow_ object
+ * when the tenant's Repairs sheet doesn't have those COLUMNS at all (sheets
+ * predating v38.123.0). A missing column means the sheet holds no truth for
+ * these fields — their authority is the SB-primary quote writer — so omitting
+ * the keys lets the merge-duplicates upsert preserve the SB values instead of
+ * NULLing them (the RPR-63981 / RPR-63950 quote_lines_json null-back class).
+ * A PRESENT-but-blank cell still propagates: handleVoidRepairQuote_ clears
+ * the cells legitimately and its resync must carry the clearing to SB.
+ * Used by the single-entity resync paths; the bulk paths use the stronger
+ * SB-existence strip (api_bulkUpsertRepairsSbAware_).
+ */
+function api_omitQuoteColsMissingOnSheet_(sbRow, sheetRowObj) {
+  var pairs = [
+    ["quote_lines_json",       "Quote Lines JSON"],
+    ["quote_subtotal",         "Quote Subtotal"],
+    ["quote_taxable_subtotal", "Quote Taxable Subtotal"],
+    ["quote_tax_area_id",      "Quote Tax Area ID"],
+    ["quote_tax_area_name",    "Quote Tax Area Name"],
+    ["quote_tax_rate",         "Quote Tax Rate"],
+    ["quote_tax_amount",       "Quote Tax Amount"],
+    ["quote_grand_total",      "Quote Grand Total"]
+  ];
+  for (var i = 0; i < pairs.length; i++) {
+    if (!sheetRowObj.hasOwnProperty(pairs[i][1])) delete sbRow[pairs[i][0]];
+  }
+  return sbRow;
+}
+
+/**
+ * v38.277.0 — Shared upsert for the two BULK sheet→SB repair sync paths.
+ * Splits rows by SB existence: new-to-SB rows upsert in full; existing rows
+ * upsert with SB-authoritative columns stripped (see
+ * SB_AUTHORITATIVE_REPAIR_COLS_). Separate batch calls because PostgREST
+ * bulk upserts require uniform keys across the array. Fail-open: if the
+ * existence prefetch fails, everything upserts in full (pre-fix behavior).
+ */
+function api_bulkUpsertRepairsSbAware_(tenantId, fullRows) {
+  if (!fullRows || fullRows.length === 0) return;
+  var existingIds = api_fetchSbRepairIdSet_(tenantId);
+  if (!existingIds) {
+    supabaseBatchUpsert_("repairs", fullRows);
+    return;
+  }
+  var newRows = [], strippedRows = [];
+  for (var i = 0; i < fullRows.length; i++) {
+    var row = fullRows[i];
+    if (existingIds[String(row.repair_id || "").trim()]) {
+      strippedRows.push(api_stripSbAuthoritativeRepairCols_(row));
+    } else {
+      newRows.push(row);
+    }
+  }
+  if (newRows.length > 0)      supabaseBatchUpsert_("repairs", newRows);
+  if (strippedRows.length > 0) supabaseBatchUpsert_("repairs", strippedRows);
+}
+
+/**
  * Build a Supabase repair row from API response fields.
  */
 function sbRepairRow_(tenantId, repair) {
@@ -8828,7 +8972,10 @@ function resyncEntityToSupabase_(entityType, tenantId, entityId) {
               try { qLines = JSON.parse(String(qLinesRaw)); }
               catch (_) { qLines = null; }
             }
-            upResult = supabaseUpsert_("repairs", sbRepairRow_(tenantId, {
+            // v38.277.0 — column-existence guard: on sheets predating the
+            // multi-line quote columns, omit those keys so the upsert
+            // preserves the SB values instead of NULLing the breakdown.
+            upResult = supabaseUpsert_("repairs", api_omitQuoteColsMissingOnSheet_(sbRepairRow_(tenantId, {
               repairId: entityId, itemId: row["Item ID"], status: row["Status"],
               repairResult: row["Repair Result"], quoteAmount: row["Quote Amount"],
               finalAmount: row["Final Amount"], repairVendor: row["Repair Vendor"],
@@ -8848,7 +8995,7 @@ function resyncEntityToSupabase_(entityType, tenantId, entityId) {
               quoteTaxRate:         row["Quote Tax Rate"],
               quoteTaxAmount:       row["Quote Tax Amount"],
               quoteGrandTotal:      row["Quote Grand Total"]
-            }));
+            }), row));
             break;
           case "will_call":
             upResult = supabaseUpsert_("will_calls", sbWillCallRow_(tenantId, {
@@ -9084,7 +9231,11 @@ function resyncEntitiesBatchToSupabase_(entityType, tenantId, entityIds) {
             try { qLines = JSON.parse(String(qLinesRaw)); }
             catch (_) { qLines = null; }
           }
-          sb = sbRepairRow_(tenantId, {
+          // v38.277.0 — same column-existence guard as the single resync:
+          // sheets without the multi-line quote columns omit those keys so
+          // the batch upsert preserves SB values (uniform keys hold because
+          // all rows in one batch come from the same sheet).
+          sb = api_omitQuoteColsMissingOnSheet_(sbRepairRow_(tenantId, {
             repairId: id, itemId: row["Item ID"], status: row["Status"],
             repairResult: row["Repair Result"], quoteAmount: row["Quote Amount"],
             finalAmount: row["Final Amount"], repairVendor: row["Repair Vendor"],
@@ -9104,7 +9255,7 @@ function resyncEntitiesBatchToSupabase_(entityType, tenantId, entityIds) {
             quoteTaxRate:         row["Quote Tax Rate"],
             quoteTaxAmount:       row["Quote Tax Amount"],
             quoteGrandTotal:      row["Quote Grand Total"]
-          });
+          }), row);
           break;
         case "will_call":
           sb = sbWillCallRow_(tenantId, {
@@ -9620,7 +9771,12 @@ function api_fullClientSync_(tenantId, entityTypes) {
                 quoteGrandTotal:      repRows[n]["Quote Grand Total"]
               }));
             }
-            supabaseBatchUpsert_("repairs", repSb);
+            // v38.277.0 — SB-existence-aware upsert: rows already in SB get
+            // the SB-authoritative columns (status + quote_* + completion
+            // fields) STRIPPED so a stale sheet cell can't revert public.
+            // repairs (the RPR-63950 approve-revert + the quote_lines_json
+            // null-back). New-to-SB rows still land in full.
+            api_bulkUpsertRepairsSbAware_(tenantId, repSb);
             // v38.220.0 — DO NOT delete SB rows missing from the per-tenant
             // Repairs sheet. Repairs are now SB-primary (PRs #405-#420; all
             // feature_flags.{cancelRepair,startRepair,sendRepairEmails,
@@ -10061,6 +10217,12 @@ function doPost(e) {
         return withClientIsolation_(callerEmail, clientSheetId, function(effectiveId) {
           var r = handleReopenRepair_(effectiveId, payload, callerEmail);
           invalidateClientCache_(effectiveId);
+          // v38.277.0 — direct single-entity propagation. The handler's own
+          // api_fullClientSync_(['repair','billing']) no longer carries the
+          // status/completion columns for existing SB rows (SB-authoritative
+          // strip), so the reopen's sheet write must reach SB through the
+          // intentional single-entity path like every other repair action.
+          api_writeThrough_(r, "repair", effectiveId, String(payload.repairId || ""));
           api_auditLog_("repair", String(payload.repairId || ""), effectiveId, "reopen", { reason: String(payload.reason || "").substring(0, 200) }, callerEmail);
           return r;
         });
@@ -42106,8 +42268,16 @@ function handleBulkSyncToSupabase_(payload) {
               taskFolderUrl: bkRepTaskFolderUrls[rTaskId] || ""
             }));
           }
-          supabaseBatchUpsert_("repairs", repSb);
-          var repDel = supabaseDeleteStaleRows_("repairs", client.spreadsheetId, bkRepKeepIds, "repair_id");
+          // v38.277.0 — same SB-existence-aware upsert as api_fullClientSync_
+          // (strip SB-authoritative columns for rows already in SB).
+          api_bulkUpsertRepairsSbAware_(client.spreadsheetId, repSb);
+          // v38.277.0 — stale-delete REMOVED for repairs, matching the
+          // v38.220.0 decision in api_fullClientSync_: SB-only multi-item
+          // repairs (request-repair-quote-sb) legitimately have no sheet row,
+          // and this sweep would delete them from public.repairs (the
+          // 2026-05-14 Seva RPR-63280 incident class). Sheet hand-deletes no
+          // longer remove SB rows — cancel via the app is the supported path.
+          var repDel = 0;
           clientResult.counts.repairs = repSb.length;
           clientResult.deleted.repairs = repDel;
           totalRows.repairs += repSb.length;
