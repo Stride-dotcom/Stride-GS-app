@@ -118,6 +118,17 @@
 
 ---
 
+## Recent Changes (2026-06-11, tasks: dashboard shows SB-created tasks again + task ids carry the service token — feat/fix/batch-task-followups)
+
+- **Reported (Justin, testing batch tasks on the Demo):** newly created tasks didn't appear on the Dashboard Overview, and the task id (JUS-TSK-N) didn't say what KIND of task it is.
+- **Dashboard fix (the invisible-tasks bug, affects more than batch tasks):** the Overview's per-user task TYPE filter compared `tasks.type` raw against svc CODES ('INSP'), but every SB-EF-created task stores the service NAME ('Inspection') — `batch-create-tasks-sb`, `complete-shipment-sb` auto-INSP (KC's receiving tasks were also invisible), `transfer-items-sb`. Even "Select All" hid them. Fix in [Dashboard.tsx](stride-gs-app/src/pages/Dashboard.tsx): name→code normalization (static ALL_SERVICE_TYPES + live service_catalog) before the includes() check, plus an all-selected fast path that shows everything so custom catalog types not in the static dropdown stay visible by default.
+- **Task ids now identify the type:** clean SB ids are **`PREFIX-INSP-N` / `PREFIX-ASM-N` / `PREFIX-DISP-N`** etc. instead of the generic `PREFIX-TSK-N`. `next_order_id` still mints from the ONE shared per-tenant task sequence (numbers never collide across types); the EFs stamp the service code over the TSK segment (`stampSvcToken` in `batch-create-tasks-sb`, inline in `complete-shipment-sb` + `transfer-items-sb`). Reserved entity tokens (WC/WCPU/RPR) are refused — a task id shaped like a will-call/repair id would collide + mis-link. Existing JUS-TSK-N rows keep their ids. **EFs redeployed: batch-create-tasks-sb v9, complete-shipment-sb v7, transfer-items-sb v8 (all verify_jwt=true preserved).** Live-verified: batch INSP on demo minted `JUS-INSP-15` (test row deleted).
+- **LinkifiedText**: clean-id detection widened so `JUS-INSP-13` links whole as a task (previously would have partially mis-matched as `INSP-13`); explicit token allowlist + FAB-prefix family; unknown middle tokens (PO-ABC-123-shaped note text) stay plain.
+- Also from the same test session: the "didn't create 1 batch task" report was a stale bundle — JUS-TSK-11/12 were created at 19:30 UTC, ~4 min after the PR #746 merge, before the new bundle (with the batch toggle) reached the browser. No code defect; hard-refresh picks up the toggle.
+- `tsc` + build clean; locked-in code-reviewer: SHIP (its reserved-token hardening applied pre-merge).
+
+---
+
 ## Recent Changes (2026-06-11, delivery: true per-item FK pickup stamping — replaces the blanket pass — fix/delivery/pickup-fk-stamping, PR #747)
 
 - **Follow-up to PR #741** (which band-aided the warehouse over-stamp with an `inventory_id` guard). This rewrites `supabase/functions/_shared/stamp-pickup-on-linked-delivery.ts` to do **strict per-item FK matching** — the real fix.

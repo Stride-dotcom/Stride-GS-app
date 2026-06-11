@@ -942,13 +942,40 @@ export function Dashboard() {
     return () => { window.removeEventListener('scroll', close, true); window.removeEventListener('resize', close); };
   }, [showTypeDropdown]);
 
-  // Explicit-list semantics — always filter through includes(). Empty
-  // array → no tasks shown (matches "Select All unchecked" expectation).
-  const filteredTasks = useMemo(
-    () => tasks.filter(t => taskTypeFilters.includes(t.taskType)),
-    [tasks, taskTypeFilters],
-  );
   const isAllSelected = taskTypeFilters.length === allTypeCodes.length;
+
+  // taskType normalization (2026-06-11): the filter list holds svc CODES
+  // ('INSP'), but public.tasks.type carries the svc NAME ('Inspection') on
+  // every SB-EF-created task (batch-create-tasks-sb, complete-shipment-sb
+  // auto-INSP, transfer-items-sb) — raw includes() silently hid ALL of them
+  // from the dashboard even with Select All checked (Justin, 2026-06-11).
+  // Resolve name → code via the static list + the live catalog before
+  // comparing; codes pass through unchanged.
+  const { services: catalogServicesForFilter } = useServiceCatalog();
+  const typeCodeByName = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const s of ALL_SERVICE_TYPES) m.set(s.name.trim().toUpperCase(), s.code);
+    for (const s of catalogServicesForFilter) {
+      const code = String(s.code || '').trim().toUpperCase();
+      const name = String(s.name || '').trim().toUpperCase();
+      if (code && name) m.set(name, code);
+    }
+    return m;
+  }, [catalogServicesForFilter]);
+
+  // Explicit-list semantics — filter through includes() on the NORMALIZED
+  // code. Empty array → no tasks shown (matches "Select All unchecked").
+  // All-selected short-circuits to everything, so tasks whose type isn't in
+  // the static dropdown list (custom catalog services) stay visible by
+  // default instead of vanishing.
+  const filteredTasks = useMemo(() => {
+    if (isAllSelected) return tasks;
+    return tasks.filter(t => {
+      const raw = String(t.taskType || '').trim().toUpperCase();
+      const code = typeCodeByName.get(raw) ?? raw;
+      return taskTypeFilters.includes(code);
+    });
+  }, [tasks, taskTypeFilters, isAllSelected, typeCodeByName]);
 
   const toggleTaskType = useCallback((type: string) => {
     setTaskTypeFilters(prev => prev.includes(type)

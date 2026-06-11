@@ -18,22 +18,45 @@ import { DeepLink, type DeepLinkKind } from './DeepLink';
  */
 
 // Match entity IDs used across the system. The first alternative matches the
-// clean orderNumbering format (PREFIX-RPR/WC/TSK-N) FIRST so it captures the
-// whole id (otherwise the legacy alternative below would mis-match the inner
-// `WC-7` of `JAS-WC-7`). The second alternative is the legacy token-first form:
+// clean orderNumbering format FIRST so it captures the whole id (otherwise
+// the legacy alternative below would mis-match the inner `WC-7` of `JAS-WC-7`
+// or the inner `INSP-13` of `JUS-INSP-13`). Since 2026-06-11 clean task ids
+// carry the SERVICE code as the middle token (PREFIX-INSP-N, PREFIX-ASM-N,
+// PREFIX-FAB_RUG-N, …) instead of the generic TSK, so the middle segment is
+// open-ended ([A-Z][A-Z0-9_]{1,7}); getDeepLinkKind gates what actually
+// linkifies — unrecognized shapes render as plain text. The second
+// alternative is the legacy token-first form:
 //   Task IDs:   2-6 uppercase letters, dash, digits, dash, digits (e.g. INSP-123-1)
 //   Repair IDs: RPR-digits-digits
 //   WC numbers: WC-digits (5+ digits, e.g. WC-032426)
-const ENTITY_ID_REGEX = /\b([A-Za-z]{1,4}-(?:RPR|WC|TSK)-\d+|(?:INSP|ASM|MNRTU|RUSH|DISP|WC|WCPU|REPAIR|RPR|STOR|RCVG)-[\w]+-?\d*)\b/g;
+const ENTITY_ID_REGEX = /\b([A-Za-z]{1,4}-[A-Z][A-Z0-9_]{1,7}-\d+|(?:INSP|ASM|MNRTU|RUSH|DISP|WC|WCPU|REPAIR|RPR|STOR|RCVG)-[\w]+-?\d*)\b/g;
 
 // Clean orderNumbering ids carry the type token in the MIDDLE segment
 // (PREFIX-TOKEN-N); legacy ids carry it FIRST. Resolve the token accordingly.
-const CLEAN_ORDER_ID = /^[A-Za-z]{1,4}-(RPR|WC|TSK)-\d+$/;
+const CLEAN_ORDER_ID = /^[A-Za-z]{1,4}-([A-Z][A-Z0-9_]{1,7})-\d+$/;
+
+// Clean-form middle tokens that resolve to a TASK deep link: the generic TSK
+// (pre-2026-06-11 ids) plus the known task service codes. Kept as an explicit
+// allowlist — treating ANY unknown middle token as a task would linkify
+// arbitrary note text shaped like PO-ABC-123. Custom catalog codes outside
+// this list (rare) render as plain text rather than mis-linking.
+const CLEAN_TASK_TOKENS = new Set([
+  'TSK', 'INSP', 'ASM', 'MNRTU', 'RUSH', 'DISP', 'STOR', 'RCVG',
+  'PLLT', 'PICK', 'LABEL', 'RSTK', 'REPAIR', 'SIT', 'NO_ID', 'MULTI_INS',
+]);
 
 function getDeepLinkKind(id: string): DeepLinkKind | null {
   const cleanMatch = CLEAN_ORDER_ID.exec(id.toUpperCase());
-  const token = cleanMatch ? cleanMatch[1] : id.split('-')[0].toUpperCase();
-  switch (token) {
+  if (cleanMatch) {
+    const token = cleanMatch[1];
+    if (token === 'RPR') return 'repair';
+    if (token === 'WC' || token === 'WCPU') return 'willcall';
+    // Fabric Protection family (FAB_RUG, FAB_BED, …) is open-ended — match
+    // by prefix; everything else goes through the explicit allowlist.
+    if (CLEAN_TASK_TOKENS.has(token) || token.startsWith('FAB')) return 'task';
+    return null;
+  }
+  switch (id.split('-')[0].toUpperCase()) {
     case 'RPR':
     case 'REPAIR':
       return 'repair';

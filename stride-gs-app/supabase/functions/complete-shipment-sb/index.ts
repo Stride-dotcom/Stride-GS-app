@@ -667,7 +667,17 @@ async function mintTaskId(
   if (cleanNumbering) {
     try {
       const { data, error } = await sb.rpc('next_order_id', { p_tenant_id: tenantId, p_order_type: 'task' });
-      if (!error && typeof data === 'string' && data) return data;
+      // 2026-06-11: stamp the service code over the generic TSK token
+      // (PREFIX-TSK-N → PREFIX-INSP-N) so the id identifies the task type.
+      // Counter stays the shared per-tenant task sequence. Mirrors
+      // batch-create-tasks-sb::stampSvcToken.
+      if (!error && typeof data === 'string' && data) {
+        const token = String(svcCode ?? '').toUpperCase().replace(/[^A-Z0-9_]/g, '');
+        // WC/WCPU/RPR are reserved entity tokens — never stamp them onto a
+        // task id (collision + wrong deep link); keep the generic TSK.
+        const safe = token && token !== 'WC' && token !== 'WCPU' && token !== 'RPR';
+        return safe ? data.replace(/-TSK-(\d+)$/, `-${token}-$1`) : data;
+      }
       if (error) console.warn('[complete-shipment-sb] next_order_id failed, using legacy id:', error.message);
     } catch (e) {
       console.warn('[complete-shipment-sb] next_order_id threw, using legacy id:', e);

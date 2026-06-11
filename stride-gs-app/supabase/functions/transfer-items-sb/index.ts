@@ -363,6 +363,9 @@ Deno.serve(async (req: Request) => {
           // Order Numbering feature (Justin Demo canary): when on for the
           // DESTINATION tenant, the auto-INSP task gets a clean PREFIX-TSK-N id
           // (scoped to destId). Resolved once. Off → legacy INSP-{itemId}-N.
+          // Clean ids are PREFIX-INSP-N since 2026-06-11 (the INSP token is
+          // stamped over TSK in cleanTaskId); the dedup below catches them
+          // via the type.eq branch, not the INSP-* like-branch.
           const cleanNumbering = await orderNumberingOn(sb, destId);
 
           // Per-item counter: max existing INSP-{itemId}-N across any tenant + 1.
@@ -651,8 +654,12 @@ async function orderNumberingOn(
 }
 
 /**
- * Mint a clean PREFIX-TSK-N task id for the given tenant via next_order_id, or
- * null on RPC error (caller falls back to the legacy counter).
+ * Mint a clean task id for the given tenant via next_order_id, or null on
+ * RPC error (caller falls back to the legacy counter). 2026-06-11: the
+ * generic TSK token is stamped with INSP (PREFIX-INSP-N) — this EF only
+ * auto-creates inspection tasks — so the id identifies the task type.
+ * Mirrors batch-create-tasks-sb::stampSvcToken; the per-tenant counter
+ * stays the shared task sequence.
  */
 async function cleanTaskId(
   sb: ReturnType<typeof createClient>,
@@ -660,7 +667,9 @@ async function cleanTaskId(
 ): Promise<string | null> {
   try {
     const { data, error } = await sb.rpc('next_order_id', { p_tenant_id: tenantId, p_order_type: 'task' });
-    if (!error && typeof data === 'string' && data) return data;
+    if (!error && typeof data === 'string' && data) {
+      return data.replace(/-TSK-(\d+)$/, '-INSP-$1');
+    }
     if (error) console.warn('[transfer-items-sb] next_order_id failed, using legacy id:', error.message);
   } catch (e) {
     console.warn('[transfer-items-sb] next_order_id threw, using legacy id:', e);

@@ -176,9 +176,13 @@ Deno.serve(async (req: Request) => {
     return null;
   }
 
-  // Mint a Task ID — clean SB-generated (PREFIX-TSK-N) when the
-  // orderNumbering feature is on for this tenant, legacy SVC-ITEM-N
-  // counter otherwise. Shared by the per-item and batch branches.
+  // Mint a Task ID — clean SB-generated when the orderNumbering feature is
+  // on for this tenant, legacy SVC-ITEM-N counter otherwise. Clean ids carry
+  // the SERVICE code as the type token (PREFIX-INSP-N, PREFIX-ASM-N, …)
+  // since 2026-06-11 — next_order_id mints the generic PREFIX-TSK-N (one
+  // shared per-tenant counter for all task types) and we stamp the svc code
+  // over the TSK segment so the id itself says what kind of task it is
+  // (Justin, 2026-06-11). Shared by the per-item and batch branches.
   async function mintTaskId(svcCode: string, itemId: string): Promise<string | null> {
     if (cleanNumbering) {
       const { data: cleanId, error: cleanErr } = await sb.rpc('next_order_id', {
@@ -189,7 +193,7 @@ Deno.serve(async (req: Request) => {
         console.error('[batch-create-tasks-sb] next_order_id failed:', cleanErr?.message);
         return null;
       }
-      return cleanId;
+      return stampSvcToken(cleanId, svcCode);
     }
     const counterKey = `${itemId}|${svcCode}`;
     if (counterCache[counterKey] == null) {
@@ -397,6 +401,24 @@ Deno.serve(async (req: Request) => {
 });
 
 // ── Helpers ─────────────────────────────────────────────────────────────
+
+/**
+ * Swap the generic TSK token in a clean task id (PREFIX-TSK-N) for the
+ * service code (PREFIX-INSP-N) so the id identifies the task type. The
+ * per-tenant counter stays shared across all task types (numbers never
+ * collide). No-op when the id isn't TSK-shaped (legacy fallback ids) or the
+ * svc code sanitizes to empty.
+ */
+function stampSvcToken(taskId: string, svcCode: string): string {
+  const token = String(svcCode ?? '').toUpperCase().replace(/[^A-Z0-9_]/g, '');
+  // Reserved order tokens: a task id stamped WC/WCPU/RPR would be
+  // shape-identical to a real will-call/repair id (separate sequences →
+  // possible number collision) and LinkifiedText would deep-link it to the
+  // wrong entity. The CreateTaskModal denylist blocks these codes from the
+  // picker; this is the EF-side backstop — keep the generic TSK instead.
+  if (!token || token === 'WC' || token === 'WCPU' || token === 'RPR') return taskId;
+  return taskId.replace(/-TSK-(\d+)$/, `-${token}-$1`);
+}
 
 /**
  * Resolve whether the `orderNumbering` feature is on for this tenant via the
