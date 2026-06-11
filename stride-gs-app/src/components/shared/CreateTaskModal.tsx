@@ -618,12 +618,12 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
               </button>
               <button
                 onClick={handleSubmit}
-                disabled={loading || !selectedCodes.size || batchClassConflict}
+                disabled={loading || !selectedCodes.size}
                 style={{
                   padding: '12px 28px', border: 'none', borderRadius: 100,
-                  background: selectedCodes.size && !loading && !batchClassConflict ? theme.colors.orange : theme.colors.border,
-                  color: selectedCodes.size && !loading && !batchClassConflict ? '#fff' : theme.colors.textMuted,
-                  fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase', cursor: selectedCodes.size && !loading && !batchClassConflict ? 'pointer' : 'not-allowed',
+                  background: selectedCodes.size && !loading ? theme.colors.orange : theme.colors.border,
+                  color: selectedCodes.size && !loading ? '#fff' : theme.colors.textMuted,
+                  fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase', cursor: selectedCodes.size && !loading ? 'pointer' : 'not-allowed',
                   fontFamily: 'inherit', fontSize: 11,
                   display: 'flex', alignItems: 'center', gap: 6,
                 }}

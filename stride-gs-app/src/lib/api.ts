@@ -4426,6 +4426,8 @@ export interface BatchTask {
   shipmentFolderUrl?: string;
   dueDate?: string;
   priority?: string;
+  /** D11 — parent batch order number (JUS-BATCH-N); undefined when standalone. */
+  batchNo?: string;
   /** v2026-05-12 — overlaid from inventory; needed by BillingPreviewCard
    *  / AddTaskServiceModal to pre-fill class-based addon rates from the
    *  Master Price List catalog. Without it the modal pre-fills $0. */
