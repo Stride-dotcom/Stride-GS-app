@@ -125,7 +125,13 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
   // tenant (this task's client), same pattern as codStorageBilling. When on,
   // the Item Info card swaps for interactive per-item cards (single-item
   // tasks get one card; future multi-item batch inspections get N).
-  const batchWorkFlagRow = useFeatureFlagRow('batchWorkItems');
+  // D6 (BATCH_WORK_ITEMS_QA.md, 2026-06-11): Justin scoped the rollout to
+  // REPAIRS ONLY until the per-item notes/photos/completion flow is proven
+  // there — TASK surfaces gate on a SEPARATE flag key that is intentionally
+  // NOT seeded (resolves 'gas' → off everywhere). Re-enabling tasks later =
+  // insert a 'batchWorkItemsTasks' feature_flags row scoped to the demo
+  // tenant; no deploy needed. RepairDetailPanel stays on 'batchWorkItems'.
+  const batchWorkFlagRow = useFeatureFlagRow('batchWorkItemsTasks');
   const batchWorkItemsEnabled =
     !!batchWorkFlagRow && resolveFlagBackend(batchWorkFlagRow, (task.clientSheetId || task.clientId || null)) === 'supabase';
   const [batchSummary, setBatchSummary] = useState<BatchStatusSummary | null>(null);
