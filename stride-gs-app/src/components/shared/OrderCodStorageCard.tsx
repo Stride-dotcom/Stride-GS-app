@@ -320,11 +320,22 @@ export function OrderCodStorageCard({ order, performedBy, canEdit }: Props) {
     const t = setTimeout(() => {
       autoPersistSigRef.current = sig;
       const patch = buildSummaryPatch();
+      // NOTE: for customer_collect, buildOrderTotalPatch does a read-modify-write
+      // on order_total (delta vs the persisted STOR). It's idempotent per client,
+      // but two editors opening the same order at once could both add the delta —
+      // a cosmetic DT-estimate drift only (the authoritative COD record is the
+      // server-side EF commit in handleCollect, never this write). Same race the
+      // explicit Save already has; acceptable for a DT estimate.
       void supabase
         .from('dt_orders')
         .update({ ...patch, ...buildOrderTotalPatch(patch.cod_storage_total ?? 0) })
         .eq('id', order.id)
-        .then(({ error }) => { if (!error) entityEvents.emit('dt_order', order.id); });
+        .then(({ error }) => {
+          // Clear the sig on failure so a later render legitimately retries
+          // (inSync + debounce still prevent a tight loop); emit on success.
+          if (error) autoPersistSigRef.current = '';
+          else entityEvents.emit('dt_order', order.id);
+        });
     }, 800);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
