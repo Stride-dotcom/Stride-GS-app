@@ -48,10 +48,13 @@ export interface OnboardClientFormData {
   autoCharge: boolean;
   /** v2 — when ON, the intake form's Step 4 shows the "required" copy
    *  variant. When OFF, Step 4 shows the "encouraged but not required"
-   *  variant (grandfathered terms-only clients). */
-  paymentMethodRequired: boolean;
+   *  variant (grandfathered terms-only clients).
+   *  undefined = unknown (source fetch didn't carry the Supabase-only
+   *  field) — the save omits it so the stored value is left untouched. */
+  paymentMethodRequired: boolean | undefined;
   // COD Storage (Supabase-only) — auto-flag received items as cod_storage.
-  endCustomerPaysStorage: boolean;
+  // undefined = unknown, same omit-on-save semantics as above.
+  endCustomerPaysStorage: boolean | undefined;
   // Active
   active: boolean;
   // Parent/child
@@ -234,8 +237,16 @@ function buildInitialData(existing: ApiClient | null): OnboardClientFormData {
     autoInspection: existing.autoInspection !== false,
     separateBySidemark: existing.separateBySidemark === true,
     autoCharge: existing.autoCharge === true,
-    paymentMethodRequired: (existing as ApiClient & { paymentMethodRequired?: boolean }).paymentMethodRequired !== false,
-    endCustomerPaysStorage: existing.endCustomerPaysStorage === true,
+    // Preserve undefined when the source fetch didn't carry these
+    // Supabase-only fields (GAS fallback / stale echo). The old coercions
+    // (`!== false` / `=== true`) turned "unknown" into a concrete value that
+    // the save then WROTE BACK — silently flipping payment_method_required
+    // to true (reverting grandfathered OFF clients) and
+    // end_customer_pays_storage to false on every unrelated client edit.
+    // undefined here → Settings.tsx omits the field from the update payload
+    // → the saved value is left untouched.
+    paymentMethodRequired: typeof existing.paymentMethodRequired === 'boolean' ? existing.paymentMethodRequired : undefined,
+    endCustomerPaysStorage: typeof existing.endCustomerPaysStorage === 'boolean' ? existing.endCustomerPaysStorage : undefined,
     active: existing.active !== false,
     parentClient: existing.parentClient || '',
     importInventoryUrl: '',
