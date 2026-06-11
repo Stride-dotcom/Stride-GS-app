@@ -215,7 +215,12 @@ export function OrderCodStorageCard({ order, performedBy, canEdit }: Props) {
     const delta = codTotal - priorStor;
     return {
       accessorials_json: codTotal > 0
-        ? [...others, { code: COD_STORAGE_SVC_CODE, quantity: 1, rate: codTotal, subtotal: codTotal }]
+        ? [...others, {
+            code: COD_STORAGE_SVC_CODE, quantity: 1, rate: codTotal, subtotal: codTotal,
+            // Sentinel — matches CreateDeliveryOrderModal's COD_STORAGE_AUTO_NOTE
+            // so a later modal edit treats this STOR as auto-driven (not manual).
+            clientNotes: 'COD storage (collected from customer)',
+          }]
         : others,
       accessorials_total: (order.accessorialsTotal ?? 0) + delta,
       order_total: (order.orderTotal ?? 0) + delta,

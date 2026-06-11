@@ -296,6 +296,11 @@ const EXTRA_PIECE_CODE = 'XTRA_PC';
 // customer, the computed COD storage amount drives this line so it rolls into
 // the order total + DT charges summary like any other add-on.
 const COD_STORAGE_SVC_CODE = 'STOR';
+// Sentinel on the STOR accessorial's clientNotes marking it as auto-driven by
+// the COD amount (vs a manually-quoted Daily Storage line). Lets the driver
+// effect remove only ITS own STOR when COD shouldn't be in the total. The
+// OrderCodStorageCard writes the same note so edits recognize it as auto.
+const COD_STORAGE_AUTO_NOTE = 'COD storage (collected from customer)';
 
 // The default sales-tax rate is no longer a hardcoded literal — it is
 // read from public.tax_jurisdictions via useDefaultTaxRate() (managed in
@@ -1551,22 +1556,33 @@ export function CreateDeliveryOrderModal({
     codApplicable && codInclude && billingMethod === 'customer_collect';
   const codChargeAmount = codLinePreview?.total ?? 0;
   useEffect(() => {
-    if (!codApplicable) return;
     setSelectedAccessorials(prev => {
       const existing = prev.get(COD_STORAGE_SVC_CODE);
+      const isOurs = existing?.clientNotes === COD_STORAGE_AUTO_NOTE;
       if (codInOrderTotal && codChargeAmount > 0) {
-        if (existing && existing.rate === codChargeAmount && Math.abs((existing.subtotal ?? 0) - codChargeAmount) < 0.001) {
+        // Only ADD once the COD basis is known (items + flags loaded). An
+        // already-present auto STOR is left in place during that load window
+        // (the remove branch below is gated on !codInOrderTotal), so a saved
+        // customer-collect STOR is never transiently dropped mid-hydration.
+        if (!codApplicable) return prev;
+        if (existing && Math.abs(existing.rate - codChargeAmount) < 0.001
+            && Math.abs((existing.subtotal ?? 0) - codChargeAmount) < 0.001) {
           return prev;
         }
         const n = new Map(prev);
         n.set(COD_STORAGE_SVC_CODE, {
           code: COD_STORAGE_SVC_CODE, quantity: 1, rate: codChargeAmount,
           subtotal: codChargeAmount, quotePending: false,
-          clientNotes: 'COD storage (collected from customer)',
+          clientNotes: COD_STORAGE_AUTO_NOTE,
         });
         return n;
       }
-      if (existing) { const n = new Map(prev); n.delete(COD_STORAGE_SVC_CODE); return n; }
+      // COD shouldn't be in the client total here (bill-to-client / prepaid, or
+      // no COD). Remove ONLY an auto-added STOR (identified by the sentinel
+      // note) — a manually-quoted STOR on a non-COD order is left untouched.
+      // Runs regardless of codApplicable so an edited bill-to-client order can't
+      // keep a stale baked STOR line in its total.
+      if (existing && isOurs) { const n = new Map(prev); n.delete(COD_STORAGE_SVC_CODE); return n; }
       return prev;
     });
   }, [codApplicable, codInOrderTotal, codChargeAmount]);
