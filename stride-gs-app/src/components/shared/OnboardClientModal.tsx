@@ -647,7 +647,11 @@ export function OnboardClientModal({ mode = 'create', existingClient = null, all
                 { key: 'autoCharge', label: 'Auto Charge', desc: 'Auto-charge payments on due date', tip: 'When ON, Stax invoices for this client are automatically charged on their due date by the daily auto-charge trigger (9 AM Pacific). When OFF, invoices must be charged manually from the Payments page. Individual invoices can still override this setting.' },
                 { key: 'paymentMethodRequired', label: 'Card Required', desc: 'Card on file required at intake', tip: 'When ON, the client\'s intake form Step 4 shows the "required" copy variant — they must set up a payment method on Paymnt.io before submitting. When OFF, Step 4 shows the "encouraged but not required" variant — used for grandfathered terms-only clients with clean payment history. Defaults to ON for new clients; existing clients without a Stax customer ID were migrated to OFF.' },
               ] as const).map(f => (
-                <div key={f.key} onClick={() => set(f.key, !data[f.key])} style={toggleStyle(data[f.key])}>
+                // `=== true` — paymentMethodRequired can be undefined (unknown,
+                // GAS-fallback fetch). Display coerces for the strict-boolean
+                // toggle helpers; clicking sets a concrete boolean. An untouched
+                // undefined field is omitted from the save payload entirely.
+                <div key={f.key} onClick={() => set(f.key, !(data[f.key] === true))} style={toggleStyle(data[f.key] === true)}>
                   <div>
                     <div style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4 }}>
                       {f.label}
@@ -655,7 +659,7 @@ export function OnboardClientModal({ mode = 'create', existingClient = null, all
                     </div>
                     <div style={{ fontSize: 10, opacity: 0.75, marginTop: 1 }}>{f.desc}</div>
                   </div>
-                  {toggleDot(data[f.key])}
+                  {toggleDot(data[f.key] === true)}
                 </div>
               ))}
               {isEdit && (
@@ -671,7 +675,7 @@ export function OnboardClientModal({ mode = 'create', existingClient = null, all
                 </div>
               )}
               {codStorageEnabled && (
-                <div onClick={() => set('endCustomerPaysStorage', !data.endCustomerPaysStorage)} style={toggleStyle(data.endCustomerPaysStorage)}>
+                <div onClick={() => set('endCustomerPaysStorage', !(data.endCustomerPaysStorage === true))} style={toggleStyle(data.endCustomerPaysStorage === true)}>
                   <div>
                     <div style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4 }}>
                       End Customer Pays Storage
@@ -679,7 +683,7 @@ export function OnboardClientModal({ mode = 'create', existingClient = null, all
                     </div>
                     <div style={{ fontSize: 10, opacity: 0.75, marginTop: 1 }}>Auto-flag received items as COD storage</div>
                   </div>
-                  {toggleDot(data.endCustomerPaysStorage)}
+                  {toggleDot(data.endCustomerPaysStorage === true)}
                 </div>
               )}
             </div>
