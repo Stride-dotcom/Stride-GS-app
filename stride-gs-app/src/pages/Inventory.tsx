@@ -1176,7 +1176,9 @@ export function Inventory() {
       if (t.status === 'Cancelled') continue; // no badge for cancelled tasks
       const code = (t.svcCode || t.type || '').toUpperCase();
       const done = t.status === 'Completed';
-      if (code === 'INSP') {
+      // RUSH = priority inspection — drives the I badge like INSP. Match the
+      // service-name spellings too (SB-EF tasks store the name in type).
+      if (code === 'INSP' || code === 'INSPECTION' || code === 'RUSH' || code === 'RUSH INSPECTION') {
         if (done && (t.result ?? '').toLowerCase() === 'fail') inspFailed.add(t.itemId);
         if (done) { if (!inspOpen.has(t.itemId)) inspDone.add(t.itemId); }
         else { inspOpen.add(t.itemId); inspDone.delete(t.itemId); }

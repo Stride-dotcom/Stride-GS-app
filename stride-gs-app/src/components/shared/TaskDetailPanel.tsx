@@ -83,7 +83,12 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
   const tc = TYPE_CFG[task.type] || TYPE_CFG.RCVG;
   const sc = STATUS_CFG[task.status] || STATUS_CFG.Open;
   const isOpen = task.status === 'Open' || task.status === 'In Progress';
-  const isInspection = task.type === 'INSP';
+  // RUSH is a priority inspection — same Pass/Fail workflow, higher rate.
+  // startsWith covers both the svc CODE (INSP/RUSH) and the service NAME
+  // ('Inspection'/'Rush Inspection') that SB-EF-created tasks store in type.
+  const isInspection = ['INSP', 'RUSH'].some((c) =>
+    String(task.svcCode || task.type || '').toUpperCase().startsWith(c)
+  );
 
   const { user } = useAuth();
   const { isMobile, isTablet } = useIsMobile();
@@ -1301,7 +1306,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
   // for clients lives in the footer pill bar (see ClientAcceptAsIsAction in
   // mobileFooter / pageFooter), not inline here, so the header stays compact.
   const isFailedInspection =
-    task.type === 'INSP'
+    isInspection // INSP or RUSH (priority inspection) — both can fail
     && (task.status === 'Completed' || completed)
     && (correctedResult || submitResult?.result || task.result) === 'Fail';
   const belowIdContent = (
