@@ -1,5 +1,13 @@
 /**
- * dt-push-order — Supabase Edge Function (Phase 2c) — v48 2026-06-09 PST
+ * dt-push-order — Supabase Edge Function (Phase 2c) — v49 2026-06-11 PST
+ *
+ * v49: COD storage now folds into the Charges Summary Total for customer-collect
+ *      orders. The app drives the STOR "Daily Storage" accessorial line from the
+ *      COD amount, so it flows through accessorials_json → the charges loop +
+ *      order_total like any other add-on; the separate "COD STORAGE … Amount
+ *      due" block is replaced by a one-line note (no second amount). For
+ *      bill_to_client orders COD stays OUT of the client's Total and keeps its
+ *      own standalone "collect from customer" block.
  *
  * v48: COD storage is now collected as a mark-paid (collect-on-delivery) event,
  *      not an invoice. When cod_storage_collected_at is set, the COD block flips
@@ -789,24 +797,33 @@ function buildOrderDescription(
     if (order.order_total != null) {
       descParts.push(`Total = $${Number(order.order_total).toFixed(2)}`);
     }
-    // COD Storage — collected from the END CUSTOMER at delivery (separate
-    // from the designer's Total above; the designer pays all other services).
-    // Surfaced so the driver collects it on delivery. Once collected (marked
-    // paid in the app) the line flips to PAID so a re-push shows it's settled.
+    // COD Storage. Two cases by billing method:
+    //  • customer_collect → COD already drives the STOR "Daily Storage" line +
+    //    the Total above (the customer pays delivery + storage together). Add a
+    //    clarifying note ONLY — never a second amount (that would double-count).
+    //  • bill_to_client  → the client pays the delivery; COD storage is owed by
+    //    the END customer separately, so it is NOT in the Total above. Show the
+    //    standalone "collect from customer" block with its own amount.
     if (order.cod_storage_enabled && order.cod_storage_total != null && Number(order.cod_storage_total) > 0) {
       const codPaid = !!order.cod_storage_collected_at;
-      descParts.push('');
-      descParts.push(codPaid ? 'COD STORAGE (collected from customer):' : 'COD STORAGE (collect from customer):');
-      descParts.push(`Items stored: ${order.cod_storage_item_count || 0}`);
-      if (order.cod_storage_rate != null) {
-        descParts.push(`Rate: $${Number(order.cod_storage_rate).toFixed(2)}/cu ft/day`);
+      const rateStr = order.cod_storage_rate != null
+        ? `$${Number(order.cod_storage_rate).toFixed(2)}/cu ft/day` : '';
+      const periodStr = order.cod_storage_period_start && order.cod_storage_cutoff_date
+        ? `${order.cod_storage_period_start} to ${order.cod_storage_cutoff_date}` : '';
+      if (order.billing_method === 'customer_collect') {
+        descParts.push('');
+        descParts.push(`STOR (Daily Storage) above = COD storage collected from customer${codPaid ? ' — PAID' : ''}`);
+        if (periodStr) descParts.push(`Period: ${periodStr}${rateStr ? ` @ ${rateStr}` : ''}`);
+      } else {
+        descParts.push('');
+        descParts.push(codPaid ? 'COD STORAGE (collected from customer):' : 'COD STORAGE (collect from customer):');
+        descParts.push(`Items stored: ${order.cod_storage_item_count || 0}`);
+        if (rateStr) descParts.push(`Rate: ${rateStr}`);
+        if (periodStr) descParts.push(`Period: ${periodStr}`);
+        descParts.push(codPaid
+          ? `PAID = $${Number(order.cod_storage_total).toFixed(2)}`
+          : `Amount due = $${Number(order.cod_storage_total).toFixed(2)}`);
       }
-      if (order.cod_storage_period_start && order.cod_storage_cutoff_date) {
-        descParts.push(`Period: ${order.cod_storage_period_start} to ${order.cod_storage_cutoff_date}`);
-      }
-      descParts.push(codPaid
-        ? `PAID = $${Number(order.cod_storage_total).toFixed(2)}`
-        : `Amount due = $${Number(order.cod_storage_total).toFixed(2)}`);
     }
   }
 
