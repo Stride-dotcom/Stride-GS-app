@@ -45,8 +45,11 @@
  *     else preserve existing (poll path must not null out good data).
  *
  * ── Idempotency ──────────────────────────────────────────────────────
- *   • picked_up_at — first write wins (gated on dit.picked_up_at IS NULL
- *     in-memory; never overwritten once set).
+ *   • picked_up_at — first write wins, enforced ATOMICALLY at the DB via
+ *     `.is('picked_up_at', null)` on its own dedicated update, so a
+ *     concurrent webhook+sync race can't overwrite a real timestamp with
+ *     a placeholder. Counted from the returned rows, so itemsStamped only
+ *     reflects the run that actually won the write.
  *   • audit columns (pickup_delivered_quantity / pickup_item_note /
  *     pickup_return_codes) — change-detected overwrite each run; they
  *     mirror the pickup item and converge as DT data refreshes.
@@ -55,10 +58,15 @@
  *     when staff hasn't manually edited it (quantity === original_quantity).
  *
  * On the webhook path the pickup items may not yet carry fresh export.xml
- * values (delivered/quantity/notes still null). The guards below mean
- * nothing meaningful is written until the data is fresh — the sync path
- * (dt-sync-statuses, which upserts pickup items first) does the real
- * stamp moments later. This is safe: no stale/partial writes.
+ * values (delivered/quantity/notes still null). The change-detect guards
+ * below skip any write whose source value is null/unchanged, so a
+ * pre-sync webhook writes nothing stale; picked_up_at additionally needs
+ * delivered=true (only the sync sets that from export.xml), so in
+ * practice the sync path (dt-sync-statuses, which upserts pickup items
+ * first) does the real per-item stamp moments later. When the pickup
+ * item already carries values at webhook time the audit mirror does
+ * write them — safe, because it's change-detected and the next sync
+ * re-mirrors against fresh data, so it converges.
  *
  * Helper never throws. Returns a structured result for telemetry.
  */
@@ -222,17 +230,42 @@ export async function stampPickupOnLinkedDelivery(
     const pu = pickupById.get(dit.parent_pickup_item_id);
     if (!pu) continue;                                  // FK dangling (pickup row gone)
 
-    const patch = buildStampPatch(pu, dit, finishedAt, propagateItemFields);
-    if (!patch) continue;                               // nothing changed → skip write
+    // (A) audit-column + quantity mirror — change-detected, converges
+    //     each run. Always-overwrite is safe (these mirror the pickup
+    //     item), so no DB-level guard is needed here.
+    const audit = buildAuditPatch(pu, dit, propagateItemFields);
+    if (audit) {
+      const { error } = await supabase
+        .from('dt_order_items')
+        .update(audit.fields)
+        .eq('id', dit.id);
+      if (error) {
+        console.warn(`[stamp-pickup] audit update failed item=${dit.id}: ${error.message}`);
+      } else if (audit.quantityChanged) {
+        itemsPropagated.push(dit.id);
+      }
+    }
 
-    const { error } = await supabase
-      .from('dt_order_items')
-      .update(patch.fields)
-      .eq('id', dit.id);
-    if (error) continue;
-
-    if (patch.stampedPickedUpAt) itemsStamped += 1;
-    if (patch.quantityChanged) itemsPropagated.push(dit.id);
+    // (B) picked_up_at — first-write-wins, enforced ATOMICALLY at the DB.
+    //     Only when the pickup item was actually collected (delivered=
+    //     true). The in-memory `!dit.picked_up_at` short-circuits an
+    //     unnecessary write; the `.is('picked_up_at', null)` clause is
+    //     what guarantees a concurrent run can't overwrite a real
+    //     timestamp with a placeholder, and itemsStamped counts only the
+    //     row that actually won the write.
+    if (pu.delivered === true && !dit.picked_up_at) {
+      const { data, error } = await supabase
+        .from('dt_order_items')
+        .update({ picked_up_at: finishedAt })
+        .eq('id', dit.id)
+        .is('picked_up_at', null)
+        .select('id');
+      if (error) {
+        console.warn(`[stamp-pickup] picked_up_at update failed item=${dit.id}: ${error.message}`);
+      } else if ((data ?? []).length > 0) {
+        itemsStamped += 1;
+      }
+    }
   }
 
   return {
@@ -245,27 +278,23 @@ export async function stampPickupOnLinkedDelivery(
   };
 }
 
-interface StampPatch {
+interface AuditPatch {
   fields: Record<string, unknown>;
-  /** True when this patch sets picked_up_at for the first time. */
-  stampedPickedUpAt: boolean;
   /** True when this patch overwrites the delivery item's real quantity. */
   quantityChanged: boolean;
 }
 
 /**
- * Build the per-item update for a delivery item FK-linked to pickup item
- * `pu`. Returns null when nothing changed (skip the no-op write).
+ * Build the audit-column (+ optional quantity) update for a delivery item
+ * FK-linked to pickup item `pu`. Returns null when nothing changed (skip
+ * the no-op write). `picked_up_at` is NOT handled here — the caller writes
+ * it separately under an atomic first-write-wins DB guard.
  *
- * Always (change-detected, mirrors the pickup item's actual result):
+ * Always (change-detected, mirrors the pickup item's actual result, so a
+ * missed pickup records qty 0 + the reason without setting picked_up_at):
  *   • pickup_delivered_quantity ← pu.delivered_quantity
  *   • pickup_item_note          ← pu.item_note
  *   • pickup_return_codes       ← pu.return_codes
- *
- * picked_up_at ← finishedAt — ONLY when pu.delivered === true and the
- *   delivery item isn't already stamped (first-write-wins). A missed
- *   pickup (delivered=false) leaves picked_up_at NULL but still records
- *   the audit columns above (quantity 0 + the reason).
  *
  * quantity ← pu.delivered_quantity — sync path only, and only when staff
  *   hasn't edited it (quantity === original_quantity). Mirrors the PU
@@ -273,15 +302,13 @@ interface StampPatch {
  *   reflect what's actually coming. Drives `quantityChanged` for the
  *   caller's push-back decision.
  */
-function buildStampPatch(
+function buildAuditPatch(
   pu: PickupItemRow,
   dit: DeliveryItemRow,
-  finishedAt: string,
   propagateQuantity: boolean,
-): StampPatch | null {
+): AuditPatch | null {
   const fields: Record<string, unknown> = {};
   let dirty = false;
-  let stampedPickedUpAt = false;
   let quantityChanged = false;
 
   // (1) audit-column quantity mirror
@@ -308,14 +335,7 @@ function buildStampPatch(
     dirty = true;
   }
 
-  // (4) picked_up_at — only when actually collected, first write wins.
-  if (pu.delivered === true && !dit.picked_up_at) {
-    fields.picked_up_at = finishedAt;
-    stampedPickedUpAt = true;
-    dirty = true;
-  }
-
-  // (5) authoritative quantity overwrite — sync path, unedited only.
+  // (4) authoritative quantity overwrite — sync path, unedited only.
   if (propagateQuantity
       && pu.delivered_quantity != null
       && dit.quantity != null
@@ -331,7 +351,7 @@ function buildStampPatch(
   }
 
   if (!dirty) return null;
-  return { fields, stampedPickedUpAt, quantityChanged };
+  return { fields, quantityChanged };
 }
 
 function codesDiffer(a: string[], b: string[]): boolean {
