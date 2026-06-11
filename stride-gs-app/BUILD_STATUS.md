@@ -118,6 +118,16 @@
 
 ---
 
+## Recent Changes (2026-06-11, delivery: pickup completion no longer stamps WAREHOUSE items as picked up — fix/delivery/pickup-stamp-warehouse-items, PR #741)
+
+- **Reported:** delivery order **JOD-00168-D** (pickup_and_delivery) — when the pickup leg completed, **all 23** delivery items were stamped "picked up by Adielle G", including **20 warehouse-inventory items** that were never on the pickup. The pickup leg (JOD-00168-P) had only **1 item**.
+- **Root cause:** `supabase/functions/_shared/stamp-pickup-on-linked-delivery.ts` blanket pass (§5b). On legacy single-pickup orders (no item carries `pickup_leg_id`), it falls into a `!anyLegTagged → stamp every unstamped item` branch that assumes *every* unstamped delivery item belongs to the completing pickup. False for P+D orders that mix picked-up items with warehouse inventory. The FK-match + code-match passes correctly matched only the 1 genuine pickup item (the rug); the blanket pass over-stamped the other 22. Originally introduced by PR #575 ("pickup completion writes to all delivery order items"); it over-corrected from day one (JAS-00096-ROZE-D had 8 warehouse items wrongly stamped too).
+- **Fix:** warehouse items carry a non-null `inventory_id` (set in `CreateDeliveryOrderModal` as `inventory_id: i.inventoryRowId`, and/or by the `resolve_inventory_id` BEFORE-INSERT/UPDATE trigger when `dt_item_code` matches an inventory `item_id`). Picked-up items round-trip through DT with a hex-UUID-prefix code that never resolves to inventory → they leave `inventory_id` NULL. The blanket pass now **skips items with `inventory_id` set** (`if (dit.inventory_id) return false;`). Preserves the blanket pass's purpose (catching genuine pickup items FK/code matching missed — the JAS-00096-ROZE case, whose items have `inventory_id` NULL). `inventory_id` added to `DeliveryItemRow` + the delivery-items SELECT.
+- **Data repair:** migration `20260611180000_unstamp_warehouse_items_picked_up.sql` cleared bogus `picked_up_at`/`pickup_return_codes`/`pickup_delivered_quantity`/`pickup_item_note` on **32** already-affected warehouse rows across **4 orders** (JOD-00168-D 20, JAS-00096-ROZE-D 8, LIG-00146-D 3, MRS-00047-D 1). Validated via aborted-transaction dry-run = exactly 32 rows; post-repair JOD-00168-D = 3 pickup items stamped, 20 warehouse cleared.
+- **Deployed:** EFs `dt-sync-statuses` (v34, `--no-verify-jwt`) + `notify-pickup-completed` (v8, verify_jwt=true) — the only two callers of the helper (`dt-push-order` references it in comments only). Opus code-review 0 blockers.
+
+---
+
 ## Recent Changes (2026-06-11, repairs: "Failed" button now clickable on the Repair page + tablet — fix/repairs/repair-failed-prompt, PR #733)
 
 - **Reported (Ken):** on an *In Progress* repair (RPR-64014…, Roche Bobois) the **Failed** button could not be clicked; **Complete** worked.
