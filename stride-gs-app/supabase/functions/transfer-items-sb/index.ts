@@ -363,6 +363,9 @@ Deno.serve(async (req: Request) => {
           // Order Numbering feature (Justin Demo canary): when on for the
           // DESTINATION tenant, the auto-INSP task gets a clean PREFIX-TSK-N id
           // (scoped to destId). Resolved once. Off → legacy INSP-{itemId}-N.
+          // Clean ids are PREFIX-INSP-N since 2026-06-11 (the INSP token is
+          // stamped over TSK in cleanTaskId); the dedup below catches them
+          // via the type.eq branch, not the INSP-* like-branch.
           const cleanNumbering = await orderNumberingOn(sb, destId);
 
           // Per-item counter: max existing INSP-{itemId}-N across any tenant + 1.

@@ -673,7 +673,10 @@ async function mintTaskId(
       // batch-create-tasks-sb::stampSvcToken.
       if (!error && typeof data === 'string' && data) {
         const token = String(svcCode ?? '').toUpperCase().replace(/[^A-Z0-9_]/g, '');
-        return token ? data.replace(/-TSK-(\d+)$/, `-${token}-$1`) : data;
+        // WC/WCPU/RPR are reserved entity tokens — never stamp them onto a
+        // task id (collision + wrong deep link); keep the generic TSK.
+        const safe = token && token !== 'WC' && token !== 'WCPU' && token !== 'RPR';
+        return safe ? data.replace(/-TSK-(\d+)$/, `-${token}-$1`) : data;
       }
       if (error) console.warn('[complete-shipment-sb] next_order_id failed, using legacy id:', error.message);
     } catch (e) {

@@ -411,7 +411,12 @@ Deno.serve(async (req: Request) => {
  */
 function stampSvcToken(taskId: string, svcCode: string): string {
   const token = String(svcCode ?? '').toUpperCase().replace(/[^A-Z0-9_]/g, '');
-  if (!token) return taskId;
+  // Reserved order tokens: a task id stamped WC/WCPU/RPR would be
+  // shape-identical to a real will-call/repair id (separate sequences →
+  // possible number collision) and LinkifiedText would deep-link it to the
+  // wrong entity. The CreateTaskModal denylist blocks these codes from the
+  // picker; this is the EF-side backstop — keep the generic TSK instead.
+  if (!token || token === 'WC' || token === 'WCPU' || token === 'RPR') return taskId;
   return taskId.replace(/-TSK-(\d+)$/, `-${token}-$1`);
 }
 
