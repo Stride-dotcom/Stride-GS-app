@@ -103,6 +103,16 @@ interface DeliveryItemRow {
   id: string;
   parent_pickup_item_id: string | null;
   pickup_leg_id: string | null;
+  /** Warehouse-origin marker. When set, this delivery item resolved to
+   *  an inventory row — either selected from inventory in
+   *  CreateDeliveryOrderModal (`inventory_id: i.inventoryRowId`) or
+   *  auto-stamped by the dt_order_items_resolve_inventory_id_trg
+   *  BEFORE-INSERT/UPDATE trigger when dt_item_code matches an inventory
+   *  item_id (migration 20260512230000). Either way it is warehouse
+   *  stock, not a picked-up piece, so it was NOT picked up on any leg.
+   *  Picked-up items round-trip through DT with a hex-UUID-prefix code
+   *  that never resolves to inventory, so they leave this NULL. */
+  inventory_id: string | null;
   dt_item_code: string | null;
   quantity: number | null;
   original_quantity: number | null;
@@ -190,7 +200,7 @@ export async function stampPickupOnLinkedDelivery(
       .is('removed_at', null),
     supabase
       .from('dt_order_items')
-      .select('id, parent_pickup_item_id, pickup_leg_id, dt_item_code, quantity, original_quantity, item_note, picked_up_at, pickup_item_note, pickup_return_codes, pickup_delivered_quantity')
+      .select('id, parent_pickup_item_id, pickup_leg_id, inventory_id, dt_item_code, quantity, original_quantity, item_note, picked_up_at, pickup_item_note, pickup_return_codes, pickup_delivered_quantity')
       .eq('dt_order_id', d.id)
       .is('removed_at', null),
     supabase
@@ -282,13 +292,28 @@ export async function stampPickupOnLinkedDelivery(
   // Idempotent via `.is('picked_up_at', null)` — never overwrites a
   // prior stamp, and itemsStamped only counts rows where the WHERE
   // clause matched (rows already stamped this run don't double-count).
+  //
+  // Warehouse guard (2026-06-11): the blanket pass NEVER stamps an item
+  // with `inventory_id` set. Such items resolved to warehouse inventory
+  // (set in CreateDeliveryOrderModal or by the resolve_inventory_id
+  // trigger when dt_item_code matches an inventory item_id) and were not picked up
+  // on any leg, so the `!anyLegTagged → stamp all` legacy fallback must
+  // not touch them. Without this guard a pickup_and_delivery order that
+  // mixes a few picked-up items with many warehouse items stamps EVERY
+  // warehouse item as "picked up by <driver>" the moment the pickup leg
+  // completes (JOD-00168-D: 1 item picked up, but all 23 stamped — the
+  // 20 warehouse items wrongly so). Picked-up items leave inventory_id
+  // NULL, so the genuine-pickup population the blanket pass exists to
+  // catch (JAS-00096-ROZE: FK/code matching missed real pickup items)
+  // is unaffected.
   const matchedStampIds = new Set([...stampByFKIds, ...stampByCodeCodes]);
   const anyLegTagged = deliveryItems.some(dit => dit.pickup_leg_id != null);
   const pickupItemIdSet = new Set(pickupItems.map(pi => pi.id));
   const blanketCandidates = deliveryItems.filter(dit => {
     if (dit.picked_up_at) return false;
     if (matchedStampIds.has(dit.id)) return false;
-    if (!anyLegTagged) return true;  // legacy fallback — stamp all
+    if (dit.inventory_id) return false;  // warehouse item — never picked up on a leg
+    if (!anyLegTagged) return true;  // legacy fallback — stamp remaining pickup items
     // Leg-aware mode: item must belong to THIS leg.
     if (thisLegId && dit.pickup_leg_id === thisLegId) return true;
     if (dit.parent_pickup_item_id && pickupItemIdSet.has(dit.parent_pickup_item_id)) return true;
