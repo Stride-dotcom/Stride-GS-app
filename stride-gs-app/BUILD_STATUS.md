@@ -118,6 +118,17 @@
 
 ---
 
+## Recent Changes (2026-06-11, delivery: true per-item FK pickup stamping — replaces the blanket pass — fix/delivery/pickup-fk-stamping, PR #747)
+
+- **Follow-up to PR #741** (which band-aided the warehouse over-stamp with an `inventory_id` guard). This rewrites `supabase/functions/_shared/stamp-pickup-on-linked-delivery.ts` to do **strict per-item FK matching** — the real fix.
+- **New behavior:** when a DT pickup leg completes, for each delivery item FK-linked to a pickup item (`parent_pickup_item_id`), mirror that pickup item's **actual DT result**: `picked_up_at` (only when `delivered=true`; atomic `.is('picked_up_at',null)` first-write-wins), `pickup_delivered_quantity` (what the driver actually collected — may be `<` qty or 0), `pickup_item_note` (driver notes), `pickup_return_codes` (DT exceptions). A **missed** pickup (`delivered=false`) records the audit columns + reason WITHOUT setting `picked_up_at`. **Delivery items without an FK match are never stamped.**
+- **Removed:** the blanket pass (stamped every unstamped item → the JOD-00168-D over-stamp class), the `dt_item_code` fallback, the leg-aware `dt_pickup_links` scoping, and the `inventory_id` guard — all subsumed by FK matching. `parent_pickup_item_id` is the only sound per-item signal (warehouse items never carry it).
+- **Coverage (verified vs. 12 live completed-pickup orders):** strictly more precise. Clean orders (FK count == pickup-item count) stamp exactly the picked-up items, unchanged. **Accepted trade-off (precision over recall):** orders whose pickup items were never FK-linked at creation (MRS-00047-D: 0 FK on 8 pickup items) now stamp 0 rather than over-stamping — the real fix for those is FK-linkage at order creation (forward-path, separate). Historical orders are **not** retroactively re-derived (per-item DT result only reliably available via live sync; PR #741 already cleared the unambiguous warehouse over-stamps).
+- **Concurrency:** `picked_up_at` atomic first-write-wins (DB guard + `.select('id')` count) — a webhook+sync race can't overwrite the real timestamp with a placeholder, and `itemsStamped` counts only the winning run. Audit columns change-detected + converge. Public `StampPickupResult` contract unchanged.
+- **Deployed:** EFs `dt-sync-statuses` (v35, `--no-verify-jwt`) + `notify-pickup-completed` (v9, verify_jwt=true). Opus code-review: 0 blockers (the dropped-atomic-guard regression it caught was fixed before merge).
+
+---
+
 ## Recent Changes (2026-06-11, tasks: batch-task creation — one task covering N items — feat/warehouse/batch-task-creation)
 
 - **What:** the missing creation path for multi-item batch tasks (batch inspections). `CreateTaskModal` gains a **"Create as one batch task"** toggle (shown only with 2+ items AND the `batchWorkItems` flag on for the data tenant): one task per selected service covering ALL items, with `public.task_items` membership rows so the task detail renders per-item Start/Pass/Fail cards (PR #743's module).
