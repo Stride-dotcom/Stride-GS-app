@@ -1,4 +1,5 @@
 /* ===================================================
+   StrideAPI.gs — v38.275.0 — 2026-06-11 PST — [MIGRATION] fix: extend the v38.274.0 repairs stale-write guard (version check) to ALL status-mirroring reverse-writethrough writers — tasks, will_calls, inventory — so the status-revert race is eliminated fleet-wide, not just for repairs. Same class as the 2026-06-02 completeTask revert (PR #596) and the 2026-06-11 repair revert (PR #739): two status-changing actions on one entity fire writeThroughReverse mirror calls that can land OUT OF ORDER, a delayed mirror re-stamps the sheet Status cell to a stale value, and the next api_fullClientSync_ upserts that stale cell onto public.<table>, reverting the newer action. New generic helper api_sbLiveStatus_(table, idField, idValue, tenantId) re-reads the LIVE SB status (api_sbRepairStatus_ now delegates to it). tasks (__writeThroughReverseTasks_) + will_calls (__writeThroughReverseWillCalls_): when an UPDATE payload touches Status, OVERRIDE the payload value with live SB truth before writing (covers start/cancel/reopen/batch-cancel/update-task and cancel/update/remove-items WC respectively — no EF changes needed). inventory (__writeThroughReverseInventory_): SKIP-on-stale instead of override (its status path has slot-ledger + open-work auto-cancel side effects and a paired Release Date cell, so writing partial stale data or re-firing side effects would be worse than the revert) — when live SB status differs from the payload, skip the whole Status/Release Date/side-effect block and let the authoritative action's own mirror carry it. All paths fail-open (null SB read keeps prior behavior) and preserve legitimate backward transitions (reopen, hold->active) because SB already holds the new value at read time. Audited the full REVERSE_WRITETHROUGH_TABLES_ set: shipments mirrors no status column (dock columns are SB-only), will_call_items status is a sheet no-op, billing/stax use a different lifecycle already protected by hard guards, and addons/invoice_tracking/entity_notes/item_photos/clients/stax_charges carry no racing status mirror — none need the guard. No schema change, no change to the v38.182 atomic invoice counter, half-write detection, or any billing math.
    StrideAPI.gs — v38.274.0 — 2026-06-11 PST — [REPAIRS/MIGRATION] fix: __writeThroughReverseRepairs_ stale-write guard (version check) stops a delayed startRepair mirror from reverting a completed repair. completeRepair + startRepair are fleet-wide SB; each fires writeThroughReverse to mirror status onto the per-tenant Repairs sheet. When staff Start then quickly Complete a repair, the two mirror HTTP calls can land out of order — a slow start-repair-sb write arriving AFTER complete-repair-sb stamps the sheet Status cell back to 'In Progress', and the next api_fullClientSync_ reads that stale cell and upserts it onto public.repairs, reverting the completion (reported JUS-RPR-1; same class as the 2026-06-02 completeTask revert, PR #596). Fix: public.repairs is authoritative for the fleet-wide SB repair cluster, so when an update payload touches Status the writer re-reads the LIVE SB status via new helper api_sbRepairStatus_ and writes THAT instead of the payload value — the sheet converges to SB truth and a stale in-flight payload can no longer clobber it. Legitimate backward transitions (re-quote to 'Pending Quote', reopen to 'In Progress') are preserved because SB already holds the new value at read time. Fail-open: a failed SB read falls back to the payload value (prior behavior). Status-only override; every other mirrored field still writes its payload value. No schema change, no change to the v38.182 atomic invoice counter or half-write detection.
    StrideAPI.gs — v38.273.0 — 2026-06-11 PST — [REPAIRS/MIGRATION] fix: __writeThroughReverseRepairs_ now auto-creates the multi-line quote columns before mirroring. The SB-primary send-repair-quote-sb writes quote_lines_json + the 7 quote total columns to public.repairs, then fires this reverse-writethrough to mirror them onto the per-tenant Repairs sheet. But the writer SKIPPED any column missing on the sheet (the `if (!col) continue` mapping guard) — and on a Repairs sheet predating the v38.123.0 multi-line columns (Quote Lines JSON / Quote Subtotal / Quote Taxable Subtotal / Quote Tax Area ID / Quote Tax Area Name / Quote Tax Rate / Quote Tax Amount / Quote Grand Total) the mirror silently dropped them. The very next full-client-sync (sbRepairRow_) then read those now-missing sheet cells as blank and pushed them back, NULLING quote_lines_json/subtotal/grand_total in Supabase while quote_amount (a column that DOES exist) survived — so a freshly-sent multi-line quote lost its breakdown and the React Quote Builder fell back to the legacy single-amount display (reported: RPR-63981-1781198414542, item 63981, quote_amount=210 but quote_lines_json=null). Fix: when the reverse payload carries any of the 8 quote columns, api_ensureColumn_ each missing one (matching what the legacy handleSendRepairQuote_ already does) and re-read the header map before mapping targets, so the mirror actually persists them and the sync round-trip stops clobbering the SB row. Non-destructive (appends missing headers, idempotent no-op when present); no change to the insert path, the v38.182 atomic invoice counter, half-write detection, or any billing logic.
    StrideAPI.gs — v38.274.0 — 2026-06-11 PST — [CLIENTS/MIGRATION] fix: the CB→Supabase client sync no longer clobbers APP-AUTHORITATIVE client settings from a stale CB Clients cell. Root cause of the auto-inspect-on-receipt failure (Brume, 2026-06): the app/intake writes settings like AUTO_INSPECTION straight to public.clients (the source of truth) and mirrors them OUT to the CB sheet via __writeThroughReverseClients_, but the 5-minute reconcileNextClient_ cron (resyncClientToSupabase_) AND the admin handleBulkSyncClientsToSupabase_ both read the FULL CB row back and upsert it, overwriting fresh app values whenever the CB cell lagged (observed: a client's auto_inspection flipping true→false within minutes). Fix: new APP_AUTHORITATIVE_CLIENT_COLS_ list + stripAppAuthoritativeClientCols_() helper strips 11 columns (auto_inspection, separate_by_sidemark, enable_notifications, enable_shipment_email, enable_receiving_billing, auto_charge, payment_terms, free_storage_days, discount_storage_pct, discount_services_pct, shipment_note) from BOTH CB→SB upsert paths — but ONLY for clients that ALREADY exist in Supabase (existence-gated via api_isKnownTenantId_ in the cron / a batched id prefetch in the bulk sync). A brand-new client — e.g. handleOnboardClient_'s first sync to SB goes through resyncClientToSupabase_ — is written in FULL so its onboarding values land instead of DB defaults. supabaseUpsert_ uses Prefer:resolution=merge-duplicates, so on the UPDATE path the omitted columns are PRESERVED → Supabase stays authoritative for app-edited settings. Sheet-authoritative columns (identity, folder IDs, web_app_url, stax/qb IDs, parent_client, notes, active) still sync CB→SB as before. Behavior change: direct CB-Clients-sheet edits to those 11 settings no longer propagate to Supabase — edit them in the app (which writes SB + mirrors to the sheet). No schema change, no billing logic touched, no change to the v38.182 atomic invoice counter or half-write detection.
@@ -2793,6 +2794,37 @@ function __writeThroughReverseInventory_(ss, payload) {
     var newStatus = String(row.status);
     var newReleaseDateStr = row.release_date != null ? String(row.release_date) : "";
 
+    // v38.275.0 — Stale-write guard (version check), same class as the repairs
+    // fix v38.274.0, but SKIP-on-stale rather than override because inventory's
+    // status path has side effects (slot-ledger update + open-work auto-cancel)
+    // and a paired Release Date cell — writing a partial stale payload or
+    // re-firing those side effects would be worse than the revert. release-
+    // items-sb / transfer-items-sb / update-item-sb / process-wc-release-sb /
+    // push-inventory-release-to-sheet all mirror Status; their writeThroughReverse
+    // calls can land out of order, so a delayed mirror would otherwise re-stamp
+    // Status (e.g. back to 'Released' after a later 'On Hold' / 'Active') and the
+    // next api_fullClientSync_ would upsert it onto public.inventory, reverting
+    // the newer action. When the LIVE SB status differs from this payload's
+    // status, the payload is a stale in-flight mirror: skip the entire Status +
+    // Release Date + side-effect block (the authoritative action's OWN mirror
+    // carries the correct values and fires the side effects exactly once).
+    // General-field writes (mode b, above) still apply. Fail-open: a null SB
+    // read proceeds with the payload value (prior behavior).
+    var invTenantId = payload && payload.tenantId ? String(payload.tenantId).trim() : "";
+    var liveInvStatus = api_sbLiveStatus_("inventory", "item_id", rowId, invTenantId);
+    if (liveInvStatus !== null && liveInvStatus !== "" && liveInvStatus !== newStatus) {
+      Logger.log(
+        "__writeThroughReverseInventory_: SKIP stale Status mirror for " + rowId +
+        " — payload status='" + newStatus + "' superseded by SB-authoritative='" + liveInvStatus +
+        "'; leaving Status / Release Date to the authoritative action's own mirror"
+      );
+      SpreadsheetApp.flush();
+      if (writtenFields.length > 0) {
+        return { rowNumber: foundRow, writtenFields: writtenFields, statusSkipped: true, reason: "stale-status-superseded" };
+      }
+      return { rowNumber: foundRow, skipped: true, reason: "stale-status-superseded" };
+    }
+
     // Parse YYYY-MM-DD safely (UTC-shift dodge — see v38.208.0 notes).
     var parsedDate = null;
     if (newReleaseDateStr) {
@@ -3500,6 +3532,31 @@ function __writeThroughReverseWillCalls_(ss, payload) {
       "(supported: status, carrier, pickup_party, pickup_phone, requested_by, " +
       "estimated_pickup_date, notes, item_count, cod, cod_amount, item_ids)"
     );
+  }
+
+  // v38.275.0 — Stale-write guard (version check), same class as the repairs
+  // fix v38.274.0. cancel-will-call-sb / update-will-call-sb /
+  // remove-items-from-will-call-sb all mirror Status here; their
+  // writeThroughReverse HTTP calls can land out of order, so a delayed mirror
+  // would otherwise re-stamp the Status cell to a stale value and the next
+  // api_fullClientSync_ would upsert it onto public.will_calls, reverting a
+  // newer status. public.will_calls is authoritative, so when this update
+  // touches Status, re-read the LIVE SB status and write THAT instead of the
+  // payload value. Legitimate transitions are preserved (SB already holds the
+  // new value at read time). Fail-open on a null SB read. Status-only override;
+  // every other mirrored WC field still writes its payload value.
+  for (var sgw = 0; sgw < updateTargets.length; sgw++) {
+    if (updateTargets[sgw].key !== "status") continue;
+    var wcTenantId = payload && payload.tenantId ? String(payload.tenantId).trim() : "";
+    var liveWcStatus = api_sbLiveStatus_("will_calls", "wc_number", rowId, wcTenantId);
+    if (liveWcStatus !== null && liveWcStatus !== "" && liveWcStatus !== updateTargets[sgw].value) {
+      Logger.log(
+        "__writeThroughReverseWillCalls_: Status override for " + rowId +
+        " — payload='" + updateTargets[sgw].value + "' superseded by SB-authoritative='" + liveWcStatus + "'"
+      );
+      updateTargets[sgw].value = liveWcStatus;
+    }
+    break;
   }
 
   // Idempotency — skip when every present field already matches the
@@ -4255,14 +4312,39 @@ function __writeThroughReverseRepairs_(ss, payload) {
  * Mirrors the PostgREST GET pattern of api_isKnownTenantId_.
  */
 function api_sbRepairStatus_(tenantId, repairId) {
-  if (!tenantId || !repairId) return null;
+  return api_sbLiveStatus_("repairs", "repair_id", repairId, tenantId);
+}
+
+/**
+ * v38.275.0 — Generic "read the live SB status of one row" helper that backs
+ * every reverse-writethrough writer's stale-write guard (repairs v38.274.0,
+ * then tasks / will_calls / inventory v38.275.0). The writers mirror an SB-
+ * authoritative status onto the per-tenant sheet; when two status-changing
+ * actions on the same entity fire their mirror HTTP calls in quick succession
+ * those calls can land OUT OF ORDER, so a delayed mirror would otherwise stamp
+ * the sheet's Status cell back to the value its originating EF captured — and
+ * the next api_fullClientSync_ reads that stale cell and upserts it onto
+ * public.<table>, reverting the newer action. Re-reading the LIVE status here
+ * lets the writer converge the sheet to SB truth instead of the stale payload.
+ *
+ * @param {string} table    public.<table> name (repairs|tasks|will_calls|inventory)
+ * @param {string} idField  SB PK column (repair_id|task_id|wc_number|item_id)
+ * @param {string} idValue  the row's PK value (rowId on the sheet)
+ * @param {string} tenantId per-tenant spreadsheet_id (= public.<table>.tenant_id)
+ * @return {string|null}    trimmed status string, or null on any error /
+ *                          missing creds / not-found (caller fails open to the
+ *                          payload value — never harder-fails than pre-guard).
+ */
+function api_sbLiveStatus_(table, idField, idValue, tenantId) {
+  if (!table || !idField || !idValue || !tenantId) return null;
   try {
     var url = prop_("SUPABASE_URL");
     var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
     if (!url || !key) return null;  // fail-open: caller keeps payload value
     var resp = UrlFetchApp.fetch(
-      url + "/rest/v1/repairs?select=status&tenant_id=eq." + encodeURIComponent(tenantId) +
-        "&repair_id=eq." + encodeURIComponent(repairId) + "&limit=1",
+      url + "/rest/v1/" + encodeURIComponent(table) + "?select=status&tenant_id=eq." +
+        encodeURIComponent(tenantId) + "&" + encodeURIComponent(idField) + "=eq." +
+        encodeURIComponent(idValue) + "&limit=1",
       {
         method: "GET",
         headers: { "Authorization": "Bearer " + key, "apikey": key },
@@ -4275,7 +4357,7 @@ function api_sbRepairStatus_(tenantId, repairId) {
     var st = rows[0].status;
     return (st === null || st === undefined) ? null : String(st).trim();
   } catch (e) {
-    Logger.log("api_sbRepairStatus_ error (fail-open to payload value): " + e);
+    Logger.log("api_sbLiveStatus_ error (fail-open to payload value): " + e);
     return null;
   }
 }
@@ -4395,6 +4477,32 @@ function __writeThroughReverseTasks_(ss, payload) {
     taskSheet.getRange(insertRowNum, 1, 1, maxCol).setValues([rowValues]);
     SpreadsheetApp.flush();
     return { rowNumber: insertRowNum, inserted: true };
+  }
+
+  // v38.275.0 — Stale-write guard (version check), same class as the repairs
+  // fix v38.274.0. start-task / cancel-task-sb / reopen-task-sb /
+  // batch-cancel-tasks-sb / update-task-sb all mirror Status here; their
+  // writeThroughReverse HTTP calls can land out of order, so a delayed mirror
+  // would otherwise stamp the Status cell back to a stale value and the next
+  // api_fullClientSync_ would upsert it onto public.tasks, reverting a newer
+  // status (the 2026-06-02 completeTask revert, PR #596). public.tasks is the
+  // authoritative store, so when this update touches Status, re-read the LIVE
+  // SB status and write THAT instead of the payload value. Legitimate backward
+  // transitions (reopen -> 'Open'/'In Progress') are preserved: SB already
+  // holds the new value at read time, so the override is a no-op for them.
+  // Fail-open: a null SB read keeps the payload value. Status-only override.
+  for (var sg = 0; sg < targets.length; sg++) {
+    if (targets[sg].sbKey !== "status") continue;
+    var taskTenantId = payload && payload.tenantId ? String(payload.tenantId).trim() : "";
+    var liveTaskStatus = api_sbLiveStatus_("tasks", "task_id", rowId, taskTenantId);
+    if (liveTaskStatus !== null && liveTaskStatus !== "" && liveTaskStatus !== targets[sg].newValue) {
+      Logger.log(
+        "__writeThroughReverseTasks_: Status override for " + rowId +
+        " — payload='" + targets[sg].newValue + "' superseded by SB-authoritative='" + liveTaskStatus + "'"
+      );
+      targets[sg].newValue = liveTaskStatus;
+    }
+    break;
   }
 
   // UPDATE path — idempotent skip when every cell already matches
