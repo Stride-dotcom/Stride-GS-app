@@ -2641,6 +2641,45 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
         />
         <FloatingActionMenu show={isCompactViewport} actions={fabActions} />
         {reQuoteModal}
+        {/* Fail sub-prompt — page mode renders the footer/FAB only, with no
+            inline area for the "what would you like to do?" branch the panel
+            shows at its In Progress footer. Without this, clicking "Failed"
+            (footer on desktop, FAB on tablet/mobile) set showResultPrompt but
+            rendered nothing, so the button looked dead. Surface the same
+            Complete (Bill) / Cancel (No Bill) choice as a modal here. */}
+        {showResultPrompt === 'fail' && (
+          <div
+            role="dialog"
+            aria-modal="true"
+            onClick={() => { if (!submitting) setShowResultPrompt(null); }}
+            style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 20 }}
+          >
+            <div onClick={(e) => e.stopPropagation()} style={{ background: '#fff', borderRadius: 14, padding: 22, width: '100%', maxWidth: 380, boxShadow: '0 20px 50px rgba(0,0,0,0.25)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                <AlertTriangle size={18} color="#B45309" />
+                <span style={{ fontSize: 15, fontWeight: 700 }}>Repair failed — what would you like to do?</span>
+              </div>
+              <p style={{ fontSize: 12.5, color: theme.colors.textSecondary, lineHeight: 1.5, margin: '0 0 16px' }}>
+                Mark the repair as failed and create the billing charge, or cancel it without billing.
+              </p>
+              {submitError && (
+                <div style={{ marginBottom: 12, padding: '8px 12px', background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: 8, fontSize: 12, color: '#DC2626', display: 'flex', alignItems: 'flex-start', gap: 6 }}>
+                  <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                  <span>{submitError}</span>
+                </div>
+              )}
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button onClick={async () => handleFailChoice('complete')} disabled={submitting} style={{ ...pagePillBase, background: '#B45309', color: '#fff', opacity: submitting ? 0.6 : 1, cursor: submitting ? 'progress' : 'pointer' }}>
+                  {submitting && <BtnSpinner size={11} color="#fff" />} Complete (Bill)
+                </button>
+                <button onClick={async () => handleFailChoice('cancel')} disabled={submitting} style={{ ...rpLight, opacity: submitting ? 0.6 : 1, cursor: submitting ? 'progress' : 'pointer' }}>
+                  Cancel (No Bill)
+                </button>
+              </div>
+              <button onClick={() => setShowResultPrompt(null)} disabled={submitting} style={{ width: '100%', marginTop: 8, padding: '8px', fontSize: 12, border: 'none', background: 'transparent', color: theme.colors.textMuted, cursor: submitting ? 'not-allowed' : 'pointer', fontFamily: 'inherit' }}>Go back</button>
+            </div>
+          </div>
+        )}
       </>
     );
   }
