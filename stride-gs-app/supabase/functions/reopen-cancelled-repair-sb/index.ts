@@ -91,9 +91,43 @@ Deno.serve(async (req: Request) => {
     // (or it was never cancelled). Return ok with the live status rather
     // than erroring, so a double-click is harmless.
     if (currentStatus !== 'Cancelled') {
+      // Already reopened (or never cancelled) — still re-fire the sheet
+      // mirror with the live SB status so a retry after a lost first mirror
+      // converges the sheet instead of leaving it stale (the RPR-63950
+      // skip-path gap, 2026-06-11). Best-effort; failures surface in the
+      // response but don't fail the call.
+      let skipMirrorOk = true;
+      let skipMirrorError: string | undefined;
+      try {
+        const gasUrl = Deno.env.get('GAS_API_URL');
+        const gasToken = Deno.env.get('GAS_API_TOKEN');
+        if (gasUrl && gasToken) {
+          const mirrorRes = await fetch(`${gasUrl}?action=writeThroughReverse&token=${encodeURIComponent(gasToken)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              tenantId, table: 'repairs', op: 'update', rowId: repairId,
+              row: { status: currentStatus, status_before_cancel: '' }, requestId,
+            }),
+          });
+          const text = await mirrorRes.text();
+          let parsed: { success?: boolean; error?: string } = {};
+          try { parsed = JSON.parse(text); } catch { parsed = { error: `non-JSON: ${text.slice(0, 200)}` }; }
+          if (!mirrorRes.ok || !parsed.success) {
+            skipMirrorOk = false;
+            skipMirrorError = parsed.error ?? `HTTP ${mirrorRes.status}`;
+          }
+        } else {
+          skipMirrorOk = false;
+          skipMirrorError = 'GAS_API_URL or GAS_API_TOKEN not configured';
+        }
+      } catch (e) {
+        skipMirrorOk = false;
+        skipMirrorError = e instanceof Error ? e.message : String(e);
+      }
       return json({
         ok: true, repairId, newStatus: currentStatus,
-        alreadyReopened: true, mirrorOk: true,
+        alreadyReopened: true, mirrorOk: skipMirrorOk, mirrorError: skipMirrorError,
       });
     }
 
