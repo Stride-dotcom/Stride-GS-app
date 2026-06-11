@@ -5,9 +5,10 @@
 -- RUSH as well as INSP (migration 20260610120100). tasks.qty defaulted to 1 and
 -- was never populated from inventory for RUSH tasks created before this change,
 -- so a rush inspection of a carton holding N pieces (inventory.qty = N) would
--- still bill "Rush × 1 @ rate" on the SB completion path. The task-creation
--- paths now seed qty from inventory.qty for RUSH (batch-create-tasks-sb,
--- complete-shipment-sb buildTaskRow). This one-time backfill fixes
+-- still bill "Rush × 1 @ rate" on the SB completion path. The RUSH task-creation
+-- path now seeds qty from inventory.qty (batch-create-tasks-sb — the only
+-- canary EF that mints RUSH tasks; complete-shipment-sb only auto-creates
+-- INSP/ASM). This one-time backfill fixes
 -- already-OPEN RUSH tasks so the NEXT completion bills the correct quantity,
 -- matching the GAS fix in StrideAPI.gs v38.272.0 (which reads inventory qty
 -- directly and is unaffected by this gap).
