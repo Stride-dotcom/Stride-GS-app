@@ -20,7 +20,9 @@ import { ProcessingOverlay } from './ProcessingOverlay';
 import { BillingPreviewCard } from './BillingPreviewCard';
 import { useEntityAddons } from '../../hooks/useEntityAddons';
 import { postSendRepairQuote, postSendRepairQuoteSb, postRespondToRepairQuote, postRespondRepairQuoteSb, postCompleteRepair, postCompleteRepairSb, postStartRepair, postStartRepairSb, postCancelRepair, postCancelRepairSb, postUpdateRepairNotes, postReopenRepair, postCorrectRepairResult, postVoidRepairQuote, isApiConfigured } from '../../lib/api';
-import { useFeatureFlag } from '../../contexts/FeatureFlagContext';
+import { useFeatureFlag, useFeatureFlagRow, resolveFlagBackend } from '../../contexts/FeatureFlagContext';
+import { BatchWorkItems } from './BatchWorkItems';
+import type { BatchStatusSummary } from '../../hooks/useBatchWorkItems';
 import { renderDoc, buildRepairTokens } from '../../lib/docRenderer';
 import { entityEvents } from '../../lib/entityEvents';
 import type { ApiRepair, SendRepairQuoteResponse, RespondToRepairQuoteResponse, CompleteRepairResponse, StartRepairResponse, SendRepairQuoteLine } from '../../lib/api';
@@ -81,6 +83,12 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   // [MIGRATION-P4a] completeRepair has its own flag (billing-touching,
   // standard 14-day canary per MIG-013 vs the P3 cluster's 3-day).
   const completeRepairBackend = useFeatureFlag('completeRepair');
+  // BatchWorkItems module — UI behavior gate resolved against the DATA
+  // tenant (this repair's client), same pattern as codStorageBilling: shows
+  // for the Justin Demo tenant's repairs regardless of who is logged in.
+  const batchWorkFlagRow = useFeatureFlagRow('batchWorkItems');
+  const batchWorkItemsEnabled =
+    !!batchWorkFlagRow && resolveFlagBackend(batchWorkFlagRow, repair.clientSheetId || null) === 'supabase';
   const { isMobile, isTablet } = useIsMobile();
   const isCompactViewport = isMobile || isTablet;
   // v2026-04-22 — panel frame handled by TabbedDetailPanel shell.
@@ -103,6 +111,12 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   // v2026-05-14 — Edit Items modal (re-quote flow). Gated to Pending Quote /
   // Quote Sent statuses below at the button render site.
   const [showReQuoteModal, setShowReQuoteModal] = useState(false);
+
+  // BatchWorkItems — live progress summary from the module (load/write/
+  // realtime). Gates the manual Pass/Fail buttons (handleResult) until every
+  // item carries a result, per the batch-completion contract.
+  const [batchSummary, setBatchSummary] = useState<BatchStatusSummary | null>(null);
+  const canWorkBatchItems = user?.role === 'admin' || user?.role === 'staff';
 
   // ─── Quote builder state (v38.120.0 multi-line) ──────────────────────────
   // The Quote Tool model (already established for ad-hoc customer quotes)
@@ -1055,11 +1069,41 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   };
 
   const handleResult = (_result: 'pass' | 'fail') => {
+    // BatchWorkItems gate: with the module active, the repair can't be
+    // manually completed until every item has a Pass/Fail. (The module
+    // auto-fires handleComplete via onBatchComplete on the last item, so
+    // in practice these buttons only matter for already-resolved batches.)
+    if (batchWorkItemsEnabled && batchSummary && batchSummary.total > 0 && !batchSummary.isAllComplete) {
+      setSubmitError(
+        `Resolve every item first — ${batchSummary.done} of ${batchSummary.total} items have a result. ` +
+        'Pass or Fail the remaining items in the Items list above.'
+      );
+      return;
+    }
     if (_result === 'fail') {
       setShowResultPrompt('fail');
     } else {
       handleComplete('Pass');
     }
+  };
+
+  // ─── BatchWorkItems orchestration ─────────────────────────────────────────
+  // The module owns per-item rows; the parent owns repair lifecycle. Starting
+  // work on any item of an Approved repair starts the repair (work has
+  // physically begun); resolving the last item completes it with the
+  // aggregate result through the existing billing/email/PDF flow.
+  const handleBatchItemStatusChange = (_itemId: string, _status: string, summary: BatchStatusSummary) => {
+    // Skip the auto-start when this same write resolved the batch —
+    // onBatchComplete fires right after and owns the lifecycle transition.
+    // Firing start + complete on the same tick is the start/complete race
+    // class from the 06/01 incident + PR #739 (stale start mirror reverting
+    // a completed repair); handleComplete is safe from Approved directly.
+    if (summary.isAllComplete) return;
+    if (effectiveStatus === 'Approved') void handleStartRepair();
+  };
+  const handleBatchComplete = (aggregate: 'Pass' | 'Fail') => {
+    if (completed || effectiveStatus === 'Complete' || effectiveStatus === 'Cancelled') return;
+    void handleComplete(aggregate);
   };
 
   const handleFailChoice = async (choice: 'complete' | 'cancel') => {
@@ -1078,6 +1122,64 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   const renderDetailsTab = () => (
     <div style={{ padding: 20 }}>
 
+          {/* BatchWorkItems (flag-gated, Justin Demo canary) — interactive
+              per-item Start/Pass/Fail + notes + photos for every repair,
+              single- or multi-item. Replaces both the read-only items table
+              and the Item Info card below. Starting work on an item of an
+              Approved repair auto-starts the repair; resolving the last item
+              auto-completes it with the aggregate result via the existing
+              handleComplete flow (billing/email/PDF untouched). */}
+          {batchWorkItemsEnabled && (
+            <BatchWorkItems
+              entityType="repair"
+              entityId={repair.repairId}
+              tenantId={repair.clientSheetId}
+              actionsEnabled={canWorkBatchItems && !completed && (effectiveStatus === 'Approved' || effectiveStatus === 'In Progress')}
+              disabledReason={
+                canWorkBatchItems && ['Pending Quote', 'Quote Sent', 'Declined'].includes(effectiveStatus)
+                  ? 'Item work begins once the quote is approved.'
+                  : undefined
+              }
+              fallbackItem={repair.itemId ? { itemId: repair.itemId } : null}
+              headerAction={
+                (effectiveStatus === 'Pending Quote' || effectiveStatus === 'Quote Sent') ? (
+                  <button
+                    onClick={() => setShowReQuoteModal(true)}
+                    title="Add or remove items — resets the quote so you can re-issue with the new list"
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 4,
+                      padding: '3px 10px', borderRadius: 6,
+                      border: `1px solid ${theme.colors.borderDefault}`, background: '#fff',
+                      fontSize: 11, fontWeight: 600, color: theme.colors.textPrimary, cursor: 'pointer',
+                    }}
+                  >
+                    <Pencil size={11} /> Edit Items
+                  </button>
+                ) : undefined
+              }
+              renderItemBadges={(badgeItemId) => (
+                <ItemIdBadges
+                  itemId={badgeItemId}
+                  inspOpenItems={inspOpenItems}
+                  inspDoneItems={inspDoneItems}
+                  inspFailedItems={inspFailedItems}
+                  asmOpenItems={asmOpenItems}
+                  asmDoneItems={asmDoneItems}
+                  repairOpenItems={repairOpenItems}
+                  repairDoneItems={repairDoneItems}
+                  wcOpenItems={wcOpenItems}
+                  wcDoneItems={wcDoneItems}
+                  dtOpenItems={dtOpenItems}
+                  dtDoneItems={dtDoneItems}
+                  codItems={codItems}
+                />
+              )}
+              onItemStatusChange={handleBatchItemStatusChange}
+              onBatchComplete={handleBatchComplete}
+              onSummaryChange={setBatchSummary}
+            />
+          )}
+
           {/* v2026-05-13 — Multi-item items table. Shown when a repair
               has more than one item (created via the SB-authoritative
               bulk path from the Inventory bulk-quote action). Single-
@@ -1085,8 +1187,9 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
               card below — switching them to a 1-row table would just
               duplicate that info without adding value. The table reads
               from repair.items[] populated by fetchRepairByIdFromSupabase
-              with the inventory overlay applied. */}
-          {repair.items && repair.items.length > 1 && (
+              with the inventory overlay applied. Superseded by the
+              BatchWorkItems module above when its flag is on. */}
+          {!batchWorkItemsEnabled && repair.items && repair.items.length > 1 && (
             <div style={{ background: theme.colors.bgSubtle, border: `1px solid ${theme.colors.border}`, borderRadius: 10, padding: 14, marginBottom: 16 }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -1151,8 +1254,9 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
 
           {/* Item Info — uses repair's own fields from API. For multi-item
               repairs we skip this card (the items table above covers it);
-              for single-item repairs this is the primary item view. */}
-          {repair.itemId && (!repair.items || repair.items.length <= 1) && (
+              for single-item repairs this is the primary item view.
+              Superseded by BatchWorkItems when its flag is on. */}
+          {!batchWorkItemsEnabled && repair.itemId && (!repair.items || repair.items.length <= 1) && (
             <div style={{ background: theme.colors.bgSubtle, border: `1px solid ${theme.colors.border}`, borderRadius: 10, padding: 14, marginBottom: 16 }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}><Package size={14} color={theme.colors.orange} /><span style={{ fontSize: 12, fontWeight: 600 }}>Item</span></div>

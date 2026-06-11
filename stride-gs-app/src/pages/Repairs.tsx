@@ -17,6 +17,7 @@ import { theme } from '../styles/theme';
 import { fmtDate, fmtDateTime } from '../lib/constants';
 import { tanstackGlobalFilter } from '../lib/searchFilters';
 import { useItemIndicators } from '../hooks/useItemIndicators';
+import { useBatchItemMap } from '../hooks/useBatchItemMap';
 import { ItemIdBadges } from '../components/shared/ItemIdBadges';
 import { WriteButton } from '../components/shared/WriteButton';
 import { BatchGuard, checkBatchClientGuard } from '../components/shared/BatchGuard';
@@ -85,13 +86,13 @@ function toCSV(rows: Repair[], fn: string) {
 }
 
 const col = createColumnHelper<Repair>();
-function cols(completerMap: Map<string, CompleterRecord>) {
+function cols(completerMap: Map<string, CompleterRecord>, batchItemMap: Map<string, string[]>) {
   return [
     col.display({ id: 'select', header: ({ table }) => <input type="checkbox" checked={table.getIsAllPageRowsSelected()} onChange={table.getToggleAllPageRowsSelectedHandler()} style={{ cursor: 'pointer', accentColor: theme.colors.orange }} />, cell: ({ row }) => <input type="checkbox" checked={row.getIsSelected()} onChange={row.getToggleSelectedHandler()} style={{ cursor: 'pointer', accentColor: theme.colors.orange }} />, size: 40, enableSorting: false }),
     col.accessor('repairId', { header: 'Repair ID', size: 100, cell: i => <span style={{ fontWeight: 600, fontSize: 12 }}>{i.getValue()}</span> }),
     col.accessor('sourceTaskId', { header: 'Source Task', size: 100, cell: i => <span style={{ color: theme.colors.textSecondary, fontSize: 12 }}>{i.getValue() || '\u2014'}</span> }),
     col.accessor('status', { header: 'Status', size: 120, filterFn: mf, cell: i => <Badge t={i.getValue()} c={STATUS_CFG[i.getValue()]} /> }),
-    col.accessor('itemId', { header: 'Item', size: 110, cell: i => { const id = i.getValue(); const ind = (window as any).__itemIndicators; return <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}><span style={{ color: theme.colors.textSecondary, fontSize: 12 }}>{id}</span>{ind && <ItemIdBadges itemId={id} inspOpenItems={ind.inspOpenItems} inspDoneItems={ind.inspDoneItems} inspFailedItems={ind.inspFailedItems} asmOpenItems={ind.asmOpenItems} asmDoneItems={ind.asmDoneItems} repairOpenItems={ind.repairOpenItems} repairDoneItems={ind.repairDoneItems} wcOpenItems={ind.wcOpenItems} wcDoneItems={ind.wcDoneItems} dtOpenItems={ind.dtOpenItems} dtDoneItems={ind.dtDoneItems} codItems={ind.codItems} />}</div>; } }),
+    col.accessor('itemId', { header: 'Item', size: 110, cell: i => { const id = i.getValue(); const ind = (window as any).__itemIndicators; const batchIds = batchItemMap.get(i.row.original.repairId); if (batchIds && batchIds.length > 1) { return <span title={batchIds.join(', ')} style={{ color: theme.colors.textSecondary, fontSize: 12, fontWeight: 600 }}>{batchIds.length} items</span>; } return <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}><span style={{ color: theme.colors.textSecondary, fontSize: 12 }}>{id}</span>{ind && <ItemIdBadges itemId={id} inspOpenItems={ind.inspOpenItems} inspDoneItems={ind.inspDoneItems} inspFailedItems={ind.inspFailedItems} asmOpenItems={ind.asmOpenItems} asmDoneItems={ind.asmDoneItems} repairOpenItems={ind.repairOpenItems} repairDoneItems={ind.repairDoneItems} wcOpenItems={ind.wcOpenItems} wcDoneItems={ind.wcDoneItems} dtOpenItems={ind.dtOpenItems} dtDoneItems={ind.dtDoneItems} codItems={ind.codItems} />}</div>; } }),
     // Session 74: warehouse location — mirrored from inventory so the
     // Repairs table matches what's on the Tasks table. Useful for
     // warehouse staff sorting by aisle/bay before picking items.
@@ -190,7 +191,10 @@ export function Repairs() {
   const itemIndicators = useItemIndicators(selectedSheetId);
   (window as any).__itemIndicators = itemIndicators.loaded ? itemIndicators : null;
 
-  const columns = useMemo(() => cols(repairCompleterMap), [repairCompleterMap]);
+  // BatchWorkItems: repair_id → item_ids[] so multi-item repairs show
+  // "N items" (full list in the tooltip) instead of just the primary.
+  const batchItemMap = useBatchItemMap('repair');
+  const columns = useMemo(() => cols(repairCompleterMap, batchItemMap), [repairCompleterMap, batchItemMap]);
   (window as any).__openRepairDetail = (r: Repair) => navigate(`/repairs/${r.repairId}`);
 
   // Effect 1: ?open= query param → navigate directly to entity page.

@@ -17,7 +17,9 @@ import { theme } from '../../styles/theme';
 import { fmtDate, fmtDateTime, toDateInputValue } from '../../lib/constants';
 import { WriteButton } from './WriteButton';
 import { postCompleteTask, postCompleteTaskSb, postStartTask, postUpdateTaskNotes, postUpdateTaskCustomPrice, postRequestRepairQuote, postRequestRepairQuoteSb, postCancelTask, postCorrectTaskResult, postReopenTask, postUpdateInventoryItem, postUpdateTaskPriority, postUpdateTaskDueDate, isApiConfigured } from '../../lib/api';
-import { useFeatureFlag } from '../../contexts/FeatureFlagContext';
+import { useFeatureFlag, useFeatureFlagRow, resolveFlagBackend } from '../../contexts/FeatureFlagContext';
+import { BatchWorkItems } from './BatchWorkItems';
+import type { BatchStatusSummary } from '../../hooks/useBatchWorkItems';
 import { renderDoc, buildTaskTokens } from '../../lib/docRenderer';
 import { writeSyncFailed } from '../../lib/syncEvents';
 import { supabase } from '../../lib/supabase';
@@ -113,6 +115,16 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
   // wired but inert. Routes the same end-state either way.
   const completeTaskBackend = useFeatureFlag('completeTask');
   const isCompactViewport = isMobile || isTablet;
+
+  // BatchWorkItems module — UI behavior gate resolved against the DATA
+  // tenant (this task's client), same pattern as codStorageBilling. When on,
+  // the Item Info card swaps for interactive per-item cards (single-item
+  // tasks get one card; future multi-item batch inspections get N).
+  const batchWorkFlagRow = useFeatureFlagRow('batchWorkItems');
+  const batchWorkItemsEnabled =
+    !!batchWorkFlagRow && resolveFlagBackend(batchWorkFlagRow, (task.clientSheetId || task.clientId || null)) === 'supabase';
+  const [batchSummary, setBatchSummary] = useState<BatchStatusSummary | null>(null);
+  const canWorkBatchItems = user?.role === 'admin' || user?.role === 'staff';
 
   const [notes, setNotes] = useState(task.taskNotes || task.notes || '');
   const [overflowOpen, setOverflowOpen] = useState(false);
@@ -709,6 +721,16 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
   };
 
   const handleResult = async (result: 'pass' | 'fail') => {
+    // BatchWorkItems gate: with the module active, the task can't be
+    // manually completed until every item has a Pass/Fail. (The module
+    // auto-fires callCompleteTask via onBatchComplete on the last item.)
+    if (batchWorkItemsEnabled && batchSummary && batchSummary.total > 0 && !batchSummary.isAllComplete) {
+      setSubmitError(
+        `Resolve every item first — ${batchSummary.done} of ${batchSummary.total} items have a result. ` +
+        'Pass or Fail the remaining items in the Items list above.'
+      );
+      return;
+    }
     if (isInspection) {
       await callCompleteTask(result === 'pass' ? 'Pass' : 'Fail');
     } else if (result === 'pass') {
@@ -728,6 +750,24 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
       // For now treat as Fail-cancel — same API call, billing flags on server handle it
       await callCompleteTask('Fail');
     }
+  };
+
+  // ─── BatchWorkItems orchestration ──────────────────────────────────
+  // The module owns per-item rows; the parent owns the task lifecycle.
+  // Starting (or directly resolving) an item of an Open task starts the
+  // task — work has physically begun; resolving the last item completes
+  // the task with the aggregate result through the existing billing flow.
+  const handleBatchItemStatusChange = (_itemId: string, _status: string, summary: BatchStatusSummary) => {
+    // Skip the auto-start when this same write resolved the batch —
+    // onBatchComplete fires right after and owns the lifecycle transition.
+    // Never fire startTask + completeTask on the same tick (the 06/01
+    // start/complete race; completeTask handles Open → Completed fine).
+    if (summary.isAllComplete) return;
+    if (task.status === 'Open' && !isAlreadyStarted) void handleStartTask();
+  };
+  const handleBatchComplete = (aggregate: 'Pass' | 'Fail') => {
+    if (completed || task.status === 'Completed' || task.status === 'Cancelled') return;
+    void callCompleteTask(aggregate);
   };
 
   // ─── Cancel task (extracted so the mobile overflow can call it) ─────
@@ -883,8 +923,72 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
             />
           )}
 
-          {/* Item Info Card */}
-          {task.itemId && (
+          {/* BatchWorkItems (flag-gated, Justin Demo canary) — interactive
+              per-item Start/Pass/Fail + notes + photos. Single-item tasks
+              render one card (synthesized from task.itemId until the first
+              write mints a task_items row); multi-item batch tasks render N.
+              Replaces the static Item Info card below. Work begun on an item
+              of an Open task auto-starts the task; resolving the last item
+              auto-completes it with the aggregate result. */}
+          {batchWorkItemsEnabled && task.itemId && (
+            <>
+              <BatchWorkItems
+                entityType="task"
+                entityId={task.taskId}
+                tenantId={clientSheetId}
+                actionsEnabled={canWorkBatchItems && !completed && (task.status === 'Open' || task.status === 'In Progress')}
+                fallbackItem={{ itemId: task.itemId, qty: task.qty != null ? Number(task.qty) : 1 }}
+                renderItemBadges={(badgeItemId) => (
+                  <ItemIdBadges
+                    itemId={badgeItemId}
+                    inspOpenItems={inspOpenItems}
+                    inspDoneItems={inspDoneItems}
+                    inspFailedItems={inspFailedItems}
+                    asmOpenItems={asmOpenItems}
+                    asmDoneItems={asmDoneItems}
+                    repairOpenItems={repairOpenItems}
+                    repairDoneItems={repairDoneItems}
+                    wcOpenItems={wcOpenItems}
+                    wcDoneItems={wcDoneItems}
+                    dtOpenItems={dtOpenItems}
+                    dtDoneItems={dtDoneItems}
+                    codItems={codItems}
+                  />
+                )}
+                onItemStatusChange={handleBatchItemStatusChange}
+                onBatchComplete={handleBatchComplete}
+                onSummaryChange={setBatchSummary}
+              />
+              {/* Work Order print + Cancelled pill — kept from the Item Info
+                  card this module replaces. */}
+              {((isAlreadyStarted && canSeeCustomPrice) || task.cancelledAt) && (
+                <div style={{ display: 'flex', gap: 6, marginTop: -8, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
+                  {isAlreadyStarted && canSeeCustomPrice && (
+                    <WriteButton
+                      label="Work Order"
+                      variant="secondary"
+                      size="sm"
+                      icon={<FileText size={13} />}
+                      onClick={async () => {
+                        await renderDoc('DOC_TASK_WORK_ORDER', buildTaskTokens(task), {
+                          action: 'print',
+                          fileName: `Work Order — ${task.taskId}`,
+                        });
+                      }}
+                    />
+                  )}
+                  {task.cancelledAt && (
+                    <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 8, background: '#F3F4F6', color: '#6B7280', fontWeight: 600 }}>
+                      ✕ Cancelled {fmtDateTime(task.cancelledAt)}
+                    </span>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+
+          {/* Item Info Card — superseded by BatchWorkItems when its flag is on. */}
+          {!batchWorkItemsEnabled && task.itemId && (
             <div style={{ background: theme.colors.bgSubtle, border: `1px solid ${theme.colors.border}`, borderRadius: 10, padding: 14, marginBottom: 16 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}><Package size={14} color={theme.colors.orange} /><span style={{ fontSize: 12, fontWeight: 600 }}>Item</span></div>
               <div style={{ fontSize: 13, fontWeight: 600, display: 'inline-flex', alignItems: 'center', flexWrap: 'wrap' }}>

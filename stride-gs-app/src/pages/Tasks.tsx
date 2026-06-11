@@ -26,6 +26,7 @@ import { theme } from '../styles/theme';
 import { fmtDate, fmtDateTime } from '../lib/constants';
 import { tanstackGlobalFilter } from '../lib/searchFilters';
 import { useItemIndicators } from '../hooks/useItemIndicators';
+import { useBatchItemMap } from '../hooks/useBatchItemMap';
 import { ItemIdBadges } from '../components/shared/ItemIdBadges';
 import { WriteButton } from '../components/shared/WriteButton';
 import { BatchGuard, checkBatchClientGuard } from '../components/shared/BatchGuard';
@@ -132,6 +133,9 @@ function cols(
   // so the list reads "who actually did the work" instead of "who was
   // on the hook for it" after the fact.
   completerMap: Map<string, CompleterRecord>,
+  // BatchWorkItems: task_id → item_ids[] so multi-item batch tasks show
+  // "N items" (full list in the tooltip) instead of just the primary.
+  batchItemMap: Map<string, string[]>,
 ) {
   return [
     col.display({ id: 'select', header: ({ table }) => <input type="checkbox" checked={table.getIsAllPageRowsSelected()} onChange={table.getToggleAllPageRowsSelectedHandler()} style={{ cursor: 'pointer', accentColor: theme.colors.orange }} />, cell: ({ row }) => <input type="checkbox" checked={row.getIsSelected()} onChange={row.getToggleSelectedHandler()} style={{ cursor: 'pointer', accentColor: theme.colors.orange }} />, size: 40, enableSorting: false }),
@@ -180,7 +184,7 @@ function cols(
       return <Badge t={label} c={TYPE_CFG[row.type]} />;
     } }),
     col.accessor('status', { header: 'Status', size: 100, filterFn: multiFilter, cell: i => <Badge t={i.getValue()} c={STATUS_CFG[i.getValue()]} /> }),
-    col.accessor('itemId', { header: 'Item', size: 110, cell: i => { const id = i.getValue(); const ind = (window as any).__itemIndicators; return <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}><span style={{ color: theme.colors.textSecondary, fontSize: 12 }}>{id}</span>{ind && <ItemIdBadges itemId={id} inspOpenItems={ind.inspOpenItems} inspDoneItems={ind.inspDoneItems} inspFailedItems={ind.inspFailedItems} asmOpenItems={ind.asmOpenItems} asmDoneItems={ind.asmDoneItems} repairOpenItems={ind.repairOpenItems} repairDoneItems={ind.repairDoneItems} wcOpenItems={ind.wcOpenItems} wcDoneItems={ind.wcDoneItems} dtOpenItems={ind.dtOpenItems} dtDoneItems={ind.dtDoneItems} codItems={ind.codItems} />}</div>; } }),
+    col.accessor('itemId', { header: 'Item', size: 110, cell: i => { const id = i.getValue(); const ind = (window as any).__itemIndicators; const batchIds = batchItemMap.get(i.row.original.taskId); if (batchIds && batchIds.length > 1) { return <span title={batchIds.join(', ')} style={{ color: theme.colors.textSecondary, fontSize: 12, fontWeight: 600 }}>{batchIds.length} items</span>; } return <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}><span style={{ color: theme.colors.textSecondary, fontSize: 12 }}>{id}</span>{ind && <ItemIdBadges itemId={id} inspOpenItems={ind.inspOpenItems} inspDoneItems={ind.inspDoneItems} inspFailedItems={ind.inspFailedItems} asmOpenItems={ind.asmOpenItems} asmDoneItems={ind.asmDoneItems} repairOpenItems={ind.repairOpenItems} repairDoneItems={ind.repairDoneItems} wcOpenItems={ind.wcOpenItems} wcDoneItems={ind.wcDoneItems} dtOpenItems={ind.dtOpenItems} dtDoneItems={ind.dtDoneItems} codItems={ind.codItems} />}</div>; } }),
     col.accessor('clientName', { header: 'Client', size: 160, filterFn: multiFilter, cell: i => <span style={{ fontWeight: 500, fontSize: 12 }}>{i.getValue()}</span> }),
     col.accessor('vendor', { header: 'Vendor', size: 120, cell: i => <span style={{ color: theme.colors.textSecondary, fontSize: 12 }}>{i.getValue()}</span> }),
     col.accessor('description', { header: 'Description', size: 240, cell: i => <span style={{ color: theme.colors.textSecondary, fontSize: 12, maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}>{i.getValue()}</span> }),
@@ -330,7 +334,8 @@ export function Tasks() {
     return m;
   }, [catalogServices]);
 
-  const columns = useMemo(() => cols(navigate, svcNameByCode, taskCompleterMap), [navigate, svcNameByCode, taskCompleterMap]);
+  const batchItemMap = useBatchItemMap('task');
+  const columns = useMemo(() => cols(navigate, svcNameByCode, taskCompleterMap, batchItemMap), [navigate, svcNameByCode, taskCompleterMap, batchItemMap]);
   (window as any).__openTaskDetail = (task: Task) => navigate(`/tasks/${encodeURIComponent(task.taskId)}${task.clientSheetId ? `?client=${encodeURIComponent(task.clientSheetId)}` : ''}`);
   (window as any).__toggleTaskPriority = async (taskId: string, clientSheetId: string, currentPriority: string) => {
     if (!apiConfigured || !clientSheetId || user?.role === 'client') return;
