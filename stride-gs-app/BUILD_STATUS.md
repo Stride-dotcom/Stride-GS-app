@@ -116,6 +116,15 @@
 
 ---
 
+## Recent Changes (2026-06-11, ops: auto-inspect-on-receipt — Supabase settings re-sync backfill + root-cause correction — no GAS code in this PR)
+
+- **Reported (Brume):** a received shipment did not auto-create INSP tasks despite the client's intake enabling auto-inspect; tasks had to be made by hand.
+- **Corrected root cause** (an earlier guess was wrong): the Receiving UI already reads `auto_inspection` from **Supabase** — `apiClients` is Supabase-first via `useClients`/`fetchClientsFromSupabase` (`select('*')`, maps `auto_inspection`); it does NOT read the CB sheet on the normal path. The real defect is a **5-minute `reconcileNextClient_` GAS trigger** (`StrideAPI.gs:5556` → `resyncClientToSupabase_:8270`) that re-upserts the **full CB Clients row** into `public.clients` (`:8321`), clobbering app/intake-authoritative settings whenever the CB cell is stale. Observed live: Security Properties flipped `true→false` within minutes. A proposed React fix (point the default at `liveClients`) was investigated and **dropped as a no-op** (`liveClients` is the same Supabase data with `autoInspection` dropped).
+- **Ops remediation (data-mutating, approved — no code):** re-ran the existing idempotent `push-client-settings-to-sheet` EF for the 17 refresh clients carrying `auto_inspection=true`, writing the CB Clients "Auto Inspection" column + per-tenant `AUTO_INSPECTION` so the 5-min resync stops clobbering them. 16 synced cleanly (`cbUpdated:21`, no skips); **Security Properties** had already been clobbered to `false` in Supabase — restored to `true` (intake-matched) then synced. All 17 verified consistent across Supabase + both sheet locations. Clients: Anja Michals, Arkitektura, Brian Paquette, Brume, Cohesively Curated, High Dive, Hyrel Mathias, Jason Dallas, Jennie Gruss, K&M, Kearney Cordovi, Mary Kenngott, Rosehill, Security Properties, Seva Home, Studio AM, Wignall.
+- **Pending durable GAS fix (deploy-gated, Justin-owned — spec'd, NOT implemented):** exclude the 10 app-authoritative `CLIENT_FIELDS_` columns from the CB→SB resync (make Supabase authoritative for app-edited settings) + surface/retry `apply-intake-on-submit` sheet-mirror failures (currently swallowed at `apply-intake-on-submit/index.ts:357,361`). At-risk columns sharing this clobber: `auto_inspection`, `separate_by_sidemark`, `enable_notifications`, `enable_shipment_email`, `enable_receiving_billing`, `auto_charge`, `payment_terms`, `free_storage_days`, `discount_storage_pct`, `discount_services_pct`. Requires `push-api && deploy-api` + version bump.
+
+---
+
 ## Recent Changes (2026-06-10, billing: RUSH inspections also bill the TRUE piece count — fix/billing/rush-qty)
 
 **Follow-up to #729 (INSP per-qty):** RUSH task completion was still billing "Rush × 1" because #729 scoped the per-piece multiplier to INSP only. Per Justin, a rush inspection of an N-piece carton is N× the work, so RUSH now scales by the piece count exactly like INSP. Every OTHER service code still stays Qty 1 per item ID (RCVG / ASM / REPAIR / WC / etc.).
