@@ -116,6 +116,14 @@
 
 ---
 
+## Recent Changes (2026-06-11, repairs: "Failed" button now clickable on the Repair page + tablet — fix/repairs/repair-failed-prompt, PR #733)
+
+- **Reported (Ken):** on an *In Progress* repair (RPR-64014…, Roche Bobois) the **Failed** button could not be clicked; **Complete** worked.
+- **Root cause:** `RepairDetailPanel.tsx` renders two ways. In the slide-out **panel** (`!renderAsPage`), clicking *Failed* sets `showResultPrompt='fail'` and the same footer swaps in the "Complete (Bill) / Cancel (No Bill) / Go back" sub-prompt. In **page mode** (`renderAsPage` — the full RepairPage route + the compact/tablet `FloatingActionMenu` FAB) the *Failed* action also called `handleResult('fail')` → `setShowResultPrompt('fail')`, **but the page-mode return never rendered that sub-prompt** (a stale comment claimed it did). The click was a silent state change → the button looked dead. *Complete* worked because `handleResult('pass')` calls `handleComplete('Pass')` directly with no prompt.
+- **Fix:** added a modal to the `renderAsPage` return that renders when `showResultPrompt === 'fail'`, offering the same Complete (Bill) / Cancel (No Bill) / Go back choice. Covers both the desktop page footer and the compact/tablet FAB (which shared the same latent dead-button). Purely additive UI — reuses the existing `handleFailChoice` handlers + style tokens. **No billing logic changed** (the bill path still routes server-side via `postCompleteRepairSb`/`postCompleteRepair`). File: `src/components/shared/RepairDetailPanel.tsx` (modal block in the `if (renderAsPage)` return). `tsc --noEmit` clean, `npm run build` passes, locked-in code-reviewer 0 Critical/Important. **Merged, NOT yet deployed** (`npm run deploy` pending).
+
+---
+
 ## Recent Changes (2026-06-11, ops: auto-inspect-on-receipt — Supabase settings re-sync backfill + root-cause correction — no GAS code in this PR)
 
 - **Reported (Brume):** a received shipment did not auto-create INSP tasks despite the client's intake enabling auto-inspect; tasks had to be made by hand.
