@@ -89,6 +89,19 @@ COMMENT ON TABLE public.task_items IS
   'rows here render a synthetic row from tasks.item_id. Per-item status is '
   'informational — task billing stays at the parent level.';
 
+-- CASCADE FK — tasks has UNIQUE (tenant_id, task_id) (verified live), so
+-- parent deletes auto-remove children. Same hardening repair_items got in
+-- PR #430 after the 2026-05-14 orphan-rows incident, shipped here from day 1.
+DO $$
+BEGIN
+  ALTER TABLE public.task_items
+    ADD CONSTRAINT task_items_parent_fk
+      FOREIGN KEY (tenant_id, task_id)
+      REFERENCES public.tasks (tenant_id, task_id)
+      ON DELETE CASCADE;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
 CREATE INDEX IF NOT EXISTS idx_task_items_task_id
   ON public.task_items (tenant_id, task_id);
 
@@ -98,6 +111,12 @@ CREATE INDEX IF NOT EXISTS idx_task_items_item_id
 -- Required 4-step Data API template (grants + RLS) — see CLAUDE.md.
 GRANT SELECT ON public.task_items TO authenticated;
 GRANT ALL    ON public.task_items TO service_role;
+-- The project's default privileges hand authenticated ALL verbs on new
+-- tables; revoke everything beyond SELECT so the grant matches the RLS
+-- policy verbs (writes go through the RPC). TRUNCATE in particular is NOT
+-- subject to RLS, so leaving it granted would be a real hazard.
+REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER
+  ON public.task_items FROM authenticated, anon;
 -- repair_items predates the explicit-grants rule; assert its grant too
 -- (idempotent — also covered by 20260520120000_backfill_data_api_grants).
 GRANT SELECT ON public.repair_items TO authenticated;
