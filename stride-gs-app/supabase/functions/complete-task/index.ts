@@ -43,6 +43,7 @@
  */
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { maybeSendBatchSummary } from '../_shared/batch-summary.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -244,12 +245,13 @@ Deno.serve(async (req: Request) => {
 
       const { data: taskRow2 } = await supabase
         .from('tasks')
-        .select('type, item_id, task_notes, shipment_number')
+        .select('type, item_id, task_notes, shipment_number, batch_no')
         .eq('tenant_id', tenantId).eq('task_id', taskId).maybeSingle();
       const taskType = String((taskRow2 as { type?: string } | null)?.type ?? '').trim();
       const itemId   = String((taskRow2 as { item_id?: string } | null)?.item_id ?? '').trim();
       const notes    = String((taskRow2 as { task_notes?: string } | null)?.task_notes ?? '');
       const shipNo   = String((taskRow2 as { shipment_number?: string } | null)?.shipment_number ?? '').trim();
+      const batchNo  = String((taskRow2 as { batch_no?: string } | null)?.batch_no ?? '').trim();
 
       interface InvRow { description: string | null; vendor: string | null; sidemark: string | null; location: string | null; }
       const { data: invRow } = itemId
@@ -303,7 +305,22 @@ Deno.serve(async (req: Request) => {
       // falsy → no send. clients.enable_notifications defaults to false and
       // is mirrored from the per-tenant setting, so only an explicit true
       // sends. (Fail-safe: an unsynced/null row never spams the client.)
-      if (!enableNotifications) {
+      if (batchNo) {
+        // D11 option B: sub-tasks of a batch complete SILENTLY — when the
+        // LAST sub goes terminal, ONE BATCH_COMPLETE summary goes out with
+        // the per-item Result + Notes table instead of N single emails.
+        emailSkipped = 'batched';
+        const batchEmail = await maybeSendBatchSummary(
+          supabase, supabaseUrl, serviceKey, tenantId, batchNo,
+          clientName, !!enableNotifications,
+        );
+        if (batchEmail === 'sent') { emailSent = true; emailSkipped = undefined; }
+        else if (batchEmail === 'notifications_disabled' || batchEmail === 'all_cancelled') {
+          emailSkipped = batchEmail;
+        } else if (batchEmail && batchEmail !== 'pending') {
+          emailError = batchEmail; // error string
+        }
+      } else if (!enableNotifications) {
         emailSkipped = 'notifications_disabled';
       } else {
         const sendRes = await fetch(`${supabaseUrl}/functions/v1/send-email`, {
@@ -387,6 +404,7 @@ function renderItemTable(itemId: string, inv: {
 function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
+
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {

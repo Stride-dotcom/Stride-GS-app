@@ -22,6 +22,7 @@ import { Scanner } from './pages/Scanner';
 import { Labels } from './pages/Labels';
 import { Marketing } from './pages/Marketing';
 const TaskPage = React.lazy(() => import('./pages/TaskPage').then(m => ({ default: m.TaskPage })));
+const BatchPage = React.lazy(() => import('./pages/BatchPage').then(m => ({ default: m.BatchPage })));
 const WillCallPage = React.lazy(() => import('./pages/WillCallPage').then(m => ({ default: m.WillCallPage })));
 const RepairPage = React.lazy(() => import('./pages/RepairPage').then(m => ({ default: m.RepairPage })));
 const ShipmentPage = React.lazy(() => import('./pages/ShipmentPage').then(m => ({ default: m.ShipmentPage })));
@@ -137,6 +138,8 @@ export default function App() {
           <Route path="/inventory/:itemId" element={<React.Suspense fallback={<div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }}>Loading...</div>}><ItemPage /></React.Suspense>} />
           <Route path="/tasks" element={<Tasks />} />
           <Route path="/tasks/:taskId" element={<React.Suspense fallback={<div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }}>Loading...</div>}><TaskPage /></React.Suspense>} />
+          {/* D11 — batch parent order detail (derived from sub-tasks). */}
+          <Route path="/batches/:batchNo" element={<React.Suspense fallback={<div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }}>Loading...</div>}><BatchPage /></React.Suspense>} />
           <Route path="/repairs" element={<Repairs />} />
           <Route path="/repairs/:repairId" element={<React.Suspense fallback={<div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }}>Loading...</div>}><RepairPage /></React.Suspense>} />
           <Route path="/will-calls" element={<WillCalls />} />

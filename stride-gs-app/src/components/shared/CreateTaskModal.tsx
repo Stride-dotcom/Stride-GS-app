@@ -131,26 +131,9 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
   const [batchOptOut, setBatchOptOut] = useState(false);
   const batchMode = batchModeAvailable && !batchOptOut;
   const batchModeActive = batchMode;
-
-  // Mixed-class guard for batch mode: complete_task_atomic rates a
-  // class_based service (INSP and RUSH are class_based in the live catalog)
-  // from the batch task's PRIMARY item class only, billing rate × total qty
-  // — a batch spanning classes would mis-rate every other class. Block
-  // submit and explain; the EF rejects server-side too (backstop).
-  const classBasedSelected = useMemo(() => {
-    const classBased = new Set<string>();
-    for (const s of serviceCatalog) {
-      const c = String(s.code || '').trim().toUpperCase();
-      if (c && s.billing === 'class_based') classBased.add(c);
-    }
-    return Array.from(selectedCodes).filter(c => classBased.has(c));
-  }, [serviceCatalog, selectedCodes]);
-  const distinctItemClasses = useMemo(() => {
-    const set = new Set(items.map(i => String(i.itemClass || '').trim().toUpperCase()));
-    return Array.from(set);
-  }, [items]);
-  const batchClassConflict =
-    batchModeActive && classBasedSelected.length > 0 && distinctItemClasses.length > 1;
+  // D11: no mixed-class guard — each sub-task is a REAL single-item task
+  // that bills its own class rate via complete_task_atomic, so a batch can
+  // span item classes freely.
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<{ created: number; skippedCount: number; taskIds: string[] } | null>(null);
   const [error, setError] = useState('');
@@ -246,7 +229,7 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
   };
 
   const handleSubmit = async () => {
-    if (!selectedCodes.size || loading || batchClassConflict) return;
+    if (!selectedCodes.size || loading) return;
     setLoading(true);
     setError('');
 
@@ -258,11 +241,9 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
       || (priorityInput === 'Urgent' ? todayPT : '');
     const trimmedNotes = taskNotesInput.trim();
     if (addOptimisticTask) {
-      // batchMode: ONE temp task per svcCode (covering all items, primary =
-      // first item) — mirrors what the EF will create. Legacy: one per
-      // (item, svcCode).
-      const tempItems = batchModeActive ? items.slice(0, 1) : items;
-      tempItems.forEach((item, ii) => {
+      // One temp task per (item, svcCode) in BOTH modes — D11 batch subs
+      // are real per-item tasks, so the optimistic shape matches.
+      items.forEach((item, ii) => {
         Array.from(selectedCodes).forEach((code, ci) => {
           const tempId = `TEMP-${Date.now()}-${ii}-${ci}`;
           tempIds.push(tempId);
@@ -423,23 +404,24 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
             </div>
           ) : (
             <>
-              {/* BatchWorkItems — single batch task toggle (flag-gated,
-                  2+ items). D1: ON by default, at the TOP of the modal.
-                  One task per service covering ALL items, each tracked
-                  individually (Start/Pass/Fail + photos per item) on the
-                  task detail page. Staff uncheck to create per-item tasks. */}
+              {/* D11 — batch order toggle (flag-gated, 2+ items). ON by
+                  default, at the TOP of the modal (D1). One BATCH order
+                  number per service; every item becomes its own real
+                  sub-task (JUS-BATCH-12-63333) worked/billed/badged exactly
+                  like a standalone task. ONE summary email when the last
+                  sub completes (option B). Uncheck for unlinked tasks. */}
               {batchModeAvailable && (
                 <div onClick={() => setBatchOptOut(b => !b)} style={{ ...toggleStyle(batchMode), marginBottom: 16 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                     <Layers size={16} color={batchMode ? theme.colors.orange : theme.colors.textMuted} />
                     <div>
                       <div style={{ fontSize: 13, fontWeight: 600, color: batchMode ? theme.colors.orange : theme.colors.text }}>
-                        Create as one batch task
+                        Group into a batch order
                       </div>
                       <div style={{ fontSize: 10, color: theme.colors.textMuted }}>
-                        One task per service covering all {items.length} items — each item gets its own
-                        Start / Pass / Fail tracking and photos on the task.
-                        Uncheck to create a separate task per item.
+                        All {items.length} items go under one batch number — each item is still its own
+                        task to start and complete, and the client gets ONE summary email when the
+                        whole batch is done. Uncheck to create unlinked tasks.
                       </div>
                     </div>
                   </div>
@@ -467,23 +449,6 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
                   );
                 })}
               </div>
-
-              {batchClassConflict && (
-                <div style={{ padding: '10px 12px', borderRadius: 8, background: '#FEF2F2', border: '1px solid #FECACA', marginBottom: 16 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-                    <AlertTriangle size={14} color="#B91C1C" />
-                    <span style={{ fontSize: 12, fontWeight: 700, color: '#B91C1C' }}>
-                      Batch task can't mix item classes
-                    </span>
-                  </div>
-                  <div style={{ fontSize: 12, color: '#7F1D1D', lineHeight: 1.5 }}>
-                    {classBasedSelected.join(' + ')} bills by item class, and your selection spans{' '}
-                    {distinctItemClasses.length} classes ({distinctItemClasses.map(c => c || 'no class').join(', ')}).
-                    A single batch task would rate every piece at the first item's class.
-                    Select items of one class per batch, or turn off batch mode to create per-item tasks.
-                  </div>
-                </div>
-              )}
 
               {/* Advanced (optional): due date, notes, priority */}
               <div style={{ marginBottom: 16 }}>
@@ -653,12 +618,12 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
               </button>
               <button
                 onClick={handleSubmit}
-                disabled={loading || !selectedCodes.size || batchClassConflict}
+                disabled={loading || !selectedCodes.size}
                 style={{
                   padding: '12px 28px', border: 'none', borderRadius: 100,
-                  background: selectedCodes.size && !loading && !batchClassConflict ? theme.colors.orange : theme.colors.border,
-                  color: selectedCodes.size && !loading && !batchClassConflict ? '#fff' : theme.colors.textMuted,
-                  fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase', cursor: selectedCodes.size && !loading && !batchClassConflict ? 'pointer' : 'not-allowed',
+                  background: selectedCodes.size && !loading ? theme.colors.orange : theme.colors.border,
+                  color: selectedCodes.size && !loading ? '#fff' : theme.colors.textMuted,
+                  fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase', cursor: selectedCodes.size && !loading ? 'pointer' : 'not-allowed',
                   fontFamily: 'inherit', fontSize: 11,
                   display: 'flex', alignItems: 'center', gap: 6,
                 }}

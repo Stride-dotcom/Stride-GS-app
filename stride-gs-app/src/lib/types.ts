@@ -99,6 +99,9 @@ export interface Task {
    *  multiplies qty × rate when inserting the ledger row.
    *  Added 2026-05-21 with migration 20260521210000. */
   qty?: number;
+  /** D11 — parent batch order number (JUS-BATCH-N) when this task is a
+   *  sub-task of a batch creation; undefined for standalone tasks. */
+  batchNo?: string;
   taskFolderUrl?: string;
   shipmentFolderUrl?: string;
   shipmentPhotosUrl?: string;

@@ -108,6 +108,7 @@ function mapToAppTask(api: ApiTask): Task {
     customPrice: api.customPrice != null ? Number(api.customPrice) : undefined,
     taskFolderUrl: api.taskFolderUrl || undefined,
     shipmentFolderUrl: api.shipmentFolderUrl || undefined,
+    batchNo: api.batchNo || undefined,
   };
 }
 
@@ -260,6 +261,7 @@ export function useTasks(autoFetch = true, filterClientSheetId?: string | string
         shipmentFolderUrl: b.shipmentFolderUrl || undefined,
         dueDate: b.dueDate || undefined,
         priority: b.priority || undefined,
+        batchNo: b.batchNo || undefined,
       } as ApiTask));
     }
     // Individual path: resolve "(single)" clientName using the clients list
