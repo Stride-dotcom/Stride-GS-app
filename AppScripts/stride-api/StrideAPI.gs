@@ -1,4 +1,5 @@
 /* ===================================================
+   StrideAPI.gs — v38.273.0 — 2026-06-11 PST — [REPAIRS/MIGRATION] fix: __writeThroughReverseRepairs_ now auto-creates the multi-line quote columns before mirroring. The SB-primary send-repair-quote-sb writes quote_lines_json + the 7 quote total columns to public.repairs, then fires this reverse-writethrough to mirror them onto the per-tenant Repairs sheet. But the writer SKIPPED any column missing on the sheet (the `if (!col) continue` mapping guard) — and on a Repairs sheet predating the v38.123.0 multi-line columns (Quote Lines JSON / Quote Subtotal / Quote Taxable Subtotal / Quote Tax Area ID / Quote Tax Area Name / Quote Tax Rate / Quote Tax Amount / Quote Grand Total) the mirror silently dropped them. The very next full-client-sync (sbRepairRow_) then read those now-missing sheet cells as blank and pushed them back, NULLING quote_lines_json/subtotal/grand_total in Supabase while quote_amount (a column that DOES exist) survived — so a freshly-sent multi-line quote lost its breakdown and the React Quote Builder fell back to the legacy single-amount display (reported: RPR-63981-1781198414542, item 63981, quote_amount=210 but quote_lines_json=null). Fix: when the reverse payload carries any of the 8 quote columns, api_ensureColumn_ each missing one (matching what the legacy handleSendRepairQuote_ already does) and re-read the header map before mapping targets, so the mirror actually persists them and the sync round-trip stops clobbering the SB row. Non-destructive (appends missing headers, idempotent no-op when present); no change to the insert path, the v38.182 atomic invoice counter, half-write detection, or any billing logic.
    StrideAPI.gs — v38.272.0 — 2026-06-10 PST — [BILLING] fix: RUSH task completion now bills the TRUE piece count (Qty × rate) too, joining INSP. Same per-piece rule as v38.271.0 but extended to svc code RUSH: a rush inspection of a carton holding N pieces bills "Rush × N", not "× 1". billQty = staff-adjusted public.tasks.qty when > 1 (via api_fetchTaskQty_), else inventory qty, else 1; feeds the Qty cell + Total = appliedRate × billQty. handleCompleteTask_ gate broadened from (svcCode === INSP) to (svcCode === INSP OR svcCode === RUSH); every OTHER service code still stays Qty 1 per item ID (RCVG / ASM / REPAIR / WC / MNRTU / etc.). SB parity: complete_task_atomic v_eff_qty now multiplies tasks.qty for INSP OR RUSH (migration 20260610120100) + tasks.qty seeded from inventory.qty for RUSH at creation (batch-create-tasks-sb — the only canary path that mints RUSH tasks; complete-shipment-sb only auto-creates INSP/ASM) + a backfill for open RUSH tasks (migration 20260610120000). Mirror sheet-checkbox path in Triggers.gs v4.8.2. No schema change, no change to the v38.182 atomic invoice counter or half-write detection.
    StrideAPI.gs — v38.271.0 — 2026-06-09 PST — [BILLING] fix: INSPECTION task completion now bills the TRUE piece count (Qty × rate), not a hardcoded Qty 1. handleCompleteTask_ wrote every task-completion billing row with "Qty": 1 and Total = appliedRate regardless of how many pieces were inspected — so a carton holding N pieces billed "Inspection × 1 @ $25 = $25" instead of "× N". Fix is scoped to INSP ONLY: billQty = the staff-adjusted public.tasks.qty when > 1 (read from Supabase via new api_fetchTaskQty_ — that count lives Supabase-only; the per-tenant Tasks sheet does not mirror it, so e.g. item 64028 declared as 1 piece but inspected as 7 must read the task qty, not inventory), else the inventory item's qty, else 1. billQty feeds both the Qty cell and Total = appliedRate × billQty (custom-price path multiplies too — per-piece semantics). EVERY OTHER service code stays Qty 1 per item ID (RCVG / ASM / REPAIR / WC / MNRTU / etc. are deliberately 1-per-ID — only inspection is per-piece). SB-side parity: complete_task_atomic gated to multiply by tasks.qty for INSP only (migration 20260609160200) + tasks.qty populated from inventory.qty at INSP task creation (batch-create-tasks-sb, complete-shipment-sb, transfer-items-sb) + a backfill migration for open INSP tasks. No schema change, no change to the v38.182 atomic invoice counter, half-write detection, or any non-inspection billing.
    StrideAPI.gs — v38.270.0 — 2026-06-09 PST — [BILLING/MIGRATION] feat: __writeThroughReverseBilling_ supports op=delete — the SB-native storage commit (commit-storage-charges-sb → commit_storage_rows) removes the stale Unbilled STOR-SUMMARY rows it deleted from public.billing off the per-tenant Billing_Ledger sheet (e.g. blank→sidemark transitions). Finds the row by Ledger Row ID and deletes it, HARD-GUARDED to NEVER delete an Invoiced/Billed row (returns skipped) — only Unbilled/Void/blank; idempotent no-op (skipped) when already absent. Fleet-rollout prerequisite for the commitStorageCharges cutover (the SB commit could previously only insert/update the sheet mirror, stranding stale summaries that GAS invoicing on non-canary tenants could wrongly pick up). Companion: commit_storage_rows returns deletedLedgerIds; the EF fires op=delete for each before mirroring the new summaries. No change to dollar totals, the v38.182 atomic invoice counter, half-write detection, or any insert/update reverse-writethrough path.
@@ -4086,6 +4087,36 @@ function __writeThroughReverseRepairs_(ss, payload) {
   var hMap = api_getHeaderMap_(repSheet);
   var idCol = hMap["Repair ID"];
   if (!idCol) throw new Error("__writeThroughReverseRepairs_: 'Repair ID' column not found");
+
+  // v38.273.0 — ensure the multi-line quote columns exist before mapping.
+  // The legacy handleSendRepairQuote_ creates these via api_ensureColumn_,
+  // but the SB-primary path (send-repair-quote-sb → this writer) used to
+  // SKIP any column absent on the tenant's sheet (the `if (!col) continue`
+  // below). On a Repairs sheet predating the multi-line quote columns the
+  // mirror silently dropped quote_lines_json / quote_subtotal /
+  // quote_grand_total, and the very next full-client-sync (sbRepairRow_)
+  // read those now-missing cells as blank and NULLED them back in
+  // Supabase — leaving quote_amount set but the breakdown gone (the
+  // RPR-63981-* class of bug, 2026-06-11). Creating the columns when a
+  // quote field is present makes the mirror actually persist them, so the
+  // sync round-trip stops clobbering the SB row. Non-destructive: appends
+  // missing headers at the end, leaves existing data untouched, idempotent.
+  var QUOTE_REVERSE_KEYS_ = [
+    "quote_lines_json", "quote_subtotal", "quote_taxable_subtotal",
+    "quote_tax_area_id", "quote_tax_area_name", "quote_tax_rate",
+    "quote_tax_amount", "quote_grand_total"
+  ];
+  var ensuredAnyColumn = false;
+  for (var qk = 0; qk < QUOTE_REVERSE_KEYS_.length; qk++) {
+    var qKey = QUOTE_REVERSE_KEYS_[qk];
+    if (!row.hasOwnProperty(qKey)) continue;
+    var qHeader = REVERSE_REPAIR_FIELDS_[qKey];
+    if (qHeader && !hMap[qHeader]) {
+      api_ensureColumn_(repSheet, qHeader);
+      ensuredAnyColumn = true;
+    }
+  }
+  if (ensuredAnyColumn) hMap = api_getHeaderMap_(repSheet);
 
   // Resolve which targeted fields are present in the payload + map them
   // to column indexes. Skip unknown row keys silently — defensive against

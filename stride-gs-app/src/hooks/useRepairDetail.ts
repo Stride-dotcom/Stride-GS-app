@@ -109,6 +109,19 @@ export function useRepairDetail(repairId: string | undefined): UseRepairDetailRe
                   // Preserve the Supabase-loaded items[] — GAS path doesn't
                   // return repair_items and a naive spread wipes it.
                   items: prev.items,
+                  // Preserve the Supabase-resolved itemClass. The SB fetch
+                  // derives it from the inventory overlay (item_class on the
+                  // live inventory row — authoritative), whereas GAS reads the
+                  // Repairs sheet "Class" column, which is frequently blank for
+                  // repairs created from tasks / multi-item batches. A naive
+                  // `...gasRepair` spread therefore CLOBBERS a good 'M' with ''
+                  // the moment the background enrichment lands — and the Quote
+                  // Builder's class-based rate auto-fill (resolveCatalogRate in
+                  // RepairDetailPanel) then resolves nothing, so Restock /
+                  // Inspection / etc. stop pre-filling. That race is exactly why
+                  // the auto-fill "sometimes works, sometimes doesn't". Prefer
+                  // the SB value; fall back to GAS only when SB had none.
+                  itemClass: prev.itemClass || gasRepair.itemClass,
                 } : prev);
                 setSource('legacy');
               }
