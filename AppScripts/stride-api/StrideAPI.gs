@@ -1,4 +1,5 @@
 /* ===================================================
+   StrideAPI.gs — v38.280.0 — 2026-06-11 PST — [READS/MIGRATION] fix: the single-entity GAS READ handlers no longer revert SB-authoritative state — closes the RPR-63755 reopen-then-resend bug (reported as "status stays Pending Quote after resending the quote"; root cause was NOT the send handler — send-repair-quote-sb committed 'Quote Sent' at 23:17:50Z, audit-logged — but handleGetRepairById_'s best-effort cache hydrate: the repair page's background GAS enrichment read the per-tenant sheet while the EF's ~30s background mirror was still in flight, and full-row-upserted the stale 'Pending Quote' sheet row back over public.repairs, silently and unaudited; the customer's approve gate requires Quote Sent. Third door into the PR #739/#740/#753 status-revert class — reverse mirrors and bulk syncs were already guarded; the READ-path hydrate was not). handleGetRepairById_ / handleGetTaskById_ / handleGetWillCallById_ now hydrate via new api_hydrateReadCacheSbAware_: row exists in SB → upsert with that entity's SB-authoritative columns STRIPPED (repairs: SB_AUTHORITATIVE_REPAIR_COLS_; tasks: new SB_AUTHORITATIVE_TASK_COLS_ = status/result/started_at/completed_at/cancelled_at; will_calls: status — due_date/priority/qty/billed keep flowing per the v38.278.0 read-path field fix); CONFIRMED absent → full-row seed (legacy rows); SB unreachable → skip entirely (new generic api_sbRowExistsTriState_ — a cache warm is never worth a clobber). Bonus closed: the repair hydrate object carries NO quote_* fields, so every GAS single-repair read was ALSO NULLing quote_lines_json + the 7 quote totals on the SB row — an additional vector for the 42-repair null-back PR #753 addressed on the bulk paths. No EF/React/schema changes, no billing math, no change to the v38.182 atomic invoice counter or half-write detection.
    StrideAPI.gs — v38.279.0 — 2026-06-11 PST — [CLIENTS/MIGRATION] fix: client-settings reverts — the v38.274 strip's existence checks FAILED THE WRONG WAY. (1) resyncClientToSupabase_ (5-min reconcile cron) gated the app-authoritative strip on api_isKnownTenantId_, which returns false on ANY Supabase read failure — so a transient SB hiccup skipped the strip and FULL-ROW-upserted stale CB settings, reverting auto_inspection & friends (the recurring revert v38.274 was meant to stop). New tri-state api_sbClientExistsTriState_: exists → stripped upsert; confirmed-new → full row (onboarding first-sync); INDETERMINATE → skip the cycle entirely (no write; cron retries in 5 min). (2) handleBulkSyncClientsToSupabase_ fell back to FULL rows for every client when its existence prefetch failed — one transient failure = fleet-wide settings revert; now the sync ABORTS with SB_PREFETCH_FAILED and the operator re-runs. (3) APP_AUTHORITATIVE_CLIENT_COLS_ extended DEFENSIVELY with every remaining app/SB-authoritative column (payment_method_required, end_customer_pays_storage, billing_*, tax_*, resale_cert_*, notification_contacts, stax_customer_name, intake stamps) — no-ops today since sbClientRow_ doesn't project them, but future projection growth can't clobber. (4) REVERSE_CLIENTS_SB_ONLY_SETTINGS_ += end_customer_pays_storage → END_CUSTOMER_PAYS_STORAGE so COD-storage flips reach the per-tenant Settings tab. Companion (same PR): update-client-sb FIELD_MAP += billing contacts + payment_method_required + end_customer_pays_storage (single write path — React Settings' separate direct supabase.update() removed; it clobbered end_customer_pays_storage to false whenever the flag-gated COD toggle wasn't on the form); React maps payment_method_required in fetchClientsFromSupabase (was NEVER hydrated — the edit modal's !== false default coerced it to true and every client save re-wrote card-required ON, reverting grandfathered OFF clients); OnboardClientModal preserves undefined for unknown SB-only booleans (omit-on-save); push-client-settings-to-sheet MIRRORED_COLUMNS + trigger WHEN clause += end_customer_pays_storage (migration 20260611230000). Same incident class as the PR #753 repairs forward-sync fix: a stale sheet must never overwrite an SB-authoritative value. No billing math, invoice counter, or half-write detection changes.
    StrideAPI.gs — v38.278.0 — 2026-06-11 PST — [TASKS/MIGRATION] fix: two task field-gap sync paths no longer wipe due_date + priority on public.tasks. (1) handleGetTaskById_ (the deep-link / panel single-task READ) builds a task object from the sheet row and best-effort "hydrates" the Supabase cache via syncEntityToSupabase_ — but the object omitted Due Date + Priority, so sbTaskRow_ defaulted due_date=null + priority='Normal' and EVERY single-task GAS read silently wiped both fields on the SB row (observed: JUS-RUSH-16, 2026-06-11 — created with due-today + High at 21:08:36, wiped at 21:09:28 by the post-write GAS fallback read that followed a failed startTask; the sheet row itself held the correct values the whole time). (2) handleBulkSyncToSupabase_'s task mapping had the same two-field gap, so any operator-run bulk sync wiped them fleet-wide (api_fullClientSync_'s task scope was NOT affected — it has carried both since v38.213.0). Both call sites now map dueDate (formatDate_ of the Due Date cell, null when blank) + priority (Priority cell, 'Normal' default), mirroring the full-sync mapping. Same field-subset class as the quote_lines_json null-back (v38.273.0) — when adding ANY new SB task column, audit ALL FIVE sbTaskRow_ call sites (fullClientSync 9553 / resync 8945 / writeThroughReverse-retry 9208 / getTaskById hydrate 14758 / bulkSync 42170). No schema change, no billing logic touched, no change to the v38.182 atomic invoice counter or half-write detection.
    StrideAPI.gs — v38.277.0 — 2026-06-11 PST — [REPAIRS/MIGRATION] fix: the FORWARD sheet→SB repair sync no longer reverts SB-authoritative fields — closes the RPR-63950 approve-revert (customer Approve committed to public.repairs, the sheet mirror was lost, and every api_fullClientSync_ 'repair' scope — e.g. the one transferItems fires — re-upserted the sheet's stale 'Quote Sent' onto SB, reverting the approval TWICE, incl. once after the operator manually fixed it) and the 42-repair quote_lines_json null-back across 21 tenants (sheets predating the multi-line quote columns hold blank/missing cells; every bulk sync re-NULLed the SB breakdown — v38.273.0's lazy ensureColumn only protects the repair whose own quote-send mirror runs post-fix). Same status-revert class as PR #739/#740 but on the FORWARD path those PRs didn't cover. (1) New SB_AUTHORITATIVE_REPAIR_COLS_ (status, quote_amount, quote_sent_date, the 8 multi-line quote cols, repair_result, final_amount, completed_date, start_date) + api_bulkUpsertRepairsSbAware_: both BULK sheet→SB paths (api_fullClientSync_ 'repair' scope + handleBulkSyncToSupabase_) now prefetch the tenant's existing SB repair_ids (one PostgREST GET, fail-open to full rows) and upsert existing rows WITHOUT those columns (merge-duplicates preserves SB truth); new-to-SB rows still land in full so sheet-side creates (handleBatchRequestRepairQuote_) keep working. (2) Single-entity propagation (resyncEntityToSupabase_ / resyncEntitiesBatchToSupabase_ via api_writeThrough_) stays UNstripped — it carries a handler's own fresh write — but gains api_omitQuoteColsMissingOnSheet_: when the tenant's sheet lacks the quote COLUMNS entirely, omit those keys (preserve SB) while present-but-blank cells still propagate (handleVoidRepairQuote_'s clears must reach SB). (3) doPost reopenRepair case adds api_writeThrough_ like every other repair action — its status change previously reached SB only via the now-stripped bulk sync. (4) handleBulkSyncToSupabase_ repairs stale-delete REMOVED (matches the v38.220.0 api_fullClientSync_ decision; the sweep would delete legitimate SB-only multi-item repairs — the 2026-05-14 Seva RPR-63280 class). Trade-off documented: direct hand-edits in the Repairs sheet to the stripped columns no longer propagate to SB — correct repair status/quote data in the app. Companion EF deploys: respond-repair-quote-sb (idempotent-skip now self-heals SB status + re-fires the sheet mirror — the retry path that previously returned without mirroring, leaving the sheet permanently stale; main-path mirror now also carries approved=true), cancel-repair-sb + reopen-cancelled-repair-sb (skip paths now converge the sheet). No billing math, invoice counter, or half-write detection changes.
@@ -8889,6 +8890,95 @@ function deleteLocationFromSupabase_(code) {
  * @param {string} tenantId - clientSheetId
  * @param {Object} data - entity data in API response format
  */
+// v38.280.0 — SB-authoritative lifecycle columns for tasks + will_calls,
+// mirroring SB_AUTHORITATIVE_REPAIR_COLS_. The fleet-SB EFs (start/complete/
+// cancel task, cancel/update WC) own these end-to-end; a sheet-sourced
+// hydrate must never copy a stale cell over them. due_date/priority/qty/
+// billed deliberately keep flowing (v38.278.0 read-path field fix intent).
+var SB_AUTHORITATIVE_TASK_COLS_ = [
+  "status", "result", "started_at", "completed_at", "cancelled_at"
+];
+var SB_AUTHORITATIVE_WC_COLS_ = ["status"];
+
+/**
+ * v38.280.0 — Generic tri-state "does this row exist in public.<table>"
+ * check (the repairs/clients pattern, parameterized): true (exists),
+ * false (CONFIRMED absent), null (indeterminate — SB unreachable/non-2xx;
+ * callers must not guess).
+ */
+function api_sbRowExistsTriState_(table, idField, idValue, tenantId) {
+  if (!table || !idField || !idValue || !tenantId) return null;
+  try {
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) return null;
+    var resp = UrlFetchApp.fetch(
+      url + "/rest/v1/" + encodeURIComponent(table) + "?select=" + encodeURIComponent(idField) +
+        "&tenant_id=eq." + encodeURIComponent(tenantId) + "&" + encodeURIComponent(idField) +
+        "=eq." + encodeURIComponent(idValue) + "&limit=1",
+      {
+        method: "GET",
+        headers: { "Authorization": "Bearer " + key, "apikey": key },
+        muteHttpExceptions: true
+      }
+    );
+    if (resp.getResponseCode() < 200 || resp.getResponseCode() >= 300) return null;
+    var rows = JSON.parse(resp.getContentText());
+    if (!Array.isArray(rows)) return null;
+    return rows.length > 0;
+  } catch (e) {
+    Logger.log("api_sbRowExistsTriState_ error (indeterminate): " + e);
+    return null;
+  }
+}
+
+/**
+ * v38.280.0 — SB-aware read-path hydrate. The single-entity GAS READ
+ * handlers (handleGetRepairById_/handleGetTaskById_/handleGetWillCallById_)
+ * best-effort warm the Supabase cache from the sheet row they just read —
+ * but a READ carries no fresh intent, and the sheet can be STALE while an
+ * EF's background mirror is still in flight (~30s GAS round-trip). Pre-fix
+ * the hydrate full-row-upserted the stale sheet over public.<table>,
+ * silently reverting SB-authoritative state with no audit trail:
+ *   • RPR-63755 (2026-06-11): reopen → Pending Quote, send quote → SB
+ *     'Quote Sent' at 23:17:50Z (audited) — then the repair page's
+ *     background GAS enrichment (getRepairById) read the not-yet-mirrored
+ *     sheet and hydrated 'Pending Quote' back over SB. Customer couldn't
+ *     approve (approve gate shows on Quote Sent). Third door into the
+ *     PR #739/#740/#753 revert class.
+ *   • The repair hydrate object also carries NO quote_* fields, so every
+ *     GAS single-repair read NULLed quote_lines_json + the 7 totals — an
+ *     additional vector for the 42-repair null-back (PR #753).
+ * Behavior: row exists in SB → upsert with the entity's SB-authoritative
+ * columns STRIPPED (enrichment like folder URLs/notes still refreshes);
+ * confirmed absent → full-row seed (legacy rows the panel needs); SB
+ * unreachable → skip entirely (a cache warm is never worth a clobber).
+ */
+function api_hydrateReadCacheSbAware_(entityType, tenantId, data) {
+  try {
+    var cfg = null;
+    if (entityType === "repair") {
+      cfg = { table: "repairs", idField: "repair_id", idValue: String(data.repairId || ""), cols: SB_AUTHORITATIVE_REPAIR_COLS_ };
+    } else if (entityType === "task") {
+      cfg = { table: "tasks", idField: "task_id", idValue: String(data.taskId || ""), cols: SB_AUTHORITATIVE_TASK_COLS_ };
+    } else if (entityType === "will_call") {
+      cfg = { table: "will_calls", idField: "wc_number", idValue: String(data.wcNumber || ""), cols: SB_AUTHORITATIVE_WC_COLS_ };
+    }
+    if (!cfg) { syncEntityToSupabase_(entityType, tenantId, data); return; }
+    var exists = api_sbRowExistsTriState_(cfg.table, cfg.idField, cfg.idValue, tenantId);
+    if (exists === null) return;                       // indeterminate — never guess on a read
+    if (exists === false) { syncEntityToSupabase_(entityType, tenantId, data); return; }  // seed legacy row in full
+    var row;
+    if (entityType === "repair")        row = sbRepairRow_(tenantId, data);
+    else if (entityType === "task")     row = sbTaskRow_(tenantId, data);
+    else                                row = sbWillCallRow_(tenantId, data);
+    for (var i = 0; i < cfg.cols.length; i++) delete row[cfg.cols[i]];
+    supabaseUpsert_(cfg.table, row);
+  } catch (e) {
+    Logger.log("api_hydrateReadCacheSbAware_ error (non-fatal): " + e);
+  }
+}
+
 function syncEntityToSupabase_(entityType, tenantId, data) {
   try {
     switch (entityType) {
@@ -14859,7 +14949,9 @@ function handleGetTaskById_(clientSheetId, params) {
   };
 
   // Hydrate Supabase read cache for next time
-  try { syncEntityToSupabase_("task", clientSheetId, task); } catch (e) { /* best-effort */ }
+  // v38.280.0 — SB-aware: a READ must never copy a stale sheet status over
+  // the fleet-SB task lifecycle (the RPR-63755 revert class).
+  try { api_hydrateReadCacheSbAware_("task", clientSheetId, task); } catch (e) { /* best-effort */ }
 
   return jsonResponse_({ success: true, task: task });
 }
@@ -14978,7 +15070,8 @@ function handleGetWillCallById_(clientSheetId, params) {
   };
 
   // Hydrate Supabase read cache
-  try { syncEntityToSupabase_("will_call", clientSheetId, wc); } catch (e) { /* best-effort */ }
+  // v38.280.0 — SB-aware: see api_hydrateReadCacheSbAware_.
+  try { api_hydrateReadCacheSbAware_("will_call", clientSheetId, wc); } catch (e) { /* best-effort */ }
 
   return jsonResponse_({ success: true, willCall: wc });
 }
@@ -15080,7 +15173,11 @@ function handleGetRepairById_(clientSheetId, params) {
   };
 
   // Hydrate Supabase read cache
-  try { syncEntityToSupabase_("repair", clientSheetId, repair); } catch (e) { /* best-effort */ }
+  // v38.280.0 — SB-aware: the old full-row hydrate is what reverted
+  // RPR-63755's fresh 'Quote Sent' back to 'Pending Quote' (and NULLed
+  // quote_lines_json on every GAS single-repair read — this object never
+  // carried the quote_* fields). See api_hydrateReadCacheSbAware_.
+  try { api_hydrateReadCacheSbAware_("repair", clientSheetId, repair); } catch (e) { /* best-effort */ }
 
   return jsonResponse_({ success: true, repair: repair });
 }
