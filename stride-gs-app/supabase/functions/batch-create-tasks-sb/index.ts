@@ -111,11 +111,12 @@ Deno.serve(async (req: Request) => {
   const itemIds = Array.from(new Set(items.map(i => String(i.itemId).trim()).filter(Boolean)));
   const openMap = await buildOpenTaskMap(sb, tenantId, itemIds);
 
-  // Inventory qty per item id. INSPECTION tasks default qty to the item's
-  // TRUE piece count (a carton of N pieces bills "Inspection × N"); every
-  // other task type stays qty 1 (the public.tasks column default). Sourced
-  // from public.inventory rather than the request payload so it's correct
-  // regardless of what the caller sends. Best-effort: a miss leaves qty 1.
+  // Inventory qty per item id. INSPECTION and RUSH tasks default qty to the
+  // item's TRUE piece count (a carton of N pieces bills "Inspection × N" /
+  // "Rush × N"); every other task type stays qty 1 (the public.tasks column
+  // default). Sourced from public.inventory rather than the request payload so
+  // it's correct regardless of what the caller sends. Best-effort: a miss
+  // leaves qty 1.
   const invQtyByItem = await fetchInventoryQty(sb, tenantId, itemIds);
 
   // Per-item-per-svc counter cache. Filled lazily by maxExistingCounter().
@@ -206,7 +207,7 @@ Deno.serve(async (req: Request) => {
         task_notes:   taskNotes,
         created:      now.toISOString(),
         billed:       false,
-        qty:          svcCode === 'INSP' ? (invQtyByItem[itemId] ?? 1) : 1,
+        qty:          (svcCode === 'INSP' || svcCode === 'RUSH') ? (invQtyByItem[itemId] ?? 1) : 1,
         priority,
         due_date:     dueDateIso,
         updated_at:   now.toISOString(),
