@@ -356,6 +356,8 @@ interface SupabaseTaskRow {
   due_date: string | null;
   priority: string | null;
   qty: number | null;
+  /** D11 batch parent order number (JUS-BATCH-N) — NULL for standalone tasks. */
+  batch_no: string | null;
 }
 
 /**
@@ -1278,6 +1280,7 @@ function mapSupabaseTaskRow(row: SupabaseTaskRow, clientNameMap?: ClientNameMap)
     shipmentFolderUrl: row.shipment_folder_url || '',
     dueDate: row.due_date || undefined,
     priority: (row.priority === 'High' ? 'High' : 'Normal') as 'High' | 'Normal',
+    batchNo: row.batch_no || undefined,
   };
 }
 
@@ -1798,6 +1801,7 @@ export async function fetchDashboardSummaryFromSupabase(
       location: row.location || '',
       taskFolderUrl: row.task_folder_url || '',
       shipmentFolderUrl: row.shipment_folder_url || '',
+      batchNo: row.batch_no || undefined,
     }));
 
     const repairs: SummaryRepair[] = ((repairsRes.data || []) as SupabaseRepairRow[]).map(row => ({

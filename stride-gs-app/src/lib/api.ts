@@ -389,6 +389,8 @@ export interface ApiTask {
   repairPhotosUrl?: string;
   dueDate?: string;
   priority?: string;
+  /** D11 — parent batch order number (JUS-BATCH-N); undefined when standalone. */
+  batchNo?: string;
 }
 
 export interface TasksResponse {
@@ -3129,6 +3131,9 @@ export interface BatchCreateTasksResponse {
   created: number;
   skipped: Array<{ itemId: string; svcCode: string; reason: string }>;
   taskIds: string[];
+  /** D11 — parent batch order numbers minted (one per svcCode with 2+
+   *  eligible items); absent when no batch was created. */
+  batchNos?: string[];
   error?: string;
 }
 
@@ -4581,6 +4586,8 @@ export interface SummaryTask {
   shipmentNumber?: string;
   taskFolderUrl?: string;
   shipmentFolderUrl?: string;
+  /** D11 — parent batch order number (JUS-BATCH-N); undefined when standalone. */
+  batchNo?: string;
 }
 
 export interface SummaryRepair {

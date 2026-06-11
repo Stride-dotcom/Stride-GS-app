@@ -82,7 +82,7 @@ const PRIORITY_CFG: Record<string, { bg: string; text: string }> = {
 };
 
 const COL_LABELS: Record<string, string> = {
-  taskId: 'Task ID', type: 'Type', status: 'Status', itemId: 'Item',
+  taskId: 'Task ID', batchNo: 'Batch', type: 'Type', status: 'Status', itemId: 'Item',
   clientName: 'Client', vendor: 'Vendor', description: 'Description',
   location: 'Location', sidemark: 'Sidemark', reference: 'Reference', assignedTo: 'Assigned',
   created: 'Created', dueDate: 'Due Date', priority: 'Priority',
@@ -92,7 +92,7 @@ const COL_LABELS: Record<string, string> = {
 const TOGGLEABLE = Object.keys(COL_LABELS);
 
 const DEFAULT_COL_ORDER = [
-  'select', 'taskId', 'type', 'status', 'itemId', 'clientName', 'vendor',
+  'select', 'taskId', 'batchNo', 'type', 'status', 'itemId', 'clientName', 'vendor',
   'description', 'location', 'sidemark', 'reference', 'assignedTo', 'created',
   'dueDate', 'priority', 'completedAt', 'result', 'taskNotes', 'svcCode', 'billed', 'actions',
 ];
@@ -145,6 +145,19 @@ function cols(
       return <span
         style={{ fontWeight: 600, fontSize: 12, color: theme.colors.orange, cursor: 'pointer' }}
         onClick={e => { e.stopPropagation(); navigate(`/tasks/${encodeURIComponent(val)}${csid ? `?client=${encodeURIComponent(csid)}` : ''}`); }}
+        onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
+        onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
+      >{val}</span>;
+    } }),
+    // D11 — parent batch order number for batch sub-tasks. Links to the
+    // batch detail page (progress + every sub in the batch).
+    col.accessor('batchNo', { header: 'Batch', size: 110, filterFn: multiFilter, cell: i => {
+      const val = i.getValue() as string | undefined;
+      if (!val) return <span style={{ color: theme.colors.textMuted, fontSize: 12 }}>{'—'}</span>;
+      const csid = i.row.original.clientSheetId;
+      return <span
+        style={{ fontWeight: 600, fontSize: 12, fontFamily: 'monospace', color: theme.colors.orange, cursor: 'pointer' }}
+        onClick={e => { e.stopPropagation(); navigate(`/batches/${encodeURIComponent(val)}${csid ? `?client=${encodeURIComponent(csid)}` : ''}`); }}
         onMouseEnter={e => (e.currentTarget.style.textDecoration = 'underline')}
         onMouseLeave={e => (e.currentTarget.style.textDecoration = 'none')}
       >{val}</span>;
