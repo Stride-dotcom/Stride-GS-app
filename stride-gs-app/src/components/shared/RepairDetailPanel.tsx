@@ -1092,7 +1092,13 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   // work on any item of an Approved repair starts the repair (work has
   // physically begun); resolving the last item completes it with the
   // aggregate result through the existing billing/email/PDF flow.
-  const handleBatchItemStatusChange = () => {
+  const handleBatchItemStatusChange = (_itemId: string, _status: string, summary: BatchStatusSummary) => {
+    // Skip the auto-start when this same write resolved the batch —
+    // onBatchComplete fires right after and owns the lifecycle transition.
+    // Firing start + complete on the same tick is the start/complete race
+    // class from the 06/01 incident + PR #739 (stale start mirror reverting
+    // a completed repair); handleComplete is safe from Approved directly.
+    if (summary.isAllComplete) return;
     if (effectiveStatus === 'Approved') void handleStartRepair();
   };
   const handleBatchComplete = (aggregate: 'Pass' | 'Fail') => {

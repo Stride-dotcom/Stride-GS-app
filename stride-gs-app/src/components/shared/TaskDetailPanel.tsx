@@ -757,7 +757,12 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
   // Starting (or directly resolving) an item of an Open task starts the
   // task — work has physically begun; resolving the last item completes
   // the task with the aggregate result through the existing billing flow.
-  const handleBatchItemStatusChange = () => {
+  const handleBatchItemStatusChange = (_itemId: string, _status: string, summary: BatchStatusSummary) => {
+    // Skip the auto-start when this same write resolved the batch —
+    // onBatchComplete fires right after and owns the lifecycle transition.
+    // Never fire startTask + completeTask on the same tick (the 06/01
+    // start/complete race; completeTask handles Open → Completed fine).
+    if (summary.isAllComplete) return;
     if (task.status === 'Open' && !isAlreadyStarted) void handleStartTask();
   };
   const handleBatchComplete = (aggregate: 'Pass' | 'Fail') => {
