@@ -10,6 +10,7 @@
  */
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { maybeSendBatchSummary } from '../_shared/batch-summary.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -49,7 +50,7 @@ Deno.serve(async (req: Request) => {
   // Single SELECT to grab current statuses for all ids.
   const { data: existing, error: readErr } = await sb
     .from('tasks')
-    .select('task_id, status')
+    .select('task_id, status, batch_no')
     .eq('tenant_id', tenantId)
     .in('task_id', taskIds);
   if (readErr) {
@@ -92,6 +93,31 @@ Deno.serve(async (req: Request) => {
         }).then(() => {}, () => {});
         void mirror(tenantId, id, { status: 'Cancelled', cancelled_at: nowIso }, requestId, callerEmail, sb);
       }
+    }
+  }
+
+  // D11 option B: cancellations can be the LAST terminal event of a batch —
+  // fire the (idempotent) summary check once per distinct batch touched.
+  if (result.succeeded > 0) {
+    const batchNosTouched = new Set<string>();
+    for (const r of (existing ?? []) as Array<{ task_id: string; batch_no?: string | null }>) {
+      const bn = String(r.batch_no ?? '').trim();
+      if (bn && toCancel.includes(r.task_id)) batchNosTouched.add(bn);
+    }
+    if (batchNosTouched.size > 0) {
+      try {
+        const { data: clientRow } = await sb
+          .from('clients').select('name, enable_notifications')
+          .eq('tenant_id', tenantId).maybeSingle();
+        const clientName = String((clientRow as { name?: string } | null)?.name ?? 'Client');
+        const notif = !!(clientRow as { enable_notifications?: boolean } | null)?.enable_notifications;
+        for (const bn of batchNosTouched) {
+          const summary = await maybeSendBatchSummary(sb, supabaseUrl, serviceKey, tenantId, bn, clientName, notif);
+          if (summary !== 'pending' && summary !== 'sent' && summary !== 'all_cancelled' && summary !== 'notifications_disabled') {
+            console.error('[batch-cancel-tasks-sb] batch summary failed:', bn, summary);
+          }
+        }
+      } catch (e) { console.warn('[batch-cancel-tasks-sb] batch summary threw:', e); }
     }
   }
 

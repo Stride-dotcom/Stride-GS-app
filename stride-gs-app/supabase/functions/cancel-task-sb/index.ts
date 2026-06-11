@@ -10,6 +10,7 @@
  */
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { maybeSendBatchSummary } from '../_shared/batch-summary.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -36,7 +37,7 @@ Deno.serve(async (req: Request) => {
 
   const { data: prev, error: prevErr } = await sb
     .from('tasks')
-    .select('task_id, status')
+    .select('task_id, status, batch_no')
     .eq('tenant_id', tenantId)
     .eq('task_id', taskId)
     .maybeSingle();
@@ -70,6 +71,27 @@ Deno.serve(async (req: Request) => {
   }).then(() => {}, () => {});
 
   void mirror(tenantId, taskId, { status: 'Cancelled', cancelled_at: nowIso }, requestId, callerEmail, sb);
+
+  // D11 option B: if this cancellation made the whole batch terminal, the
+  // summary email still has to go out (complete-task can't fire it — no
+  // completion event ran). Best-effort; idempotent on
+  // batch-complete:{tenant}:{batchNo}.
+  const batchNo = String((prev as { batch_no?: string }).batch_no ?? '').trim();
+  if (batchNo) {
+    try {
+      const { data: clientRow } = await sb
+        .from('clients').select('name, enable_notifications')
+        .eq('tenant_id', tenantId).maybeSingle();
+      const summary = await maybeSendBatchSummary(
+        sb, supabaseUrl, serviceKey, tenantId, batchNo,
+        String((clientRow as { name?: string } | null)?.name ?? 'Client'),
+        !!(clientRow as { enable_notifications?: boolean } | null)?.enable_notifications,
+      );
+      if (summary !== 'pending' && summary !== 'sent' && summary !== 'all_cancelled' && summary !== 'notifications_disabled') {
+        console.error('[cancel-task-sb] batch summary failed:', summary);
+      }
+    } catch (e) { console.warn('[cancel-task-sb] batch summary threw:', e); }
+  }
 
   return json({ success: true, taskId, message: 'Task cancelled' });
 });

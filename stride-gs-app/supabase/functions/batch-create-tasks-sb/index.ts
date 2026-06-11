@@ -219,16 +219,27 @@ Deno.serve(async (req: Request) => {
     for (const svcCode of svcCodes) {
       const svcName = svcMetaBySvcCode[svcCode]?.name ?? svcCode;
       const eligible: ItemPayload[] = [];
+      // Intra-request duplicate guard: eligibility runs BEFORE openMap gets
+      // marked (the insert loop below), so a duplicate itemId in the payload
+      // would otherwise pass twice → two identical {batchNo}-{itemId} task
+      // ids → the whole insert 500s on UNIQUE(tenant_id, task_id). The
+      // modal sends unique rows; this is the server-side backstop.
+      const seenThisSvc = new Set<string>();
       for (const item of items) {
         const itemId = String(item.itemId).trim();
         if (!itemId) {
           skipped.push({ itemId, svcCode, reason: 'blank itemId' });
           continue;
         }
+        if (seenThisSvc.has(itemId)) {
+          skipped.push({ itemId, svcCode, reason: 'duplicate itemId in request' });
+          continue;
+        }
         if (openMap[`${itemId}|${svcCode}`]) {
           skipped.push({ itemId, svcCode, reason: `open ${svcCode} task already exists` });
           continue;
         }
+        seenThisSvc.add(itemId);
         eligible.push(item);
       }
       if (eligible.length === 0) continue;
