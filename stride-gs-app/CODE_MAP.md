@@ -102,7 +102,7 @@ Operational tasks (Inspect, Assemble, Move, etc.) per inventory item.
 | Pages | `src/pages/Tasks.tsx`, `src/pages/TaskPage.tsx`, `src/pages/TaskJobPage.tsx` (legacy) |
 | Hooks | `src/hooks/useTasks.ts`, `src/hooks/useTaskDetail.ts` |
 | Components | `src/components/shared/TaskDetailPanel.tsx`, `src/components/shared/CreateTaskModal.tsx` |
-| Migrations | `20260420000000_tasks_due_date_priority.sql` (due_date + priority columns), `20260610120100_complete_task_atomic_insp_rush_qty.sql` (per-piece billing — `complete_task_atomic` multiplies `tasks.qty` for INSP **and** RUSH, else 1; extends the INSP-only `20260609160200`), `20260610120000_backfill_rush_task_qty.sql` (seed open RUSH tasks' qty from inventory.qty) |
+| Migrations | `20260420000000_tasks_due_date_priority.sql` (due_date + priority columns), `20260610120100_complete_task_atomic_insp_rush_qty.sql` (per-piece billing — `complete_task_atomic` multiplies `tasks.qty` for INSP **and** RUSH, else 1; extends the INSP-only `20260609160200`), `20260610120000_backfill_rush_task_qty.sql` (seed open RUSH tasks' qty from inventory.qty), `20260610130000_complete_task_atomic_resolve_svc_by_name.sql` (resolve svc by code OR name + gate qty on resolved code, so RUSH/INSP price + multiply whether `tasks.type` is the code or the service name) |
 | Apps Script | `AppScripts/stride-client-inventory/src/Tasks.gs` (task CRUD + completion) |
 
 ---
