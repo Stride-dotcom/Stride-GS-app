@@ -3105,6 +3105,8 @@ interface SupabaseClientRow {
   billing_address: string | null;
   // COD Storage (Supabase-only)
   end_customer_pays_storage: boolean | null;
+  // Card-on-file requirement (Supabase-only, drives intake Step 4 copy)
+  payment_method_required: boolean | null;
 }
 
 export async function fetchClientsFromSupabase(
@@ -3147,6 +3149,10 @@ export async function fetchClientsFromSupabase(
       billingEmail:       row.billing_email ?? '',
       billingAddress:     row.billing_address ?? '',
       endCustomerPaysStorage: row.end_customer_pays_storage ?? false,
+      // Was never mapped — so the edit modal's `!== false` default coerced
+      // the missing field to TRUE and every client save re-wrote
+      // payment_method_required=true, reverting grandfathered OFF clients.
+      paymentMethodRequired: row.payment_method_required ?? undefined,
     }));
 
     return { clients, count: clients.length };

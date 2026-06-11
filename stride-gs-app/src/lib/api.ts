@@ -233,6 +233,11 @@ export interface ApiClient {
    *  CB Clients column, no GAS round-trip). When true, items received for this
    *  client are auto-flagged cod_storage so end customers pay storage. */
   endCustomerPaysStorage?: boolean;
+  /** Card-on-file requirement (Supabase-only — drives the intake form's
+   *  Step 4 copy variant). undefined when the source fetch didn't carry it
+   *  (GAS fallback path) — consumers must NOT coerce undefined to a
+   *  default before writing it back. */
+  paymentMethodRequired?: boolean;
 }
 
 export interface ClientsResponse {
@@ -3008,6 +3013,17 @@ export interface UpdateClientPayload {
   webAppUrl?: string;
   syncToSheet?: boolean;       // Default true — push to client Settings tab
   parentClient?: string;
+  /** Supabase-only settings (no CB Clients column). Routed through
+   *  update-client-sb's FIELD_MAP so the EF is the single write path —
+   *  previously Settings.tsx wrote these via a separate direct
+   *  supabase.update() after this call, which clobbered
+   *  end_customer_pays_storage to false whenever the (flag-gated) COD
+   *  toggle wasn't on the form. Omit a field to leave it untouched. */
+  billingContactName?: string;
+  billingEmail?: string;
+  billingAddress?: string;
+  paymentMethodRequired?: boolean;
+  endCustomerPaysStorage?: boolean;
 }
 
 export interface UpdateClientResponse {

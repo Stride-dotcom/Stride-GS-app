@@ -2427,33 +2427,24 @@ export function Settings() {
         const res = await postUpdateClient({
           spreadsheetId: data.spreadsheetId,
           ...schemaPayload,
+          // Supabase-only settings ride the SAME update call now (update-client-sb
+          // FIELD_MAP carries them, partial semantics). The old pattern — a
+          // separate direct supabase.update() AFTER this call — was a second
+          // write path that (a) clobbered end_customer_pays_storage to false
+          // whenever the flag-gated COD toggle wasn't on the form
+          // (`=== true` coerced undefined → false), and (b) bypassed the EF's
+          // audit log + sheet mirror. Booleans are sent only when the form
+          // actually carries them; absent = leave the saved value untouched.
+          ...(typeof data.billingContactName === 'string' ? { billingContactName: data.billingContactName } : {}),
+          ...(typeof data.billingEmail === 'string' ? { billingEmail: data.billingEmail } : {}),
+          ...(typeof data.billingAddress === 'string' ? { billingAddress: data.billingAddress } : {}),
+          ...(typeof data.paymentMethodRequired === 'boolean' ? { paymentMethodRequired: data.paymentMethodRequired } : {}),
+          ...(typeof data.endCustomerPaysStorage === 'boolean' ? { endCustomerPaysStorage: data.endCustomerPaysStorage } : {}),
           syncToSheet: true,
         });
         setClientActionLoading(false);
         if (res.data?.success) {
           setUpdateResult(res.data);
-
-          // v38.159.0 — Persist Supabase-only billing contact fields after
-          // the GAS update succeeds. Same pattern as the create-mode tax
-          // fields above. Best-effort — never blocks the success return on
-          // a Supabase failure (the GAS-side legacy fields already landed).
-          if (data.spreadsheetId) {
-            try {
-              await supabase
-                .from('clients')
-                .update({
-                  billing_contact_name: data.billingContactName || null,
-                  billing_email:        data.billingEmail        || null,
-                  billing_address:      data.billingAddress      || null,
-                  payment_method_required: data.paymentMethodRequired,
-                  // COD Storage — Supabase-only (auto-flags received items).
-                  end_customer_pays_storage: data.endCustomerPaysStorage === true,
-                })
-                .eq('spreadsheet_id', data.spreadsheetId);
-            } catch (billingErr) {
-              console.warn('[update] billing contact save failed (non-blocking):', billingErr);
-            }
-          }
 
           // Force bypass GAS 600s cache — otherwise refetch returns stale data
           // and overwrites the optimistic patch, making changes appear to revert.

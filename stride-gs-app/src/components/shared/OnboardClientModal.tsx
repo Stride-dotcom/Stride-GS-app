@@ -28,9 +28,12 @@ export interface OnboardClientFormData {
   // three fields drive the invoice email and the QBO BillEmail
   // inheritance. Written directly to Supabase by the submit handler
   // — no CB Clients sheet column, no GAS round-trip.
-  billingContactName: string;
-  billingEmail: string;
-  billingAddress: string;
+  /** Supabase-only billing contacts. undefined = unknown (the source fetch
+   *  didn't carry them, e.g. the GAS fallback) — the save omits undefined
+   *  fields so a previously-saved value is never blanked by a stale form. */
+  billingContactName: string | undefined;
+  billingEmail: string | undefined;
+  billingAddress: string | undefined;
   // Billing
   qbCustomerName: string;
   staxCustomerName: string;
@@ -48,10 +51,13 @@ export interface OnboardClientFormData {
   autoCharge: boolean;
   /** v2 — when ON, the intake form's Step 4 shows the "required" copy
    *  variant. When OFF, Step 4 shows the "encouraged but not required"
-   *  variant (grandfathered terms-only clients). */
-  paymentMethodRequired: boolean;
+   *  variant (grandfathered terms-only clients).
+   *  undefined = unknown (source fetch didn't carry the Supabase-only
+   *  field) — the save omits it so the stored value is left untouched. */
+  paymentMethodRequired: boolean | undefined;
   // COD Storage (Supabase-only) — auto-flag received items as cod_storage.
-  endCustomerPaysStorage: boolean;
+  // undefined = unknown, same omit-on-save semantics as above.
+  endCustomerPaysStorage: boolean | undefined;
   // Active
   active: boolean;
   // Parent/child
@@ -218,9 +224,11 @@ function buildInitialData(existing: ApiClient | null): OnboardClientFormData {
     clientEmail: existing.email,
     contactName: existing.contactName || '',
     phone: existing.phone || '',
-    billingContactName: existing.billingContactName || '',
-    billingEmail:       existing.billingEmail       || '',
-    billingAddress:     existing.billingAddress     || '',
+    // Preserve undefined when the fetch didn't carry these SB-only fields
+    // (GAS fallback) — same omit-on-save semantics as the booleans below.
+    billingContactName: typeof existing.billingContactName === 'string' ? existing.billingContactName : undefined,
+    billingEmail:       typeof existing.billingEmail === 'string' ? existing.billingEmail : undefined,
+    billingAddress:     typeof existing.billingAddress === 'string' ? existing.billingAddress : undefined,
     qbCustomerName: existing.qbCustomerName || '',
     staxCustomerName: existing.staxCustomerName || '',
     staxCustomerId: existing.staxCustomerId || '',
@@ -234,8 +242,16 @@ function buildInitialData(existing: ApiClient | null): OnboardClientFormData {
     autoInspection: existing.autoInspection !== false,
     separateBySidemark: existing.separateBySidemark === true,
     autoCharge: existing.autoCharge === true,
-    paymentMethodRequired: (existing as ApiClient & { paymentMethodRequired?: boolean }).paymentMethodRequired !== false,
-    endCustomerPaysStorage: existing.endCustomerPaysStorage === true,
+    // Preserve undefined when the source fetch didn't carry these
+    // Supabase-only fields (GAS fallback / stale echo). The old coercions
+    // (`!== false` / `=== true`) turned "unknown" into a concrete value that
+    // the save then WROTE BACK — silently flipping payment_method_required
+    // to true (reverting grandfathered OFF clients) and
+    // end_customer_pays_storage to false on every unrelated client edit.
+    // undefined here → Settings.tsx omits the field from the update payload
+    // → the saved value is left untouched.
+    paymentMethodRequired: typeof existing.paymentMethodRequired === 'boolean' ? existing.paymentMethodRequired : undefined,
+    endCustomerPaysStorage: typeof existing.endCustomerPaysStorage === 'boolean' ? existing.endCustomerPaysStorage : undefined,
     active: existing.active !== false,
     parentClient: existing.parentClient || '',
     importInventoryUrl: '',
@@ -527,7 +543,7 @@ export function OnboardClientModal({ mode = 'create', existingClient = null, all
                   <span>Billing Contact Name</span>
                   <InfoTooltip text="Name of the billing/AP contact at the client. Optional — used as the salutation on invoice emails when set." />
                 </label>
-                <input value={data.billingContactName} onChange={e => set('billingContactName', e.target.value)}
+                <input value={data.billingContactName ?? ''} onChange={e => set('billingContactName', e.target.value)}
                   placeholder="e.g., Accounts Payable" style={inp} />
               </div>
               <div>
@@ -535,7 +551,7 @@ export function OnboardClientModal({ mode = 'create', existingClient = null, all
                   <span>Billing Email</span>
                   <InfoTooltip text="Email address(es) that should receive invoices. Multi-recipient supported (comma-separated) for the Stride invoice email; QBO uses the first address only. Leave blank to fall back to Notification Emails above." />
                 </label>
-                <input type="email" value={data.billingEmail} onChange={e => set('billingEmail', e.target.value)}
+                <input type="email" value={data.billingEmail ?? ''} onChange={e => set('billingEmail', e.target.value)}
                   placeholder="ap@client.com" style={inp} />
               </div>
               <div style={{ gridColumn: '1 / -1' }}>
@@ -543,7 +559,7 @@ export function OnboardClientModal({ mode = 'create', existingClient = null, all
                   <span>Billing Address</span>
                   <InfoTooltip text="Optional — only set when the billing mailing address differs from the operational address. Currently informational; not yet used by the invoice flow." />
                 </label>
-                <textarea value={data.billingAddress} onChange={e => set('billingAddress', e.target.value)}
+                <textarea value={data.billingAddress ?? ''} onChange={e => set('billingAddress', e.target.value)}
                   placeholder="If different from the business address" rows={2}
                   style={{ ...inp, fontFamily: 'inherit', resize: 'vertical' }} />
               </div>
@@ -636,7 +652,11 @@ export function OnboardClientModal({ mode = 'create', existingClient = null, all
                 { key: 'autoCharge', label: 'Auto Charge', desc: 'Auto-charge payments on due date', tip: 'When ON, Stax invoices for this client are automatically charged on their due date by the daily auto-charge trigger (9 AM Pacific). When OFF, invoices must be charged manually from the Payments page. Individual invoices can still override this setting.' },
                 { key: 'paymentMethodRequired', label: 'Card Required', desc: 'Card on file required at intake', tip: 'When ON, the client\'s intake form Step 4 shows the "required" copy variant — they must set up a payment method on Paymnt.io before submitting. When OFF, Step 4 shows the "encouraged but not required" variant — used for grandfathered terms-only clients with clean payment history. Defaults to ON for new clients; existing clients without a Stax customer ID were migrated to OFF.' },
               ] as const).map(f => (
-                <div key={f.key} onClick={() => set(f.key, !data[f.key])} style={toggleStyle(data[f.key])}>
+                // `=== true` — paymentMethodRequired can be undefined (unknown,
+                // GAS-fallback fetch). Display coerces for the strict-boolean
+                // toggle helpers; clicking sets a concrete boolean. An untouched
+                // undefined field is omitted from the save payload entirely.
+                <div key={f.key} onClick={() => set(f.key, !(data[f.key] === true))} style={toggleStyle(data[f.key] === true)}>
                   <div>
                     <div style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4 }}>
                       {f.label}
@@ -644,7 +664,7 @@ export function OnboardClientModal({ mode = 'create', existingClient = null, all
                     </div>
                     <div style={{ fontSize: 10, opacity: 0.75, marginTop: 1 }}>{f.desc}</div>
                   </div>
-                  {toggleDot(data[f.key])}
+                  {toggleDot(data[f.key] === true)}
                 </div>
               ))}
               {isEdit && (
@@ -660,7 +680,7 @@ export function OnboardClientModal({ mode = 'create', existingClient = null, all
                 </div>
               )}
               {codStorageEnabled && (
-                <div onClick={() => set('endCustomerPaysStorage', !data.endCustomerPaysStorage)} style={toggleStyle(data.endCustomerPaysStorage)}>
+                <div onClick={() => set('endCustomerPaysStorage', !(data.endCustomerPaysStorage === true))} style={toggleStyle(data.endCustomerPaysStorage === true)}>
                   <div>
                     <div style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4 }}>
                       End Customer Pays Storage
@@ -668,7 +688,7 @@ export function OnboardClientModal({ mode = 'create', existingClient = null, all
                     </div>
                     <div style={{ fontSize: 10, opacity: 0.75, marginTop: 1 }}>Auto-flag received items as COD storage</div>
                   </div>
-                  {toggleDot(data.endCustomerPaysStorage)}
+                  {toggleDot(data.endCustomerPaysStorage === true)}
                 </div>
               )}
             </div>

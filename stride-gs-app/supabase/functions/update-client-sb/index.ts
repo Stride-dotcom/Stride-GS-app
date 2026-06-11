@@ -56,13 +56,27 @@ const FIELD_MAP: Record<string, string> = {
   notes:                   'notes',
   shipmentNote:            'shipment_note',
   active:                  'active',
+  // Supabase-only client settings (no CB Clients column). Previously React
+  // Settings wrote these via a SEPARATE direct supabase.update() after
+  // postUpdateClient — a second write path that clobbered
+  // end_customer_pays_storage to false whenever the form didn't carry the
+  // field (the flag-gated COD toggle), and that the EF's mirror never saw.
+  // Routing them through this EF makes it the single client-settings write
+  // path: partial semantics (absent field = untouched) + audit + mirror.
+  billingContactName:      'billing_contact_name',
+  billingEmail:            'billing_email',
+  billingAddress:          'billing_address',
+  paymentMethodRequired:   'payment_method_required',
+  endCustomerPaysStorage:  'end_customer_pays_storage',
 };
 
 const BOOL_FIELDS = new Set([
   'enable_receiving_billing', 'enable_shipment_email', 'enable_notifications',
   'auto_inspection', 'separate_by_sidemark', 'auto_charge', 'active',
+  'payment_method_required', 'end_customer_pays_storage',
 ]);
 const NUM_FIELDS = new Set(['free_storage_days', 'discount_storage_pct', 'discount_services_pct']);
+const NULL_WHEN_EMPTY = new Set(['billing_contact_name', 'billing_email', 'billing_address']);
 
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
@@ -83,6 +97,10 @@ Deno.serve(async (req: Request) => {
     if (BOOL_FIELDS.has(col)) val = val === true || val === 'true' || val === 'TRUE';
     else if (NUM_FIELDS.has(col)) val = val === null || val === '' ? null : Number(val);
     else val = val === null ? null : String(val);
+    // Billing contacts store NULL for "not set", never '' — the QBO
+    // billing-contact backfill targets `billing_email is.null`, and an
+    // empty string would silently exclude a row from that sweep.
+    if (NULL_WHEN_EMPTY.has(col) && val === '') val = null;
     updates[col] = val;
     echoUpdated[key] = val;
   }
