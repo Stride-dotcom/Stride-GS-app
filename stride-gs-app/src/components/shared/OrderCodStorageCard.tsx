@@ -49,6 +49,10 @@ function fmtCurrency(n: number): string {
   return `$${(n || 0).toFixed(2)}`;
 }
 
+// service_catalog "Daily Storage" accessorial — the charge line the COD amount
+// drives on a customer-collect order so it rolls into the order total + DT.
+const COD_STORAGE_SVC_CODE = 'STOR';
+
 /** Build the persisted snake_case detail snapshot from the EF preview's
  *  billable items (source of truth for the DT push + collected record). */
 function detailsFromPreview(items: CodCollectionItem[], rate: number): CodStorageDetail[] {
@@ -198,6 +202,31 @@ export function OrderCodStorageCard({ order, performedBy, canEdit }: Props) {
     };
   };
 
+  // For a customer-collect order, the COD amount is part of what the customer
+  // pays, so it drives the "Daily Storage" (STOR) accessorial line — keeping
+  // order_total + the DT charges summary in sync as the cutoff/date changes.
+  // STOR is non-taxable, so order_total / accessorials_total shift by exactly
+  // the delta vs the STOR amount already baked into the order. For a
+  // bill-to-client order COD stays OUT of the client's total (returns {}).
+  const buildOrderTotalPatch = (codTotal: number) => {
+    if (order.billingMethod !== 'customer_collect') return {};
+    const others = (order.accessorials ?? []).filter((a) => a.code !== COD_STORAGE_SVC_CODE);
+    const priorStor = (order.accessorials ?? []).find((a) => a.code === COD_STORAGE_SVC_CODE)?.subtotal ?? 0;
+    const delta = codTotal - priorStor;
+    return {
+      accessorials_json: codTotal > 0
+        ? [...others, {
+            code: COD_STORAGE_SVC_CODE, quantity: 1, rate: codTotal, subtotal: codTotal,
+            // Sentinel — matches CreateDeliveryOrderModal's COD_STORAGE_AUTO_NOTE
+            // so a later modal edit treats this STOR as auto-driven (not manual).
+            clientNotes: 'COD storage (collected from customer)',
+          }]
+        : others,
+      accessorials_total: (order.accessorialsTotal ?? 0) + delta,
+      order_total: (order.orderTotal ?? 0) + delta,
+    };
+  };
+
   // Persist the line onto dt_orders (drives the DT description push) — no billing.
   const handleSave = async () => {
     if (!canEdit || saving) return;
@@ -205,9 +234,10 @@ export function OrderCodStorageCard({ order, performedBy, canEdit }: Props) {
     setSaveError(null);
     setSaved(false);
     try {
+      const patch = buildSummaryPatch();
       const { error: upErr } = await supabase
         .from('dt_orders')
-        .update(buildSummaryPatch())
+        .update({ ...patch, ...buildOrderTotalPatch(patch.cod_storage_total ?? 0) })
         .eq('id', order.id);
       if (upErr) { setSaveError(upErr.message); return; }
       setSaved(true);
@@ -231,10 +261,13 @@ export function OrderCodStorageCard({ order, performedBy, canEdit }: Props) {
     setCollectError(null);
     try {
       // 1. Persist the current line so the RPC reads the right details + amount.
+      //    For customer-collect, this also folds COD into the order total via
+      //    the STOR "Daily Storage" line (so the DT re-push total includes it).
       const patch = buildSummaryPatch();
+      const totalsPatch = buildOrderTotalPatch(patch.cod_storage_total ?? 0);
       const { error: upErr } = await supabase
         .from('dt_orders')
-        .update({ ...patch, cod_storage_enabled: true })
+        .update({ ...patch, ...totalsPatch, cod_storage_enabled: true })
         .eq('id', order.id);
       if (upErr) { setCollectError(upErr.message); return; }
 
@@ -242,13 +275,16 @@ export function OrderCodStorageCard({ order, performedBy, canEdit }: Props) {
       //    cod_storage_collected_* + per-item activity row. No billing row.
       await markCodStorageCollected(order.id, collectNotes.trim() || null, performedBy);
 
-      // 3. Unified settle: a customer-collect order is paid in full at the door,
-      //    so record delivery charges + COD storage as paid. (Client-paid
-      //    deliveries leave the order's own paid_* alone — only COD is collected
-      //    from the end customer.)
+      // 3. Unified settle: a customer-collect order is paid in full at the door.
+      //    order_total now already includes COD (step 1), so paid_amount = the
+      //    NEW order total — never order_total + cod (that would double-count).
+      //    (Client-paid deliveries leave the order's own paid_* alone — only COD
+      //    is collected from the end customer, recorded above.)
       if (order.billingMethod === 'customer_collect') {
         const nowIso = new Date().toISOString();
-        const paidAmount = (order.orderTotal ?? 0) + (patch.cod_storage_total ?? total);
+        const paidAmount = ('order_total' in totalsPatch)
+          ? (totalsPatch as { order_total: number }).order_total
+          : (order.orderTotal ?? 0);
         const { error: paidErr } = await supabase
           .from('dt_orders')
           .update({
@@ -288,11 +324,20 @@ export function OrderCodStorageCard({ order, performedBy, canEdit }: Props) {
           </span>
         )}
       </div>
-      <div style={{ fontSize: 12, color: theme.colors.textMuted, marginBottom: 12 }}>
+      <div style={{ fontSize: 12, color: theme.colors.textMuted, marginBottom: 8 }}>
         {collected
           ? `${order.codStorageItemCount ?? 0} item${(order.codStorageItemCount ?? 0) !== 1 ? 's' : ''}`
           : `${billableItems.length} item${billableItems.length !== 1 ? 's' : ''} · ${dateRange}`}
       </div>
+
+      {/* How the amount relates to the order total, per billing method. */}
+      {!collected && (
+        <div style={{ fontSize: 11, color: theme.colors.textSecondary, marginBottom: 12, lineHeight: 1.45 }}>
+          {order.billingMethod === 'customer_collect'
+            ? 'Included in the order total as the “Daily Storage” line (the customer pays delivery + storage together).'
+            : 'Collected separately from the customer — NOT part of the client’s order total.'}
+        </div>
+      )}
 
       {/* Collected view */}
       {collected ? (

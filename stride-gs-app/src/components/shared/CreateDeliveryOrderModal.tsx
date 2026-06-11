@@ -292,6 +292,15 @@ interface SelectedAccessorial {
 // retune both in Settings → Pricing → Delivery without a code change.
 // Constant is the lookup code only; the rate and threshold are live.
 const EXTRA_PIECE_CODE = 'XTRA_PC';
+// service_catalog "Daily Storage" accessorial. When the order is collect-from-
+// customer, the computed COD storage amount drives this line so it rolls into
+// the order total + DT charges summary like any other add-on.
+const COD_STORAGE_SVC_CODE = 'STOR';
+// Sentinel on the STOR accessorial's clientNotes marking it as auto-driven by
+// the COD amount (vs a manually-quoted Daily Storage line). Lets the driver
+// effect remove only ITS own STOR when COD shouldn't be in the total. The
+// OrderCodStorageCard writes the same note so edits recognize it as auto.
+const COD_STORAGE_AUTO_NOTE = 'COD storage (collected from customer)';
 
 // The default sales-tax rate is no longer a hardcoded literal — it is
 // read from public.tax_jurisdictions via useDefaultTaxRate() (managed in
@@ -1520,6 +1529,7 @@ export function CreateDeliveryOrderModal({
       let changed = false;
       const n = new Map(prev);
       for (const [code, cur] of prev) {
+        if (code === COD_STORAGE_SVC_CODE) continue; // COD owns STOR (effect below) — don't recompute to $0
         const acc = accessorials.find(a => a.code === code) || allAccessorials.find(a => a.code === code);
         if (!acc || acc.billingMode !== 'per_class') continue;
         const fresh = computeAccessorialSubtotal(acc, cur, selectedInvItems);
@@ -1532,6 +1542,50 @@ export function CreateDeliveryOrderModal({
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedInvItems, accessorials, allAccessorials]);
+
+  // ── COD Storage → "Daily Storage" (STOR) charge line ────────────────────
+  // When the whole order is collect-from-customer, the COD storage amount is
+  // part of what the customer pays, so it drives the STOR accessorial subtotal
+  // and flows through accessorialsTotal → orderTotal → accessorials_json → the
+  // DT charges summary like any other add-on. When the delivery is billed to
+  // the client, COD is kept OUT of the client's charges (shown separately) — so
+  // STOR is removed here and rendered as its own "collect from customer" line.
+  // Only manage STOR while COD items are on the order; non-COD orders leave any
+  // manually-selected STOR untouched.
+  const codInOrderTotal =
+    codApplicable && codInclude && billingMethod === 'customer_collect';
+  const codChargeAmount = codLinePreview?.total ?? 0;
+  useEffect(() => {
+    setSelectedAccessorials(prev => {
+      const existing = prev.get(COD_STORAGE_SVC_CODE);
+      const isOurs = existing?.clientNotes === COD_STORAGE_AUTO_NOTE;
+      if (codInOrderTotal && codChargeAmount > 0) {
+        // Only ADD once the COD basis is known (items + flags loaded). An
+        // already-present auto STOR is left in place during that load window
+        // (the remove branch below is gated on !codInOrderTotal), so a saved
+        // customer-collect STOR is never transiently dropped mid-hydration.
+        if (!codApplicable) return prev;
+        if (existing && Math.abs(existing.rate - codChargeAmount) < 0.001
+            && Math.abs((existing.subtotal ?? 0) - codChargeAmount) < 0.001) {
+          return prev;
+        }
+        const n = new Map(prev);
+        n.set(COD_STORAGE_SVC_CODE, {
+          code: COD_STORAGE_SVC_CODE, quantity: 1, rate: codChargeAmount,
+          subtotal: codChargeAmount, quotePending: false,
+          clientNotes: COD_STORAGE_AUTO_NOTE,
+        });
+        return n;
+      }
+      // COD shouldn't be in the client total here (bill-to-client / prepaid, or
+      // no COD). Remove ONLY an auto-added STOR (identified by the sentinel
+      // note) — a manually-quoted STOR on a non-COD order is left untouched.
+      // Runs regardless of codApplicable so an edited bill-to-client order can't
+      // keep a stale baked STOR line in its total.
+      if (existing && isOurs) { const n = new Map(prev); n.delete(COD_STORAGE_SVC_CODE); return n; }
+      return prev;
+    });
+  }, [codApplicable, codInOrderTotal, codChargeAmount]);
 
   const isAccessorialSelected = (code: string) => selectedAccessorials.has(code);
 
@@ -5886,7 +5940,12 @@ export function CreateDeliveryOrderModal({
               </button>
               {addonsExpanded && (
               <div style={{ display: 'grid', gap: 8 }}>
-                {accessorials.map(acc => {
+                {accessorials
+                  // When COD storage applies, the STOR "Daily Storage" line is
+                  // auto-driven by the COD amount (or kept separate for
+                  // bill-to-client), so hide it from the manual add-on toggles.
+                  .filter(acc => !(codApplicable && acc.code === COD_STORAGE_SVC_CODE))
+                  .map(acc => {
                   const selected = isAccessorialSelected(acc.code);
                   const current = selectedAccessorials.get(acc.code);
                   const staffOnly = !acc.visibleToClient;
@@ -6334,11 +6393,12 @@ export function CreateDeliveryOrderModal({
                 <span>Estimated Total</span>
                 <span>{orderTotal != null ? `$${orderTotal.toFixed(2)}` : isCallForQuote ? 'Call for quote' : '—'}</span>
               </div>
-              {/* COD Storage — collected from the END customer at delivery, NOT
-                  part of the client's Estimated Total above. Shown as a separate
-                  line so the operator/driver sees what to collect on-site; it's
-                  pushed to the DT order details (Charges Summary) the same way. */}
-              {codApplicable && codInclude && (codLinePreview?.total ?? 0) > 0 && (
+              {/* COD Storage, BILL-TO-CLIENT case only — the end customer owes
+                  storage but the client is paying the delivery, so COD is kept
+                  OUT of the client's Estimated Total above and shown separately.
+                  (For a collect-from-customer order, COD instead drives the
+                  "Daily Storage" add-on row and is already inside the total.) */}
+              {codApplicable && codInclude && billingMethod !== 'customer_collect' && (codLinePreview?.total ?? 0) > 0 && (
                 <div style={{
                   display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                   marginTop: 8, paddingTop: 8, borderTop: `1px dashed ${theme.colors.border}`,
