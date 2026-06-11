@@ -119,8 +119,14 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
     items.length > 1 &&
     !!batchWorkFlagRow &&
     resolveFlagBackend(batchWorkFlagRow, clientSheetId || null) === 'supabase';
-  const [batchMode, setBatchMode] = useState(false);
-  const batchModeActive = batchModeAvailable && batchMode;
+  // D1 (BATCH_WORK_ITEMS_QA.md): batch is the DEFAULT whenever it's
+  // available — staff opt OUT for per-item tasks. Tracked as an opt-out
+  // boolean (not initial state) because the flag row loads async: at first
+  // render batchModeAvailable is false, so a `useState(batchModeAvailable)`
+  // default would freeze OFF.
+  const [batchOptOut, setBatchOptOut] = useState(false);
+  const batchMode = batchModeAvailable && !batchOptOut;
+  const batchModeActive = batchMode;
 
   // Mixed-class guard for batch mode: complete_task_atomic rates a
   // class_based service (INSP and RUSH are class_based in the live catalog)
@@ -413,6 +419,30 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
             </div>
           ) : (
             <>
+              {/* BatchWorkItems — single batch task toggle (flag-gated,
+                  2+ items). D1: ON by default, at the TOP of the modal.
+                  One task per service covering ALL items, each tracked
+                  individually (Start/Pass/Fail + photos per item) on the
+                  task detail page. Staff uncheck to create per-item tasks. */}
+              {batchModeAvailable && (
+                <div onClick={() => setBatchOptOut(b => !b)} style={{ ...toggleStyle(batchMode), marginBottom: 16 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <Layers size={16} color={batchMode ? theme.colors.orange : theme.colors.textMuted} />
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: batchMode ? theme.colors.orange : theme.colors.text }}>
+                        Create as one batch task
+                      </div>
+                      <div style={{ fontSize: 10, color: theme.colors.textMuted }}>
+                        One task per service covering all {items.length} items — each item gets its own
+                        Start / Pass / Fail tracking and photos on the task.
+                        Uncheck to create a separate task per item.
+                      </div>
+                    </div>
+                  </div>
+                  {batchMode && <Check size={14} color={theme.colors.orange} />}
+                </div>
+              )}
+
               {/* Task type selector */}
               <div style={{ fontSize: 12, color: theme.colors.textMuted, marginBottom: 12 }}>
                 Select task type(s) to create for all selected items:
@@ -433,28 +463,6 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
                   );
                 })}
               </div>
-
-              {/* BatchWorkItems — single batch task toggle (flag-gated,
-                  2+ items). One task per service covering ALL items, each
-                  tracked individually (Start/Pass/Fail + photos per item)
-                  on the task detail page. */}
-              {batchModeAvailable && (
-                <div onClick={() => setBatchMode(b => !b)} style={{ ...toggleStyle(batchMode), marginBottom: 16 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                    <Layers size={16} color={batchMode ? theme.colors.orange : theme.colors.textMuted} />
-                    <div>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: batchMode ? theme.colors.orange : theme.colors.text }}>
-                        Create as one batch task
-                      </div>
-                      <div style={{ fontSize: 10, color: theme.colors.textMuted }}>
-                        One task per service covering all {items.length} items — each item gets its own
-                        Start / Pass / Fail tracking and photos on the task.
-                      </div>
-                    </div>
-                  </div>
-                  {batchMode && <Check size={14} color={theme.colors.orange} />}
-                </div>
-              )}
 
               {batchClassConflict && (
                 <div style={{ padding: '10px 12px', borderRadius: 8, background: '#FEF2F2', border: '1px solid #FECACA', marginBottom: 16 }}>
