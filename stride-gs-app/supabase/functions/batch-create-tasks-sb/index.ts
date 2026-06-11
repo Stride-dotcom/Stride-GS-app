@@ -120,23 +120,26 @@ Deno.serve(async (req: Request) => {
   // per request; off → legacy path (no extra per-task RPC round trips).
   const cleanNumbering = await orderNumberingOn(sb, tenantId);
 
-  // Resolve service name from svc_code via service_catalog (mirrors
-  // api_lookupSvcName_). Best-effort — falls back to svcCode itself if
-  // the catalog lookup fails.
-  const svcNameBySvcCode = await resolveSvcNames(sb, svcCodes);
+  // Resolve service name + billing mode from svc_code via service_catalog
+  // (mirrors api_lookupSvcName_). Best-effort — falls back to svcCode itself
+  // (billing unknown) if the catalog lookup fails.
+  const svcMetaBySvcCode = await resolveSvcMeta(sb, svcCodes);
 
   // Build an index of existing open tasks for THIS tenant to dedupe
   // intra-batch and against existing rows (mirrors api_buildOpenTaskMap_).
   const itemIds = Array.from(new Set(items.map(i => String(i.itemId).trim()).filter(Boolean)));
   const openMap = await buildOpenTaskMap(sb, tenantId, itemIds);
 
-  // Inventory qty per item id. INSPECTION and RUSH tasks default qty to the
-  // item's TRUE piece count (a carton of N pieces bills "Inspection × N" /
-  // "Rush × N"); every other task type stays qty 1 (the public.tasks column
-  // default). Sourced from public.inventory rather than the request payload so
-  // it's correct regardless of what the caller sends. Best-effort: a miss
-  // leaves qty 1.
-  const invQtyByItem = await fetchInventoryQty(sb, tenantId, itemIds);
+  // Inventory qty + item_class per item id. INSPECTION and RUSH tasks default
+  // qty to the item's TRUE piece count (a carton of N pieces bills
+  // "Inspection × N" / "Rush × N"); every other task type stays qty 1 (the
+  // public.tasks column default). item_class backs the batch-mode mixed-class
+  // guard below. Sourced from public.inventory rather than the request payload
+  // so it's correct regardless of what the caller sends. Best-effort: a miss
+  // leaves qty 1 / class unknown.
+  const invByItem = await fetchInventoryMeta(sb, tenantId, itemIds);
+  const invQtyByItem: Record<string, number> = {};
+  for (const [id, meta] of Object.entries(invByItem)) invQtyByItem[id] = meta.qty;
 
   // Per-item-per-svc counter cache. Filled lazily by maxExistingCounter().
   const counterCache: Record<string, number> = {};
@@ -206,7 +209,7 @@ Deno.serve(async (req: Request) => {
     // piece count for INSP/RUSH so complete_task_atomic's qty × rate
     // billing charges the true total.
     for (const svcCode of svcCodes) {
-      const svcName = svcNameBySvcCode[svcCode] ?? svcCode;
+      const svcName = svcMetaBySvcCode[svcCode]?.name ?? svcCode;
       const eligible: ItemPayload[] = [];
       for (const item of items) {
         const itemId = String(item.itemId).trim();
@@ -221,6 +224,25 @@ Deno.serve(async (req: Request) => {
         eligible.push(item);
       }
       if (eligible.length === 0) continue;
+
+      // Mixed-class guard: complete_task_atomic resolves a class_based
+      // service's rate from the PRIMARY item's item_class only, then bills
+      // rate × tasks.qty (the whole batch). A batch spanning different
+      // classes would mis-rate every non-primary class, so reject it —
+      // INSP and RUSH are class_based in the live catalog. The modal
+      // blocks this client-side; this is the fail-closed backstop.
+      if (svcMetaBySvcCode[svcCode]?.billing === 'class_based') {
+        const classes = new Set(
+          eligible.map(i => String(invByItem[String(i.itemId).trim()]?.itemClass ?? '').trim().toUpperCase()),
+        );
+        if (classes.size > 1) {
+          return json({
+            error: `${svcCode} is class-based billed — a single batch task can't mix item classes ` +
+                   `(selection has: ${Array.from(classes).map(c => c || '(no class)').join(', ')}). ` +
+                   'Create separate batches per class, or turn off batch mode.',
+          }, 400);
+        }
+      }
 
       const primary = eligible[0];
       const primaryId = String(primary.itemId).trim();
@@ -273,7 +295,7 @@ Deno.serve(async (req: Request) => {
     }
   } else {
   for (const svcCode of svcCodes) {
-    const svcName = svcNameBySvcCode[svcCode] ?? svcCode;
+    const svcName = svcMetaBySvcCode[svcCode]?.name ?? svcCode;
     for (const item of items) {
       const itemId = String(item.itemId).trim();
       if (!itemId) {
@@ -398,23 +420,23 @@ async function orderNumberingOn(
   }
 }
 
-async function resolveSvcNames(
+async function resolveSvcMeta(
   sb: ReturnType<typeof createClient>,
   svcCodes: readonly string[],
-): Promise<Record<string, string>> {
+): Promise<Record<string, { name: string; billing: string }>> {
   if (svcCodes.length === 0) return {};
   try {
     const { data, error } = await sb
       .from('service_catalog')
-      .select('code, name')
+      .select('code, name, billing')
       .in('code', svcCodes as string[]);
     if (error) {
       console.warn('[batch-create-tasks-sb] service_catalog lookup failed:', error.message);
       return {};
     }
-    const out: Record<string, string> = {};
-    for (const row of (data ?? []) as Array<{ code: string; name: string }>) {
-      out[row.code] = row.name || row.code;
+    const out: Record<string, { name: string; billing: string }> = {};
+    for (const row of (data ?? []) as Array<{ code: string; name: string; billing: string | null }>) {
+      out[row.code] = { name: row.name || row.code, billing: String(row.billing ?? '') };
     }
     return out;
   } catch (e) {
@@ -457,26 +479,30 @@ async function buildOpenTaskMap(
   return out;
 }
 
-async function fetchInventoryQty(
+async function fetchInventoryMeta(
   sb: ReturnType<typeof createClient>,
   tenantId: string,
   itemIds: string[],
-): Promise<Record<string, number>> {
+): Promise<Record<string, { qty: number; itemClass: string }>> {
   if (itemIds.length === 0) return {};
   const { data, error } = await sb
     .from('inventory')
-    .select('item_id, qty')
+    .select('item_id, qty, item_class')
     .eq('tenant_id', tenantId)
     .in('item_id', itemIds);
   if (error) {
-    console.warn('[batch-create-tasks-sb] inventory qty lookup failed:', error.message);
+    console.warn('[batch-create-tasks-sb] inventory lookup failed:', error.message);
     return {};
   }
-  const out: Record<string, number> = {};
-  for (const row of (data ?? []) as Array<{ item_id: string; qty: number | string | null }>) {
+  const out: Record<string, { qty: number; itemClass: string }> = {};
+  for (const row of (data ?? []) as Array<{ item_id: string; qty: number | string | null; item_class: string | null }>) {
     const itemId = String(row.item_id ?? '').trim();
+    if (!itemId) continue;
     const q = Math.round(Number(row.qty));
-    if (itemId && Number.isFinite(q) && q > 0) out[itemId] = q;
+    out[itemId] = {
+      qty: Number.isFinite(q) && q > 0 ? q : 1,
+      itemClass: String(row.item_class ?? '').trim(),
+    };
   }
   return out;
 }

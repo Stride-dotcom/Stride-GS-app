@@ -121,6 +121,26 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
     resolveFlagBackend(batchWorkFlagRow, clientSheetId || null) === 'supabase';
   const [batchMode, setBatchMode] = useState(false);
   const batchModeActive = batchModeAvailable && batchMode;
+
+  // Mixed-class guard for batch mode: complete_task_atomic rates a
+  // class_based service (INSP and RUSH are class_based in the live catalog)
+  // from the batch task's PRIMARY item class only, billing rate × total qty
+  // — a batch spanning classes would mis-rate every other class. Block
+  // submit and explain; the EF rejects server-side too (backstop).
+  const classBasedSelected = useMemo(() => {
+    const classBased = new Set<string>();
+    for (const s of serviceCatalog) {
+      const c = String(s.code || '').trim().toUpperCase();
+      if (c && s.billing === 'class_based') classBased.add(c);
+    }
+    return Array.from(selectedCodes).filter(c => classBased.has(c));
+  }, [serviceCatalog, selectedCodes]);
+  const distinctItemClasses = useMemo(() => {
+    const set = new Set(items.map(i => String(i.itemClass || '').trim().toUpperCase()));
+    return Array.from(set);
+  }, [items]);
+  const batchClassConflict =
+    batchModeActive && classBasedSelected.length > 0 && distinctItemClasses.length > 1;
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<{ created: number; skippedCount: number; taskIds: string[] } | null>(null);
   const [error, setError] = useState('');
@@ -216,7 +236,7 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
   };
 
   const handleSubmit = async () => {
-    if (!selectedCodes.size || loading) return;
+    if (!selectedCodes.size || loading || batchClassConflict) return;
     setLoading(true);
     setError('');
 
@@ -436,6 +456,23 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
                 </div>
               )}
 
+              {batchClassConflict && (
+                <div style={{ padding: '10px 12px', borderRadius: 8, background: '#FEF2F2', border: '1px solid #FECACA', marginBottom: 16 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                    <AlertTriangle size={14} color="#B91C1C" />
+                    <span style={{ fontSize: 12, fontWeight: 700, color: '#B91C1C' }}>
+                      Batch task can't mix item classes
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 12, color: '#7F1D1D', lineHeight: 1.5 }}>
+                    {classBasedSelected.join(' + ')} bills by item class, and your selection spans{' '}
+                    {distinctItemClasses.length} classes ({distinctItemClasses.map(c => c || 'no class').join(', ')}).
+                    A single batch task would rate every piece at the first item's class.
+                    Select items of one class per batch, or turn off batch mode to create per-item tasks.
+                  </div>
+                </div>
+              )}
+
               {/* Advanced (optional): due date, notes, priority */}
               <div style={{ marginBottom: 16 }}>
                 <button
@@ -604,12 +641,12 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
               </button>
               <button
                 onClick={handleSubmit}
-                disabled={loading || !selectedCodes.size}
+                disabled={loading || !selectedCodes.size || batchClassConflict}
                 style={{
                   padding: '12px 28px', border: 'none', borderRadius: 100,
-                  background: selectedCodes.size && !loading ? theme.colors.orange : theme.colors.border,
-                  color: selectedCodes.size && !loading ? '#fff' : theme.colors.textMuted,
-                  fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase', cursor: selectedCodes.size && !loading ? 'pointer' : 'not-allowed',
+                  background: selectedCodes.size && !loading && !batchClassConflict ? theme.colors.orange : theme.colors.border,
+                  color: selectedCodes.size && !loading && !batchClassConflict ? '#fff' : theme.colors.textMuted,
+                  fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase', cursor: selectedCodes.size && !loading && !batchClassConflict ? 'pointer' : 'not-allowed',
                   fontFamily: 'inherit', fontSize: 11,
                   display: 'flex', alignItems: 'center', gap: 6,
                 }}
