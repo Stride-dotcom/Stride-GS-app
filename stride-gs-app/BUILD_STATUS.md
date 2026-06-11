@@ -118,6 +118,16 @@
 
 ---
 
+## Recent Changes (2026-06-11, tasks: batch-task creation — one task covering N items — feat/warehouse/batch-task-creation)
+
+- **What:** the missing creation path for multi-item batch tasks (batch inspections). `CreateTaskModal` gains a **"Create as one batch task"** toggle (shown only with 2+ items AND the `batchWorkItems` flag on for the data tenant): one task per selected service covering ALL items, with `public.task_items` membership rows so the task detail renders per-item Start/Pass/Fail cards (PR #743's module).
+- **EF (`batch-create-tasks-sb`, redeployed):** request field `batchMode: true` → per svcCode, dedupe items as before, mint ONE task id, `tasks.item_id` = first eligible item (primary, mirrors multi-item repairs), **`tasks.qty` = summed inventory piece count for INSP/RUSH** (keeps `complete_task_atomic`'s qty × rate billing correct for the whole batch; other services qty 1), insert task_items rows (per-item piece counts, display-only). task_items insert failure **fails closed** (deletes the just-created task rows + 500). Audit rows carry `{batchMode, itemIds}`. Legacy per-(item, svcCode) path unchanged (id-minting refactored into a shared `mintTaskId` helper).
+- **Mixed-class guard (billing):** INSP + RUSH are `class_based` in the live catalog, and `complete_task_atomic` rates a class_based service from the PRIMARY item's class only — a batch spanning classes would mis-rate every other class. The modal **blocks submit** with an explainer when a class_based service is selected across >1 distinct `item_class`; the EF rejects 400 as the fail-closed backstop. One class per batch (or batch mode off → per-item tasks, each rated by its own class).
+- **GAS:** untouched. The GAS `handleBatchCreateTasks_` ignores `batchMode` — the toggle is gated on `batchWorkItems` (scope ⊆ the `createTask` SB canary, both Justin Demo today), so a batchMode request always lands on the EF. If a future operator widens `batchWorkItems` beyond `createTask`'s SB scope, batchMode degrades gracefully to legacy N-task creation via GAS.
+- Files: `supabase/functions/batch-create-tasks-sb/index.ts`, `src/components/shared/CreateTaskModal.tsx`, `src/lib/api.ts` (`BatchCreateTasksPayload.batchMode`). `tsc` + build clean; locked-in code-reviewer: SHIP (its one Important finding — the mixed-class rating gap — closed by the guard above).
+
+---
+
 ## Recent Changes (2026-06-11, receiving: per-item Needs Inspection now sticks on auto-inspect clients — fix/receiving/sb-per-item-inspection, PR #744)
 
 - **Reported (Ken, testing Justin's Demo — a Supabase canary, all handlers SB):** received a shipment, unchecked "Needs Inspection" in the Receiving screen, but item **00003** still got an INSP task. Confirmed via Management API: 00003's `inventory.needs_inspection = true` while siblings were `false`.
