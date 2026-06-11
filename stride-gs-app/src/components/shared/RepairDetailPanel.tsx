@@ -238,10 +238,13 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
       const { data, error } = await supabase
         .from('clients')
         .select('tax_exempt')
-        .eq('tenant_id', cid)
+        .eq('spreadsheet_id', cid)
         .maybeSingle();
       if (cancelled || error || !data) return;
-      setClientTaxExempt((data as { tax_exempt: boolean | null }).tax_exempt === true);
+      // !== false matches CreateDeliveryOrderModal's clientTaxInfo and the
+      // DB default (tax_exempt boolean DEFAULT true, reason 'Resale') —
+      // a null cell means exempt, same as the delivery-order flow.
+      setClientTaxExempt((data as { tax_exempt: boolean | null }).tax_exempt !== false);
     })();
     return () => { cancelled = true; };
   }, [repair.clientSheetId]);
