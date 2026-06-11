@@ -133,6 +133,14 @@
 
 ---
 
+## Recent Changes (2026-06-11, repairs: explicit Complete Repair button + per-item results in the completion email + item-work activity log — feat/repairs/batch-complete-button, D2/D4/D5)
+
+- **D4 — explicit completion**: with the batch module active (demo canary), resolving the last item NO LONGER auto-completes the repair. The parent Pass/Fail pair is replaced (all 3 sites: panel footer, FAB, page footer) by ONE **Complete Repair** button, enabled only when every item carries a Pass/Fail; it runs the existing complete flow (billing + email + work-order PDF) with the aggregate result (any item failed → Fail). Item work on an Approved repair still auto-starts it.
+- **D5 — completion email** (fleet-wide, complete-repair-sb redeployed): items table now carries **Result** (per-item Pass/Fail, parent-result fallback for legacy/non-module rows) and **Notes** (repair_items.item_notes, client-visible) columns; the internal warehouse **Location column was dropped** to keep the table readable. The blanket "Result: PASS/FAIL" headline + subject token were removed from the REPAIR_COMPLETE template (DB row updated) — per-item rows tell the story.
+- **D2 — activity log**: `update_batch_work_item` RPC (migration [20260611233000](stride-gs-app/supabase/migrations/20260611233000_batch_work_item_audit_log.sql), applied) writes changed-only `entity_audit_log` rows (action='item_work', e.g. "Item 63333: In Progress → Pass" / "Item 63333 notes updated") so the repair's Activity tab shows per-item work with who + when. EntityHistory gained the Item Work label.
+- Decision log: Dropbox `Apps\GS Inventory\BATCH_WORK_ITEMS_QA.md`.
+
+---
 ## Recent Changes (2026-06-11, tasks: due_date/priority wipe fixed at the source + batch module scoped to repairs-only — fix/tasks/hydrate-field-wipe-and-repairs-only)
 
 - **Justin-reported: JUS-RUSH-16's due date + Urgent priority "reverted to blank/Normal".** Root cause (verified live): `handleGetTaskById_`'s best-effort Supabase cache hydrate built its task object WITHOUT Due Date/Priority, so `sbTaskRow_` defaulted `due_date=null` + `priority='Normal'` and EVERY single-task GAS read (deep link, post-write fallback) silently wiped both columns on public.tasks. The sheet held the correct values the whole time. `handleBulkSyncToSupabase_` had the same gap. Both fixed in **StrideAPI.gs v38.278.0** (deployed, web app version 577); JUS-RUSH-16 self-healed on the first post-fix read (verified: due 2026-06-11 + High back in SB). **Rule for future SB task columns: audit all FIVE sbTaskRow_ call sites** (fullClientSync / resync / writeThrough-retry / getTaskById hydrate / bulkSync).
@@ -2428,5 +2436,6 @@ Late-day session that started as a single production fire (release-items timing 
 - [ ] **Deploy the `get-shared-doc` Edge Function** (completes the #443/#444 shared-doc fix â€” until this runs, public shared-attachment PDF links stay broken). The builder environment had no `SUPABASE_ACCESS_TOKEN`. From a machine logged into Supabase (or with the token set), run from `C:\dev\Stride-GS-app\stride-gs-app`:
   `npx supabase functions deploy get-shared-doc --project-ref uqplppugeickmamycpuz --no-verify-jwt`
   The `--no-verify-jwt` flag is mandatory â€” the page opens the function directly with no auth header; without it the gateway 401s. No new secrets needed (the function uses the built-in `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY`). Verify by opening a Documents "Open" link on a live `/#/shared/attachments/{shareId}` page.
+
 
 
