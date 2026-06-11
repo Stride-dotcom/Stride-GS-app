@@ -1140,22 +1140,32 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   // ─── BatchWorkItems orchestration ─────────────────────────────────────────
   // The module owns per-item rows; the parent owns repair lifecycle. Starting
   // work on any item of an Approved repair starts the repair (work has
-  // physically begun); resolving the last item completes it with the
-  // aggregate result through the existing billing/email/PDF flow.
-  const handleBatchItemStatusChange = (_itemId: string, _status: string, summary: BatchStatusSummary) => {
-    // Skip the auto-start when this same write resolved the batch —
-    // onBatchComplete fires right after and owns the lifecycle transition.
-    // Firing start + complete on the same tick is the start/complete race
-    // class from the 06/01 incident + PR #739 (stale start mirror reverting
-    // a completed repair); handleComplete is safe from Approved directly.
-    if (summary.isAllComplete) return;
+  // physically begun). Completion is an EXPLICIT button (D4,
+  // BATCH_WORK_ITEMS_QA.md): once every item carries a Pass/Fail, the
+  // parent's Pass/Fail pair is replaced by ONE "Complete Repair" button that
+  // runs the existing complete flow (billing + email + PDF) with the
+  // aggregate result (any item failed → Fail). No auto-complete — billing
+  // and the client email should never fire off a card mis-click.
+  const handleBatchItemStatusChange = (_itemId: string, _status: string, _summary: BatchStatusSummary) => {
+    // Auto-start is safe even on the write that resolves the last item:
+    // completion is now manual (seconds later at minimum), so the 06/01
+    // same-tick start/complete race can't recur, and the v38.274.0+ stale-
+    // mirror guards converge the sheet to SB truth regardless.
     if (effectiveStatus === 'Approved') void handleStartRepair();
   };
-  const handleBatchComplete = (aggregate: 'Pass' | 'Fail') => {
-    if (completed || effectiveStatus === 'Complete' || effectiveStatus === 'Cancelled') return;
-    void handleComplete(aggregate);
+  // Whether the per-item module is live for this repair (flag on + summary
+  // loaded with at least one item). Drives the Complete-button swap below.
+  const batchModuleActive = batchWorkItemsEnabled && !!batchSummary && batchSummary.total > 0;
+  const handleBatchCompleteClick = () => {
+    if (!batchSummary || !batchSummary.isAllComplete) {
+      setSubmitError(
+        `Resolve every item first — ${batchSummary?.done ?? 0} of ${batchSummary?.total ?? 0} items have a result. ` +
+        'Pass or Fail the remaining items in the Items list.'
+      );
+      return;
+    }
+    void handleComplete(batchSummary.anyFail ? 'Fail' : 'Pass');
   };
-
   const handleFailChoice = async (choice: 'complete' | 'cancel') => {
     setShowResultPrompt(null);
     if (choice === 'complete') {
@@ -1176,9 +1186,10 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
               per-item Start/Pass/Fail + notes + photos for every repair,
               single- or multi-item. Replaces both the read-only items table
               and the Item Info card below. Starting work on an item of an
-              Approved repair auto-starts the repair; resolving the last item
-              auto-completes it with the aggregate result via the existing
-              handleComplete flow (billing/email/PDF untouched). */}
+              Approved repair auto-starts the repair; once every item is
+              resolved the explicit "Complete Repair" button (D4) commits the
+              batch with the aggregate result via the existing handleComplete
+              flow (billing/email/PDF untouched). */}
           {batchWorkItemsEnabled && (
             <BatchWorkItems
               entityType="repair"
@@ -1225,7 +1236,6 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
                 />
               )}
               onItemStatusChange={handleBatchItemStatusChange}
-              onBatchComplete={handleBatchComplete}
               onSummaryChange={setBatchSummary}
             />
           )}
@@ -1807,7 +1817,28 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
                 <span>{submitError}</span>
               </div>
             )}
-            {showResultPrompt === 'fail' ? (
+            {batchModuleActive ? (
+              /* D4 — per-item results drive the outcome; ONE explicit
+                 Complete button commits the batch (billing + email + PDF)
+                 once every item carries a Pass/Fail. */
+              <div>
+                <WriteButton
+                  label={submitting ? 'Saving...'
+                    : batchSummary?.isAllComplete
+                      ? `Complete Repair${batchSummary.anyFail ? ` (${batchSummary.failed} failed)` : ''}`
+                      : `Complete Repair (${batchSummary?.done ?? 0} of ${batchSummary?.total ?? 0} items resolved)`}
+                  variant="primary"
+                  icon={submitting ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <CheckCircle2 size={16} />}
+                  style={{ width: '100%', background: batchSummary?.isAllComplete ? '#15803D' : theme.colors.border, padding: '10px', fontSize: 13, opacity: submitting ? 0.7 : 1, color: batchSummary?.isAllComplete ? '#fff' : theme.colors.textMuted }}
+                  disabled={submitting || !batchSummary?.isAllComplete}
+                  onClick={async () => handleBatchCompleteClick()} />
+                <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 6, textAlign: 'center' }}>
+                  {batchSummary?.isAllComplete
+                    ? 'Completing bills the repair and sends the completion email with per-item results.'
+                    : 'Pass or Fail each item above to enable completion.'}
+                </div>
+              </div>
+            ) : showResultPrompt === 'fail' ? (
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}><AlertTriangle size={16} color="#B45309" /><span style={{ fontSize: 13, fontWeight: 600 }}>Repair failed — what would you like to do?</span></div>
                 <div style={{ display: 'flex', gap: 8 }}>
@@ -2689,10 +2720,16 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
       { label: 'Approve', icon: <CheckCircle2 size={16} />, onClick: () => handleRespond('Approve'), color: '#15803D' },
     ] : []),
     ...(s === 'Approved' && canStaffEdit ? [{ label: 'Start Repair', icon: <Play size={16} />, onClick: handleStartRepair, color: theme.colors.orange }] : []),
-    ...(s === 'In Progress' ? [
-      { label: 'Failed', icon: <XCircle size={16} />, onClick: async () => handleResult('fail'), color: '#B91C1C' },
-      { label: 'Complete', icon: <CheckCircle2 size={16} />, onClick: async () => handleResult('pass'), color: '#15803D' },
-    ] : []),
+    ...(s === 'In Progress' ? (
+      batchModuleActive
+        // D4 — one explicit Complete action; gate inside the handler
+        // surfaces "resolve every item first" when items remain open.
+        ? [{ label: 'Complete Repair', icon: <CheckCircle2 size={16} />, onClick: async () => handleBatchCompleteClick(), color: '#15803D' }]
+        : [
+            { label: 'Failed', icon: <XCircle size={16} />, onClick: async () => handleResult('fail'), color: '#B91C1C' },
+            { label: 'Complete', icon: <CheckCircle2 size={16} />, onClick: async () => handleResult('pass'), color: '#15803D' },
+          ]
+    ) : []),
     ...((s === 'In Progress' || s === 'Complete') && canStaffEdit ? [{ label: printLoading ? 'Generating…' : 'Print Work Order', icon: printLoading ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <FileText size={16} />, onClick: handlePrintWorkOrder }] : []),
   ];
 
@@ -2759,6 +2796,14 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
         </button>
       )}
       {s === 'In Progress' && (
+        batchModuleActive ? (
+          /* D4 — single explicit Complete action; handler gates on
+             every item carrying a result. */
+          <button onClick={async () => handleBatchCompleteClick()} disabled={submitting} style={{ ...rpGreen, opacity: submitting || !batchSummary?.isAllComplete ? 0.6 : 1, cursor: submitting ? 'progress' : 'pointer' }}>
+            {submitting && <BtnSpinner size={11} color="#fff" />} Complete Repair
+            {batchSummary && !batchSummary.isAllComplete ? ` (${batchSummary.done}/${batchSummary.total})` : ''}
+          </button>
+        ) : (
         <>
           <button onClick={async () => handleResult('fail')} disabled={submitting} style={{ ...rpRed, opacity: submitting ? 0.6 : 1, cursor: submitting ? 'progress' : 'pointer' }}>
             {submitting && <BtnSpinner size={11} color="#fff" />} Failed
@@ -2767,6 +2812,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
             {submitting && <BtnSpinner size={11} color="#fff" />} Complete
           </button>
         </>
+        )
       )}
       {/* Print Work Order — In Progress / Complete (client-side, sub-second) */}
       {(s === 'In Progress' || s === 'Complete') && canStaffEdit && (
