@@ -1604,7 +1604,15 @@ export async function postCompleteTaskSb(
     'complete-task',
     { body: payload },
   );
-  if (error) return { ok: false, error: error.message };
+  if (error) {
+    // Surface the EF's real reason (e.g. INVALID_STATUS) instead of the generic
+    // "non-2xx status code" — the real message lives in error.context (PR #734).
+    const { message, errorCode } = await extractEdgeError(
+      error,
+      'Couldn’t reach the Complete Task service. Please try again.',
+    );
+    return { ok: false, error: message, errorCode };
+  }
   return data ?? { ok: false, error: 'no response body' };
 }
 

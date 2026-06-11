@@ -673,6 +673,11 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
         }
 
         if (!resp.ok || !resp.data?.success) {
+          // Roll back the optimistic 'In Progress' patch so a failed start
+          // doesn't leave the row falsely showing In Progress (matches the
+          // conflict path above; the start did not actually take effect).
+          clearTaskPatch?.(task.taskId);
+          setStartTaskResult(null);
           const errMsg = resp.error || resp.data?.message || resp.data?.error || 'Work order generation failed.';
           setStartTaskError(errMsg + ' You can retry from the Regenerate Work Order button.');
           void writeSyncFailed({
@@ -692,6 +697,9 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
         setStartTaskResult(resp.data);
         onTaskUpdated?.();
       } catch (err) {
+        // Roll back the optimistic patch on a thrown/network failure too.
+        clearTaskPatch?.(task.taskId);
+        setStartTaskResult(null);
         setStartTaskError(
           (err instanceof Error ? err.message : 'Network error')
           + ' while generating work order — you can retry from the Regenerate Work Order button.'
