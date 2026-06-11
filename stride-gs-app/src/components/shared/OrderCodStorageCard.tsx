@@ -107,6 +107,9 @@ export function OrderCodStorageCard({ order, performedBy, canEdit }: Props) {
   const [loadingPreview, setLoadingPreview] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const reqSeq = useRef(0);
+  // Signature of the last auto-persisted line — guards against re-attempting an
+  // identical write (e.g. if a write errors or the realtime refresh is slow).
+  const autoPersistSigRef = useRef<string>('');
 
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -174,14 +177,6 @@ export function OrderCodStorageCard({ order, performedBy, canEdit }: Props) {
     // Only the included line's total drives "unsaved changes" — a disabled
     // line's live total differing from the persisted 0 isn't a pending edit.
     (enabled && total !== (order.codStorageTotal ?? 0));
-
-  // ── Render decision ──────────────────────────────────────────────────
-  // Collected orders always show (the green record). Otherwise wait for the
-  // preview; render nothing if this order has no COD-flagged items.
-  if (!collected) {
-    if (!preview && !loadingPreview) return null;       // first load not started
-    if (preview && codItems.length === 0) return null;  // no COD items on order
-  }
 
   // Build the dt_orders cod_storage_* patch from a result set (the live
   // preview for Save, or the commit result for Collect so the persisted
@@ -303,12 +298,55 @@ export function OrderCodStorageCard({ order, performedBy, canEdit }: Props) {
     }
   };
 
+  // Auto-persist the COD line so it ALWAYS reflects in DT + totals without a
+  // manual Save. The DT push reads the persisted cod_storage_* columns, not this
+  // card's live preview — so an order whose item was flagged COD AFTER creation
+  // (no create-time seed) showed no COD in DT until someone happened to hit Save
+  // (the DIG-00160 report). Editors only; never after collected; only with a
+  // billable, included line; and only on a real diff — the post-write realtime
+  // refresh then makes the next run a no-op, so there's no write loop. Debounced.
+  useEffect(() => {
+    if (!canEdit || collected || saving || collecting) return;
+    if (!preview || billableItems.length === 0 || !enabled) return;
+    const inSync =
+      order.codStorageEnabled === true &&
+      Math.abs((order.codStorageTotal ?? 0) - total) < 0.005 &&
+      (order.codStorageCutoffDate || '') === (cutoff || '') &&
+      Math.abs((order.codStorageRate ?? COD_STORAGE_DEFAULT_RATE) - rate) < 0.0001;
+    if (inSync) return;
+    // Don't re-attempt the identical line (prevents an error/slow-refresh loop).
+    const sig = `${total}|${cutoff}|${rate}`;
+    if (autoPersistSigRef.current === sig) return;
+    const t = setTimeout(() => {
+      autoPersistSigRef.current = sig;
+      const patch = buildSummaryPatch();
+      void supabase
+        .from('dt_orders')
+        .update({ ...patch, ...buildOrderTotalPatch(patch.cod_storage_total ?? 0) })
+        .eq('id', order.id)
+        .then(({ error }) => { if (!error) entityEvents.emit('dt_order', order.id); });
+    }, 800);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canEdit, collected, saving, collecting, preview, billableItems.length, enabled, total, cutoff, rate,
+      order.id, order.codStorageEnabled, order.codStorageTotal, order.codStorageCutoffDate, order.codStorageRate]);
+
   const dateRange = periodStart && cutoff ? `${periodStart} → ${cutoff}` : `through ${cutoff}`;
 
   const labelCss: React.CSSProperties = {
     display: 'block', fontSize: 11, fontWeight: 600, color: theme.colors.textSecondary,
     textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 4,
   };
+
+  // ── Render decision ──────────────────────────────────────────────────
+  // Collected orders always show (the green record). Otherwise wait for the
+  // preview; render nothing if this order has no COD-flagged items. (Placed
+  // after all hooks so the auto-persist effect above always runs — Rules of
+  // Hooks: no early return before a hook.)
+  if (!collected) {
+    if (!preview && !loadingPreview) return null;       // first load not started
+    if (preview && codItems.length === 0) return null;  // no COD items on order
+  }
 
   return (
     <div style={{ background: '#fff', border: `1px solid ${theme.colors.border}`, borderRadius: 12, padding: 16, marginBottom: 14 }}>
