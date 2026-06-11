@@ -346,29 +346,49 @@ Deno.serve(async (req: Request) => {
     //       async; an explicit await reduces variance.
     // The GAS writer is idempotent so the duplicate fire is a no-op
     // on identical values.
+    // Retried up to 3x with backoff: the CB Clients sheet is a single shared
+    // sheet, and a transient GAS lock/timeout here used to leave the sheet
+    // stale (while Supabase was correct) — the original auto-inspect-on-receipt
+    // failure mode. StrideAPI v38.273.0 also stops the CB→SB resync from
+    // clobbering these app-authoritative settings, so a missed mirror no longer
+    // corrupts Supabase; but a fresh sheet still matters for the GAS-side paths
+    // that read the per-tenant Settings tab (auto-inspect server fallback +
+    // transfer auto-inspect), so we make the mirror best-effort-but-persistent.
     let sheetMirrorOk = false;
     let sheetMirrorError: string | null = null;
-    try {
-      const mirrorResp = await fetch(`${supabaseUrl}/functions/v1/push-client-settings-to-sheet`, {
-        method:  'POST',
-        headers: {
-          'Authorization': `Bearer ${serviceKey}`,
-          'Content-Type':  'application/json',
-        },
-        body: JSON.stringify({
-          spreadsheet_id: clientSpreadsheetId,
-          requestedBy:    'apply-intake-on-submit',
-        }),
-      });
-      const mirrorJson = await mirrorResp.json().catch(() => ({}));
-      sheetMirrorOk = mirrorResp.ok && mirrorJson.ok === true;
-      if (!sheetMirrorOk) {
-        sheetMirrorError = String(mirrorJson.error || `HTTP ${mirrorResp.status}`);
-        console.warn('[apply-intake-on-submit] sheet mirror failed (non-fatal):', sheetMirrorError);
+    for (let attempt = 1; attempt <= 3 && !sheetMirrorOk; attempt++) {
+      if (attempt > 1) await new Promise(r => setTimeout(r, 400 * (attempt - 1)));
+      try {
+        const mirrorResp = await fetch(`${supabaseUrl}/functions/v1/push-client-settings-to-sheet`, {
+          method:  'POST',
+          headers: {
+            'Authorization': `Bearer ${serviceKey}`,
+            'Content-Type':  'application/json',
+          },
+          body: JSON.stringify({
+            spreadsheet_id: clientSpreadsheetId,
+            requestedBy:    'apply-intake-on-submit',
+          }),
+        });
+        const mirrorJson = await mirrorResp.json().catch(() => ({} as Record<string, unknown>));
+        // A partial sheet write (the GAS writer reports cbSkipped /
+        // perTenantSkipped) is treated as retryable, not success.
+        const result = (mirrorJson?.result ?? null) as { cbSkipped?: unknown[]; perTenantSkipped?: unknown[] } | null;
+        const partial = !!result && (
+          (Array.isArray(result.cbSkipped) && result.cbSkipped.length > 0) ||
+          (Array.isArray(result.perTenantSkipped) && result.perTenantSkipped.length > 0)
+        );
+        sheetMirrorOk = mirrorResp.ok && mirrorJson?.ok === true && !partial;
+        if (sheetMirrorOk) {
+          sheetMirrorError = null;
+        } else {
+          sheetMirrorError = String(mirrorJson?.error || (partial ? 'partial sheet write (cbSkipped/perTenantSkipped)' : `HTTP ${mirrorResp.status}`));
+          console.warn(`[apply-intake-on-submit] sheet mirror attempt ${attempt}/3 failed (non-fatal):`, sheetMirrorError);
+        }
+      } catch (e) {
+        sheetMirrorError = e instanceof Error ? e.message : String(e);
+        console.warn(`[apply-intake-on-submit] sheet mirror attempt ${attempt}/3 threw (non-fatal):`, sheetMirrorError);
       }
-    } catch (e) {
-      sheetMirrorError = e instanceof Error ? e.message : String(e);
-      console.warn('[apply-intake-on-submit] sheet mirror threw (non-fatal):', sheetMirrorError);
     }
 
     return json({
