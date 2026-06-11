@@ -223,6 +223,51 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Client tax exemption — drives the DEFAULT of each line's "taxable"
+  // checkbox (same pattern as CreateDeliveryOrderModal's clientTaxInfo).
+  // null = unknown/loading; once true, new lines default to non-taxable
+  // and the pristine draft's lines are unchecked once (staff can still
+  // re-check a line manually — this only changes defaults, and the server
+  // keeps recomputing tax from whatever flags are actually sent).
+  const [clientTaxExempt, setClientTaxExempt] = useState<boolean | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const cid = repair.clientSheetId;
+    if (!cid) return;
+    (async () => {
+      const { data, error } = await supabase
+        .from('clients')
+        .select('tax_exempt')
+        .eq('tenant_id', cid)
+        .maybeSingle();
+      if (cancelled || error || !data) return;
+      setClientTaxExempt((data as { tax_exempt: boolean | null }).tax_exempt === true);
+    })();
+    return () => { cancelled = true; };
+  }, [repair.clientSheetId]);
+
+  // Tracks whether the builder was seeded from a PERSISTED quote (editing
+  // an already-sent quote). Persisted lines carry deliberate operator
+  // intent — the exemption auto-uncheck below must never rewrite them.
+  const linesFromPersisted = Array.isArray(repair.quoteLines) && repair.quoteLines.length > 0;
+
+  // One-time pass when the exemption loads as TRUE on a fresh draft:
+  // uncheck every line (covers the initial default REPAIR line, which is
+  // created before the async client fetch lands). Runs only on the
+  // null→true transition, so a staff member re-checking a line afterwards
+  // isn't fought.
+  useEffect(() => {
+    if (clientTaxExempt !== true || linesFromPersisted) return;
+    setQuoteLines(prev => prev.map(l => l.taxable ? { ...l, taxable: false } : l));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clientTaxExempt]);
+
+  // Default taxable for a NEW line: the price-list (catalog) flag, unless
+  // the client is tax-exempt — then default OFF. Manual toggles after the
+  // line exists are always respected.
+  const defaultTaxable = (catalogTaxable: boolean): boolean =>
+    clientTaxExempt === true ? false : catalogTaxable;
+
   // v38.124.1 — once the catalog finishes loading, back-fill rates on
   // any line that still has an empty rate (the initial state was built
   // at mount time before the catalog was available, so the default
@@ -237,12 +282,14 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
       if (!entry) return l;
       const filled = resolveCatalogRate(entry);
       if (!filled) return l;                          // catalog has nothing usable
-      return { ...l, rate: filled, taxable: entry.taxable === true };
+      return { ...l, rate: filled, taxable: defaultTaxable(entry.taxable === true) };
     }));
   // resolveCatalogRate closes over `repair.itemClass` + serviceCatalog;
-  // re-run if the class or catalog changes. setQuoteLines is stable.
+  // re-run if the class or catalog changes (clientTaxExempt feeds
+  // defaultTaxable — include it so a late exemption load still lands on
+  // pristine lines). setQuoteLines is stable.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [serviceCatalog, repair.itemClass]);
+  }, [serviceCatalog, repair.itemClass, clientTaxExempt]);
 
   // Live totals — recomputed on every keystroke; same math the server
   // re-runs on submit so what you see is what gets quoted.
@@ -303,7 +350,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
       svcName: entry.name || entry.code,
       qty: '1',
       rate: resolveCatalogRate(entry),
-      taxable: entry.taxable === true,
+      taxable: defaultTaxable(entry.taxable === true),
     }]);
   }
   function updateLineField(idx: number, field: keyof LineDraft, value: string | boolean) {
@@ -323,7 +370,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
       ...l,
       svcCode: code,
       svcName: entry?.name || code,
-      taxable: entry?.taxable === true,
+      taxable: defaultTaxable(entry?.taxable === true),
       rate: resolveCatalogRate(entry),
     } : l));
   }
@@ -841,7 +888,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
         // Reset local state so the builder is empty and ready.
         setEffectiveStatus('Pending Quote');
         setRevised(false);
-        setQuoteLines([{ svcCode: 'REPAIR', svcName: 'Repair', qty: '1', rate: '', taxable: true }]);
+        setQuoteLines([{ svcCode: 'REPAIR', svcName: 'Repair', qty: '1', rate: '', taxable: defaultTaxable(true) }]);
         setSubmitResult(null);
         setRespondResult(null);
         applyRepairPatch?.(repair.repairId, {
@@ -1962,6 +2009,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
             )}
             <RepairQuoteBuilder
               lines={quoteLines}
+              clientTaxExempt={clientTaxExempt}
               taxAreaId={taxAreaId}
               taxAreas={taxAreas}
               catalog={serviceCatalog}
@@ -2007,6 +2055,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
               <>
                 <RepairQuoteBuilder
                   lines={quoteLines}
+                  clientTaxExempt={clientTaxExempt}
                   taxAreaId={taxAreaId}
                   taxAreas={taxAreas}
                   catalog={serviceCatalog}
@@ -2476,6 +2525,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
           <>
             <RepairQuoteBuilder
               lines={quoteLines}
+              clientTaxExempt={clientTaxExempt}
               taxAreaId={taxAreaId}
               taxAreas={taxAreas}
               catalog={serviceCatalog}
@@ -2504,6 +2554,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
           <>
             <RepairQuoteBuilder
               lines={quoteLines}
+              clientTaxExempt={clientTaxExempt}
               taxAreaId={taxAreaId}
               taxAreas={taxAreas}
               catalog={serviceCatalog}
@@ -2980,13 +3031,16 @@ function RepairQuoteBuilder(props: {
   catalog: Array<{ code: string; name: string; category: string | null; taxable: boolean | null; flat_rate: number | null }>;
   totals: { subtotal: number; taxable: number; taxRate: number; taxAmount: number; grand: number; taxAreaName: string };
   disabled: boolean;
+  /** Client's tax_exempt setting — when true, lines default non-taxable
+   *  and the tax block shows an explanatory note. null = unknown. */
+  clientTaxExempt?: boolean | null;
   onAddLine: (code: string) => void;
   onChangeService: (idx: number, code: string) => void;
   onUpdateField: (idx: number, field: 'svcCode' | 'svcName' | 'qty' | 'rate' | 'taxable', value: string | boolean) => void;
   onRemoveLine: (idx: number) => void;
   onTaxAreaChange: (id: string) => void;
 }) {
-  const { lines, taxAreaId, taxAreas, catalog, totals, disabled,
+  const { lines, taxAreaId, taxAreas, catalog, totals, disabled, clientTaxExempt,
           onChangeService, onUpdateField, onRemoveLine, onAddLine, onTaxAreaChange } = props;
   const [pickerCode, setPickerCode] = useState<string>('');
 
@@ -3131,6 +3185,11 @@ function RepairQuoteBuilder(props: {
 
       {/* Tax area + totals */}
       <div style={{ marginTop: 12, padding: 10, background: theme.colors.bgSubtle, borderRadius: 8 }}>
+        {clientTaxExempt === true && (
+          <div style={{ fontSize: 11, color: '#92400E', background: '#FEF3C7', borderRadius: 6, padding: '4px 8px', marginBottom: 8 }}>
+            Client is tax-exempt — lines default to non-taxable. Check a line's Tax box to override.
+          </div>
+        )}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
           <span style={{ fontSize: 11, fontWeight: 600, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
             Tax Area
