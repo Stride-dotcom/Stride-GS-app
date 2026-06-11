@@ -109,12 +109,16 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
   );
 
   // BatchWorkItems (2026-06-11) — "single batch task" mode. Gated on the
-  // batchWorkItems flag resolved against the DATA tenant (same UI-only gate
-  // the detail panels use), and only meaningful with 2+ items. The flag's
-  // tenant scope is a subset of the createTask SB canary, so any tenant that
-  // can see this toggle is routed to batch-create-tasks-sb (the GAS handler
-  // ignores batchMode).
-  const batchWorkFlagRow = useFeatureFlagRow('batchWorkItems');
+  // batchWorkItemsTasks flag resolved against the DATA tenant (same UI-only
+  // gate the detail panels use), and only meaningful with 2+ items. The
+  // flag's tenant scope is a subset of the createTask SB canary, so any
+  // tenant that can see this toggle is routed to batch-create-tasks-sb (the
+  // GAS handler ignores batchMode).
+  // D6 (BATCH_WORK_ITEMS_QA.md): TASK batch surfaces are parked behind this
+  // separate, intentionally-unseeded key while the per-item workflow is
+  // proven on repairs — so the toggle is hidden everywhere until a
+  // 'batchWorkItemsTasks' feature_flags row is inserted (no deploy needed).
+  const batchWorkFlagRow = useFeatureFlagRow('batchWorkItemsTasks');
   const batchModeAvailable =
     items.length > 1 &&
     !!batchWorkFlagRow &&
