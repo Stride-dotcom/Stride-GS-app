@@ -208,6 +208,15 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
   const [autoPrintLabels, setAutoPrintLabels] = useState(() => localStorage.getItem('stride_auto_print_labels') === 'true');
   const printRef = useRef<HTMLDivElement>(null);
   const [items, setItems] = useState<DockItem[]>(() => Array.from({ length: 5 }, () => emptyItem(false)));
+  // Shipment-wide "Needs Inspection" default for NEWLY added/pasted rows. Tracks
+  // the client's auto_inspection until the operator overrides it via the per-row
+  // checkbox or the toolbar master toggle. `inspectTouchedRef` records that the
+  // operator deliberately set the inspection column, so the auto-inspection race
+  // effect (and a transient apiClients refetch) can't silently re-check rows the
+  // operator turned off — the exact gap behind item 00003 getting an unwanted
+  // INSP task after inspection was unchecked on an auto-inspect (Demo) client.
+  const [inspectDefault, setInspectDefault] = useState(false);
+  const inspectTouchedRef = useRef(false);
   const [submitted, setSubmitted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [savingDraft, setSavingDraft] = useState(false);
@@ -395,6 +404,13 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
   useEffect(() => {
     if (prevAutoInspectRef.current === clientAutoInspect) return;
     prevAutoInspectRef.current = clientAutoInspect;
+    // Don't clobber a deliberate operator override of the inspection column
+    // (per-row uncheck or the toolbar master toggle). Without this guard a
+    // late apiClients load — or a realtime 'client' refetch that briefly empties
+    // apiClients then repopulates — flips clientAutoInspect back to true and
+    // silently re-checks rows the operator turned off.
+    if (inspectTouchedRef.current) return;
+    setInspectDefault(clientAutoInspect);
     setItems(prev => prev.map(item => ({ ...item, needsInspection: clientAutoInspect })));
   }, [clientAutoInspect]);
 
@@ -504,6 +520,12 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
 
   const filledItems = items.filter(i => i.itemId.trim() && i.description.trim());
 
+  // Master "Needs Inspection" toggle state for the toolbar checkbox — reflects the
+  // inspection column across every row: all on → checked, none → unchecked, mixed
+  // → indeterminate.
+  const inspectAllOn = items.length > 0 && items.every(i => i.needsInspection);
+  const inspectAnyOn = items.some(i => i.needsInspection);
+
   const update = useCallback((idx: number, field: keyof DockItem, value: string | number | boolean) => {
     // Item ID is digits-only. Scrub anything else here (paste, IME, browser
     // autofill, accidental ' / `) so a typo can never poison the row before
@@ -513,22 +535,33 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
     if (field === 'itemId' && typeof value === 'string') {
       value = value.replace(/\D+/g, '');
     }
+    // Operator deliberately set the inspection flag on a row — make new rows
+    // follow this intent and stop the auto-inspect race effect from re-checking.
+    if (field === 'needsInspection') inspectTouchedRef.current = true;
     setItems(prev => prev.map((item, i) => i === idx ? { ...item, [field]: value } : item));
   }, []);
 
+  // Toolbar master toggle — set/clear "Needs Inspection" on every row at once and
+  // make subsequently added/pasted rows follow that choice.
+  const setAllInspection = useCallback((next: boolean) => {
+    inspectTouchedRef.current = true;
+    setInspectDefault(next);
+    setItems(prev => prev.map(item => ({ ...item, needsInspection: next })));
+  }, []);
+
   const addRow = useCallback(() => {
-    const newItem = emptyItem(clientAutoInspect);
+    const newItem = emptyItem(inspectDefault);
     setItems(prev => [...prev, newItem]);
     if (autoIdEnabled) assignAutoId(newItem.id);
-  }, [clientAutoInspect, autoIdEnabled, assignAutoId]);
+  }, [inspectDefault, autoIdEnabled, assignAutoId]);
 
   const addRows = useCallback((n: number) => {
-    const newItems = Array.from({ length: n }, () => emptyItem(clientAutoInspect));
+    const newItems = Array.from({ length: n }, () => emptyItem(inspectDefault));
     setItems(prev => [...prev, ...newItems]);
     if (autoIdEnabled) {
       newItems.forEach(item => assignAutoId(item.id));
     }
-  }, [clientAutoInspect, autoIdEnabled, assignAutoId]);
+  }, [inspectDefault, autoIdEnabled, assignAutoId]);
   const removeRow = useCallback((idx: number) => setItems(prev => prev.length > 1 ? prev.filter((_, i) => i !== idx) : prev), []);
   const duplicateRow = useCallback((idx: number) => {
     const newId = `r-${Date.now()}-${Math.random().toString(36).slice(2,6)}`;
@@ -618,7 +651,7 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
         const cols = line.split('\t');
         const targetIdx = startIdx + offset;
         if (targetIdx >= next.length) {
-          const item = emptyItem(clientAutoInspect);
+          const item = emptyItem(inspectDefault);
           next.push(item);
           newRowIds.push(item.id);
         }
@@ -651,7 +684,7 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
       newRowIds.forEach(id => assignAutoId(id));
     }
     return true;
-  }, [autoIdEnabled, assignAutoId, clientAutoInspect]);
+  }, [autoIdEnabled, assignAutoId, inspectDefault]);
 
   const handlePaste = useCallback((e: React.ClipboardEvent<HTMLInputElement>, startIdx: number, field: keyof DockItem) => {
     const text = e.clipboardData.getData('text');
@@ -1466,6 +1499,8 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
     setAutoIdError('');
     const freshItems = Array.from({ length: 5 }, () => emptyItem(false));
     setItems(freshItems);
+    inspectTouchedRef.current = false;
+    setInspectDefault(false);
     setSubmitted(false); setSubmitError(''); setSubmitResult(null);
     idempotencyKeyRef.current = crypto.randomUUID();
     // Mint a fresh DOCK number so the new intake doesn't collide with the
@@ -1625,10 +1660,17 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
                   const autoInspect = apiMatch?.autoInspection ?? false;
                   setClient(liveMatch.name);
                   setClientSheetId(liveMatch.id);
+                  // Picking a (new) client is a fresh start — clear any prior
+                  // override and seed both the rows and the new-row default from
+                  // this client's auto_inspection.
+                  inspectTouchedRef.current = false;
+                  setInspectDefault(autoInspect);
                   setItems(prev => prev.map(item => ({ ...item, needsInspection: autoInspect })));
                 } else {
                   setClient('');
                   setClientSheetId('');
+                  inspectTouchedRef.current = false;
+                  setInspectDefault(false);
                   setItems(prev => prev.map(item => ({ ...item, needsInspection: false })));
                 }
               }}
@@ -1934,6 +1976,22 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
             <button onClick={addRow} style={{ padding: '5px 12px', fontSize: 11, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary, display: 'flex', alignItems: 'center', gap: 4 }}><Plus size={13} /> Add Row</button>
             <button onClick={() => addRows(5)} style={{ padding: '5px 12px', fontSize: 11, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>+5</button>
             <button onClick={() => addRows(10)} style={{ padding: '5px 12px', fontSize: 11, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary }}>+10</button>
+            {/* Master "Needs Inspection" toggle — set/clear INSP on every row at
+                once; newly added/pasted rows follow this choice. Fixes auto-inspect
+                clients where one un-noticed row would still create an INSP task. */}
+            <label
+              title="Set or clear Needs Inspection for every row. New rows follow this setting."
+              style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '5px 10px', fontSize: 11, fontWeight: 600, border: `1px solid ${theme.colors.border}`, borderRadius: 6, background: '#fff', cursor: 'pointer', fontFamily: 'inherit', color: theme.colors.textSecondary, userSelect: 'none' }}
+            >
+              <input
+                type="checkbox"
+                checked={inspectAllOn}
+                ref={el => { if (el) el.indeterminate = inspectAnyOn && !inspectAllOn; }}
+                onChange={() => setAllInspection(!inspectAllOn)}
+                style={{ accentColor: theme.colors.orange, cursor: 'pointer' }}
+              />
+              INSP all
+            </label>
             {/* Column visibility toggle */}
             <div style={{ position: 'relative' }}>
               <button
