@@ -124,6 +124,17 @@
 
 ---
 
+## Recent Changes (2026-06-11, clients: durable fix — CB→Supabase resync no longer clobbers app-authoritative settings — feat/fix/client-settings-resync-clobber, v38.273.0)
+
+- **Follow-up to the same-day ops backfill below.** Implements the durable GAS fix for the auto-inspect-on-receipt clobber (and 10 sibling client settings).
+- **Root cause:** the app/intake writes client settings (`auto_inspection`, etc.) straight to `public.clients` (source of truth) + mirrors them OUT to the CB Clients sheet. But two CB→SB paths read the FULL CB row back and upserted it, overwriting fresh app values from a stale CB cell: the **5-min `reconcileNextClient_` cron** (`resyncClientToSupabase_`, `StrideAPI.gs`) and the admin **`handleBulkSyncClientsToSupabase_`**. Observed live: a client's `auto_inspection` flipping `true→false` within minutes of an intake refresh.
+- **Fix (StrideAPI.gs v38.273.0):** new `APP_AUTHORITATIVE_CLIENT_COLS_` (11 cols: `auto_inspection`, `separate_by_sidemark`, `enable_notifications`, `enable_shipment_email`, `enable_receiving_billing`, `auto_charge`, `payment_terms`, `free_storage_days`, `discount_storage_pct`, `discount_services_pct`, `shipment_note`) + `stripAppAuthoritativeClientCols_()`. Both CB→SB paths now strip those columns **only for clients that already exist in Supabase** (existence-gated via `api_isKnownTenantId_` in the cron; a batched `spreadsheet_id` prefetch in the bulk sync). `supabaseUpsert_` uses `merge-duplicates`, so omitted cols are preserved on UPDATE → **Supabase is authoritative** for app-edited settings. A brand-new client (e.g. `handleOnboardClient_`'s first sync runs through `resyncClientToSupabase_`) is written in FULL so onboarding values land, not DB defaults.
+- **Secondary (apply-intake-on-submit EF):** the `push-client-settings-to-sheet` mirror now **retries up to 3× with backoff** and treats a partial write (`cbSkipped`/`perTenantSkipped`) as retryable, so a transient GAS lock no longer leaves the per-tenant Settings / CB sheet stale (those still feed the GAS-side auto-inspect server-fallback + transfer auto-inspect).
+- **Behavior change to note:** direct edits to those 11 columns in the **CB Clients sheet** no longer propagate to Supabase — change them in the app (which writes SB + mirrors to the sheet).
+- Opus code-reviewed twice (the INSERT/onboarding edge was caught + fixed in review). tsc + build clean. **Deploy (this session, post-merge):** StrideAPI v38.273.0 via `push-api && deploy-api`; `apply-intake-on-submit` EF via `supabase functions deploy`.
+
+---
+
 ## Recent Changes (2026-06-11, ops: auto-inspect-on-receipt — Supabase settings re-sync backfill + root-cause correction — no GAS code in this PR)
 
 - **Reported (Brume):** a received shipment did not auto-create INSP tasks despite the client's intake enabling auto-inspect; tasks had to be made by hand.
