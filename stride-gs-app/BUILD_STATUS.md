@@ -118,6 +118,14 @@
 
 ---
 
+## Recent Changes (2026-06-11, receiving: per-item Needs Inspection now sticks on auto-inspect clients — fix/receiving/sb-per-item-inspection, PR #744)
+
+- **Reported (Ken, testing Justin's Demo — a Supabase canary, all handlers SB):** received a shipment, unchecked "Needs Inspection" in the Receiving screen, but item **00003** still got an INSP task. Confirmed via Management API: 00003's `inventory.needs_inspection = true` while siblings were `false`.
+- **Root cause (UI state, NOT the edge function):** `complete-shipment-sb` behaved correctly — it honored the per-item flag because the UI sends `autoInspectionLoaded: true` (the inverse of the earlier real-client bug where enabled auto-inspect FAILED to create tasks). 00003 was simply submitted with `needsInspection: true`. The gap is in [Receiving.tsx](stride-gs-app/src/pages/Receiving.tsx): for a client with `auto_inspection = true` the INSP checkbox defaults **on for every row** (client-select bulk-set + the auto-inspect race effect + each new/pasted row seeded `emptyItem(clientAutoInspect)`), and the only way to turn it off was per-row. A row added/pasted **after** the operator unchecked the others came back pre-checked, so among many rows one (00003) slipped through still checked.
+- **Fix (operator-chosen):** toolbar **"INSP all" master toggle** (set/clear the whole column, indeterminate when mixed) + a shipment-wide **`inspectDefault`** that newly added/pasted rows follow + an **`inspectTouchedRef`** that records a deliberate operator override so the auto-inspect race effect (and a transient `apiClients` refetch) can no longer silently re-check rows the operator turned off. Client-select / `reset()` clear the override and re-seed from the new client's default. No EF/billing/schema/RLS change; original auto-inspect direction preserved (untouched rows still get the client default on late `apiClients` load). tsc + build clean; code-reviewer 0 Critical/Important. **Merged, NOT deployed** (deploy pending). Follow-up: 00003's already-created INSP task on the Demo to be cancelled separately (operator-approved).
+
+---
+
 ## Recent Changes (2026-06-11, shared: BatchWorkItems — per-item start/pass/fail + photos for batch repairs & tasks — feat/warehouse/batch-work-items)
 
 - **What:** reusable per-item work module any batch entity plugs into. Each item in a repair/task batch is independently **Started / Passed / Failed**, carries its own **notes** and **photos** (tagged to BOTH the item and the batch entity → photo shows on the item detail rollup AND the batch's Photos tab from one upload), with a "N of M complete" progress header. Single-item entities render the same component with one card.
