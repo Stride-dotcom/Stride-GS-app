@@ -3648,7 +3648,16 @@ export async function postCompleteRepairSb(
     'complete-repair-sb',
     { body: payload },
   );
-  if (error) return { ok: false, error: error.message };
+  if (error) {
+    // Surface the EF's real reason (e.g. INVALID_PARAMS) instead of the
+    // generic "Edge Function returned a non-2xx status code" — the real
+    // message lives in error.context (a Response), not error.message (PR #734).
+    const { message, errorCode } = await extractEdgeError(
+      error,
+      'Couldn’t reach the Complete Repair service. Please try again.',
+    );
+    return { ok: false, error: message, errorCode };
+  }
   return data ?? { ok: false, error: 'no response body' };
 }
 

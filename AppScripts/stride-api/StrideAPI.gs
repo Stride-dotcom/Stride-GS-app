@@ -1,4 +1,5 @@
 /* ===================================================
+   StrideAPI.gs — v38.274.0 — 2026-06-11 PST — [REPAIRS/MIGRATION] fix: __writeThroughReverseRepairs_ stale-write guard (version check) stops a delayed startRepair mirror from reverting a completed repair. completeRepair + startRepair are fleet-wide SB; each fires writeThroughReverse to mirror status onto the per-tenant Repairs sheet. When staff Start then quickly Complete a repair, the two mirror HTTP calls can land out of order — a slow start-repair-sb write arriving AFTER complete-repair-sb stamps the sheet Status cell back to 'In Progress', and the next api_fullClientSync_ reads that stale cell and upserts it onto public.repairs, reverting the completion (reported JUS-RPR-1; same class as the 2026-06-02 completeTask revert, PR #596). Fix: public.repairs is authoritative for the fleet-wide SB repair cluster, so when an update payload touches Status the writer re-reads the LIVE SB status via new helper api_sbRepairStatus_ and writes THAT instead of the payload value — the sheet converges to SB truth and a stale in-flight payload can no longer clobber it. Legitimate backward transitions (re-quote to 'Pending Quote', reopen to 'In Progress') are preserved because SB already holds the new value at read time. Fail-open: a failed SB read falls back to the payload value (prior behavior). Status-only override; every other mirrored field still writes its payload value. No schema change, no change to the v38.182 atomic invoice counter or half-write detection.
    StrideAPI.gs — v38.273.0 — 2026-06-11 PST — [REPAIRS/MIGRATION] fix: __writeThroughReverseRepairs_ now auto-creates the multi-line quote columns before mirroring. The SB-primary send-repair-quote-sb writes quote_lines_json + the 7 quote total columns to public.repairs, then fires this reverse-writethrough to mirror them onto the per-tenant Repairs sheet. But the writer SKIPPED any column missing on the sheet (the `if (!col) continue` mapping guard) — and on a Repairs sheet predating the v38.123.0 multi-line columns (Quote Lines JSON / Quote Subtotal / Quote Taxable Subtotal / Quote Tax Area ID / Quote Tax Area Name / Quote Tax Rate / Quote Tax Amount / Quote Grand Total) the mirror silently dropped them. The very next full-client-sync (sbRepairRow_) then read those now-missing sheet cells as blank and pushed them back, NULLING quote_lines_json/subtotal/grand_total in Supabase while quote_amount (a column that DOES exist) survived — so a freshly-sent multi-line quote lost its breakdown and the React Quote Builder fell back to the legacy single-amount display (reported: RPR-63981-1781198414542, item 63981, quote_amount=210 but quote_lines_json=null). Fix: when the reverse payload carries any of the 8 quote columns, api_ensureColumn_ each missing one (matching what the legacy handleSendRepairQuote_ already does) and re-read the header map before mapping targets, so the mirror actually persists them and the sync round-trip stops clobbering the SB row. Non-destructive (appends missing headers, idempotent no-op when present); no change to the insert path, the v38.182 atomic invoice counter, half-write detection, or any billing logic.
    StrideAPI.gs — v38.274.0 — 2026-06-11 PST — [CLIENTS/MIGRATION] fix: the CB→Supabase client sync no longer clobbers APP-AUTHORITATIVE client settings from a stale CB Clients cell. Root cause of the auto-inspect-on-receipt failure (Brume, 2026-06): the app/intake writes settings like AUTO_INSPECTION straight to public.clients (the source of truth) and mirrors them OUT to the CB sheet via __writeThroughReverseClients_, but the 5-minute reconcileNextClient_ cron (resyncClientToSupabase_) AND the admin handleBulkSyncClientsToSupabase_ both read the FULL CB row back and upsert it, overwriting fresh app values whenever the CB cell lagged (observed: a client's auto_inspection flipping true→false within minutes). Fix: new APP_AUTHORITATIVE_CLIENT_COLS_ list + stripAppAuthoritativeClientCols_() helper strips 11 columns (auto_inspection, separate_by_sidemark, enable_notifications, enable_shipment_email, enable_receiving_billing, auto_charge, payment_terms, free_storage_days, discount_storage_pct, discount_services_pct, shipment_note) from BOTH CB→SB upsert paths — but ONLY for clients that ALREADY exist in Supabase (existence-gated via api_isKnownTenantId_ in the cron / a batched id prefetch in the bulk sync). A brand-new client — e.g. handleOnboardClient_'s first sync to SB goes through resyncClientToSupabase_ — is written in FULL so its onboarding values land instead of DB defaults. supabaseUpsert_ uses Prefer:resolution=merge-duplicates, so on the UPDATE path the omitted columns are PRESERVED → Supabase stays authoritative for app-edited settings. Sheet-authoritative columns (identity, folder IDs, web_app_url, stax/qb IDs, parent_client, notes, active) still sync CB→SB as before. Behavior change: direct CB-Clients-sheet edits to those 11 settings no longer propagate to Supabase — edit them in the app (which writes SB + mirrors to the sheet). No schema change, no billing logic touched, no change to the v38.182 atomic invoice counter or half-write detection.
    StrideAPI.gs — v38.272.0 — 2026-06-10 PST — [BILLING] fix: RUSH task completion now bills the TRUE piece count (Qty × rate) too, joining INSP. Same per-piece rule as v38.271.0 but extended to svc code RUSH: a rush inspection of a carton holding N pieces bills "Rush × N", not "× 1". billQty = staff-adjusted public.tasks.qty when > 1 (via api_fetchTaskQty_), else inventory qty, else 1; feeds the Qty cell + Total = appliedRate × billQty. handleCompleteTask_ gate broadened from (svcCode === INSP) to (svcCode === INSP OR svcCode === RUSH); every OTHER service code still stays Qty 1 per item ID (RCVG / ASM / REPAIR / WC / MNRTU / etc.). SB parity: complete_task_atomic v_eff_qty now multiplies tasks.qty for INSP OR RUSH (migration 20260610120100) + tasks.qty seeded from inventory.qty for RUSH at creation (batch-create-tasks-sb — the only canary path that mints RUSH tasks; complete-shipment-sb only auto-creates INSP/ASM) + a backfill for open RUSH tasks (migration 20260610120000). Mirror sheet-checkbox path in Triggers.gs v4.8.2. No schema change, no change to the v38.182 atomic invoice counter or half-write detection.
@@ -4180,6 +4181,40 @@ function __writeThroughReverseRepairs_(ss, payload) {
   }
 
   // ── UPDATE path: row exists → write only the changed cells ──────────
+  // v38.274.0 — Stale-write guard (version check). A reverse-writethrough
+  // payload carries the status value its originating -sb EF captured when
+  // that EF ran. completeRepair + startRepair are both fleet-wide SB and
+  // each mirrors Status here; when staff Start then quickly Complete a
+  // repair, the two writeThroughReverse HTTP calls can land out of order.
+  // A slow start-repair-sb mirror arriving AFTER complete-repair-sb would
+  // otherwise stamp this row's Status back to 'In Progress' — and the next
+  // api_fullClientSync_ reads that stale cell and upserts it onto
+  // public.repairs, REVERTING the completion (the 2026-06-11 JUS-RPR-1
+  // revert; same class as the 2026-06-02 completeTask revert, PR #596).
+  //
+  // public.repairs is the authoritative store for the repair cluster, so
+  // the sheet must converge to SB truth — not to whatever status a delayed
+  // payload happened to carry. When this update touches the Status column,
+  // re-read the LIVE SB status and write THAT instead of the payload value.
+  // Legitimate backward transitions (re-quote -> 'Pending Quote', reopen ->
+  // 'In Progress') are preserved: SB already holds the new value at read
+  // time, so the override is a no-op for them. Fail-open: if the SB read
+  // fails (null) we keep the payload value (prior behavior). Only Status is
+  // overridden; every other targeted field still writes its payload value.
+  for (var sg = 0; sg < targets.length; sg++) {
+    if (targets[sg].sbKey !== "status") continue;
+    var rwTenantId = payload && payload.tenantId ? String(payload.tenantId).trim() : "";
+    var authStatus = api_sbRepairStatus_(rwTenantId, rowId);
+    if (authStatus !== null && authStatus !== "" && authStatus !== targets[sg].newValue) {
+      Logger.log(
+        "__writeThroughReverseRepairs_: Status override for " + rowId +
+        " — payload='" + targets[sg].newValue + "' superseded by SB-authoritative='" + authStatus + "'"
+      );
+      targets[sg].newValue = authStatus;
+    }
+    break;
+  }
+
   // Idempotency: skip the write when every target column already
   // matches its new value. Cheap N-cell read avoids redundant setValue
   // round-trips on FailedOps retry.
@@ -4208,6 +4243,41 @@ function __writeThroughReverseRepairs_(ss, payload) {
     written[targets[m].sbKey] = targets[m].newValue;
   }
   return { rowNumber: foundRow, written: written };
+}
+
+/**
+ * v38.274.0 — Read the authoritative status of a single repair from
+ * public.repairs. Backs __writeThroughReverseRepairs_'s stale-write guard:
+ * the sheet mirror converges to SB truth instead of a delayed payload's
+ * captured status, so an out-of-order startRepair mirror cannot revert a
+ * completion. Returns the trimmed status string, or null on any error /
+ * not-found (the caller then falls back to the payload value — fail-open).
+ * Mirrors the PostgREST GET pattern of api_isKnownTenantId_.
+ */
+function api_sbRepairStatus_(tenantId, repairId) {
+  if (!tenantId || !repairId) return null;
+  try {
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) return null;  // fail-open: caller keeps payload value
+    var resp = UrlFetchApp.fetch(
+      url + "/rest/v1/repairs?select=status&tenant_id=eq." + encodeURIComponent(tenantId) +
+        "&repair_id=eq." + encodeURIComponent(repairId) + "&limit=1",
+      {
+        method: "GET",
+        headers: { "Authorization": "Bearer " + key, "apikey": key },
+        muteHttpExceptions: true
+      }
+    );
+    if (resp.getResponseCode() < 200 || resp.getResponseCode() >= 300) return null;
+    var rows = JSON.parse(resp.getContentText());
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+    var st = rows[0].status;
+    return (st === null || st === undefined) ? null : String(st).trim();
+  } catch (e) {
+    Logger.log("api_sbRepairStatus_ error (fail-open to payload value): " + e);
+    return null;
+  }
 }
 
 /**
