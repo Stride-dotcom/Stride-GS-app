@@ -114,6 +114,7 @@ const MIRRORED_COLUMNS: string[] = [
   'resale_cert_expires',
   'resale_cert_url',
   'payment_method_required', // 2026-05-28 audit gap #5 — Stax payment-method enforcement
+  'end_customer_pays_storage', // 2026-06-11 — COD Storage flag (paired with trigger WHEN + REVERSE_CLIENTS_SB_ONLY_SETTINGS_)
 ];
 
 Deno.serve(async (req: Request) => {

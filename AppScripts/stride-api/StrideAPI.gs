@@ -1,4 +1,5 @@
 /* ===================================================
+   StrideAPI.gs — v38.279.0 — 2026-06-11 PST — [CLIENTS/MIGRATION] fix: client-settings reverts — the v38.274 strip's existence checks FAILED THE WRONG WAY. (1) resyncClientToSupabase_ (5-min reconcile cron) gated the app-authoritative strip on api_isKnownTenantId_, which returns false on ANY Supabase read failure — so a transient SB hiccup skipped the strip and FULL-ROW-upserted stale CB settings, reverting auto_inspection & friends (the recurring revert v38.274 was meant to stop). New tri-state api_sbClientExistsTriState_: exists → stripped upsert; confirmed-new → full row (onboarding first-sync); INDETERMINATE → skip the cycle entirely (no write; cron retries in 5 min). (2) handleBulkSyncClientsToSupabase_ fell back to FULL rows for every client when its existence prefetch failed — one transient failure = fleet-wide settings revert; now the sync ABORTS with SB_PREFETCH_FAILED and the operator re-runs. (3) APP_AUTHORITATIVE_CLIENT_COLS_ extended DEFENSIVELY with every remaining app/SB-authoritative column (payment_method_required, end_customer_pays_storage, billing_*, tax_*, resale_cert_*, notification_contacts, stax_customer_name, intake stamps) — no-ops today since sbClientRow_ doesn't project them, but future projection growth can't clobber. (4) REVERSE_CLIENTS_SB_ONLY_SETTINGS_ += end_customer_pays_storage → END_CUSTOMER_PAYS_STORAGE so COD-storage flips reach the per-tenant Settings tab. Companion (same PR): update-client-sb FIELD_MAP += billing contacts + payment_method_required + end_customer_pays_storage (single write path — React Settings' separate direct supabase.update() removed; it clobbered end_customer_pays_storage to false whenever the flag-gated COD toggle wasn't on the form); React maps payment_method_required in fetchClientsFromSupabase (was NEVER hydrated — the edit modal's !== false default coerced it to true and every client save re-wrote card-required ON, reverting grandfathered OFF clients); OnboardClientModal preserves undefined for unknown SB-only booleans (omit-on-save); push-client-settings-to-sheet MIRRORED_COLUMNS + trigger WHEN clause += end_customer_pays_storage (migration 20260611230000). Same incident class as the PR #753 repairs forward-sync fix: a stale sheet must never overwrite an SB-authoritative value. No billing math, invoice counter, or half-write detection changes.
    StrideAPI.gs — v38.278.0 — 2026-06-11 PST — [TASKS/MIGRATION] fix: two task field-gap sync paths no longer wipe due_date + priority on public.tasks. (1) handleGetTaskById_ (the deep-link / panel single-task READ) builds a task object from the sheet row and best-effort "hydrates" the Supabase cache via syncEntityToSupabase_ — but the object omitted Due Date + Priority, so sbTaskRow_ defaulted due_date=null + priority='Normal' and EVERY single-task GAS read silently wiped both fields on the SB row (observed: JUS-RUSH-16, 2026-06-11 — created with due-today + High at 21:08:36, wiped at 21:09:28 by the post-write GAS fallback read that followed a failed startTask; the sheet row itself held the correct values the whole time). (2) handleBulkSyncToSupabase_'s task mapping had the same two-field gap, so any operator-run bulk sync wiped them fleet-wide (api_fullClientSync_'s task scope was NOT affected — it has carried both since v38.213.0). Both call sites now map dueDate (formatDate_ of the Due Date cell, null when blank) + priority (Priority cell, 'Normal' default), mirroring the full-sync mapping. Same field-subset class as the quote_lines_json null-back (v38.273.0) — when adding ANY new SB task column, audit ALL FIVE sbTaskRow_ call sites (fullClientSync 9553 / resync 8945 / writeThroughReverse-retry 9208 / getTaskById hydrate 14758 / bulkSync 42170). No schema change, no billing logic touched, no change to the v38.182 atomic invoice counter or half-write detection.
    StrideAPI.gs — v38.277.0 — 2026-06-11 PST — [REPAIRS/MIGRATION] fix: the FORWARD sheet→SB repair sync no longer reverts SB-authoritative fields — closes the RPR-63950 approve-revert (customer Approve committed to public.repairs, the sheet mirror was lost, and every api_fullClientSync_ 'repair' scope — e.g. the one transferItems fires — re-upserted the sheet's stale 'Quote Sent' onto SB, reverting the approval TWICE, incl. once after the operator manually fixed it) and the 42-repair quote_lines_json null-back across 21 tenants (sheets predating the multi-line quote columns hold blank/missing cells; every bulk sync re-NULLed the SB breakdown — v38.273.0's lazy ensureColumn only protects the repair whose own quote-send mirror runs post-fix). Same status-revert class as PR #739/#740 but on the FORWARD path those PRs didn't cover. (1) New SB_AUTHORITATIVE_REPAIR_COLS_ (status, quote_amount, quote_sent_date, the 8 multi-line quote cols, repair_result, final_amount, completed_date, start_date) + api_bulkUpsertRepairsSbAware_: both BULK sheet→SB paths (api_fullClientSync_ 'repair' scope + handleBulkSyncToSupabase_) now prefetch the tenant's existing SB repair_ids (one PostgREST GET, fail-open to full rows) and upsert existing rows WITHOUT those columns (merge-duplicates preserves SB truth); new-to-SB rows still land in full so sheet-side creates (handleBatchRequestRepairQuote_) keep working. (2) Single-entity propagation (resyncEntityToSupabase_ / resyncEntitiesBatchToSupabase_ via api_writeThrough_) stays UNstripped — it carries a handler's own fresh write — but gains api_omitQuoteColsMissingOnSheet_: when the tenant's sheet lacks the quote COLUMNS entirely, omit those keys (preserve SB) while present-but-blank cells still propagate (handleVoidRepairQuote_'s clears must reach SB). (3) doPost reopenRepair case adds api_writeThrough_ like every other repair action — its status change previously reached SB only via the now-stripped bulk sync. (4) handleBulkSyncToSupabase_ repairs stale-delete REMOVED (matches the v38.220.0 api_fullClientSync_ decision; the sweep would delete legitimate SB-only multi-item repairs — the 2026-05-14 Seva RPR-63280 class). Trade-off documented: direct hand-edits in the Repairs sheet to the stripped columns no longer propagate to SB — correct repair status/quote data in the app. Companion EF deploys: respond-repair-quote-sb (idempotent-skip now self-heals SB status + re-fires the sheet mirror — the retry path that previously returned without mirroring, leaving the sheet permanently stale; main-path mirror now also carries approved=true), cancel-repair-sb + reopen-cancelled-repair-sb (skip paths now converge the sheet). No billing math, invoice counter, or half-write detection changes.
    StrideAPI.gs — v38.276.0 — 2026-06-11 PST — [REPAIRS] feat: repair reopen (un-cancel) + revised-quote support. Two new SB-authoritative repair columns mirrored through __writeThroughReverseRepairs_: status_before_cancel and quote_revised (added to REVERSE_REPAIR_FIELDS_ + the api_ensureColumn_ list so older Repairs sheets get the columns and the mirror stops getting silently skipped; the forward sync sbRepairRow_ deliberately does NOT project them so a sheet round-trip never nulls them back). (1) Reopen: cancel-repair-sb now stamps status_before_cancel with the pre-cancel status, and a new SB-first reopen-cancelled-repair-sb EF restores it (or 'Pending Quote' when blank/non-restorable) and clears the column. handleCancelRepair_ mirrors the same capture into a 'Status Before Cancel' sheet cell for parity (dormant — cancelRepair is fleet-SB). (2) Revised quote: send-repair-quote-sb's edit-after-sent flow (isRevision=true) now sets quote_revised=true and titles the email 'Revised Repair Quote: …' (was 'REVISED — Repair Quote Ready'); status stays 'Quote Sent' so every approve/decline/edit gate is unchanged. handleSendRepairQuote_ writes the 'Quote Revised' sheet cell + matching subject for parity. No schema change to billing, no change to the v38.182 atomic invoice counter or half-write detection.
@@ -4767,7 +4768,11 @@ var REVERSE_CLIENTS_SB_ONLY_SETTINGS_ = {
   // MIRRORED_COLUMNS (push-client-settings-to-sheet) and the trigger
   // WHEN clause (migration 20260528150000) so a future standalone flip
   // of just this field also reaches the sheet.
-  "payment_method_required": "PAYMENT_METHOD_REQUIRED"
+  "payment_method_required": "PAYMENT_METHOD_REQUIRED",
+  // v38.279.0 — COD Storage flag. Same Supabase-only pattern; paired with
+  // MIRRORED_COLUMNS (push-client-settings-to-sheet) + the trigger WHEN
+  // clause (migration 20260611230000) so flips reach the Settings tab.
+  "end_customer_pays_storage": "END_CUSTOMER_PAYS_STORAGE"
 };
 
 function __writeThroughReverseClients_(ss, payload) {
@@ -8175,7 +8180,19 @@ var APP_AUTHORITATIVE_CLIENT_COLS_ = [
   "auto_inspection", "separate_by_sidemark", "enable_notifications",
   "enable_shipment_email", "enable_receiving_billing", "auto_charge",
   "payment_terms", "free_storage_days", "discount_storage_pct",
-  "discount_services_pct", "shipment_note"
+  "discount_services_pct", "shipment_note",
+  // v38.279.0 — every remaining app/SB-authoritative column, added
+  // DEFENSIVELY: sbClientRow_ doesn't project any of these today, so the
+  // deletes are no-ops — but if sbClientRow_ ever grows one of them, the
+  // strip already covers it and the CB→SB sync still can't clobber the
+  // app's source-of-truth value. Keep in sync with public.clients.
+  "payment_method_required", "end_customer_pays_storage",
+  "billing_contact_name", "billing_email", "billing_address",
+  "tax_exempt", "tax_exempt_reason", "tax_rate_pct",
+  "resale_cert_url", "resale_cert_expires", "resale_cert_uploaded_at",
+  "notification_contacts", "stax_customer_name",
+  "last_intake_submitted_at", "last_intake_body_sha256",
+  "intake_reminder_snooze_until", "last_intake_reminder_at"
 ];
 function stripAppAuthoritativeClientCols_(row) {
   if (!row) return row;
@@ -8183,6 +8200,40 @@ function stripAppAuthoritativeClientCols_(row) {
     delete row[APP_AUTHORITATIVE_CLIENT_COLS_[i]];
   }
   return row;
+}
+
+/**
+ * v38.279.0 — Tri-state "does this client exist in public.clients" check
+ * backing the CB→SB strip decision: true (exists — strip app-authoritative
+ * settings), false (CONFIRMED absent — full row, the onboarding first-sync),
+ * null (indeterminate — Supabase unreachable / non-2xx; caller must NOT
+ * write at all, because guessing either way risks a clobber).
+ * api_isKnownTenantId_ keeps its boolean fail-closed contract for the
+ * security checks that use it; this exists because that contract is the
+ * WRONG polarity for the strip decision.
+ */
+function api_sbClientExistsTriState_(tenantId) {
+  if (!tenantId) return null;
+  try {
+    var url = prop_("SUPABASE_URL");
+    var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) return null;
+    var resp = UrlFetchApp.fetch(
+      url + "/rest/v1/clients?select=spreadsheet_id&spreadsheet_id=eq." + encodeURIComponent(tenantId) + "&limit=1",
+      {
+        method: "GET",
+        headers: { "Authorization": "Bearer " + key, "apikey": key },
+        muteHttpExceptions: true
+      }
+    );
+    if (resp.getResponseCode() < 200 || resp.getResponseCode() >= 300) return null;
+    var rows = JSON.parse(resp.getContentText());
+    if (!Array.isArray(rows)) return null;
+    return rows.length > 0;
+  } catch (e) {
+    Logger.log("api_sbClientExistsTriState_ error (indeterminate): " + e);
+    return null;
+  }
 }
 
 /**
@@ -8748,9 +8799,24 @@ function resyncClientToSupabase_(spreadsheetId) {
       // row — handleOnboardClient_ first-syncs a client to SB via this very
       // function (line ~10520) — write the FULL row so the onboarding values
       // (auto_inspection, discounts, payment terms, …) land instead of DB
-      // defaults. api_isKnownTenantId_ is the existing exists-in-SB check.
+      // defaults.
+      //
+      // v38.279.0 — the existence check must be TRI-STATE. api_isKnownTenantId_
+      // returns false on ANY Supabase read failure ("fail closed" for its
+      // original security purpose) — which here meant fail-OPEN for the
+      // settings clobber: a transient SB hiccup during the 5-minute reconcile
+      // cron skipped the strip and FULL-ROW-upserted stale CB settings,
+      // reverting auto_inspection & friends (the recurring revert v38.274 was
+      // supposed to stop). Now: exists → stripped upsert; confirmed-new →
+      // full row; INDETERMINATE → skip this cycle entirely (the cron retries
+      // in 5 minutes; a skipped reconcile is strictly safer than a clobber).
       var sbRow = sbClientRow_(apiClient);
-      if (api_isKnownTenantId_(rowSid)) stripAppAuthoritativeClientCols_(sbRow);
+      var sbExists = api_sbClientExistsTriState_(rowSid);
+      if (sbExists === null) {
+        Logger.log("resyncClientToSupabase_: SB existence check indeterminate for " + rowSid + " — skipping this reconcile cycle (no write)");
+        return;
+      }
+      if (sbExists === true) stripAppAuthoritativeClientCols_(sbRow);
       supabaseUpsert_("clients", sbRow);
       return;
     }
@@ -41969,12 +42035,19 @@ function handleBulkSyncClientsToSupabase_() {
     // beats a per-row existence check. On prefetch failure we fall back to
     // full-row writes (the pre-v38.274.0 behavior) rather than risk dropping
     // settings for a new client.
+    // v38.279.0 — the prefetch must succeed or the sync must ABORT. The old
+    // fallback ("prefetch failed → write full rows") meant one transient SB
+    // read failure made this admin sync full-row-upsert EVERY client's
+    // app-authoritative settings from possibly-stale CB cells — a fleet-wide
+    // settings revert (the exact clobber v38.274's strip exists to prevent).
+    // Failing loudly is strictly safer: the operator re-runs the sync.
     var existingSbIds = {};
+    var prefetchOk = false;
     try {
       var _sbUrl = prop_("SUPABASE_URL");
       var _sbKey = prop_("SUPABASE_SERVICE_ROLE_KEY");
       if (_sbUrl && _sbKey) {
-        var _idResp = UrlFetchApp.fetch(_sbUrl + "/rest/v1/clients?select=spreadsheet_id", {
+        var _idResp = UrlFetchApp.fetch(_sbUrl + "/rest/v1/clients?select=spreadsheet_id&limit=10000", {
           method: "GET",
           headers: { "Authorization": "Bearer " + _sbKey, "apikey": _sbKey },
           muteHttpExceptions: true
@@ -41984,10 +42057,18 @@ function handleBulkSyncClientsToSupabase_() {
           for (var _r = 0; _r < _idRows.length; _r++) {
             existingSbIds[String(_idRows[_r].spreadsheet_id || "").trim()] = true;
           }
+          prefetchOk = true;
         }
       }
     } catch (eIds) {
-      Logger.log("handleBulkSyncClientsToSupabase_ existing-id prefetch failed (writing full rows): " + eIds);
+      Logger.log("handleBulkSyncClientsToSupabase_ existing-id prefetch failed: " + eIds);
+    }
+    if (!prefetchOk) {
+      return errorResponse_(
+        "Bulk client sync aborted: could not read existing client ids from Supabase. " +
+        "Writing full rows without the existence check would clobber app-authoritative settings — re-run the sync.",
+        "SB_PREFETCH_FAILED"
+      );
     }
 
     var rows = [];
