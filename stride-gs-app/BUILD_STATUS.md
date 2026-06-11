@@ -116,6 +116,23 @@
 
 ---
 
+## Recent Changes (2026-06-10, billing: RUSH inspections also bill the TRUE piece count — fix/billing/rush-qty)
+
+**Follow-up to #729 (INSP per-qty):** RUSH task completion was still billing "Rush × 1" because #729 scoped the per-piece multiplier to INSP only. Per Justin, a rush inspection of an N-piece carton is N× the work, so RUSH now scales by the piece count exactly like INSP. Every OTHER service code still stays Qty 1 per item ID (RCVG / ASM / REPAIR / WC / etc.).
+
+**Change (RUSH added to the INSP per-piece gate, both backends):**
+- **GAS `handleCompleteTask_`** (StrideAPI.gs v38.272.0, React path) + **`processTaskCompletionById_`** (Triggers.gs v4.8.2, sheet-checkbox path): billQty gate broadened from `svcCode === 'INSP'` to `INSP || RUSH` — staff-adjusted `public.tasks.qty` when > 1 (via `api_fetchTaskQty_`), else the inventory item's qty, else 1. Qty cell + Total = rate × billQty (custom-price path multiplies too).
+- **SB `complete_task_atomic`** (migration `20260610120100`): `v_eff_qty` CASE now multiplies `tasks.qty` for `INSP/INSPECTION/RUSH`, else 1. Recreated byte-identical to `20260609160200` except that one gate.
+- **SB task creation**: `batch-create-tasks-sb` now seeds `tasks.qty` from inventory.qty for RUSH (the only canary EF that mints RUSH tasks — `complete-shipment-sb` only auto-creates INSP/ASM, so it was intentionally left unchanged).
+- **Backfill** (migration `20260610120000`): open RUSH tasks at qty=1 with inventory qty>1 → set to inventory count (so pending completions bill right). Open-tasks-only, never touches Completed/Cancelled.
+- **UI**: `TaskDetailPanel` now offers the qty editor for RUSH tasks as well as INSP.
+
+**Operator heads-up:** any currently-open RUSH task carrying a stale `qty>1` (from the pre-#729 shared qty editor) will bill `qty×rate` on next completion — intended, but a few RUSH rows may jump from "×1" to "×N" the first cycle.
+
+Files: `AppScripts/stride-api/StrideAPI.gs`, `AppScripts/stride-client-inventory/src/Triggers.gs`, `supabase/functions/batch-create-tasks-sb/index.ts`, `supabase/migrations/20260610120000_backfill_rush_task_qty.sql`, `supabase/migrations/20260610120100_complete_task_atomic_insp_rush_qty.sql`, `src/components/shared/TaskDetailPanel.tsx`. Opus review: 0 Critical / 0 Important. tsc + build clean.
+
+---
+
 ## Recent Changes (2026-06-09, delivery: COD Storage is now MARK-PAID, not invoiced — feat/delivery/cod-mark-paid)
 
 - **Model change (per Justin):** the delivery-order COD storage line is now collected as a **mark-paid (collect-on-delivery)** event like will-call COD — **NO QBO/billing row**. (The standalone Inventory "Collect COD" path still invoices — different use case: billing warehouse storage with no delivery.) The order-page COD card's button changed from "Collect COD Storage" (→ `collect-cod-storage-sb` EF → Unbilled `COD_STOR` billing rows) to **"Mark Paid"**, which calls the `mark_cod_storage_collected` RPC (records the `storage_billing_items` dedup ledger + stamps `cod_storage_collected_*`, no billing).
