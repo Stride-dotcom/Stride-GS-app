@@ -364,6 +364,13 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
             dismissedAddons: Array.isArray(d.dismissed_addons) ? d.dismissed_addons : [],
             expanded: false,
           })));
+          // Hydrated per-item needs_inspection IS the operator's saved intent.
+          // Mark inspection authoritative so (a) the auto-inspect race effect
+          // can't clobber a saved uncheck when apiClients resolves later, and
+          // (b) submit sends autoInspectionLoaded=true even if apiClients hasn't
+          // loaded yet — otherwise complete-shipment-sb's tenant-default OR
+          // re-inspects items the operator unchecked (the reopened-draft race).
+          inspectTouchedRef.current = true;
         }
         // Else leave the 5 empty rows seeded by the default state — first-time
         // operators reopening a row where they only filled dock fields.
@@ -882,10 +889,19 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
         notes: packNotes(reference, notes),
         receiveDate,
         ...(!chargeReceiving && { skipReceivingBilling: true }),
-        // Signal that React resolved the auto-inspection setting before submit.
-        // If apiClients hadn't loaded (race condition), checkboxes may be wrong →
-        // server falls back to AUTO_INSPECTION from client Settings.
-        autoInspectionLoaded: apiClients.length > 0,
+        // Tells complete-shipment-sb the per-item needsInspection flags are
+        // authoritative; when false the server OR-s the tenant's AUTO_INSPECTION
+        // over every item (which RE-INSPECTS items the operator unchecked).
+        // Flags are authoritative when ANY of:
+        //   • apiClients resolved the client's auto_inspection (normal dropdown
+        //     receive — selecting a client already required this list to load), OR
+        //   • the operator deliberately set inspection (per-row or "INSP all"), OR
+        //   • items were hydrated from a saved dock draft (the saved state IS the
+        //     operator's intent — inspectTouchedRef is set on hydrate).
+        // This closes the reopened-draft race: clientSheetId is set from hydrate,
+        // not the dropdown, so apiClients could still be empty at submit, which
+        // used to send false and re-inspect unchecked items.
+        autoInspectionLoaded: apiClients.length > 0 || inspectTouchedRef.current,
       }, clientSheetId);
 
       if (!resp.ok || !resp.data) {
