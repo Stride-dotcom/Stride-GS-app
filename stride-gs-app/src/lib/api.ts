@@ -445,6 +445,9 @@ export interface ApiRepair {
   quoteTaxRate?: number | null;
   quoteTaxAmount?: number | null;
   quoteGrandTotal?: number | null;
+  // True when the quote was edited + resent after the first send (the
+  // "Revised" badge + "Revised Repair Quote" email). Status stays 'Quote Sent'.
+  quoteRevised?: boolean | null;
   // Multi-item repairs (2026-05-13). Populated from public.repair_items
   // overlaid with inventory descriptions/vendors/etc. For legacy
   // single-item repairs there's exactly one row in here matching
@@ -3492,6 +3495,37 @@ export async function postCancelRepairSb(
     { body: payload },
   );
   if (error) return { ok: false, error: error.message };
+  return data ?? { ok: false, error: 'no response body' };
+}
+
+export interface ReopenCancelledRepairSbResponse {
+  ok: boolean;
+  repairId?: string;
+  newStatus?: string;
+  alreadyReopened?: boolean;
+  mirrorOk?: boolean;
+  mirrorError?: string;
+  error?: string;
+}
+/**
+ * Reopen (un-cancel) a Cancelled repair. SB-first, symmetric with
+ * postCancelRepairSb — there is no GAS equivalent, so this always invokes the
+ * EF directly (not feature-flag gated). Restores status_before_cancel (or
+ * 'Pending Quote' when none was stored). Surfaces the real EF error via
+ * extractEdgeError so the panel can show a useful message (PR #734 pattern).
+ */
+export async function postReopenCancelledRepairSb(
+  payload: { tenantId: string; repairId: string; requestId?: string }
+): Promise<ReopenCancelledRepairSbResponse> {
+  const { supabase } = await import('./supabase');
+  const { data, error } = await supabase.functions.invoke<ReopenCancelledRepairSbResponse>(
+    'reopen-cancelled-repair-sb',
+    { body: payload },
+  );
+  if (error) {
+    const { message } = await extractEdgeError(error, 'Failed to reopen repair');
+    return { ok: false, error: message };
+  }
   return data ?? { ok: false, error: 'no response body' };
 }
 

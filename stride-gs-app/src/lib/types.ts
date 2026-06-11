@@ -172,6 +172,9 @@ export interface Repair {
   quoteTaxRate?: number;       // percent, e.g. 10.4
   quoteTaxAmount?: number;
   quoteGrandTotal?: number;
+  // True when the quote was edited + resent after first send. Status stays
+  // 'Quote Sent'; this flag drives the "Revised" badge in the list + panel.
+  quoteRevised?: boolean;
   repairVendor?: string;
   assignedTo?: string;
   createdDate: string; // ISO date

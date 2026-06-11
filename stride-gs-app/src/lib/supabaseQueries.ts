@@ -511,6 +511,8 @@ interface SupabaseRepairRow {
   quote_tax_rate: number | null;
   quote_tax_amount: number | null;
   quote_grand_total: number | null;
+  quote_revised: boolean | null;
+  status_before_cancel: string | null;
 }
 
 export async function fetchRepairsFromSupabase(
@@ -576,6 +578,7 @@ export async function fetchRepairsFromSupabase(
       quoteTaxRate:         row.quote_tax_rate != null ? Number(row.quote_tax_rate) : null,
       quoteTaxAmount:       row.quote_tax_amount != null ? Number(row.quote_tax_amount) : null,
       quoteGrandTotal:      row.quote_grand_total != null ? Number(row.quote_grand_total) : null,
+      quoteRevised:         row.quote_revised === true,
     }));
 
     // Session 69 Phase 4: overlay inventory fields (authoritative source)
@@ -1598,6 +1601,7 @@ export async function fetchRepairByIdFromSupabase(
       quoteTaxRate:         row.quote_tax_rate != null ? Number(row.quote_tax_rate) : null,
       quoteTaxAmount:       row.quote_tax_amount != null ? Number(row.quote_tax_amount) : null,
       quoteGrandTotal:      row.quote_grand_total != null ? Number(row.quote_grand_total) : null,
+      quoteRevised:         row.quote_revised === true,
       items,
     };
   } catch {
@@ -1731,6 +1735,7 @@ export async function fetchRepairsByItemIdFromSupabase(
       quoteTaxRate:         row.quote_tax_rate != null ? Number(row.quote_tax_rate) : null,
       quoteTaxAmount:       row.quote_tax_amount != null ? Number(row.quote_tax_amount) : null,
       quoteGrandTotal:      row.quote_grand_total != null ? Number(row.quote_grand_total) : null,
+      quoteRevised:         row.quote_revised === true,
     }));
   } catch {
     return [];

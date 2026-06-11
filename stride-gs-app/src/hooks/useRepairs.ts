@@ -83,6 +83,7 @@ function mapToAppRepair(api: ApiRepair): Repair {
     quoteTaxRate:         api.quoteTaxRate ?? undefined,
     quoteTaxAmount:       api.quoteTaxAmount ?? undefined,
     quoteGrandTotal:      api.quoteGrandTotal ?? undefined,
+    quoteRevised:         api.quoteRevised ?? undefined,
     repairVendor: api.repairVendor || undefined,
     assignedTo: api.createdBy || undefined,
     createdDate: api.createdDate,
