@@ -4088,7 +4088,7 @@ function __writeThroughReverseRepairs_(ss, payload) {
   var idCol = hMap["Repair ID"];
   if (!idCol) throw new Error("__writeThroughReverseRepairs_: 'Repair ID' column not found");
 
-  // v38.270.0 — ensure the multi-line quote columns exist before mapping.
+  // v38.273.0 — ensure the multi-line quote columns exist before mapping.
   // The legacy handleSendRepairQuote_ creates these via api_ensureColumn_,
   // but the SB-primary path (send-repair-quote-sb → this writer) used to
   // SKIP any column absent on the tenant's sheet (the `if (!col) continue`
