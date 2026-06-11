@@ -3097,6 +3097,12 @@ export interface BatchCreateTasksPayload {
    *  payload.dueDate (single value, all tasks) takes precedence if set.
    */
   slaHoursBySvcCode?: Record<string, number>;
+  /** BatchWorkItems (2026-06-11): create ONE task per svcCode covering all
+   *  selected items (membership in public.task_items, per-item cards on the
+   *  task detail) instead of one task per (item, svcCode). SB-only — the
+   *  GAS handler ignores it; the CreateTaskModal toggle is gated on the
+   *  batchWorkItems flag so only SB-routed tenants can send it. */
+  batchMode?: boolean;
 }
 
 export interface BatchCreateTasksResponse {

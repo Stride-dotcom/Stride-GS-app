@@ -1,9 +1,10 @@
 import React, { useState, useMemo } from 'react';
-import { X, Check, ClipboardList, Loader2, AlertTriangle, Split as SplitIcon, ChevronDown, ChevronRight } from 'lucide-react';
+import { X, Check, ClipboardList, Loader2, AlertTriangle, Split as SplitIcon, ChevronDown, ChevronRight, Layers } from 'lucide-react';
 import { postBatchCreateTasks, postCreateSplitTask } from '../../lib/api';
 import type { InventoryItem, Task } from '../../lib/types';
 import { usePricing } from '../../hooks/usePricing';
 import { useServiceCatalog } from '../../hooks/useServiceCatalog';
+import { useFeatureFlagRow, resolveFlagBackend } from '../../contexts/FeatureFlagContext';
 import { theme } from '../../styles/theme';
 import { ProcessingOverlay } from './ProcessingOverlay';
 import { entityEvents } from '../../lib/entityEvents';
@@ -106,6 +107,20 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
     () => items.filter(i => Number((i as { qty?: number }).qty) > 1),
     [items],
   );
+
+  // BatchWorkItems (2026-06-11) — "single batch task" mode. Gated on the
+  // batchWorkItems flag resolved against the DATA tenant (same UI-only gate
+  // the detail panels use), and only meaningful with 2+ items. The flag's
+  // tenant scope is a subset of the createTask SB canary, so any tenant that
+  // can see this toggle is routed to batch-create-tasks-sb (the GAS handler
+  // ignores batchMode).
+  const batchWorkFlagRow = useFeatureFlagRow('batchWorkItems');
+  const batchModeAvailable =
+    items.length > 1 &&
+    !!batchWorkFlagRow &&
+    resolveFlagBackend(batchWorkFlagRow, clientSheetId || null) === 'supabase';
+  const [batchMode, setBatchMode] = useState(false);
+  const batchModeActive = batchModeAvailable && batchMode;
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<{ created: number; skippedCount: number; taskIds: string[] } | null>(null);
   const [error, setError] = useState('');
@@ -213,7 +228,11 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
       || (priorityInput === 'Urgent' ? todayPT : '');
     const trimmedNotes = taskNotesInput.trim();
     if (addOptimisticTask) {
-      items.forEach((item, ii) => {
+      // batchMode: ONE temp task per svcCode (covering all items, primary =
+      // first item) — mirrors what the EF will create. Legacy: one per
+      // (item, svcCode).
+      const tempItems = batchModeActive ? items.slice(0, 1) : items;
+      tempItems.forEach((item, ii) => {
         Array.from(selectedCodes).forEach((code, ci) => {
           const tempId = `TEMP-${Date.now()}-${ii}-${ci}`;
           tempIds.push(tempId);
@@ -263,6 +282,7 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
           ...(effectiveDueDate ? { dueDate: effectiveDueDate } : {}),
           ...(trimmedNotes     ? { taskNotes: trimmedNotes } : {}),
           priority: priorityForWire,
+          ...(batchModeActive ? { batchMode: true } : {}),
         },
         clientSheetId
       );
@@ -393,6 +413,28 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
                   );
                 })}
               </div>
+
+              {/* BatchWorkItems — single batch task toggle (flag-gated,
+                  2+ items). One task per service covering ALL items, each
+                  tracked individually (Start/Pass/Fail + photos per item)
+                  on the task detail page. */}
+              {batchModeAvailable && (
+                <div onClick={() => setBatchMode(b => !b)} style={{ ...toggleStyle(batchMode), marginBottom: 16 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <Layers size={16} color={batchMode ? theme.colors.orange : theme.colors.textMuted} />
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: batchMode ? theme.colors.orange : theme.colors.text }}>
+                        Create as one batch task
+                      </div>
+                      <div style={{ fontSize: 10, color: theme.colors.textMuted }}>
+                        One task per service covering all {items.length} items — each item gets its own
+                        Start / Pass / Fail tracking and photos on the task.
+                      </div>
+                    </div>
+                  </div>
+                  {batchMode && <Check size={14} color={theme.colors.orange} />}
+                </div>
+              )}
 
               {/* Advanced (optional): due date, notes, priority */}
               <div style={{ marginBottom: 16 }}>

@@ -7,6 +7,16 @@
  * the next counter for that item+svc pair), INSERT into public.tasks,
  * write entity_audit_log.
  *
+ * batchMode (2026-06-11, BatchWorkItems): when the request carries
+ * `batchMode: true`, create ONE task per svcCode covering every
+ * non-deduped item instead, with membership rows in public.task_items
+ * (one per item) so the per-item Start/Pass/Fail module renders a card
+ * per item. tasks.qty = summed piece count for INSP/RUSH (keeps
+ * complete_task_atomic's qty × rate billing correct for the whole
+ * batch); tasks.item_id = the first eligible item (the "primary",
+ * mirroring multi-item repairs). task_items insert failure rolls the
+ * new task rows back (fail closed).
+ *
  * Reverse-writethrough to per-tenant Tasks sheet is BEST-EFFORT via
  * the existing __writeThroughReverseStub_ (tasks writer not shipped
  * yet); on canary tenants the per-tenant Tasks sheet drifts until
@@ -61,6 +71,14 @@ interface BatchCreateBody {
   /** 2026-05-29 — single string stamped on every task in the batch.
    *  Mirrors GAS payload.taskNotes; empty/missing keeps task_notes blank. */
   taskNotes?: string;
+  /** 2026-06-11 — BatchWorkItems: when true, create ONE task per svcCode
+   *  covering ALL (non-deduped) items, with membership rows in
+   *  public.task_items so the per-item Start/Pass/Fail module lights up
+   *  with one card per item. False/missing keeps the legacy
+   *  one-task-per-(item, svcCode) behavior. SB-only — the GAS handler
+   *  ignores this field (the React toggle is gated on the batchWorkItems
+   *  flag, which is only on for tenants already routed to this EF). */
+  batchMode?: boolean;
 }
 
 Deno.serve(async (req: Request) => {
@@ -83,6 +101,7 @@ Deno.serve(async (req: Request) => {
   const priority    = String(body.priority ?? 'Normal').trim() || 'Normal';
   const dueDateRaw  = String(body.dueDate ?? '').trim();
   const taskNotes   = String(body.taskNotes ?? '').trim();
+  const batchMode   = body.batchMode === true;
 
   if (!tenantId) return json({ error: 'tenantId is required' }, 400);
   if (svcCodes.length === 0) return json({ error: 'svcCodes array is required and must not be empty' }, 400);
@@ -129,8 +148,10 @@ Deno.serve(async (req: Request) => {
   // audit log records the real service code. The legacy id encoded it as the
   // first segment (taskId.split('-')[0]); the clean PREFIX-TSK-N id does not,
   // so we can no longer parse it back out of the id.
-  const taskMeta: Array<{ taskId: string; svcCode: string }> = [];
+  const taskMeta: Array<{ taskId: string; svcCode: string; itemIds?: string[] }> = [];
   const toInsert: Array<Record<string, unknown>> = [];
+  // batchMode membership rows for public.task_items (BatchWorkItems module).
+  const taskItemRows: Array<Record<string, unknown>> = [];
 
   // Compute due date for a given svcCode per the precedence rule
   // mirrors handleBatchCreateTasks_ at StrideAPI.gs:29263.
@@ -152,6 +173,105 @@ Deno.serve(async (req: Request) => {
     return null;
   }
 
+  // Mint a Task ID — clean SB-generated (PREFIX-TSK-N) when the
+  // orderNumbering feature is on for this tenant, legacy SVC-ITEM-N
+  // counter otherwise. Shared by the per-item and batch branches.
+  async function mintTaskId(svcCode: string, itemId: string): Promise<string | null> {
+    if (cleanNumbering) {
+      const { data: cleanId, error: cleanErr } = await sb.rpc('next_order_id', {
+        p_tenant_id: tenantId,
+        p_order_type: 'task',
+      });
+      if (cleanErr || typeof cleanId !== 'string' || !cleanId) {
+        console.error('[batch-create-tasks-sb] next_order_id failed:', cleanErr?.message);
+        return null;
+      }
+      return cleanId;
+    }
+    const counterKey = `${itemId}|${svcCode}`;
+    if (counterCache[counterKey] == null) {
+      counterCache[counterKey] = await maxExistingCounter(sb, tenantId, itemId, svcCode);
+    }
+    counterCache[counterKey] += 1;
+    return `${svcCode}-${itemId}-${counterCache[counterKey]}`;
+  }
+
+  if (batchMode) {
+    // ── Batch mode (BatchWorkItems, 2026-06-11) ─────────────────────────
+    // ONE task per svcCode covering every non-deduped item, plus one
+    // public.task_items row per item so the per-item Start/Pass/Fail
+    // module renders a card per item. The task row's denormalized item
+    // fields come from the FIRST eligible item (the "primary", mirroring
+    // repairs.item_id for multi-item repairs); tasks.qty is the SUMMED
+    // piece count for INSP/RUSH so complete_task_atomic's qty × rate
+    // billing charges the true total.
+    for (const svcCode of svcCodes) {
+      const svcName = svcNameBySvcCode[svcCode] ?? svcCode;
+      const eligible: ItemPayload[] = [];
+      for (const item of items) {
+        const itemId = String(item.itemId).trim();
+        if (!itemId) {
+          skipped.push({ itemId, svcCode, reason: 'blank itemId' });
+          continue;
+        }
+        if (openMap[`${itemId}|${svcCode}`]) {
+          skipped.push({ itemId, svcCode, reason: `open ${svcCode} task already exists` });
+          continue;
+        }
+        eligible.push(item);
+      }
+      if (eligible.length === 0) continue;
+
+      const primary = eligible[0];
+      const primaryId = String(primary.itemId).trim();
+      const taskId = await mintTaskId(svcCode, primaryId);
+      if (!taskId) {
+        return json({ error: 'Task number allocation failed' }, 500);
+      }
+
+      const perPiece = svcCode === 'INSP' || svcCode === 'RUSH';
+      const eligibleIds = eligible.map(i => String(i.itemId).trim());
+      const qtyFor = (itemId: string) => (perPiece ? (invQtyByItem[itemId] ?? 1) : 1);
+      const totalQty = perPiece
+        ? eligibleIds.reduce((sum, id) => sum + qtyFor(id), 0)
+        : 1;
+
+      toInsert.push({
+        tenant_id:    tenantId,
+        task_id:      taskId,
+        item_id:      primaryId,
+        type:         svcName,
+        status:       'Open',
+        vendor:       String(primary.vendor ?? ''),
+        description:  String(primary.description ?? ''),
+        location:     String(primary.location ?? ''),
+        sidemark:     String(primary.sidemark ?? ''),
+        shipment_number: String(primary.shipmentNo ?? ''),
+        item_notes:   String(primary.itemNotes ?? ''),
+        task_notes:   taskNotes,
+        created:      now.toISOString(),
+        billed:       false,
+        qty:          totalQty,
+        priority,
+        due_date:     computeDueDate(svcCode),
+        updated_at:   now.toISOString(),
+      });
+      for (const item of eligible) {
+        const itemId = String(item.itemId).trim();
+        taskItemRows.push({
+          tenant_id: tenantId,
+          task_id:   taskId,
+          item_id:   itemId,
+          // Per-item piece count regardless of service type — the card
+          // shows "× N"; only tasks.qty (above) is billing-relevant.
+          qty:       invQtyByItem[itemId] ?? 1,
+        });
+        openMap[`${itemId}|${svcCode}`] = true; // prevent intra-batch dupes
+      }
+      taskIds.push(taskId);
+      taskMeta.push({ taskId, svcCode, itemIds: eligibleIds });
+    }
+  } else {
   for (const svcCode of svcCodes) {
     const svcName = svcNameBySvcCode[svcCode] ?? svcCode;
     for (const item of items) {
@@ -166,28 +286,10 @@ Deno.serve(async (req: Request) => {
         continue;
       }
 
-      // Generate Task ID. Clean SB-generated id (PREFIX-TSK-N) when the
-      // orderNumbering feature is on for this tenant; legacy SVC-ITEM-N
-      // counter otherwise.
-      let taskId: string;
-      if (cleanNumbering) {
-        const { data: cleanId, error: cleanErr } = await sb.rpc('next_order_id', {
-          p_tenant_id: tenantId,
-          p_order_type: 'task',
-        });
-        if (cleanErr || typeof cleanId !== 'string' || !cleanId) {
-          console.error('[batch-create-tasks-sb] next_order_id failed:', cleanErr?.message);
-          return json({ error: `Task number allocation failed: ${cleanErr?.message ?? 'no id returned'}` }, 500);
-        }
-        taskId = cleanId;
-      } else {
-        // Generate Task ID: SVC-ITEM-N
-        const counterKey = `${itemId}|${svcCode}`;
-        if (counterCache[counterKey] == null) {
-          counterCache[counterKey] = await maxExistingCounter(sb, tenantId, itemId, svcCode);
-        }
-        counterCache[counterKey] += 1;
-        taskId = `${svcCode}-${itemId}-${counterCache[counterKey]}`;
+      // Generate Task ID (clean PREFIX-TSK-N or legacy SVC-ITEM-N).
+      const taskId = await mintTaskId(svcCode, itemId);
+      if (!taskId) {
+        return json({ error: 'Task number allocation failed' }, 500);
       }
 
       const dueDateIso = computeDueDate(svcCode);
@@ -218,6 +320,7 @@ Deno.serve(async (req: Request) => {
       openMap[dedupKey] = true; // prevent intra-batch dupes
     }
   }
+  } // end batchMode branch
 
   // Single batch insert. supabase-js batches up to ~1000 rows safely.
   if (toInsert.length > 0) {
@@ -228,13 +331,32 @@ Deno.serve(async (req: Request) => {
     }
   }
 
-  // Audit-log per task (best-effort; mirrors GAS api_auditLog_ wrap)
-  const auditPromises = taskMeta.map(({ taskId, svcCode }) => sb.from('entity_audit_log').insert({
+  // batchMode: membership rows. FAIL CLOSED — a batch task without its
+  // task_items rows would render as a single-item card (the React hook's
+  // legacy fallback synthesizes from tasks.item_id = the primary only), so
+  // on insert failure roll the just-created task rows back and error out
+  // rather than leave a half-created batch.
+  if (taskItemRows.length > 0) {
+    const { error: tiErr } = await sb.from('task_items').insert(taskItemRows);
+    if (tiErr) {
+      console.error('[batch-create-tasks-sb] task_items insert failed:', tiErr.message);
+      await sb.from('tasks')
+        .delete()
+        .eq('tenant_id', tenantId)
+        .in('task_id', taskIds)
+        .then(() => {}, () => {});
+      return json({ error: `Batch task items insert failed: ${tiErr.message}` }, 500);
+    }
+  }
+
+  // Audit-log per task (best-effort; mirrors GAS api_auditLog_ wrap).
+  // Batch tasks also record the full member item list.
+  const auditPromises = taskMeta.map(({ taskId, svcCode, itemIds: memberIds }) => sb.from('entity_audit_log').insert({
     entity_type:   'task',
     entity_id:     taskId,
     tenant_id:     tenantId,
     action:        'create',
-    changes:       { svcCode, requestId },
+    changes:       { svcCode, requestId, ...(memberIds ? { batchMode: true, itemIds: memberIds } : {}) },
     performed_by:  callerEmail || 'batch-create-tasks-sb',
     source:        'supabase',
   }).then(() => {}, () => {}));
