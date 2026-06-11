@@ -22,11 +22,11 @@ import { entityEvents } from '../lib/entityEvents';
 import { fetchDtStatusesFromSupabase } from '../lib/supabaseQueries';
 
 export interface ItemIndicators {
-  /** INSP tasks that are open or in progress */
+  /** INSP/RUSH tasks that are open or in progress */
   inspOpenItems: Set<string>;
-  /** INSP tasks that are completed */
+  /** INSP/RUSH tasks that are completed */
   inspDoneItems: Set<string>;
-  /** INSP tasks completed with result=Fail (red I, overrides done) */
+  /** INSP/RUSH tasks completed with result=Fail (red I, overrides done) */
   inspFailedItems: Set<string>;
   /** ASM tasks that are open or in progress */
   asmOpenItems: Set<string>;
@@ -110,7 +110,7 @@ export function useItemIndicators(clientSheetIds?: string | string[]): ItemIndic
     const cod = new Set<string>();
 
     try {
-      // Fetch task indicators (INSP + ASM) with status for open/done split.
+      // Fetch task indicators (INSP/RUSH + ASM) with status for open/done split.
       let tq = supabase.from('tasks').select('item_id, type, status, result');
       if (Array.isArray(clientSheetIds) && clientSheetIds.length > 0) {
         tq = tq.in('tenant_id', clientSheetIds);
@@ -124,7 +124,11 @@ export function useItemIndicators(clientSheetIds?: string | string[]): ItemIndic
           if (TASK_CANCELLED.has(t.status ?? '')) continue; // no badge for cancelled tasks
           const done = TASK_DONE.has(t.status ?? '');
           const code = (t.type || '').toUpperCase();
-          if (code === 'INSP' || code === 'INSPECTION') {
+          // RUSH is a priority inspection (same workflow, higher rate) — it
+          // drives the I badge exactly like INSP. tasks.type carries the svc
+          // CODE on GAS-created tasks and the service NAME on SB-EF-created
+          // ones (the PR #749 Dashboard lesson), so match both spellings.
+          if (code === 'INSP' || code === 'INSPECTION' || code === 'RUSH' || code === 'RUSH INSPECTION') {
             const failed = done && (t.result ?? '').toLowerCase() === 'fail';
             if (failed) { inspFailed.add(t.item_id); }
             if (done) { if (!inspOpen.has(t.item_id)) inspDone.add(t.item_id); }
