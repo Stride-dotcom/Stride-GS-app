@@ -349,7 +349,7 @@ Deno.serve(async (req: Request) => {
     // Retried up to 3x with backoff: the CB Clients sheet is a single shared
     // sheet, and a transient GAS lock/timeout here used to leave the sheet
     // stale (while Supabase was correct) — the original auto-inspect-on-receipt
-    // failure mode. StrideAPI v38.273.0 also stops the CB→SB resync from
+    // failure mode. StrideAPI v38.274.0 also stops the CB→SB resync from
     // clobbering these app-authoritative settings, so a missed mirror no longer
     // corrupts Supabase; but a fresh sheet still matters for the GAS-side paths
     // that read the per-tenant Settings tab (auto-inspect server fallback +

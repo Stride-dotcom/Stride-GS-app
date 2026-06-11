@@ -7826,7 +7826,7 @@ function sbClientRow_(client) {
   };
 }
 
-// v38.273.0 — Columns the APP/intake owns directly in public.clients and mirrors
+// v38.274.0 — Columns the APP/intake owns directly in public.clients and mirrors
 // OUT to the CB sheet via __writeThroughReverseClients_. The CB→SB sync paths
 // (resyncClientToSupabase_ 5-min cron + handleBulkSyncClientsToSupabase_) must
 // NOT write these back from the CB sheet: a stale CB cell was clobbering fresh
@@ -8407,7 +8407,7 @@ function resyncClientToSupabase_(spreadsheetId) {
         shipmentNote: String(obj["CLIENT SHIPMENT NOTE"] || "").trim(),
         active: isActive
       };
-      // v38.273.0 — strip app-authoritative settings ONLY when the client
+      // v38.274.0 — strip app-authoritative settings ONLY when the client
       // already exists in Supabase (the clobber case: a stale CB cell would
       // otherwise overwrite the app's source-of-truth value). For a brand-new
       // row — handleOnboardClient_ first-syncs a client to SB via this very
@@ -41586,12 +41586,12 @@ function handleBulkSyncClientsToSupabase_() {
 
     var headersUpper = data[0].map(function(h) { return String(h || "").trim().toUpperCase(); });
 
-    // v38.273.0 — Pre-fetch the set of clients that ALREADY exist in Supabase.
+    // v38.274.0 — Pre-fetch the set of clients that ALREADY exist in Supabase.
     // Existing rows get app-authoritative settings stripped (don't clobber the
     // app's source-of-truth from a stale CB cell); brand-new rows get the FULL
     // CB values so a never-synced client still lands complete. One batched read
     // beats a per-row existence check. On prefetch failure we fall back to
-    // full-row writes (the pre-v38.273.0 behavior) rather than risk dropping
+    // full-row writes (the pre-v38.274.0 behavior) rather than risk dropping
     // settings for a new client.
     var existingSbIds = {};
     try {
@@ -41626,7 +41626,7 @@ function handleBulkSyncClientsToSupabase_() {
       if (!sid || !name) { skipped++; continue; }
       var active = obj["ACTIVE"];
       var isActive = !(active === false || active === "FALSE" || active === "No");
-      // v38.273.0 — strip app-authoritative settings for EXISTING clients only
+      // v38.274.0 — strip app-authoritative settings for EXISTING clients only
       // (same rationale as resyncClientToSupabase_): Supabase owns these; don't
       // overwrite from a possibly-stale CB cell. New clients keep full values.
       var bulkRow = sbClientRow_({
