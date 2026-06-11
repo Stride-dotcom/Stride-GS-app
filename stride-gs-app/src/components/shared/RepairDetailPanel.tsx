@@ -1120,9 +1120,9 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
 
   const handleResult = (_result: 'pass' | 'fail') => {
     // BatchWorkItems gate: with the module active, the repair can't be
-    // manually completed until every item has a Pass/Fail. (The module
-    // auto-fires handleComplete via onBatchComplete on the last item, so
-    // in practice these buttons only matter for already-resolved batches.)
+    // manually completed until every item has a Pass/Fail. (Defensive —
+    // the Pass/Fail pair is replaced by the Complete Repair button when
+    // batchModuleActive, so this only fires from a stale render.)
     if (batchWorkItemsEnabled && batchSummary && batchSummary.total > 0 && !batchSummary.isAllComplete) {
       setSubmitError(
         `Resolve every item first — ${batchSummary.done} of ${batchSummary.total} items have a result. ` +
