@@ -7894,6 +7894,16 @@ function api_fetchSbRepairIdSet_(tenantId) {
       "repair_id"
     );
     if (!sel.ok) return null;
+    // Truncation guard: supabaseSelect_ is a single un-paginated GET. If we
+    // got exactly the limit back, the set may be incomplete — a truncated
+    // set would silently misclassify the missing repairs as "new" and give
+    // them full-row upserts (the revert vector this exists to kill). Fail
+    // open instead: null → caller upserts everything in full (pre-fix
+    // behavior) and we log loudly. No tenant is near 10000 repairs today.
+    if (sel.rows.length >= 10000) {
+      Logger.log("api_fetchSbRepairIdSet_: hit the 10000-row ceiling for tenant " + tenantId + " — failing open to full-row upserts. Paginate this fetch before any tenant grows past the cap.");
+      return null;
+    }
     var map = {};
     for (var i = 0; i < sel.rows.length; i++) {
       var rid = String(sel.rows[i].repair_id || "").trim();
