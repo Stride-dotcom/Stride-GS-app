@@ -3481,6 +3481,37 @@ export async function postCancelRepairSb(
   return data ?? { ok: false, error: 'no response body' };
 }
 
+/**
+ * Pull the real error out of a supabase-js `functions.invoke` failure.
+ *
+ * On a non-2xx EF response, supabase-js sets `error.message` to the
+ * useless generic "Edge Function returned a non-2xx status code" and
+ * stashes the actual Response in `error.context`. This reads the JSON
+ * body the EF returned (`{ error, errorCode }`) so callers can surface
+ * the real reason. Falls back to a friendly message when there's no
+ * parseable body (boot error / timeout / network drop) — end users
+ * should never see the raw "non-2xx status code" string.
+ */
+export async function extractEdgeError(
+  error: unknown,
+  fallback = 'Something went wrong. Please try again.',
+): Promise<{ message: string; errorCode?: string }> {
+  const ctx = (error as { context?: unknown } | null)?.context;
+  if (ctx instanceof Response) {
+    try {
+      const body = await ctx.clone().json();
+      if (body && typeof body === 'object') {
+        const message  = typeof body.error === 'string' && body.error.trim() ? body.error : undefined;
+        const errorCode = typeof body.errorCode === 'string' ? body.errorCode : undefined;
+        if (message) return { message, errorCode };
+      }
+    } catch { /* body wasn't JSON or was already consumed — fall through */ }
+  }
+  const raw = error instanceof Error ? error.message : String(error ?? '');
+  if (!raw || /non-2xx status code/i.test(raw)) return { message: fallback };
+  return { message: raw };
+}
+
 // [MIGRATION-P3] SB-primary entry point for startRepair. Used when
 // feature_flags.startRepair.active_backend = 'supabase' for the caller's
 // tenant. Otherwise stay on legacy postStartRepair GAS path. Behavior
@@ -3506,7 +3537,15 @@ export async function postStartRepairSb(
     'start-repair-sb',
     { body: payload },
   );
-  if (error) return { ok: false, error: error.message };
+  if (error) {
+    // Surface the EF's real reason (e.g. INVALID_STATUS) instead of the
+    // generic "Edge Function returned a non-2xx status code".
+    const { message, errorCode } = await extractEdgeError(
+      error,
+      'Couldn’t reach the Start Repair service. Please try again.',
+    );
+    return { ok: false, error: message, errorCode };
+  }
   return data ?? { ok: false, error: 'no response body' };
 }
 

@@ -883,7 +883,9 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
     // 1. OPTIMISTIC UI — flip panel + table row + cross-page hooks now.
     //    No setSubmitting(true): we don't want the full-panel
     //    ProcessingOverlay to cover the Work Order banner that's about
-    //    to appear.
+    //    to appear. Capture the prior status first so the SB path can
+    //    roll the flip back if the backend rejects it.
+    const prevStatus = effectiveStatus;
     setEffectiveStatus('In Progress');
     setStartResult({
       success: true,
@@ -904,8 +906,16 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
         if (startRepairBackend === 'supabase') {
           const resp = await postStartRepairSb({ tenantId: clientSheetId, repairId: repair.repairId });
           if (!resp.ok) {
-            const errMsg = resp.error || 'Start Repair failed.';
-            setSubmitError(errMsg + ' Start Repair status flip already applied — you can print the Work Order from the button below.');
+            // The SB start is atomic: a non-ok response means the status
+            // flip did NOT apply. Roll the optimistic UI back to the prior
+            // status so the panel + table row match the DB instead of
+            // stranding "In Progress" over an Approved row, and surface the
+            // EF's real reason (already de-generic-ified in postStartRepairSb).
+            setEffectiveStatus(prevStatus);
+            setStartResult(null);
+            clearRepairPatch?.(repair.repairId);
+            entityEvents.emit('repair', repair.repairId);
+            setSubmitError(resp.error || 'Start Repair failed. Please try again.');
           } else {
             // SB path doesn't produce a work-order URL — the React-side
             // generator (lib/docRenderer.ts) handles printing. Keep the
