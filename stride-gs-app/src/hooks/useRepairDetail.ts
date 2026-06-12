@@ -93,37 +93,63 @@ export function useRepairDetail(repairId: string | undefined): UseRepairDetailRe
 
         // Background GAS enrichment: Supabase repair rows are often sparse
         // (missing vendor, description, notes from the sheet), so we fetch
-        // the full row from GAS and merge into state when it arrives. If it
-        // fails or never arrives, the user still sees Supabase data.
+        // the full row from GAS and SPARSE-FILL a whitelist of sheet-only /
+        // descriptive fields. If it fails or never arrives, the user still
+        // sees Supabase data.
+        //
+        // ⚠️ NEVER spread the whole GAS row over the SB repair. Repairs are
+        // fleet-wide SB-primary: status, approval, and every quote_* column
+        // are written in Supabase first and mirrored to the sheet in the
+        // BACKGROUND, so the sheet is allowed to be stale at any moment.
+        // The old `{...prev, ...gasRepair}` merge meant the page loaded the
+        // correct SB amount and then — a few seconds later — the enrichment
+        // landed the sheet's stale numbers over it (RPR-63755: $228.20
+        // visibly flipping to $251.93 on screen, 2026-06-12). Same incident
+        // class as PR #739/#753/#772, client-side edition: the DB was right;
+        // the UI clobbered itself. useTaskDetail has always done this
+        // correctly (it picks ONLY taskFolderUrl). We now do the same:
+        // sparse-fill descriptive fields, never lifecycle/quote/billing.
         if (sbRepair.clientSheetId && !isMultiItem) {
           fetchRepairById(repairId, sbRepair.clientSheetId, controller.signal)
             .then(gasResp => {
               if (fetchId !== fetchCountRef.current) return;
               if (gasResp.ok && gasResp.data?.success && gasResp.data.repair) {
                 const gasRepair = gasResp.data.repair;
-                setRepair(prev => prev ? {
-                  ...prev,
-                  ...gasRepair,
-                  clientSheetId: sbRepair.clientSheetId,
-                  clientName: gasRepair.clientName || prev.clientName,
-                  // Preserve the Supabase-loaded items[] — GAS path doesn't
-                  // return repair_items and a naive spread wipes it.
-                  items: prev.items,
-                  // Preserve the Supabase-resolved itemClass. The SB fetch
-                  // derives it from the inventory overlay (item_class on the
-                  // live inventory row — authoritative), whereas GAS reads the
-                  // Repairs sheet "Class" column, which is frequently blank for
-                  // repairs created from tasks / multi-item batches. A naive
-                  // `...gasRepair` spread therefore CLOBBERS a good 'M' with ''
-                  // the moment the background enrichment lands — and the Quote
-                  // Builder's class-based rate auto-fill (resolveCatalogRate in
-                  // RepairDetailPanel) then resolves nothing, so Restock /
-                  // Inspection / etc. stop pre-filling. That race is exactly why
-                  // the auto-fill "sometimes works, sometimes doesn't". Prefer
-                  // the SB value; fall back to GAS only when SB had none.
-                  itemClass: prev.itemClass || gasRepair.itemClass,
-                } : prev);
-                setSource('legacy');
+                setRepair(prev => {
+                  if (!prev) return prev;
+                  const next = { ...prev };
+                  // Sheet-only fields: SB never has these — take GAS verbatim.
+                  if (gasRepair.repairFolderUrl)   next.repairFolderUrl   = gasRepair.repairFolderUrl;
+                  if (gasRepair.taskFolderUrl)     next.taskFolderUrl     = gasRepair.taskFolderUrl;
+                  // shipmentFolderUrl IS populated by the SB inventory
+                  // overlay (authoritative) — sparse-fill only.
+                  if (!next.shipmentFolderUrl && gasRepair.shipmentFolderUrl) next.shipmentFolderUrl = gasRepair.shipmentFolderUrl;
+                  // Descriptive fields: fill only where SB was blank. The
+                  // itemClass preference is load-bearing — the SB value comes
+                  // from the live inventory overlay (authoritative) while the
+                  // sheet "Class" column is frequently blank, and the Quote
+                  // Builder's class-based rate auto-fill dies without it.
+                  if (!next.clientName)  next.clientName  = gasRepair.clientName  || '';
+                  if (!next.vendor)      next.vendor      = gasRepair.vendor      || '';
+                  if (!next.description) next.description = gasRepair.description || '';
+                  if (!next.sidemark)    next.sidemark    = gasRepair.sidemark    || '';
+                  if (!next.location)    next.location    = gasRepair.location    || '';
+                  if (!next.itemClass)   next.itemClass   = gasRepair.itemClass   || '';
+                  if (!next.taskNotes)   next.taskNotes   = gasRepair.taskNotes   || '';
+                  if (!next.itemNotes)   next.itemNotes   = gasRepair.itemNotes   || '';
+                  if (!next.repairNotes) next.repairNotes = gasRepair.repairNotes || '';
+                  if (!next.createdBy)   next.createdBy   = gasRepair.createdBy   || '';
+                  if (!next.createdDate) next.createdDate = gasRepair.createdDate || '';
+                  if (!next.sourceTaskId) next.sourceTaskId = gasRepair.sourceTaskId || '';
+                  if (!next.repairVendor) next.repairVendor = gasRepair.repairVendor || '';
+                  if (!next.invoiceId)   next.invoiceId   = gasRepair.invoiceId   || '';
+                  // EXCLUDED on purpose (SB-authoritative; sheet may be stale):
+                  // status, approved, quoteAmount, quoteLines + every quote_*
+                  // total, quoteSentDate, quoteRevised, scheduledDate,
+                  // startDate, completedDate, repairResult, finalAmount,
+                  // partsCost, laborHours, billed.
+                  return next;
+                });
               }
             })
             .catch(() => { /* best-effort */ });

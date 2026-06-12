@@ -172,8 +172,16 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
     }
     // Pre-fill a single REPAIR line. If a quoteAmount was carried over
     // from a legacy single-input draft, seed it as the rate.
-    const legacyRate = repair.quoteAmount != null && repair.quoteAmount > 0 ? String(repair.quoteAmount) : '';
-    return [{ svcCode: 'REPAIR', svcName: 'Repair', qty: '1', rate: legacyRate, taxable: true }];
+    // When carrying over a legacy stored amount, taxable:false is
+    // load-bearing: a lines-less quote_amount is the FINAL tax-inclusive
+    // total, so seeding it taxable re-taxes it — $228.20 × 1.104 = $251.93,
+    // the exact RPR-63755 inflation that a Save & Resend then persisted.
+    // Matches send-repair-quote-sb's legacy synthesize (taxable:false).
+    // A FRESH quote (no stored amount) keeps the taxable default — the
+    // catalog flag / tax-exempt pass (PR #770) then adjusts it.
+    const hasLegacyAmt = repair.quoteAmount != null && repair.quoteAmount > 0;
+    const legacyRate = hasLegacyAmt ? String(repair.quoteAmount) : '';
+    return [{ svcCode: 'REPAIR', svcName: 'Repair', qty: '1', rate: legacyRate, taxable: !hasLegacyAmt }];
   })();
   const [quoteLines, setQuoteLines] = useState<LineDraft[]>(initialLines);
   const [taxAreaId, setTaxAreaId] = useState<string>(repair.quoteTaxAreaId || '');
@@ -198,7 +206,9 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
     hasRealQuoteLines
       ? repair.quoteLines!
       : (typeof repair.quoteAmount === 'number' && repair.quoteAmount > 0
-          ? [{ svcCode: 'REPAIR', svcName: 'Repair', qty: 1, rate: repair.quoteAmount, taxable: true }]
+          // taxable:false — the lines-less amount is the final total (see
+          // the builder seed above); never imply more tax on top of it.
+          ? [{ svcCode: 'REPAIR', svcName: 'Repair', qty: 1, rate: repair.quoteAmount, taxable: false }]
           : []);
   // Synthetic single-line quotes have no stored tax breakdown — render a
   // bare "Total" row (totalOnly) unless real totals survived on the row.
