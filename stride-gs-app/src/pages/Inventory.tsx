@@ -2845,7 +2845,7 @@ export function Inventory() {
       {/* ── COD Storage Modal (feature-gated) ── */}
       {showCodStorageModal && codEnabledFor(detailActionItem?.clientId || selectedRows[0]?.original.clientId) && (detailActionItem || selectedRows.length > 0) && (
         <SetCodStorageModal
-          items={(detailActionItem ? [detailActionItem] : selectedRows.map(r => r.original)).map(i => ({ itemId: i.itemId, description: i.description }))}
+          items={(detailActionItem ? [detailActionItem] : selectedRows.map(r => r.original)).map(i => ({ itemId: i.itemId, description: i.description, receiveDate: i.receiveDate }))}
           clientName={detailActionItem?.clientName || selectedRows[0]?.original.clientName || ''}
           clientSheetId={detailActionItem?.clientId || selectedRows[0]?.original.clientId || ''}
           onClose={() => { setShowCodStorageModal(false); setDetailActionItem(null); }}

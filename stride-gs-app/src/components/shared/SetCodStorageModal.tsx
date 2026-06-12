@@ -11,18 +11,22 @@
  * useFeatureFlag('codStorageBilling') === 'supabase'). Mirrors the
  * StorageCreditModal layout/pattern.
  */
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { X, CheckCircle2, AlertTriangle, CalendarDays, PackageX } from 'lucide-react';
 import { theme } from '../../styles/theme';
 import { WriteButton } from './WriteButton';
 import { ProcessingOverlay } from './ProcessingOverlay';
-import { setCodStorage, todayIso } from '../../lib/codStorage';
+import { setCodStorage, setCodStorageFromReceipt, addDaysIso, todayIso } from '../../lib/codStorage';
+import { supabase } from '../../lib/supabase';
 import { entityEvents } from '../../lib/entityEvents';
 import type { InventoryItem } from '../../lib/types';
 
 export interface CodStorageModalItem {
   itemId: string;
   description?: string;
+  /** Inventory receive date (ISO YYYY-MM-DD). Drives the "days after receipt"
+   *  per-item COD start date + its preview. */
+  receiveDate?: string;
 }
 
 interface Props {
@@ -38,7 +42,7 @@ interface Props {
 }
 
 type Mode = 'set' | 'remove';
-type SetWhen = 'today' | 'date';
+type SetWhen = 'today' | 'date' | 'receipt';
 
 export function SetCodStorageModal({
   items, clientName, clientSheetId, onClose, onSuccess, applyItemPatch, clearItemPatch,
@@ -47,14 +51,44 @@ export function SetCodStorageModal({
   const [mode, setMode] = useState<Mode>('set');
   const [when, setWhen] = useState<SetWhen>('today');
   const [startDate, setStartDate] = useState(today);
+  const [days, setDays] = useState<number>(0);
+  const [freeStorageDays, setFreeStorageDays] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [doneCount, setDoneCount] = useState<number | null>(null);
 
+  // Read the client's free-storage period (clients.free_storage_days) for the
+  // selected tenant — shown at the top + pre-fills the "days after receipt"
+  // input (staff can override). Falls back silently to 0 if unset/unreadable.
+  useEffect(() => {
+    let active = true;
+    if (!clientSheetId) { setFreeStorageDays(null); return; }
+    supabase
+      .from('clients')
+      .select('free_storage_days')
+      .eq('spreadsheet_id', clientSheetId)
+      .maybeSingle()
+      .then(({ data }) => {
+        if (!active) return;
+        const n = data?.free_storage_days;
+        const val = typeof n === 'number' ? n : null;
+        setFreeStorageDays(val);
+        // Pre-fill the days input from the client's free-storage period. This
+        // effect only re-runs when the tenant changes, so an in-session manual
+        // edit isn't clobbered; a new tenant correctly re-applies its default.
+        if (val != null) setDays(val);
+      });
+    return () => { active = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clientSheetId]);
+
   const itemIds = items.map(i => i.itemId).filter(Boolean);
-  const effectiveStart = mode === 'set' ? (when === 'today' ? today : startDate) : null;
+  // Per-item COD start = receive_date + N (blank receive_date → today + N,
+  // mirroring the RPC's CURRENT_DATE fallback). Drives the preview + optimistic.
+  const receiptStartFor = (it: CodStorageModalItem) => addDaysIso(it.receiveDate || null, days);
+  const effectiveStart = mode === 'set' ? (when === 'today' ? today : when === 'date' ? startDate : null) : null;
   const canSubmit = itemIds.length > 0 && !!clientSheetId &&
-    (mode === 'remove' || (when === 'today' || !!startDate));
+    (mode === 'remove' || when === 'today' || when === 'receipt' || (when === 'date' && !!startDate));
 
   const handleSubmit = async () => {
     if (!canSubmit) return;
@@ -62,15 +96,21 @@ export function SetCodStorageModal({
     setError(null);
 
     const enabled = mode === 'set';
-    // Optimistic table patch.
+    const isReceipt = enabled && when === 'receipt';
+    // Optimistic table patch. Receipt mode is per-item (receive_date + N);
+    // every other mode shares one start date.
     if (applyItemPatch) {
-      for (const id of itemIds) {
-        applyItemPatch(id, { codStorage: enabled, codStorageStartDate: enabled ? (effectiveStart || '') : '' });
+      for (const it of items) {
+        if (!it.itemId) continue;
+        const start = !enabled ? '' : (isReceipt ? receiptStartFor(it) : (effectiveStart || ''));
+        applyItemPatch(it.itemId, { codStorage: enabled, codStorageStartDate: start });
       }
     }
 
     try {
-      const n = await setCodStorage(clientSheetId, itemIds, enabled, effectiveStart);
+      const n = isReceipt
+        ? await setCodStorageFromReceipt(clientSheetId, itemIds, days)
+        : await setCodStorage(clientSheetId, itemIds, enabled, effectiveStart);
 
       // The set_cod_storage RPC writes the entity_audit_log row server-side
       // (SECURITY DEFINER bypasses the admin/staff INSERT policy that rejects
@@ -168,21 +208,28 @@ export function SetCodStorageModal({
 
               {mode === 'set' && (
                 <div style={{ marginBottom: 14 }}>
+                  {/* Client's free-storage period — context for the "days after
+                      receipt" option (pre-fills the input below). */}
+                  {freeStorageDays != null && (
+                    <div style={{ fontSize: 12, color: theme.colors.textSecondary, background: theme.colors.orangeLight, border: `1px solid ${theme.colors.orange}`, borderRadius: 8, padding: '7px 10px', marginBottom: 12 }}>
+                      Free storage days: <strong style={{ color: theme.colors.orange }}>{freeStorageDays}</strong> <span style={{ color: theme.colors.textMuted }}>(from client settings)</span>
+                    </div>
+                  )}
                   <label style={labelCss}>Start date</label>
-                  <div style={{ display: 'flex', gap: 8, marginBottom: when === 'date' ? 10 : 0 }}>
-                    {(['today', 'date'] as SetWhen[]).map(w => (
+                  <div style={{ display: 'flex', gap: 6, marginBottom: when === 'today' ? 0 : 10 }}>
+                    {(['today', 'date', 'receipt'] as SetWhen[]).map(w => (
                       <button
                         key={w}
                         onClick={() => setWhen(w)}
                         style={{
-                          flex: 1, padding: '7px 10px', borderRadius: 8, cursor: 'pointer',
+                          flex: 1, padding: '7px 8px', borderRadius: 8, cursor: 'pointer',
                           border: `1px solid ${when === w ? theme.colors.orange : theme.colors.borderDefault}`,
                           background: when === w ? theme.colors.orangeLight : '#fff',
                           color: when === w ? theme.colors.orange : theme.colors.textSecondary,
                           fontSize: 12, fontWeight: 600,
                         }}
                       >
-                        {w === 'today' ? 'COD from today' : 'COD from date'}
+                        {w === 'today' ? 'Today' : w === 'date' ? 'Specific date' : 'Days from receipt'}
                       </button>
                     ))}
                   </div>
@@ -193,6 +240,39 @@ export function SetCodStorageModal({
                       onChange={e => setStartDate(e.target.value)}
                       style={{ width: '100%', padding: '8px 12px', fontSize: 13, border: `1px solid ${theme.colors.borderDefault}`, borderRadius: 8, fontFamily: 'inherit', outline: 'none' }}
                     />
+                  )}
+                  {when === 'receipt' && (
+                    <>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                        <input
+                          type="number"
+                          min={0}
+                          value={days}
+                          onChange={e => setDays(Math.max(0, parseInt(e.target.value, 10) || 0))}
+                          style={{ width: 90, padding: '8px 12px', fontSize: 13, border: `1px solid ${theme.colors.borderDefault}`, borderRadius: 8, fontFamily: 'inherit', outline: 'none' }}
+                        />
+                        <span style={{ fontSize: 13, color: theme.colors.textSecondary }}>days after each item's receipt</span>
+                      </div>
+                      {/* Per-item preview: each item's COD start = received + N. */}
+                      <div style={{ border: `1px solid ${theme.colors.borderDefault}`, borderRadius: 8, overflow: 'hidden' }}>
+                        <div style={{ display: 'flex', fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: theme.colors.textSecondary, background: '#FAFAF9', padding: '6px 10px' }}>
+                          <span style={{ flex: 1 }}>Item</span>
+                          <span style={{ width: 96, textAlign: 'right' }}>Received</span>
+                          <span style={{ width: 96, textAlign: 'right' }}>COD Starts</span>
+                        </div>
+                        <div style={{ maxHeight: 150, overflowY: 'auto' }}>
+                          {items.map((it, idx) => (
+                            <div key={it.itemId} style={{ display: 'flex', fontSize: 12, padding: '6px 10px', borderTop: idx === 0 ? 'none' : `1px solid ${theme.colors.borderDefault}` }}>
+                              <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.itemId}</span>
+                              <span style={{ width: 96, textAlign: 'right', color: it.receiveDate ? theme.colors.textSecondary : theme.colors.textMuted }}>
+                                {it.receiveDate || '— today'}
+                              </span>
+                              <span style={{ width: 96, textAlign: 'right', fontWeight: 600, color: theme.colors.orange }}>{receiptStartFor(it)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </>
                   )}
                 </div>
               )}
