@@ -409,6 +409,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   const [editSavedMessage, setEditSavedMessage] = useState<string | null>(null);
 
   const handleStartEditQuote = () => {
+    setBuilderDirty(false); // edit session starts clean; mutators re-set it
     setSubmitError(null);
     // Snapshot persisted quote → builder state. Re-runs the same shape
     // as the initialLines IIFE at mount but reads the latest repair prop
@@ -425,6 +426,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   };
 
   const handleCancelEditQuote = () => {
+    setBuilderDirty(false); // builder restored to persisted lines — a plain Send may fast-path resend again
     // Reset to persisted state — same logic as Start Edit (idempotent).
     if (Array.isArray(repair.quoteLines) && repair.quoteLines.length > 0) {
       setQuoteLines(repair.quoteLines.map(l => ({

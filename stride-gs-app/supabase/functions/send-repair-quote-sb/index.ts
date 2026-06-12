@@ -391,7 +391,7 @@ Deno.serve(async (req: Request) => {
               sync_status:   'sync_failed',
               requested_by:  `send-repair-quote-sb:${callerEmail}`,
               request_id:    requestId,
-              payload:       { table: 'repairs', op: 'update', rowId: repairId, fieldCount: 11 },
+              payload:       { table: 'repairs', op: 'update', rowId: repairId, fieldCount: resendExisting ? 1 : 11 },
               error_message: String(errMsg).slice(0, 1000),
             }).then(() => {}, () => {});
           }
@@ -406,7 +406,7 @@ Deno.serve(async (req: Request) => {
             sync_status:   'sync_failed',
             requested_by:  `send-repair-quote-sb:${callerEmail}`,
             request_id:    requestId,
-            payload:       { table: 'repairs', op: 'update', rowId: repairId, fieldCount: 11 },
+            payload:       { table: 'repairs', op: 'update', rowId: repairId, fieldCount: resendExisting ? 1 : 11 },
             error_message: errMsg.slice(0, 1000),
           }).then(() => {}, () => {});
         }
