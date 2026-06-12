@@ -131,6 +131,12 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
   const [batchOptOut, setBatchOptOut] = useState(false);
   const batchMode = batchModeAvailable && !batchOptOut;
   const batchModeActive = batchMode;
+  // 2026-06-12 — Grouped-item auto-split is now OPT-IN (default OFF). It
+  // previously fired for EVERY qty>1 item whenever any task was created
+  // (incl. auto-inspect), spawning unwanted SPLIT-* tasks alongside an INSP
+  // (e.g. SPLIT-64115-1). Staff now explicitly choose to split via the
+  // checkbox in the grouped-item notice below.
+  const [autoSplitGrouped, setAutoSplitGrouped] = useState(false);
   // D11: no mixed-class guard — each sub-task is a REAL single-item task
   // that bills its own class rate via complete_task_atomic, so a batch can
   // span item classes freely.
@@ -309,9 +315,12 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
         setResult({ created: r.created, skippedCount: r.skipped?.length ?? 0, taskIds: r.taskIds ?? [] });
         onSuccess(r.taskIds ?? []);
 
-        // Auto-create a Split task for every grouped item, so per-piece
-        // work can proceed against individual labels. Best-effort.
-        if (groupedItems.length > 0) {
+        // OPT-IN (2026-06-12): only when the operator ticked "Also create a
+        // Split task" in the grouped-item notice. Default OFF so creating a
+        // task (incl. auto-inspect) on a qty>1 item no longer spawns an
+        // unwanted SPLIT-* task. When ticked, auto-create a Split task for
+        // every grouped item so per-piece work can proceed. Best-effort.
+        if (autoSplitGrouped && groupedItems.length > 0) {
           await Promise.all(groupedItems.map(async (gi) => {
             try {
               const giQty = Number((gi as { qty?: number }).qty) || 1;
@@ -555,12 +564,25 @@ export function CreateTaskModal({ items, clientSheetId, onClose, onSuccess, addO
                   <div style={{ fontSize: 12, color: '#7C2D12', lineHeight: 1.5 }}>
                     {groupedItems.map((gi) => (
                       <div key={gi.itemId}>
-                        Item <strong>{gi.itemId}</strong> has a grouped quantity of <strong>{Number((gi as { qty?: number }).qty) || 1}</strong>. The warehouse will split it before tasking individual pieces.
+                        Item <strong>{gi.itemId}</strong> has a grouped quantity of <strong>{Number((gi as { qty?: number }).qty) || 1}</strong>.
                       </div>
                     ))}
                   </div>
-                  <div style={{ fontSize: 11, color: '#7C2D12', marginTop: 6 }}>
-                    A Split task will be auto-created and assigned to the warehouse team alongside this request.
+                  <div
+                    onClick={() => setAutoSplitGrouped(v => !v)}
+                    style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, cursor: 'pointer' }}
+                  >
+                    <span style={{
+                      width: 16, height: 16, borderRadius: 4, flexShrink: 0,
+                      border: `1px solid ${autoSplitGrouped ? '#C2410C' : '#FDBA74'}`,
+                      background: autoSplitGrouped ? '#C2410C' : '#fff',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    }}>
+                      {autoSplitGrouped && <Check size={12} color="#fff" />}
+                    </span>
+                    <span style={{ fontSize: 11, color: '#7C2D12' }}>
+                      Also create a Split task for the warehouse to break out individual pieces (off by default).
+                    </span>
                   </div>
                 </div>
               )}
