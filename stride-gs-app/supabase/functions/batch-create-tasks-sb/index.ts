@@ -207,8 +207,9 @@ Deno.serve(async (req: Request) => {
 
   if (batchMode) {
     // ── Batch mode v2 (D11, 2026-06-11) — parent order + REAL sub-tasks ──
-    // A batch is a parent ORDER NUMBER (JUS-BATCH-12) housing one real
-    // single-item task per eligible item (task_id = {batchNo}-{itemId},
+    // A batch is a parent ORDER NUMBER (JUS-INSP-3G — service code + 'G'
+    // group suffix) housing one real single-item task per eligible item
+    // (task_id = {batchNo}-{itemId} → JUS-INSP-3G-1,
     // tasks.batch_no = the parent number). Each sub rides the existing
     // single-task rails — per-item class-based billing via
     // complete_task_atomic, badges, notes, photos, SLA — so mixed item
@@ -258,7 +259,17 @@ Deno.serve(async (req: Request) => {
           console.error('[batch-create-tasks-sb] batch number allocation failed:', mintErr?.message);
           return json({ error: 'Batch number allocation failed (order numbering must be enabled for this account)' }, 500);
         }
-        batchNo = minted;
+        // 2026-06-12 (Justin) — the parent number reads as the SERVICE plus a
+        // 'G' (group) suffix, not the generic BATCH token: JUS-BATCH-3 →
+        // JUS-INSP-3G. Subs are {batchNo}-{itemId} → JUS-INSP-3G-1. The
+        // per-tenant 'batch' counter still drives N (sequential across all
+        // batches, service code embedded for readability); the G suffix keeps
+        // the parent string distinct from a regular JUS-INSP-3 task and from
+        // its own subs. No-op fallback if the minted id isn't BATCH-shaped.
+        const svcToken = svcCode.replace(/[^A-Z0-9_]/g, '');
+        batchNo = svcToken
+          ? minted.replace(/-BATCH-(\d+)$/, `-${svcToken}-$1G`)
+          : minted;
       }
 
       for (const item of eligible) {

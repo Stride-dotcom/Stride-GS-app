@@ -1,9 +1,10 @@
 /**
  * BatchPage — D11 batch parent order detail (BATCH_WORK_ITEMS_QA.md).
  *
- * A batch is a parent ORDER NUMBER (JUS-BATCH-12) housing real single-item
- * sub-tasks (tasks.batch_no = the parent number; task_id =
- * {batchNo}-{itemId}). There is no parent row — this page derives everything
+ * A batch is a parent ORDER NUMBER (JUS-INSP-3G — service code + 'G' group
+ * suffix) housing real single-item sub-tasks (tasks.batch_no = the parent
+ * number; task_id = {batchNo}-{itemId} → JUS-INSP-3G-1). There is no parent
+ * row — this page derives everything
  * from the subs: overall progress, pass/fail counts, and the sub-task list.
  * Work happens in the sub-tasks themselves (click a row → the task page),
  * exactly like standalone tasks; completing the last sub triggers the ONE
