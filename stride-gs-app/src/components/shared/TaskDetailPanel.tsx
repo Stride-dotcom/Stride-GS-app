@@ -9,7 +9,8 @@ import { useDocuments } from '../../hooks/useDocuments';
 import { usePhotoGraphRollup, useNoteGraphRollup, type RollupContext } from '../../hooks/useGraphRollup';
 import { useItemContainerScopes } from '../../hooks/useEntityNeighbors';
 import { PhotosPanel as _PhotosPanel, DocumentsPanel as _DocumentsPanel, NotesPanel as _NotesPanel } from './EntityAttachments';
-import { EntityHistory } from './EntityHistory';
+import { ActivityTimeline } from './ActivityTimeline';
+import { logEntityAudit } from '../../lib/auditLog';
 import { ItemIdBadges } from './ItemIdBadges';
 import { useItemIndicators } from '../../hooks/useItemIndicators';
 import { buildDeepLinkUrl } from '../../lib/deepLinks';
@@ -963,6 +964,14 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
                         action: 'print',
                         fileName: `Work Order — ${task.taskId}`,
                       });
+                      void logEntityAudit({
+                        entityType: 'task',
+                        entityId: task.taskId,
+                        tenantId: clientSheetId ?? null,
+                        action: 'work_order_printed',
+                        performedBy: user?.email ?? null,
+                        performedByName: user?.displayName ?? null,
+                      });
                     }}
                   />
                 )}
@@ -1678,7 +1687,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
     />
   );
   const renderTaskActivityTab = () => (
-    <EntityHistory entityType="task" entityId={task.taskId} tenantId={clientSheetId ?? undefined} />
+    <ActivityTimeline entityType="task" entityId={task.taskId} tenantId={clientSheetId ?? undefined} />
   );
 
   // Page-mode footer — state-aware pill-styled buttons. Mirrors existing handlers.

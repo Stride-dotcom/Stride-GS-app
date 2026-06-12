@@ -118,6 +118,9 @@ interface PickupItemRow {
 
 interface DeliveryItemRow {
   id: string;
+  /** Stride inventory row UUID, when the item maps. Used to resolve the
+   *  inventory item_id for per-item pickup_completed audit rows. */
+  inventory_id: string | null;
   /** FK → the pickup dt_order_items row this delivery item was picked up
    *  from. Set by CreateDeliveryOrderModal's forward path. NULL for
    *  warehouse stock and any item with no pickup counterpart — those are
@@ -205,7 +208,7 @@ export async function stampPickupOnLinkedDelivery(
       .is('removed_at', null),
     supabase
       .from('dt_order_items')
-      .select('id, parent_pickup_item_id, quantity, original_quantity, picked_up_at, pickup_item_note, pickup_return_codes, pickup_delivered_quantity')
+      .select('id, inventory_id, parent_pickup_item_id, quantity, original_quantity, picked_up_at, pickup_item_note, pickup_return_codes, pickup_delivered_quantity')
       .eq('dt_order_id', d.id)
       .is('removed_at', null),
   ]);
@@ -224,6 +227,9 @@ export async function stampPickupOnLinkedDelivery(
   // pickup item's actual result. No FK ⇒ never touched.
   let itemsStamped = 0;
   const itemsPropagated: string[] = [];
+  /** inventory_id UUIDs of delivery items whose picked_up_at write won —
+   *  resolved to item_ids below for per-item pickup_completed audit rows. */
+  const stampedInventoryIds: string[] = [];
 
   for (const dit of deliveryItems) {
     if (!dit.parent_pickup_item_id) continue;          // not from a pickup
@@ -264,7 +270,55 @@ export async function stampPickupOnLinkedDelivery(
         console.warn(`[stamp-pickup] picked_up_at update failed item=${dit.id}: ${error.message}`);
       } else if ((data ?? []).length > 0) {
         itemsStamped += 1;
+        if (dit.inventory_id) stampedInventoryIds.push(dit.inventory_id);
       }
+    }
+  }
+
+  // ── 6. Audit log (best-effort) ───────────────────────────────────
+  // One pickup_completed row on the DELIVERY order + one per stamped
+  // inventory item, so both the OrderPage and each Item's ActivityTimeline
+  // show the completed pickup. Only the run that won the atomic
+  // picked_up_at write inserts, so re-runs / webhook+sync races don't
+  // duplicate rows.
+  if (itemsStamped > 0) {
+    try {
+      const auditRows: Record<string, unknown>[] = [{
+        entity_type:  'dt_order',
+        entity_id:    d.id,
+        tenant_id:    p.tenant_id,
+        action:       'pickup_completed',
+        changes: {
+          summary: `${itemsStamped} item(s) picked up`,
+          itemsStamped,
+          dtIdentifier: p.dt_identifier ?? undefined,
+          driverName: driverName ?? undefined,
+        },
+        performed_by: driverName || 'system',
+        source:       'supabase',
+      }];
+      if (stampedInventoryIds.length > 0) {
+        const { data: invRows } = await supabase
+          .from('inventory')
+          .select('id, item_id')
+          .in('id', stampedInventoryIds);
+        for (const inv of (invRows ?? []) as Array<{ id: string; item_id: string | null }>) {
+          if (!inv.item_id) continue;
+          auditRows.push({
+            entity_type:  'inventory',
+            entity_id:    inv.item_id,
+            tenant_id:    p.tenant_id,
+            action:       'pickup_completed',
+            changes:      { dtIdentifier: p.dt_identifier ?? undefined, driverName: driverName ?? undefined },
+            performed_by: driverName || 'system',
+            source:       'supabase',
+          });
+        }
+      }
+      const { error: auditErr } = await supabase.from('entity_audit_log').insert(auditRows);
+      if (auditErr) console.warn(`[stamp-pickup] audit insert failed: ${auditErr.message}`);
+    } catch (e) {
+      console.warn('[stamp-pickup] audit insert threw:', e);
     }
   }
 

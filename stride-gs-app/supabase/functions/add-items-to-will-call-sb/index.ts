@@ -158,15 +158,28 @@ Deno.serve(async (req: Request) => {
     warnings.push(`Parent WC update failed: ${wcUpErr.message}`);
   }
 
-  await sb.from('entity_audit_log').insert({
-    entity_type:  'will_call',
-    entity_id:    wcNumber,
-    tenant_id:    tenantId,
-    action:       'update',
-    changes:      { summary: 'Items added to will call', itemIds: itemIds.slice(0, 20).join(',') },
-    performed_by: callerEmail || 'add-items-to-will-call-sb',
-    source:       'supabase',
-  }).then(() => {}, () => {});
+  // Audit: one row on the WC (with the item IDs) + one per item so each
+  // item's ActivityTimeline shows "Added to Will Call: WC-x".
+  await sb.from('entity_audit_log').insert([
+    {
+      entity_type:  'will_call',
+      entity_id:    wcNumber,
+      tenant_id:    tenantId,
+      action:       'update',
+      changes:      { summary: `${itemIds.length} item(s) added to will call`, itemIds },
+      performed_by: callerEmail || 'add-items-to-will-call-sb',
+      source:       'supabase',
+    },
+    ...itemIds.map(id => ({
+      entity_type:  'inventory',
+      entity_id:    id,
+      tenant_id:    tenantId,
+      action:       'added_to_will_call',
+      changes:      { wcNumber },
+      performed_by: callerEmail || 'add-items-to-will-call-sb',
+      source:       'supabase',
+    })),
+  ]).then(() => {}, () => {});
 
   void mirror(tenantId, wcNumber, { item_count: newCount, total_wc_fee: newFee, item_ids: newIds }, requestId, callerEmail, sb);
 

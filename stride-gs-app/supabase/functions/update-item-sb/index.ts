@@ -220,9 +220,13 @@ Deno.serve(async (req: Request) => {
   // true Released-transition. Also confirms the row exists so a
   // typo'd itemId returns NOT_FOUND instead of silently updating zero
   // rows.
+  // Select every editable column (not just status) so the audit log can
+  // record field-level old → new diffs for the ActivityTimeline.
+  const prevSelectCols = ['item_id', 'status',
+    ...Object.values(FIELD_MAP).map(s => s.column).filter(c => c !== 'status')].join(', ');
   const { data: prevRow, error: prevErr } = await sb
     .from('inventory')
-    .select('item_id, status')
+    .select(prevSelectCols)
     .eq('tenant_id', tenantId)
     .eq('item_id', itemId)
     .maybeSingle();
@@ -408,11 +412,22 @@ Deno.serve(async (req: Request) => {
   // We add tenantId + callerEmail to the strip set because those are
   // SB-side framing keys that don't appear on the GAS-side payload (GAS
   // takes them as query params, not in the body).
+  // v2026-06-12 — editable fields log as {field: {old, new}} so the
+  // ActivityTimeline can render "Class changed: M → L". Non-FIELD_MAP body
+  // keys (note, etc.) keep the legacy raw-value shape.
+  const prevRecord = prevRow as Record<string, unknown>;
   const auditChanges: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(body)) {
     if (k === 'itemId' || k === 'requestId' || k === 'tenantId' || k === 'callerEmail') continue;
     if (v === undefined) continue;
-    auditChanges[k] = v;
+    const spec = FIELD_MAP[k];
+    if (spec && Object.prototype.hasOwnProperty.call(updates, k)) {
+      const oldVal = prevRecord[spec.column];
+      const newVal = (updates as Record<string, unknown>)[k];
+      if (oldVal !== newVal) auditChanges[k] = { old: oldVal ?? null, new: newVal ?? null };
+    } else {
+      auditChanges[k] = v;
+    }
   }
   await sb.from('entity_audit_log').insert({
     entity_type:   'inventory',

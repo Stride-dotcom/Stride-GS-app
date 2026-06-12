@@ -43,7 +43,7 @@ import { useResizablePanel } from '../../hooks/useResizablePanel';
 import { getPanelContainerStyle, panelBackdropStyle } from './panelStyles';
 import { DetailHeader } from './DetailHeader';
 import { PhotosPanel, DocumentsPanel, NotesPanel } from './EntityAttachments';
-import { EntityHistory } from './EntityHistory';
+import { ActivityTimeline } from './ActivityTimeline';
 import { usePhotos, type EntityType as PhotoEntityType } from '../../hooks/usePhotos';
 import { useDocuments, type DocumentContextType } from '../../hooks/useDocuments';
 import { useEntityNotes } from '../../hooks/useEntityNotes';
@@ -110,7 +110,7 @@ export interface TabbedDetailPanelBuiltInTabs {
     rollupCtx?: RollupContext | null;
   };
   /** Activity tab — accepts either a simple entityType/entityId pair (renders
-   *  the default `<EntityHistory>`) OR a full render function (escape hatch
+   *  the default `<ActivityTimeline>`) OR a full render function (escape hatch
    *  for entities like Item whose activity view has cross-entity logic). */
   activity?:
     | { entityType: string; entityId: string; tenantId?: string | null }
@@ -343,7 +343,7 @@ function useBuiltInTabs(cfg: TabbedDetailPanelBuiltInTabs | undefined): TabbedDe
           label: 'Activity',
           badgeCount: null,
           render: () => (
-            <EntityHistory
+            <ActivityTimeline
               entityType={activityCfg.entityType}
               entityId={activityCfg.entityId}
               tenantId={activityCfg.tenantId ?? undefined}

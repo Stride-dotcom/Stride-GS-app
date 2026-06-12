@@ -41,7 +41,7 @@ import type {
 import {
   EntityPage, EPCard, EPLabel, EPFooterButton, EntityPageTokens as EP,
 } from '../components/shared/EntityPage';
-import { EntityHistory } from '../components/shared/EntityHistory';
+import { ActivityTimeline } from '../components/shared/ActivityTimeline';
 import { PhotosPanel, DocumentsPanel } from '../components/shared/EntityAttachments';
 import { useServiceCatalog } from '../hooks/useServiceCatalog';
 import { supabase } from '../lib/supabase';
@@ -2613,7 +2613,7 @@ export function OrderPage() {
           </EPCard>
           <EPCard>
             <SectionTitle>Activity Timeline</SectionTitle>
-            <EntityHistory entityType="dt_order" entityId={order.id} tenantId={order.tenantId ?? undefined} />
+            <ActivityTimeline entityType="dt_order" entityId={order.id} tenantId={order.tenantId ?? undefined} />
           </EPCard>
         </div>
       ),

@@ -8,7 +8,8 @@ import { useDocuments } from '../../hooks/useDocuments';
 import { usePhotoGraphRollup, useNoteGraphRollup, type RollupContext } from '../../hooks/useGraphRollup';
 import { useItemContainerScopes } from '../../hooks/useEntityNeighbors';
 import { PhotosPanel as _PhotosPanel, DocumentsPanel as _DocumentsPanel, NotesPanel as _NotesPanel } from './EntityAttachments';
-import { EntityHistory } from './EntityHistory';
+import { ActivityTimeline } from './ActivityTimeline';
+import { logEntityAudit } from '../../lib/auditLog';
 import { FolderButton } from './FolderButton';
 import { DeepLink } from './DeepLink';
 import { ItemIdBadges } from './ItemIdBadges';
@@ -484,6 +485,14 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
       await renderDoc('DOC_REPAIR_WORK_ORDER', buildRepairTokens(repair), {
         action: 'print',
         fileName: `Repair Work Order — ${repair.repairId}`,
+      });
+      void logEntityAudit({
+        entityType: 'repair',
+        entityId: repair.repairId,
+        tenantId: repair.clientSheetId ?? null,
+        action: 'work_order_printed',
+        performedBy: user?.email ?? null,
+        performedByName: user?.displayName ?? null,
       });
     } catch (err) {
       setPrintError(err instanceof Error ? err.message : 'Work Order generation failed');
@@ -2552,7 +2561,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
     />
   );
   const renderRepairActivityTab = () => (
-    <EntityHistory entityType="repair" entityId={repair.repairId} tenantId={repair.clientSheetId ?? undefined} />
+    <ActivityTimeline entityType="repair" entityId={repair.repairId} tenantId={repair.clientSheetId ?? undefined} />
   );
 
   // v38.124.0 / repair-quote follow-up — render the Quote builder /

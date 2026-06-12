@@ -116,15 +116,28 @@ Deno.serve(async (req: Request) => {
     .eq('tenant_id', tenantId).eq('wc_number', wcNumber)
     .then(() => {}, () => {});
 
-  await sb.from('entity_audit_log').insert({
-    entity_type:  'will_call',
-    entity_id:    wcNumber,
-    tenant_id:    tenantId,
-    action:       'update',
-    changes:      { summary: 'Items removed from will call', itemIds: removeIds.slice(0, 20).join(','), cancelled },
-    performed_by: callerEmail || 'remove-items-from-will-call-sb',
-    source:       'supabase',
-  }).then(() => {}, () => {});
+  // Audit: one row on the WC (with the item IDs) + one per item so each
+  // item's ActivityTimeline shows "Removed from Will Call: WC-x".
+  await sb.from('entity_audit_log').insert([
+    {
+      entity_type:  'will_call',
+      entity_id:    wcNumber,
+      tenant_id:    tenantId,
+      action:       'update',
+      changes:      { summary: `${removeIds.length} item(s) removed from will call`, itemIds: removeIds, cancelled },
+      performed_by: callerEmail || 'remove-items-from-will-call-sb',
+      source:       'supabase',
+    },
+    ...removeIds.map((id: string) => ({
+      entity_type:  'inventory',
+      entity_id:    id,
+      tenant_id:    tenantId,
+      action:       'removed_from_will_call',
+      changes:      { wcNumber },
+      performed_by: callerEmail || 'remove-items-from-will-call-sb',
+      source:       'supabase',
+    })),
+  ]).then(() => {}, () => {});
 
   void mirror(tenantId, wcNumber, wcUpdate, requestId, callerEmail, sb);
 
