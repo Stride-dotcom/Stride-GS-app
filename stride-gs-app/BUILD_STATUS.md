@@ -144,6 +144,15 @@
 
 ---
 
+## Recent Changes (2026-06-12, tasks: batch parent number reads as service code + G suffix, not BATCH — feat/tasks/batch-number-service-token)
+
+- **Justin:** disliked `JUS-BATCH-3`; wants the service code + a group marker. Batch parent numbers are now **`JUS-INSP-3G`** (service code replaces the BATCH token, `G` = group suffix); sub-tasks follow as **`JUS-INSP-3G-1`** (`{batchNo}-{itemId}`). The per-tenant `batch` sequence still drives N (sequential across batches; service code embedded for readability). Existing `JUS-BATCH-N` batches keep their numbers.
+- **EF** [batch-create-tasks-sb](stride-gs-app/supabase/functions/batch-create-tasks-sb/index.ts): post-processes the minted `JUS-BATCH-N` → `JUS-{SVC}-{N}G` (anchored `-BATCH-(\d+)$` replace; no-op fallback). No reserved-token guard needed — CreateTaskModal's EXCLUDE_CODES keeps WC/WCPU/RPR out of the batch picker, so a parent can never masquerade as a will-call/repair id. **EF redeployed (verify_jwt unchanged).**
+- **[LinkifiedText](stride-gs-app/src/components/shared/LinkifiedText.tsx)**: regex widened to capture the parent (`-NG`) and sub (`-NG-itemId`) shapes; the bare parent renders as PLAIN text (no `batch` DeepLink kind — the Tasks Batch column links it explicitly), subs resolve to the task page. Verified empirically across all id shapes (regular/repair/WC/legacy/FAB all unchanged).
+- BatchPage / Tasks Batch column / batch-summary email all treat `batch_no` as opaque — no parsing changes needed. Batch counter is separate from the atomic invoice counter (no billing impact). tsc + build clean; locked-in reviewer: SHIP.
+
+---
+
 ## Recent Changes (2026-06-11, tasks: D11 batch parent + REAL sub-tasks + option-B summary email — feat/tasks/batch-parent-subtasks, PR #768)
 
 - **Architecture pivot (Justin, D11 in Dropbox `BATCH_WORK_ITEMS_QA.md`):** a task batch is now a parent ORDER NUMBER housing real single-item sub-tasks — no join table, no parent row. `tasks.batch_no` (SB-only; sbTaskRow_ never projects it so sheet syncs preserve it) + sub ids `{batchNo}-{itemId}` (e.g. JUS-BATCH-1-61791; `next_order_id` gained the 'batch' → BATCH token). Each sub rides the existing single-task rails: per-item class-based billing (mixed classes now allowed — the v1 guards were removed), badges, notes, photos, SLA. Migration [20260611235000](stride-gs-app/supabase/migrations/20260611235000_batch_parent_subtasks.sql) applied; `batchWorkItemsTasks` flag seeded (demo) gating ONLY the CreateTaskModal toggle.

@@ -29,11 +29,17 @@ import { DeepLink, type DeepLinkKind } from './DeepLink';
 //   Task IDs:   2-6 uppercase letters, dash, digits, dash, digits (e.g. INSP-123-1)
 //   Repair IDs: RPR-digits-digits
 //   WC numbers: WC-digits (5+ digits, e.g. WC-032426)
-const ENTITY_ID_REGEX = /\b([A-Za-z]{1,4}-[A-Z][A-Z0-9_]{1,7}-\d+|(?:INSP|ASM|MNRTU|RUSH|DISP|WC|WCPU|REPAIR|RPR|STOR|RCVG)-[\w]+-?\d*)\b/g;
+// The clean alternative also captures the D11 batch forms: a parent batch
+// order (PREFIX-INSP-3G — optional 'G' group suffix) and its sub-tasks
+// (PREFIX-INSP-3G-1 — trailing -itemId). getDeepLinkKind decides what each
+// resolves to (subs → task page; the bare parent renders plain — no batch
+// DeepLink kind, and the Tasks Batch column links it explicitly).
+const ENTITY_ID_REGEX = /\b([A-Za-z]{1,4}-[A-Z][A-Z0-9_]{1,7}-\d+G?(?:-[A-Za-z0-9]+)?|(?:INSP|ASM|MNRTU|RUSH|DISP|WC|WCPU|REPAIR|RPR|STOR|RCVG)-[\w]+-?\d*)\b/g;
 
 // Clean orderNumbering ids carry the type token in the MIDDLE segment
-// (PREFIX-TOKEN-N); legacy ids carry it FIRST. Resolve the token accordingly.
-const CLEAN_ORDER_ID = /^[A-Za-z]{1,4}-([A-Z][A-Z0-9_]{1,7})-\d+$/;
+// (PREFIX-TOKEN-N); legacy ids carry it FIRST. Group 2 = the 'G' batch-group
+// suffix (parent + subs), group 3 = a sub-task's -itemId tail.
+const CLEAN_ORDER_ID = /^[A-Za-z]{1,4}-([A-Z][A-Z0-9_]{1,7})-\d+(G)?(-[A-Za-z0-9]+)?$/;
 
 // Clean-form middle tokens that resolve to a TASK deep link: the generic TSK
 // (pre-2026-06-11 ids) plus the known task service codes. Kept as an explicit
@@ -49,6 +55,12 @@ function getDeepLinkKind(id: string): DeepLinkKind | null {
   const cleanMatch = CLEAN_ORDER_ID.exec(id.toUpperCase());
   if (cleanMatch) {
     const token = cleanMatch[1];
+    const isGroup = !!cleanMatch[2];   // 'G' suffix → D11 batch parent or sub
+    const hasSub  = !!cleanMatch[3];   // trailing -itemId → it's a real sub-task
+    // A bare batch PARENT number (PREFIX-INSP-3G, no -itemId) has no task row
+    // and no batch DeepLink kind — render it as plain text. Its subs
+    // (PREFIX-INSP-3G-1) ARE real tasks and resolve by token below.
+    if (isGroup && !hasSub) return null;
     if (token === 'RPR') return 'repair';
     if (token === 'WC' || token === 'WCPU') return 'willcall';
     // Fabric Protection family (FAB_RUG, FAB_BED, …) is open-ended — match
