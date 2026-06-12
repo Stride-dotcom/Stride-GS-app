@@ -5,7 +5,7 @@ import { ColumnManagerMenu, moveColumnInOrder } from '../components/shared/Colum
 import {
   useReactTable, getCoreRowModel, getSortedRowModel, getFilteredRowModel,
   getPaginationRowModel, flexRender, createColumnHelper,
-  type RowSelectionState, type FilterFn, type ColumnSizingState,
+  type RowSelectionState, type FilterFn,
 } from '@tanstack/react-table';
 import {
   Eye, FileText, Search, Download, ChevronUp, ChevronDown,
@@ -254,7 +254,7 @@ export function Claims() {
   const isLive = apiSucceeded;
   const isDemo = !hasApi;
 
-  const { colVis: columnVisibility, setColVis: setColumnVisibility, sorting, setSorting, columnOrder, setColumnOrder } = useTablePreferences('claims', [{ id: 'dateOpened', desc: true }], { outcomeType: false, dateClosed: false, incidentLocation: false, createdBy: false }, DEFAULT_COL_ORDER);
+  const { colVis: columnVisibility, setColVis: setColumnVisibility, sorting, setSorting, columnOrder, setColumnOrder, columnSizing, setColumnSizing } = useTablePreferences('claims', [{ id: 'dateOpened', desc: true }], { outcomeType: false, dateClosed: false, incidentLocation: false, createdBy: false }, DEFAULT_COL_ORDER);
   // columnFilters removed — status/type/client filtering done in data useMemo
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
   const [globalFilter, setGlobalFilter] = useState('');
@@ -263,7 +263,6 @@ export function Claims() {
   const [showColMenu, setShowColMenu] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   useEffect(() => { if (!apiLoading && refreshing) setRefreshing(false); }, [apiLoading, refreshing]);
-  const [columnSizing, setColumnSizing] = useState<ColumnSizingState>({});
   const [colToggleRect, setColToggleRect] = useState<DOMRect | null>(null);
   // Status filter key namespaced by user.email so an admin's selection
   // doesn't leak into an impersonated client's view (and vice versa).

@@ -41,7 +41,7 @@
  * "even though we technically can, we deliberately don't" backstop.
  */
 import { useState, useCallback, useEffect, useRef } from 'react';
-import type { SortingState, VisibilityState } from '@tanstack/react-table';
+import type { ColumnSizingState, SortingState, VisibilityState } from '@tanstack/react-table';
 import { useAuth } from '../contexts/AuthContext';
 import {
   fetchUserViewPrefs,
@@ -54,6 +54,9 @@ interface TablePrefs {
   sorting?: SortingState;
   columnOrder?: string[];
   statusFilter?: string[];  // multi-select status chips
+  /** v2026-06-12 — per-column drag-resize widths (TanStack columnSizing).
+   *  Previously local component state, so widths reverted on navigation. */
+  columnSizing?: ColumnSizingState;
 }
 
 function loadPrefs(storageKey: string): TablePrefs {
@@ -131,6 +134,7 @@ export function useTablePreferences(
     reconcileColumnOrder(saved.current.columnOrder, defaultColumnOrder),
   );
   const [statusFilter, setStatusFilterRaw] = useState<string[]>(saved.current.statusFilter ?? defaultStatusFilter);
+  const [columnSizing, setColumnSizingRaw] = useState<ColumnSizingState>(saved.current.columnSizing ?? {});
 
   // ── Hydration / edit-protection refs ─────────────────────────────────
   // Without these refs we get two real bugs:
@@ -174,6 +178,14 @@ export function useTablePreferences(
 
   const setColumnOrder = useCallback((updater: string[] | ((prev: string[]) => string[])) => {
     setColumnOrderRaw(prev => {
+      const next = typeof updater === 'function' ? updater(prev) : updater;
+      if (next !== prev) userEditedRef.current = true;
+      return next;
+    });
+  }, []);
+
+  const setColumnSizing = useCallback((updater: ColumnSizingState | ((prev: ColumnSizingState) => ColumnSizingState)) => {
+    setColumnSizingRaw(prev => {
       const next = typeof updater === 'function' ? updater(prev) : updater;
       if (next !== prev) userEditedRef.current = true;
       return next;
@@ -230,12 +242,12 @@ export function useTablePreferences(
     // mount.
     if (!serverHydratedRef.current) return;
     if (isImpersonating) return; // ephemeral admin session — see header
-    const prefs = { colVis, sorting, columnOrder, statusFilter };
+    const prefs = { colVis, sorting, columnOrder, statusFilter, columnSizing };
     savePrefs(storageKey, prefs);
     if (userEmail) {
       scheduleUpsertUserViewPrefs(userEmail, pageKey, prefs);
     }
-  }, [storageKey, userEmail, pageKey, isImpersonating, colVis, sorting, columnOrder, statusFilter]);
+  }, [storageKey, userEmail, pageKey, isImpersonating, colVis, sorting, columnOrder, statusFilter, columnSizing]);
 
   // Async Supabase load on identity change — fetches THIS user's saved
   // prefs and rehydrates React state if the server has a row. If the
@@ -283,6 +295,7 @@ export function useTablePreferences(
       if (normalizedStatusFilter !== undefined) {
         setStatusFilterRaw(normalizedStatusFilter);
       }
+      if (next.columnSizing !== undefined) setColumnSizingRaw(next.columnSizing);
       // Mirror the freshly-fetched server state into the local cache so
       // the NEXT page load (before Supabase responds) starts from the
       // server's authoritative state. Write the NORMALIZED statusFilter
@@ -292,6 +305,7 @@ export function useTablePreferences(
         sorting: next.sorting,
         columnOrder: next.columnOrder,
         statusFilter: normalizedStatusFilter,
+        columnSizing: next.columnSizing,
       });
       serverHydratedRef.current = true;
     })();
@@ -315,5 +329,5 @@ export function useTablePreferences(
     return () => window.removeEventListener('beforeunload', handler);
   }, []);
 
-  return { colVis, setColVis, sorting, setSorting, columnOrder, setColumnOrder, statusFilter, toggleStatus, clearStatusFilter };
+  return { colVis, setColVis, sorting, setSorting, columnOrder, setColumnOrder, statusFilter, toggleStatus, clearStatusFilter, columnSizing, setColumnSizing };
 }

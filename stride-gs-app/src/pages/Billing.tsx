@@ -6,7 +6,7 @@ import {
   useReactTable, getCoreRowModel, getSortedRowModel, getFilteredRowModel,
   flexRender, createColumnHelper,
   type ColumnFiltersState,
-  type RowSelectionState, type FilterFn, type ColumnSizingState,
+  type RowSelectionState, type FilterFn,
 } from '@tanstack/react-table';
 import {
   Search, Download, ChevronUp, ChevronDown, ChevronRight, ArrowUpDown,
@@ -1238,12 +1238,11 @@ export function Billing() {
   const [voidResult, setVoidResult] = useState<{ ok: boolean; voided: number; rejected: number; notFound: number; alreadyVoid: number; perGroup: { client: string; voided: number; error?: string }[] } | null>(null);
 
   // ─── Table state ──────────────────────────────────────────────────────────
-  const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder } = useTablePreferences('billing', [{ id: 'date', desc: true }], {}, DEFAULT_COL_ORDER, ['Unbilled']);
+  const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder, columnSizing, setColumnSizing } = useTablePreferences('billing', [{ id: 'date', desc: true }], {}, DEFAULT_COL_ORDER, ['Unbilled']);
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
   const [globalFilter, setGlobalFilter] = useState('');
   const [rowSel, setRowSel] = useState<RowSelectionState>({});
   const [showCols, setShowCols] = useState(false);
-  const [columnSizing, setColumnSizing] = useState<ColumnSizingState>({});
   const [colToggleRect, setColToggleRect] = useState<DOMRect | null>(null);
   const [selectedBillingRow, setSelectedBillingRow] = useState<BillingRow | null>(null);
   const [refreshing, setRefreshing] = useState(false);

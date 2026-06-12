@@ -6,7 +6,7 @@ import {
   useReactTable, getCoreRowModel, getSortedRowModel, getFilteredRowModel,
   flexRender, createColumnHelper,
   type ColumnFiltersState,
-  type RowSelectionState, type FilterFn, type ColumnSizingState,
+  type RowSelectionState, type FilterFn,
 } from '@tanstack/react-table';
 import {
   Eye, Search, Download, ChevronUp, ChevronDown,
@@ -354,7 +354,7 @@ export function Shipments() {
   const isDemo = !hasApi;
 
   // State
-  const { colVis: columnVisibility, setColVis: setColumnVisibility, sorting, setSorting, columnOrder, setColumnOrder } = useTablePreferences('shipments', [{ id: 'receivedDate', desc: true }], { notes: false, createdBy: false }, DEFAULT_COL_ORDER);
+  const { colVis: columnVisibility, setColVis: setColumnVisibility, sorting, setSorting, columnOrder, setColumnOrder, columnSizing, setColumnSizing } = useTablePreferences('shipments', [{ id: 'receivedDate', desc: true }], { notes: false, createdBy: false }, DEFAULT_COL_ORDER);
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
   const [globalFilter, setGlobalFilter] = useState('');
@@ -429,7 +429,6 @@ export function Shipments() {
   const [showColMenu, setShowColMenu] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   useEffect(() => { if (!apiLoading && refreshing) setRefreshing(false); }, [apiLoading, refreshing]);
-  const [columnSizing, setColumnSizing] = useState<ColumnSizingState>({});
   const [colToggleRect, setColToggleRect] = useState<DOMRect | null>(null);
 
   // Filters (status filter persisted to localStorage, keyed by user.email

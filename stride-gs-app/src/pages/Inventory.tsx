@@ -12,7 +12,6 @@ import {
   type ColumnFiltersState,
   type VisibilityState,
   type RowSelectionState,
-  type ColumnSizingState,
   type FilterFn,
 } from '@tanstack/react-table';
 import {
@@ -975,7 +974,7 @@ export function Inventory() {
   }, [inventoryItems, navigate]);
 
   // Table state — column order persisted per user via useTablePreferences
-  const { colVis: columnVisibility, setColVis: setColumnVisibility, sorting, setSorting, columnOrder, setColumnOrder, statusFilter: persistedStatusFilter, toggleStatus: togglePersistedStatus, clearStatusFilter: clearPersistedStatus } = useTablePreferences('inventory', [], {}, DEFAULT_COL_ORDER);
+  const { colVis: columnVisibility, setColVis: setColumnVisibility, sorting, setSorting, columnOrder, setColumnOrder, statusFilter: persistedStatusFilter, toggleStatus: togglePersistedStatus, clearStatusFilter: clearPersistedStatus, columnSizing, setColumnSizing } = useTablePreferences('inventory', [], {}, DEFAULT_COL_ORDER);
   // Lazy-init from URL so back-nav from /inventory/:id restores the same filter
   // scope (and shareable links open already-filtered). See useInventoryUrlFilters.
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>(
@@ -985,7 +984,6 @@ export function Inventory() {
     () => readInventoryFiltersFromUrl().globalFilter
   );
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
-  const [columnSizing, setColumnSizing] = useState<ColumnSizingState>({});
 
   // UI state
   const [openFilterCol, setOpenFilterCol] = useState<string | null>(null);

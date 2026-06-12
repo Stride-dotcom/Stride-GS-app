@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import {
   useReactTable, getCoreRowModel, getSortedRowModel, getFilteredRowModel,
   flexRender, createColumnHelper,
-  type SortingState, type ColumnSizingState,
+  type SortingState,
 } from '@tanstack/react-table';
 import { ColumnManagerMenu, moveColumnInOrder } from '../components/shared/ColumnManagerMenu';
 import {
@@ -242,10 +242,9 @@ function TasksTab({ tasks, onNavigate, indicators, canEditPriority }: { tasks: S
   // descending (newest first) as tiebreaker. Tasks with no due date sort
   // to the bottom via the taskDueDate sortingFn — see column def.
   // Per Justin 2026-05-13: staff want to work tasks in due-date order.
-  const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder } = useTablePreferences('dashboard-tasks', [{ id: 'taskDueDate', desc: false }, { id: 'taskCreated', desc: true }], {}, TASK_DEFAULT_ORDER);
+  const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder, columnSizing, setColumnSizing } = useTablePreferences('dashboard-tasks', [{ id: 'taskDueDate', desc: false }, { id: 'taskCreated', desc: true }], {}, TASK_DEFAULT_ORDER);
   const [statusFilters, setStatusFilters] = useState<string[]>(DEFAULT_TASK_STATUSES);
   const [showCols, setShowCols] = useState(false);
-  const [columnSizing, setColumnSizing] = useState<ColumnSizingState>({});
   const [colToggleRect, setColToggleRect] = useState<DOMRect | null>(null);
 
   // Selected row (single click). Double click navigates. Persists per page
@@ -586,10 +585,9 @@ function RepairsTab({ repairs, onNavigate, userRole, indicators }: { repairs: Su
   // sections surface the most-overdue rows at the top.
   // Per Justin 2026-05-28: dashboard default view for everyone =
   // nearest due date / oldest waiting at the top.
-  const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder } = useTablePreferences('dashboard-repairs', [{ id: 'repairCreated', desc: false }], {}, REPAIR_DEFAULT_ORDER);
+  const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder, columnSizing, setColumnSizing } = useTablePreferences('dashboard-repairs', [{ id: 'repairCreated', desc: false }], {}, REPAIR_DEFAULT_ORDER);
   const [statusFilters, setStatusFilters] = useState<string[]>(DEFAULT_REPAIR_STATUSES);
   const [showCols, setShowCols] = useState(false);
-  const [columnSizing, setColumnSizing] = useState<ColumnSizingState>({});
   const [colToggleRect, setColToggleRect] = useState<DOMRect | null>(null);
 
   const allStatuses = useMemo(() => [...new Set(repairs.map(r => r.status))].sort(), [repairs]);
@@ -688,10 +686,9 @@ const WC_COL_LABELS: Record<string, string> = { wcNumber: 'WC #', wcStatus: 'Sta
 
 function WillCallsTab({ willCalls, onNavigate }: { willCalls: SummaryWillCall[]; onNavigate: (wc: SummaryWillCall) => void }) {
   const colW = createColumnHelper<SummaryWillCall>();
-  const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder } = useTablePreferences('dashboard-willcalls', [{ id: 'wcScheduled', desc: false }], {}, WC_DEFAULT_ORDER);
+  const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder, columnSizing, setColumnSizing } = useTablePreferences('dashboard-willcalls', [{ id: 'wcScheduled', desc: false }], {}, WC_DEFAULT_ORDER);
   const [statusFilters, setStatusFilters] = useState<string[]>(DEFAULT_WC_STATUSES);
   const [showCols, setShowCols] = useState(false);
-  const [columnSizing, setColumnSizing] = useState<ColumnSizingState>({});
   const [colToggleRect, setColToggleRect] = useState<DOMRect | null>(null);
 
   const allStatuses = useMemo(() => [...new Set(willCalls.map(w => w.status))].sort(), [willCalls]);
