@@ -1714,11 +1714,10 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
         {/* Photos + Notes now live in dedicated tabs via builtInTabs below. */}
 
         {/* Billing Preview — staff/admin only. Shows the projected
-            REPAIR charge from the catalog plus any addons attached to
-            this repair plus any recorded ledger rows. v38.177.0:
-            addons are now polymorphic — staff can attach extras
-            (parts pickup, materials, etc.) that flush to Billing_Ledger
-            when handleCompleteRepair_ runs. */}
+            REPAIR charge plus any addons attached to this repair plus any
+            recorded ledger rows. Repairs are quote-priced: the projected
+            rate is the QUOTED amount, never the catalog flat rate (which
+            is $0 for REPAIR across all classes). */}
         <BillingPreviewCard
           entityType="repair"
           entityId={repair.repairId}
@@ -1726,7 +1725,20 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
           itemId={repair.itemId ? String(repair.itemId) : null}
           svcCode="REPAIR"
           itemClass={repair.itemClass || null}
-          customPrice={repair.finalAmount != null ? Number(repair.finalAmount) : (repair.quoteAmount != null ? Number(repair.quoteAmount) : null)}
+          // Zero-skipping precedence, mirroring the complete_repair RPC
+          // (NULLIF(final_amount,0) → quote_amount): a final_amount of 0
+          // means "not set", NOT "free repair". The old `finalAmount !=
+          // null` check passed 0 through, and the card treats 0 as
+          // "no override → catalog rate" → the preview showed $0.00 for
+          // fully-quoted repairs (RPR-61825: $145.40 quote, preview $0).
+          // Completion billing was never affected — the RPC resolves the
+          // same precedence server-side.
+          customPrice={
+            (repair.finalAmount ?? 0) > 0 ? Number(repair.finalAmount)
+            : (repair.quoteGrandTotal ?? 0) > 0 ? Number(repair.quoteGrandTotal)
+            : (repair.quoteAmount ?? 0) > 0 ? Number(repair.quoteAmount)
+            : null
+          }
           addons={repairAddons}
           visible={canStaffEdit}
           editable={canStaffEdit && !repairCompleted}
