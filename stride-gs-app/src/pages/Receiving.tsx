@@ -3,7 +3,7 @@ import { useLocation } from 'react-router-dom';
 import {
   useReactTable, getCoreRowModel, getSortedRowModel,
   flexRender, createColumnHelper,
-  type SortingState, type VisibilityState, type ColumnSizingState,
+  type SortingState, type VisibilityState,
 } from '@tanstack/react-table';
 import { useTablePreferences } from '../hooks/useTablePreferences';
 import { ColumnManagerMenu, moveColumnInOrder } from '../components/shared/ColumnManagerMenu';
@@ -190,9 +190,9 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
   const {
     colVis: columnVisibility, setColVis: setColumnVisibility,
     columnOrder, setColumnOrder,
+    columnSizing, setColumnSizing,
   } = useTablePreferences('receiving', [], {}, DEFAULT_RCV_COL_ORDER);
   const [sorting, setSorting] = useState<SortingState>([]);
-  const [columnSizing, setColumnSizing] = useState<ColumnSizingState>({});
   const [colToggleRect, setColToggleRect] = useState<DOMRect | null>(null);
   const [showColToggle, setShowColToggle] = useState(false);
 

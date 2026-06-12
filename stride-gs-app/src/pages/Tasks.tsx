@@ -9,7 +9,6 @@ import {
   createColumnHelper,
   type ColumnFiltersState,
   type RowSelectionState,
-  type ColumnSizingState,
   type FilterFn,
 } from '@tanstack/react-table';
 import {
@@ -437,7 +436,7 @@ export function Tasks() {
     }
   }, [tasks, navigate]);
 
-  const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder, statusFilter: sf, toggleStatus, clearStatusFilter } = useTablePreferences('tasks', [{ id: 'priority', desc: false }, { id: 'dueDate', desc: false }], {}, DEFAULT_COL_ORDER);
+  const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder, statusFilter: sf, toggleStatus, clearStatusFilter, columnSizing, setColumnSizing } = useTablePreferences('tasks', [{ id: 'priority', desc: false }, { id: 'dueDate', desc: false }], {}, DEFAULT_COL_ORDER);
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
   const [globalFilter, setGlobalFilter] = useState('');
   const [rowSel, setRowSel] = useState<RowSelectionState>({});
@@ -448,9 +447,6 @@ export function Tasks() {
   useEffect(() => { if (!tasksLoading && refreshing) setRefreshing(false); }, [tasksLoading, refreshing]);
   const [batchGuardClients, setBatchGuardClients] = useState<string[] | null>(null);
   const [batchGuardAction, setBatchGuardAction] = useState('');
-  // Local (non-persisted) column widths, mirroring Inventory's resize. The
-  // Columns menu's "Reset widths" clears this.
-  const [columnSizing, setColumnSizing] = useState<ColumnSizingState>({});
   const [colToggleRect, setColToggleRect] = useState<DOMRect | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const showToast = useCallback((msg: string) => { setToast(msg); setTimeout(() => setToast(null), 3000); }, []);

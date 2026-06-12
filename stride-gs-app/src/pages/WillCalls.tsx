@@ -5,7 +5,7 @@ import {
   useReactTable, getCoreRowModel, getSortedRowModel, getFilteredRowModel,
   flexRender, createColumnHelper,
   type ColumnFiltersState,
-  type RowSelectionState, type FilterFn, type ColumnSizingState,
+  type RowSelectionState, type FilterFn,
 } from '@tanstack/react-table';
 import {
   Eye, X, Search, Download,
@@ -185,12 +185,11 @@ export function WillCalls() {
       if (found) { pendingOpenRef.current = null; navigate(`/will-calls/${id}`); }
     }
   }, [willCalls, navigate]);
-  const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder, statusFilter: sf, toggleStatus, clearStatusFilter } = useTablePreferences('willcalls', [{ id: 'scheduledDate', desc: false }], {}, DEFAULT_COL_ORDER);
+  const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder, statusFilter: sf, toggleStatus, clearStatusFilter, columnSizing, setColumnSizing } = useTablePreferences('willcalls', [{ id: 'scheduledDate', desc: false }], {}, DEFAULT_COL_ORDER);
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
   const [globalFilter, setGlobalFilter] = useState('');
   const [rowSel, setRowSel] = useState<RowSelectionState>({});
   const [showCols, setShowCols] = useState(false);
-  const [columnSizing, setColumnSizing] = useState<ColumnSizingState>({});
   const [colToggleRect, setColToggleRect] = useState<DOMRect | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   useEffect(() => { if (!wcsLoading && refreshing) setRefreshing(false); }, [wcsLoading, refreshing]);

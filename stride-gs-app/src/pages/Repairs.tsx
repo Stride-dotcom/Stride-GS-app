@@ -5,7 +5,7 @@ import {
   useReactTable, getCoreRowModel, getSortedRowModel, getFilteredRowModel,
   flexRender, createColumnHelper,
   type ColumnFiltersState,
-  type RowSelectionState, type FilterFn, type ColumnSizingState,
+  type RowSelectionState, type FilterFn,
 } from '@tanstack/react-table';
 import {
   Eye, X, Search, Download,
@@ -240,7 +240,7 @@ export function Repairs() {
       if (found) { pendingOpenRef.current = null; navigate(`/repairs/${id}`); }
     }
   }, [repairs, navigate]);
-  const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder, statusFilter: sf, toggleStatus, clearStatusFilter } = useTablePreferences('repairs', [{ id: 'createdDate', desc: true }], {}, DEFAULT_COL_ORDER);
+  const { sorting, setSorting, colVis, setColVis, columnOrder, setColumnOrder, statusFilter: sf, toggleStatus, clearStatusFilter, columnSizing, setColumnSizing } = useTablePreferences('repairs', [{ id: 'createdDate', desc: true }], {}, DEFAULT_COL_ORDER);
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
   const [globalFilter, setGlobalFilter] = useState('');
   const [rowSel, setRowSel] = useState<RowSelectionState>({});
@@ -249,7 +249,6 @@ export function Repairs() {
   useEffect(() => { if (!repairsLoading && refreshing) setRefreshing(false); }, [repairsLoading, refreshing]);
   const [batchGuardClients, setBatchGuardClients] = useState<string[] | null>(null);
   const [batchGuardAction, setBatchGuardAction] = useState('');
-  const [columnSizing, setColumnSizing] = useState<ColumnSizingState>({});
   const [colToggleRect, setColToggleRect] = useState<DOMRect | null>(null);
 
   // Page-level safety net: resolve clientName from apiClients if empty (race when Supabase fetch happens before useClients loaded)
