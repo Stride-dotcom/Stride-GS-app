@@ -266,6 +266,11 @@ Deno.serve(async (req: Request) => {
         // batches, service code embedded for readability); the G suffix keeps
         // the parent string distinct from a regular JUS-INSP-3 task and from
         // its own subs. No-op fallback if the minted id isn't BATCH-shaped.
+        // NB: unlike stampSvcToken (which guards WC/WCPU/RPR so a task id
+        // can't masquerade as a will-call/repair), there's no reserved-token
+        // guard here — the safety rests on CreateTaskModal's EXCLUDE_CODES
+        // denylist (WC/WCPU/RPR/REPAIR/STOR/RCVG/SPLIT can't reach the batch
+        // picker), so svcCode is always a real task service here.
         const svcToken = svcCode.replace(/[^A-Z0-9_]/g, '');
         batchNo = svcToken
           ? minted.replace(/-BATCH-(\d+)$/, `-${svcToken}-$1G`)
