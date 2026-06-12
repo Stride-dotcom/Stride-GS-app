@@ -103,7 +103,7 @@ const fmt = fmtDate;
 
 function fmtMoney(n?: number | null) {
   if (n == null) return '—';
-  return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 0 });
+  return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 function fmtTimestamp(ts?: string) {
