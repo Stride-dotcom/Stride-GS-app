@@ -54,7 +54,7 @@ interface TablePrefs {
   sorting?: SortingState;
   columnOrder?: string[];
   statusFilter?: string[];  // multi-select status chips
-  /** v2026-06-13 — per-column drag-resize widths (TanStack columnSizing).
+  /** v2026-06-12 — per-column drag-resize widths (TanStack columnSizing).
    *  Previously local component state, so widths reverted on navigation. */
   columnSizing?: ColumnSizingState;
 }
