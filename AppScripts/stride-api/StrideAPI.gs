@@ -6864,8 +6864,12 @@ function supabaseDeleteStaleRows_(table, tenantId, keepIds, idColumn, protectRec
       var exId = existingIds[e].id;
       if (keepSet[exId]) continue;
       if (protectMs && existingIds[e].createdAt) {
+        // created_at is the EF/Deno UTC clock; nowMs is the GAS UTC clock.
+        // Tolerate ~1 min of forward skew (a future-stamped row is exactly the
+        // fresh SB-first row we want to protect) but don't protect a clearly
+        // bogus far-future timestamp forever.
         var ageMs = nowMs - new Date(existingIds[e].createdAt).getTime();
-        if (ageMs >= 0 && ageMs < protectMs) { protectedRecent++; continue; }
+        if (ageMs >= -60000 && ageMs < protectMs) { protectedRecent++; continue; }
       }
       staleIds.push(exId);
     }
