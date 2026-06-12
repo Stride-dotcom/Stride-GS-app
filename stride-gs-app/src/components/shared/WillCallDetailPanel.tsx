@@ -1586,7 +1586,7 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
             tenantId: clientSheetId,
             entityType: 'will_call',
             entityId: String(wc.wcNumber),
-            items: (wc.items ?? []).map(it => ({
+            items: (wc.items ?? []).map((it: { itemId: string; itemClass?: string | null; description?: string }) => ({
               itemId: it.itemId,
               itemClass: it.itemClass ?? null,
               label: it.description ? `${it.itemId} · ${it.description}` : it.itemId,
