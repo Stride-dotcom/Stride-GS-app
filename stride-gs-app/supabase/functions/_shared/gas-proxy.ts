@@ -56,7 +56,20 @@ export async function gasProxy<T = unknown>(
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const url = `${gasUrl}?action=${encodeURIComponent(action)}&token=${encodeURIComponent(gasToken)}`;
+    // GAS `doPost` reads callerEmail + clientSheetId from the QUERY STRING
+    // (e.parameter.callerEmail / e.parameter.clientSheetId), NOT the JSON
+    // body — see StrideAPI.gs doPost. Every handler routed through
+    // withClientIsolation_ rejects with "callerEmail is required" (and would
+    // also lose tenant isolation) if these aren't forwarded as query params.
+    // The values still ride along in the body too (harmless). This mirrors
+    // the params the direct apiPost GAS path sets (api.ts apiPost).
+    let url = `${gasUrl}?action=${encodeURIComponent(action)}&token=${encodeURIComponent(gasToken)}`;
+    if (typeof payload.callerEmail === 'string' && payload.callerEmail) {
+      url += `&callerEmail=${encodeURIComponent(payload.callerEmail)}`;
+    }
+    if (typeof payload.clientSheetId === 'string' && payload.clientSheetId) {
+      url += `&clientSheetId=${encodeURIComponent(payload.clientSheetId)}`;
+    }
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
