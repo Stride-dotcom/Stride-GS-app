@@ -50,6 +50,9 @@ Deno.serve(async (req: Request) => {
   let newStatus: string;
   let updates: Record<string, unknown>;
   const voidedBillingRows: string[] = [];
+  // Stamped onto each voided billing row; reused when mirroring the Void
+  // back to the per-tenant Billing_Ledger sheet (see mirrorBillingVoid).
+  let voidStampedReason = '';
 
   if (status === 'Completed') {
     // Check billing rows linked to this task.
@@ -77,10 +80,10 @@ Deno.serve(async (req: Request) => {
     }
 
     if (unbilledIds.length > 0) {
-      const stampedReason = `Task ${taskId} reopened by ${callerEmail || '?'}${reason ? ': ' + reason : ''}`;
+      voidStampedReason = `Task ${taskId} reopened by ${callerEmail || '?'}${reason ? ': ' + reason : ''}`;
       const { error: voidErr } = await sb
         .from('billing')
-        .update({ status: 'Void', item_notes: stampedReason, updated_at: new Date().toISOString() })
+        .update({ status: 'Void', item_notes: voidStampedReason, updated_at: new Date().toISOString() })
         .eq('tenant_id', tenantId)
         .in('ledger_row_id', unbilledIds);
       if (voidErr) return json({ success: false, error: `Billing void failed: ${voidErr.message}` }, 500);
@@ -129,6 +132,20 @@ Deno.serve(async (req: Request) => {
 
   void mirror(tenantId, taskId, updates, requestId, callerEmail, sb);
 
+  // Mirror the billing Void to the per-tenant Billing_Ledger sheet. The SB
+  // billing table is voided above, but that sheet is still the SOURCE OF
+  // TRUTH consumed by invoice-PDF generation, CB Consolidated_Ledger
+  // aggregation, and QBO/IIF export. Without this, a reopened task's charge
+  // stays Unbilled on the sheet and can be re-billed downstream — exactly
+  // the double-bill the reopen-void is meant to prevent. The GAS path
+  // (handleReopenTask_ → api_voidBillingRowsWhere_) already does this; this
+  // brings the SB-primary path to parity. Best-effort: a sheet-mirror
+  // failure must not undo the SB-side void (the React Billing report reads
+  // public.billing, which is already correct).
+  if (voidedBillingRows.length > 0) {
+    void mirrorBillingVoid(tenantId, voidedBillingRows, voidStampedReason, requestId, callerEmail, sb);
+  }
+
   return json({ success: true, taskId, newStatus, voidedBillingRows });
 });
 
@@ -154,6 +171,45 @@ async function mirror(
       }).then(() => {}, () => {});
     }
   } catch (e) { console.warn('[reopen-task-sb] mirror threw:', e); }
+}
+
+/**
+ * Mirror the billing Void to the per-tenant Billing_Ledger sheet, one
+ * reverse-writethrough per voided Ledger Row ID. Routes through the GAS
+ * `writeThroughReverse` action → `__writeThroughReverseBilling_`, which
+ * finds the row by Ledger Row ID and flips Status→'Void' in place (it
+ * refuses to touch an already-Invoiced row, so this can't un-invoice
+ * anything). Best-effort: each failure is logged to gs_sync_events for
+ * observability but never blocks — the SB-side void already committed.
+ */
+async function mirrorBillingVoid(
+  tenantId: string, ledgerRowIds: string[], stampedReason: string,
+  requestId: string, callerEmail: string, sb: ReturnType<typeof createClient>,
+): Promise<void> {
+  const gasUrl   = Deno.env.get('GAS_API_URL');
+  const gasToken = Deno.env.get('GAS_API_TOKEN');
+  if (!gasUrl || !gasToken) return;
+  for (const ledgerRowId of ledgerRowIds) {
+    const payload = {
+      tenantId, table: 'billing', op: 'update', rowId: ledgerRowId,
+      row: { ledger_row_id: ledgerRowId, status: 'Void', item_notes: stampedReason },
+      requestId,
+    };
+    try {
+      const res = await fetch(`${gasUrl}?action=writeThroughReverse&token=${encodeURIComponent(gasToken)}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        await sb.from('gs_sync_events').insert({
+          tenant_id: tenantId, entity_type: 'billing', entity_id: ledgerRowId,
+          action_type: 'writethrough_reverse', sync_status: 'sync_failed',
+          requested_by: callerEmail || 'reopen-task-sb', request_id: requestId,
+          payload, error_message: `HTTP ${res.status}`,
+        }).then(() => {}, () => {});
+      }
+    } catch (e) { console.warn('[reopen-task-sb] billing-void mirror threw:', e); }
+  }
 }
 
 function json(body: unknown, status = 200): Response {
