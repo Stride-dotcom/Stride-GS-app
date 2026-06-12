@@ -326,7 +326,7 @@ export function AddChargeModal({ editing, defaultClientSheetId, entity, onClose,
         <ProcessingOverlay
           visible={saving}
           message={isEdit ? 'Hold tight — saving your charge' : 'Hold tight — adding the charge'}
-          subMessage="Writing to the billing ledger and syncing to Supabase. You can leave this open."
+          subMessage="Saving the charge and syncing it across the billing system. You can leave this open."
         />
         {/* Header */}
         <div style={{
