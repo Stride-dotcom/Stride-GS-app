@@ -1,14 +1,26 @@
 /**
  * add-manual-charge-sb — SB-primary handler for `addManualCharge`.
  *
- * Mirrors GAS handleAddManualCharge_ (StrideAPI.gs:14252). Inserts a
- * Billing_Ledger row (Status=Unbilled) with a server-generated ledger_row_id
- * of the form `MANUAL-{ms}-{random6}`. Total is server-computed (rate × qty)
- * so the client can't cook the books by sending a mismatched total.
+ * Mirrors GAS handleAddManualCharge_. Inserts a Billing_Ledger row
+ * (Status=Unbilled). Total is server-computed (rate × qty) so the client
+ * can't cook the books by sending a mismatched total.
+ *
+ * Ledger id: when an anchor (itemId, else entityId) is supplied — i.e. the
+ * charge was added from an entity detail page via the universal "Add Charge"
+ * button — the id is DETERMINISTIC and human-readable:
+ * `MANUAL-<SVC>-<ANCHOR>-<YYYYMMDD>`. A genuine second identical charge the
+ * same day is a real workflow, so a `-2`, `-3`… suffix is appended on a
+ * (tenant_id, ledger_row_id) unique collision rather than rejecting it.
+ * (Accidental double-submits are prevented UI-side: the modal's button is
+ * disabled while saving and the modal closes on success.) With no anchor
+ * (standalone Billing-page charge) it falls back to the legacy random
+ * `MANUAL-<ms>-<random6>`. Either way the `MANUAL-` prefix is preserved so
+ * void/update handlers keep recognising it.
  *
  * Payload:  { tenantId, serviceCode|svcCode, serviceName|svcName, qty?,
  *             rate?, classCode|itemClass?, sidemark?, notes?, description?,
- *             callerEmail?, requestId? }
+ *             category?, reference?, itemId?, taskId?, repairId?,
+ *             shipmentNumber?, entityType?, entityId?, callerEmail?, requestId? }
  * Response: { success, ledgerRowId, total, message }
  */
 
@@ -47,6 +59,16 @@ Deno.serve(async (req: Request) => {
   const description = String(body.description ?? svcName).trim();
   const createdBy   = String(body.createdBy ?? callerEmail ?? '').trim();
 
+  // ── Entity linkage (universal "Add Charge") ───────────────────────────
+  const itemId         = String(body.itemId ?? '').trim();
+  const taskId         = String(body.taskId ?? '').trim();
+  const repairId       = String(body.repairId ?? '').trim();
+  const shipmentNumber = String(body.shipmentNumber ?? '').trim();
+  const category       = String(body.category ?? '').trim();
+  const reference      = String(body.reference ?? '').trim();
+  const entityType     = String(body.entityType ?? '').trim();
+  const entityId       = String(body.entityId ?? '').trim();
+
   const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
   const serviceKey  = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
   if (!supabaseUrl || !serviceKey) return json({ error: 'Server misconfigured' }, 500);
@@ -60,15 +82,20 @@ Deno.serve(async (req: Request) => {
     .maybeSingle();
   const clientName = clientRow ? String((clientRow as { name?: string }).name ?? '') : '';
 
-  const ledgerRowId = newManualLedgerId();
   const dateStr = new Date().toISOString().slice(0, 10);
   const nowIso  = new Date().toISOString();
 
   // NOTE: public.billing has no `source` or `created_by` columns. Manual
-  // origin is encoded in the ledger_row_id prefix ("MANUAL-"), and the
-  // creator email goes into entity_audit_log only.
-  void createdBy; // intentional — surfaced via the audit log below
-  const row = {
+  // origin is encoded in the ledger_row_id prefix ("MANUAL-"); the creator
+  // email surfaces via entity_audit_log (performed_by) below.
+
+  // Deterministic id when anchored to an entity; legacy random otherwise.
+  const anchor = itemId || entityId;
+  const baseLedgerId = anchor
+    ? `MANUAL-${slug(svcCode)}-${slug(anchor)}-${dateStr.replace(/-/g, '')}`
+    : newManualLedgerId();
+
+  const buildRow = (ledgerRowId: string) => ({
     tenant_id:       tenantId,
     ledger_row_id:   ledgerRowId,
     status:          'Unbilled',
@@ -77,33 +104,51 @@ Deno.serve(async (req: Request) => {
     date:            dateStr,
     svc_code:        svcCode,
     svc_name:        svcName,
-    category:        '',
-    item_id:         '',
+    category,
+    item_id:         itemId,
     description,
     item_class:      itemClass,
     qty,
     rate,
     total,
-    task_id:         '',
-    repair_id:       '',
-    shipment_number: '',
+    task_id:         taskId,
+    repair_id:       repairId,
+    shipment_number: shipmentNumber,
     item_notes:      notes,
     sidemark,
-    reference:       '',
+    reference,
     created_at:      nowIso,
     updated_at:      nowIso,
-  };
+  });
 
-  const { error: insErr } = await sb.from('billing').insert(row);
-  if (insErr) return json({ success: false, error: `Insert failed: ${insErr.message}` }, 500);
+  // Insert, suffixing on a (tenant_id, ledger_row_id) unique violation so a
+  // legitimate repeat charge the same day still lands as its own row.
+  let ledgerRowId = baseLedgerId;
+  let row = buildRow(ledgerRowId);
+  let inserted = false;
+  for (let attempt = 1; attempt <= 25; attempt++) {
+    const { error: insErr } = await sb.from('billing').insert(row);
+    if (!insErr) { inserted = true; break; }
+    if (insErr.code !== '23505') {
+      return json({ success: false, error: `Insert failed: ${insErr.message}` }, 500);
+    }
+    // Random ids should never collide; only the deterministic path retries.
+    if (!anchor) ledgerRowId = newManualLedgerId();
+    else ledgerRowId = `${baseLedgerId}-${attempt + 1}`;
+    row = buildRow(ledgerRowId);
+  }
+  if (!inserted) return json({ success: false, error: 'Could not allocate a unique ledger id' }, 500);
 
+  // Internal billing audit row. The entity-facing "charge_added" timeline
+  // entry is written client-side by AddChargeModal so it is uniform across
+  // the GAS and SB backends (and not duplicated here on the SB path).
   await sb.from('entity_audit_log').insert({
     entity_type:  'billing',
     entity_id:    ledgerRowId,
     tenant_id:    tenantId,
     action:       'create',
-    changes:      { summary: 'Manual charge added', svcCode, total: String(total) },
-    performed_by: callerEmail || 'add-manual-charge-sb',
+    changes:      { summary: `Manual charge added: ${svcName} $${total.toFixed(2)}`, svcCode, total: String(total), entityType, entityId },
+    performed_by: callerEmail || createdBy || 'add-manual-charge-sb',
     source:       'supabase',
   }).then(() => {}, () => {});
 
@@ -116,6 +161,11 @@ function newManualLedgerId(): string {
   const ms = Date.now();
   const rand = Math.random().toString(36).slice(2, 8).toUpperCase();
   return `MANUAL-${ms}-${rand}`;
+}
+
+/** Uppercase, keep A-Z0-9, collapse runs of other chars to a single dash. */
+function slug(s: string): string {
+  return String(s).toUpperCase().replace(/[^A-Z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 }
 
 async function mirror(

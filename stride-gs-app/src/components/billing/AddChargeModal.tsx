@@ -6,20 +6,23 @@
  * On edit:   POSTs to updateBillingRow with the same payload shape (the GAS
  * handler accepts svcCode/svcName/itemClass when the row is MANUAL-).
  */
-import { useEffect, useMemo, useState } from 'react';
-import { X } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { X, Search } from 'lucide-react';
 import { BtnSpinner } from '../ui/BtnSpinner';
 import { ProcessingOverlay } from '../shared/ProcessingOverlay';
 import { theme } from '../../styles/theme';
 import { useClients } from '../../hooks/useClients';
 import { useServiceCatalog, type CatalogService } from '../../hooks/useServiceCatalog';
 import { useAuth } from '../../contexts/AuthContext';
+import { logEntityAudit } from '../../lib/auditLog';
 import {
   postAddManualCharge, postUpdateBillingRow,
   type AddManualChargePayload, type UpdateBillingRowPayload,
 } from '../../lib/api';
 
 const CLASSES = ['XS', 'S', 'M', 'L', 'XL', 'XXL'] as const;
+// Custom-charge categories — mirrors the service_catalog.category CHECK.
+const CUSTOM_CATEGORIES = ['Warehouse', 'Storage', 'Shipping', 'Assembly', 'Repair', 'Labor', 'Admin', 'Delivery'] as const;
 const CUSTOM_SVC_CODE = '__CUSTOM__';
 
 export interface ManualChargeEditTarget {
@@ -36,37 +39,76 @@ export interface ManualChargeEditTarget {
   sidemark: string;
 }
 
+/** One pickable item for a multi-item entity (Will Call, Shipment). */
+export interface AddChargeEntityItem {
+  itemId: string;
+  itemClass?: string | null;
+  label?: string;
+}
+
+/**
+ * Entity context for the universal "Add Charge" flow. When supplied, the
+ * modal locks the client, pre-fills the item class, links the resulting
+ * Billing_Ledger row to the entity, and logs a `charge_added` activity entry.
+ */
+export interface AddChargeEntity {
+  tenantId: string;                 // the client's spreadsheetId (clientSheetId)
+  clientName?: string;
+  entityType: 'item' | 'task' | 'repair' | 'will_call' | 'shipment' | 'order';
+  entityId: string;                 // matches the entity's ActivityTimeline id
+  itemId?: string | null;           // primary item, when the entity has one
+  itemClass?: string | null;
+  items?: AddChargeEntityItem[];    // multi-item entities — drives the item picker
+  sidemark?: string | null;
+}
+
+// entityType → the entity_type string the entity's ActivityTimeline reads.
+const AUDIT_ENTITY_TYPE: Record<AddChargeEntity['entityType'], string> = {
+  item: 'inventory', task: 'task', repair: 'repair',
+  will_call: 'will_call', shipment: 'shipment', order: 'dt_order',
+};
+
 interface Props {
   /** When set, modal opens in EDIT mode (PATCH via updateBillingRow). */
   editing?: ManualChargeEditTarget | null;
   /** When opening in ADD mode, pre-select this client (e.g. the active filter). */
   defaultClientSheetId?: string;
+  /** When set, opens entity-aware: client locked, item/class prefilled, row linked. */
+  entity?: AddChargeEntity | null;
   onClose: () => void;
   onSaved: (msg: string) => void;
 }
 
-export function AddChargeModal({ editing, defaultClientSheetId, onClose, onSaved }: Props) {
+export function AddChargeModal({ editing, defaultClientSheetId, entity, onClose, onSaved }: Props) {
   const v2 = theme.v2;
   const { user } = useAuth();
   const { apiClients } = useClients();
   const { services } = useServiceCatalog();
 
   const isEdit = !!editing;
+  const entityItems = entity?.items ?? [];
 
   const [clientSheetId, setClientSheetId] = useState<string>(
-    editing?.clientSheetId ?? defaultClientSheetId ?? '',
+    editing?.clientSheetId ?? entity?.tenantId ?? defaultClientSheetId ?? '',
   );
   const [serviceId, setServiceId] = useState<string>('');   // catalog row.id, or CUSTOM_SVC_CODE
+  const [serviceQuery, setServiceQuery] = useState('');     // type-ahead text
+  const [serviceListOpen, setServiceListOpen] = useState(false);
   const [customCode, setCustomCode] = useState('');
   const [customName, setCustomName] = useState('');
-  const [classCode, setClassCode] = useState<string>(editing?.itemClass ?? '');
+  const [customCategory, setCustomCategory] = useState<string>('Warehouse');
+  const [classCode, setClassCode] = useState<string>(editing?.itemClass ?? entity?.itemClass ?? '');
+  const [selectedItemId, setSelectedItemId] = useState<string>(
+    entity?.itemId ?? entityItems[0]?.itemId ?? '',
+  );
   const [qty, setQty] = useState<string>(editing ? String(editing.qty) : '1');
   const [rate, setRate] = useState<string>(editing ? String(editing.rate) : '0');
   const [description, setDescription] = useState(editing?.description ?? '');
   const [notes, setNotes] = useState(editing?.notes ?? '');
-  const [sidemark, setSidemark] = useState(editing?.sidemark ?? '');
+  const [sidemark, setSidemark] = useState(editing?.sidemark ?? entity?.sidemark ?? '');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const serviceBoxRef = useRef<HTMLDivElement | null>(null);
 
   // ── On mount in EDIT mode: try to preselect the catalog service by code.
   //    If the existing svcCode doesn't exist in the catalog, fall back to
@@ -76,17 +118,47 @@ export function AddChargeModal({ editing, defaultClientSheetId, onClose, onSaved
     const match = services.find(s => s.code === editing.svcCode);
     if (match) {
       setServiceId(match.id);
+      setServiceQuery(`${match.code} — ${match.name}`);
     } else {
       setServiceId(CUSTOM_SVC_CODE);
+      setServiceQuery('Custom (free-text)');
       setCustomCode(editing.svcCode);
       setCustomName(editing.svcName);
     }
   }, [editing, services]);
 
+  // Close the type-ahead list on outside click.
+  useEffect(() => {
+    if (!serviceListOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (serviceBoxRef.current && !serviceBoxRef.current.contains(e.target as Node)) {
+        setServiceListOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [serviceListOpen]);
+
   const activeServices = useMemo(
     () => services.filter(s => s.active).sort((a, b) => a.code.localeCompare(b.code)),
     [services],
   );
+
+  // Type-ahead: filter the catalog by code/name substring. When a service is
+  // already selected and the query still matches its label, show the full list
+  // (so the user can switch) rather than just the one match.
+  const filteredServices = useMemo(() => {
+    const q = serviceQuery.trim().toLowerCase();
+    if (!q) return activeServices;
+    const selectedLabel = serviceId && serviceId !== CUSTOM_SVC_CODE
+      ? activeServices.find(s => s.id === serviceId)
+      : null;
+    if (selectedLabel && `${selectedLabel.code} — ${selectedLabel.name}`.toLowerCase() === q) {
+      return activeServices;
+    }
+    return activeServices.filter(s =>
+      s.code.toLowerCase().includes(q) || s.name.toLowerCase().includes(q));
+  }, [activeServices, serviceQuery, serviceId]);
 
   const selectedService: CatalogService | null = useMemo(
     () => services.find(s => s.id === serviceId) ?? null,
@@ -94,6 +166,26 @@ export function AddChargeModal({ editing, defaultClientSheetId, onClose, onSaved
   );
   const isCustom = serviceId === CUSTOM_SVC_CODE;
   const isClassBased = !!selectedService && selectedService.billing === 'class_based';
+
+  const pickService = (id: string) => {
+    setServiceId(id);
+    if (id === CUSTOM_SVC_CODE) {
+      setServiceQuery('Custom (free-text)');
+    } else {
+      const svc = activeServices.find(s => s.id === id);
+      setServiceQuery(svc ? `${svc.code} — ${svc.name}` : '');
+      setCustomCode('');
+      setCustomName('');
+    }
+    setServiceListOpen(false);
+  };
+
+  // Resolve the client name to show when the client is locked (entity flow).
+  const lockedClientName = useMemo(() => {
+    if (!entity) return '';
+    if (entity.clientName) return entity.clientName;
+    return apiClients.find(c => c.spreadsheetId === entity.tenantId)?.name ?? '';
+  }, [entity, apiClients]);
 
   // When the user picks a service or changes the class, auto-fill rate from
   // the catalog. We DON'T overwrite an explicit rate if the user has been
@@ -161,9 +253,45 @@ export function AddChargeModal({ editing, defaultClientSheetId, onClose, onSaved
       sidemark,
       createdBy: user?.displayName || user?.email || '',
     };
+
+    // Entity linkage — ties the Billing_Ledger row to the originating record
+    // and drives the deterministic ledger id on the backend.
+    if (entity) {
+      payload.entityType = entity.entityType;
+      payload.entityId = entity.entityId;
+      if (selectedItemId) payload.itemId = selectedItemId;
+      if (entity.entityType === 'task') payload.taskId = entity.entityId;
+      else if (entity.entityType === 'repair') payload.repairId = entity.entityId;
+      else if (entity.entityType === 'shipment') payload.shipmentNumber = entity.entityId;
+      else if (entity.entityType === 'will_call' || entity.entityType === 'order') payload.reference = entity.entityId;
+    }
+    if (entity || isCustom) {
+      payload.category = isCustom ? customCategory : (selectedService?.category ?? '');
+    }
+
     const res = await postAddManualCharge(payload, clientSheetId);
     setSaving(false);
     if (res.ok && res.data?.success) {
+      // Entity-facing activity entry (uniform across the GAS + SB backends;
+      // supersedes the billing-enrichment twin via ledgerRowId dedupe).
+      if (entity) {
+        void logEntityAudit({
+          entityType: AUDIT_ENTITY_TYPE[entity.entityType],
+          entityId: entity.entityId,
+          tenantId: clientSheetId,
+          action: 'charge_added',
+          changes: {
+            service: resolvedServiceName,
+            svcCode: resolvedServiceCode,
+            total,
+            qty: numQty,
+            rate: numRate,
+            ledgerRowId: res.data?.ledgerRowId ?? '',
+          },
+          performedBy: user?.email ?? null,
+          performedByName: user?.displayName || user?.email || null,
+        });
+      }
       onSaved(`Charge added — $${total.toFixed(2)} · ${resolvedServiceName}`);
       onClose();
     } else {
@@ -207,9 +335,11 @@ export function AddChargeModal({ editing, defaultClientSheetId, onClose, onSaved
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         }}>
           <div>
-            <div style={{ ...v2.typography.label, marginBottom: 4 }}>Billing</div>
+            <div style={{ ...v2.typography.label, marginBottom: 4 }}>
+              {entity ? `Billing · ${entity.entityId}` : 'Billing'}
+            </div>
             <h2 style={{ margin: 0, fontSize: 20, fontWeight: 500, color: v2.colors.text }}>
-              {isEdit ? 'Edit Manual Charge' : 'Add Manual Charge'}
+              {isEdit ? 'Edit Manual Charge' : entity ? 'Add Charge' : 'Add Manual Charge'}
             </h2>
           </div>
           <button onClick={onClose} style={{
@@ -222,67 +352,147 @@ export function AddChargeModal({ editing, defaultClientSheetId, onClose, onSaved
 
         {/* Body */}
         <div style={{ padding: '24px 28px', display: 'flex', flexDirection: 'column', gap: 14 }}>
-          {/* Client */}
-          <div>
-            <label style={labelStyle}>Client *</label>
-            <select
-              style={inputStyle}
-              value={clientSheetId}
-              onChange={e => setClientSheetId(e.target.value)}
-              disabled={isEdit}
-              title={isEdit ? 'Client cannot be changed on an existing charge' : undefined}
-            >
-              <option value="">Select a client…</option>
-              {[...apiClients].sort((a, b) => a.name.localeCompare(b.name)).map(c => (
-                <option key={c.spreadsheetId} value={c.spreadsheetId}>{c.name}</option>
-              ))}
-            </select>
-          </div>
+          {/* Client — locked to the entity's tenant in the entity flow. */}
+          {entity ? (
+            <div>
+              <label style={labelStyle}>Client</label>
+              <div style={{ ...inputStyle, background: v2.colors.bgCard, color: v2.colors.textSecondary }}>
+                {lockedClientName || '—'}
+              </div>
+            </div>
+          ) : (
+            <div>
+              <label style={labelStyle}>Client *</label>
+              <select
+                style={inputStyle}
+                value={clientSheetId}
+                onChange={e => setClientSheetId(e.target.value)}
+                disabled={isEdit}
+                title={isEdit ? 'Client cannot be changed on an existing charge' : undefined}
+              >
+                <option value="">Select a client…</option>
+                {[...apiClients].sort((a, b) => a.name.localeCompare(b.name)).map(c => (
+                  <option key={c.spreadsheetId} value={c.spreadsheetId}>{c.name}</option>
+                ))}
+              </select>
+            </div>
+          )}
 
-          {/* Service */}
-          <div>
+          {/* Item picker — only when the entity carries multiple items. */}
+          {entityItems.length > 1 && (
+            <div>
+              <label style={labelStyle}>Item</label>
+              <select
+                style={inputStyle}
+                value={selectedItemId}
+                onChange={e => {
+                  const id = e.target.value;
+                  setSelectedItemId(id);
+                  const it = entityItems.find(i => i.itemId === id);
+                  if (it?.itemClass) setClassCode(it.itemClass);
+                }}
+              >
+                {entityItems.map(it => (
+                  <option key={it.itemId} value={it.itemId}>
+                    {it.label || it.itemId}{it.itemClass ? ` · ${it.itemClass}` : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {/* Service — type-ahead against the service catalog. */}
+          <div ref={serviceBoxRef} style={{ position: 'relative' }}>
             <label style={labelStyle}>Service *</label>
-            <select
-              style={inputStyle}
-              value={serviceId}
-              onChange={e => {
-                setServiceId(e.target.value);
-                // reset custom fields when switching back to a real service
-                if (e.target.value !== CUSTOM_SVC_CODE) {
-                  setCustomCode('');
-                  setCustomName('');
-                }
-              }}
-            >
-              <option value="">Select a service…</option>
-              {activeServices.map(s => (
-                <option key={s.id} value={s.id}>{s.code} — {s.name}</option>
-              ))}
-              <option value={CUSTOM_SVC_CODE}>— Custom (free-text) —</option>
-            </select>
+            <div style={{ position: 'relative' }}>
+              <Search size={14} style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: v2.colors.textMuted, pointerEvents: 'none' }} />
+              <input
+                style={{ ...inputStyle, paddingLeft: 34 }}
+                value={serviceQuery}
+                placeholder="Search services (e.g. “Assem”)…"
+                onFocus={() => setServiceListOpen(true)}
+                onChange={e => {
+                  setServiceQuery(e.target.value);
+                  setServiceListOpen(true);
+                  // typing clears a prior selection until a new pick is made
+                  if (serviceId) setServiceId('');
+                }}
+              />
+            </div>
+            {serviceListOpen && (
+              <div style={{
+                position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 5,
+                marginTop: 4, maxHeight: 260, overflowY: 'auto',
+                background: v2.colors.bgWhite, border: `1px solid ${v2.colors.border}`,
+                borderRadius: v2.radius.input, boxShadow: '0 8px 24px rgba(0,0,0,0.12)',
+              }}>
+                {filteredServices.length === 0 && (
+                  <div style={{ padding: '10px 14px', fontSize: 12, color: v2.colors.textMuted }}>
+                    No services match “{serviceQuery}”
+                  </div>
+                )}
+                {filteredServices.map(s => (
+                  <button
+                    key={s.id}
+                    type="button"
+                    onClick={() => pickService(s.id)}
+                    style={{
+                      display: 'flex', width: '100%', textAlign: 'left', gap: 8,
+                      padding: '9px 14px', fontSize: 13, cursor: 'pointer',
+                      background: s.id === serviceId ? v2.colors.bgCard : 'transparent',
+                      border: 'none', borderBottom: `1px solid ${v2.colors.border}`,
+                      color: v2.colors.text, fontFamily: 'inherit', alignItems: 'baseline',
+                    }}
+                  >
+                    <span style={{ fontWeight: 600, minWidth: 64 }}>{s.code}</span>
+                    <span style={{ color: v2.colors.textSecondary }}>{s.name}</span>
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => pickService(CUSTOM_SVC_CODE)}
+                  style={{
+                    display: 'block', width: '100%', textAlign: 'left',
+                    padding: '9px 14px', fontSize: 13, cursor: 'pointer',
+                    background: serviceId === CUSTOM_SVC_CODE ? v2.colors.bgCard : 'transparent',
+                    border: 'none', color: v2.colors.accent, fontFamily: 'inherit', fontWeight: 600,
+                  }}
+                >
+                  — Miscellaneous (custom charge) —
+                </button>
+              </div>
+            )}
           </div>
 
           {isCustom && (
-            <div style={{ display: 'grid', gridTemplateColumns: '140px 1fr', gap: 12 }}>
-              <div>
-                <label style={labelStyle}>Custom code *</label>
-                <input
-                  style={{ ...inputStyle, textTransform: 'uppercase' }}
-                  value={customCode}
-                  placeholder="MISC"
-                  onChange={e => setCustomCode(e.target.value.toUpperCase())}
-                />
+            <>
+              <div style={{ display: 'grid', gridTemplateColumns: '140px 1fr', gap: 12 }}>
+                <div>
+                  <label style={labelStyle}>Custom code *</label>
+                  <input
+                    style={{ ...inputStyle, textTransform: 'uppercase' }}
+                    value={customCode}
+                    placeholder="MISC"
+                    onChange={e => setCustomCode(e.target.value.toUpperCase())}
+                  />
+                </div>
+                <div>
+                  <label style={labelStyle}>Custom name *</label>
+                  <input
+                    style={inputStyle}
+                    value={customName}
+                    placeholder="Crating material disposal"
+                    onChange={e => setCustomName(e.target.value)}
+                  />
+                </div>
               </div>
               <div>
-                <label style={labelStyle}>Custom name *</label>
-                <input
-                  style={inputStyle}
-                  value={customName}
-                  placeholder="Crating material disposal"
-                  onChange={e => setCustomName(e.target.value)}
-                />
+                <label style={labelStyle}>Category</label>
+                <select style={inputStyle} value={customCategory} onChange={e => setCustomCategory(e.target.value)}>
+                  {CUSTOM_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
               </div>
-            </div>
+            </>
           )}
 
           {/* Class (class-based services only) */}

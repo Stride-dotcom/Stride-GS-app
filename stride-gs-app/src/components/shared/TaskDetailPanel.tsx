@@ -38,6 +38,7 @@ import { EntityNotesInline } from '../notes/EntityNotesInline';
 import { SplitTaskPanel } from './SplitTaskPanel';
 
 import type { Task, Repair, InventoryItem } from '../../lib/types';
+import { AddChargeButton } from '../billing/AddChargeButton';
 interface Props {
   task: any;
   onClose: () => void;
@@ -1763,6 +1764,19 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
         >
           <Wrench size={13} /> {repairRequesting ? 'Requesting…' : 'Repair Quote'}
         </button>
+      )}
+      {/* Add Charge — admin/staff; works on completed/cancelled tasks too. */}
+      {clientSheetId && (
+        <AddChargeButton
+          entity={{
+            tenantId: clientSheetId,
+            entityType: 'task',
+            entityId: String(task.taskId),
+            itemId: task.itemId ? String(task.itemId) : null,
+            itemClass: task.itemClass ?? null,
+          }}
+          buttonStyle={tkDark}
+        />
       )}
       {/* Edit toggle */}
       {isOpen && !completed && !isEditingTask && (

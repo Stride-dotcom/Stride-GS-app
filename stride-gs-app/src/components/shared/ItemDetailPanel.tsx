@@ -2,6 +2,7 @@ import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import { X, Package, Calendar, FileText, ClipboardList, Wrench, Truck, ExternalLink, AlertCircle, CheckCircle2, Pencil, Save, Loader2, FolderOpen, Plus, ChevronDown, Shield, Image as ImageIcon, StickyNote, Activity, BadgePercent, Split as SplitIcon } from 'lucide-react';
 import { StorageCreditsSection } from './StorageCreditsSection';
 import { ActivityTimeline } from './ActivityTimeline';
+import { AddChargeButton } from '../billing/AddChargeButton';
 import { FolderButton } from './FolderButton';
 import { ItemIdBadges } from './ItemIdBadges';
 import { useItemIndicators } from '../../hooks/useItemIndicators';
@@ -1078,6 +1079,19 @@ export function ItemDetailPanel({
         <button onClick={onCreateWillCall} style={darkPill}>
           <Truck size={13} /> Add to WC
         </button>
+      )}
+      {clientSheetId && (
+        <AddChargeButton
+          entity={{
+            tenantId: clientSheetId,
+            entityType: 'item',
+            entityId: String(item.itemId),
+            itemId: String(item.itemId),
+            itemClass: item.itemClass ?? null,
+            sidemark: item.sidemark ?? null,
+          }}
+          buttonStyle={darkPill}
+        />
       )}
       {canSplit && onSplit && (
         <button onClick={onSplit} style={darkPill}>

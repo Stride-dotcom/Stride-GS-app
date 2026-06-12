@@ -2686,6 +2686,21 @@ export interface AddManualChargePayload {
   notes?: string;
   sidemark?: string;
   createdBy?: string;
+  // ── Entity linkage (universal "Add Charge", v38.281.0) ────────────────
+  // When a charge is added from an entity detail page these tie the
+  // Billing_Ledger row to that record. All optional — omitting them
+  // preserves the standalone (Billing page) behaviour. When an anchor
+  // (itemId, else entityId) is present the backend builds a DETERMINISTIC
+  // ledger_row_id (MANUAL-<SVC>-<ANCHOR>-<YYYYMMDD>, collision-suffixed)
+  // instead of the random MANUAL-<ms>-<rand> id.
+  itemId?: string;
+  taskId?: string;
+  repairId?: string;
+  shipmentNumber?: string;
+  category?: string;
+  reference?: string;          // entities w/o a dedicated billing column (WC #, order id)
+  entityType?: string;         // 'item'|'task'|'repair'|'will_call'|'shipment'|'order' — for the audit row
+  entityId?: string;
 }
 
 export interface AddManualChargeResponse {

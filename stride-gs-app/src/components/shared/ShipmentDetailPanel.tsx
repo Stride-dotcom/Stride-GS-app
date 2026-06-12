@@ -29,6 +29,7 @@ import { PhotosPanel as _PhotosPanel, DocumentsPanel as _DocumentsPanel, NotesPa
 import { ActivityTimeline } from './ActivityTimeline';
 import { InlineEditableCell } from './InlineEditableCell';
 import { renderDoc, buildReceivingTokens } from '../../lib/docRenderer';
+import { AddChargeButton } from '../billing/AddChargeButton';
 
 /**
  * Phase 7A-7 + 2026-04-22 tabbed migration.
@@ -563,6 +564,19 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
               onClick={async () => openAction('wc')} />
             {canTransfer && <WriteButton label="Transfer Items" variant="secondary" size="sm" style={{ width: '100%', fontSize: 11 }}
               onClick={async () => openAction('transfer')} />}
+            {shipment.clientSheetId && (
+              <AddChargeButton
+                entity={{
+                  tenantId: shipment.clientSheetId,
+                  entityType: 'shipment',
+                  entityId: String(shipment.shipmentNo),
+                  items: items.map(it => ({ itemId: it.itemId, itemClass: it.itemClass ?? null, label: it.description ? `${it.itemId} · ${it.description}` : it.itemId })),
+                  itemId: items.length === 1 ? items[0].itemId : null,
+                  itemClass: items.length === 1 ? (items[0].itemClass ?? null) : null,
+                }}
+                buttonStyle={{ width: '100%', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6, fontSize: 11, fontWeight: 600, padding: '8px 10px', borderRadius: 8, background: '#fff', color: theme.colors.text, border: `1px solid ${theme.colors.border}`, cursor: 'pointer', fontFamily: 'inherit' }}
+              />
+            )}
           </div>
           <div style={{ fontSize: 10, color: theme.colors.textMuted, marginTop: 6 }}>
             Select items below, or click a button to use all items.
@@ -863,6 +877,19 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
         <button onClick={() => openAction('wc')} style={orangePill}>
           <Truck size={13} /> Create WC
         </button>
+      )}
+      {shipment.clientSheetId && (
+        <AddChargeButton
+          entity={{
+            tenantId: shipment.clientSheetId,
+            entityType: 'shipment',
+            entityId: String(shipment.shipmentNo),
+            items: items.map(it => ({ itemId: it.itemId, itemClass: it.itemClass ?? null, label: it.description ? `${it.itemId} · ${it.description}` : it.itemId })),
+            itemId: items.length === 1 ? items[0].itemId : null,
+            itemClass: items.length === 1 ? (items[0].itemClass ?? null) : null,
+          }}
+          buttonStyle={darkPill}
+        />
       )}
     </>
   );

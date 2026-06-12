@@ -78,6 +78,10 @@ interface TimelineEvent {
   relatedId?: string;
   /** item_photos.id / audit changes.photoId — dedupe key for photo events. */
   photoDedupeKey?: string;
+  /** billing.ledger_row_id — drops the billing-enrichment twin of a
+   *  charge_added audit row (manual charges carry attribution the
+   *  enrichment row can't). */
+  billingDedupeKey?: string;
 }
 
 // ─── Category palette ───────────────────────────────────────────────────────
@@ -122,6 +126,7 @@ const ACTION_META: Record<string, { label: string; category: Category; icon: Luc
   void_invoice:          { label: 'Invoice Voided',       category: 'billing',   icon: XCircle,     color: '#DC2626' },
   void:                  { label: 'Voided',               category: 'billing',   icon: XCircle,     color: '#DC2626' },
   qbo_push:              { label: 'Pushed to QuickBooks', category: 'billing',   icon: Send },
+  charge_added:          { label: 'Charge Added',         category: 'billing',   icon: DollarSign },
   approve:               { label: 'Approved',             category: 'status',    icon: CheckCircle2, color: '#15803D' },
   reject:                { label: 'Rejected',             category: 'status',    icon: XCircle,     color: '#DC2626' },
   revision_requested:    { label: 'Revision Requested',   category: 'status',    icon: RotateCcw,   color: '#B45309' },
@@ -249,6 +254,7 @@ function auditToEvent(r: AuditRow, isRelated: boolean): TimelineEvent {
   let diffs: Diff[] = [];
   let category = meta.category;
   let photoDedupeKey: string | undefined;
+  let billingDedupeKey: string | undefined;
 
   const summary = changes?.summary != null ? String(changes.summary) : '';
   const status = changes?.status && typeof changes.status === 'object'
@@ -291,6 +297,16 @@ function auditToEvent(r: AuditRow, isRelated: boolean): TimelineEvent {
       const doc = changes?.qboDocNumber ? String(changes.qboDocNumber) : '';
       detail = [doc ? `QBO Doc ${doc}` : null, changes?.total != null ? `Total: ${fmtVal('total', changes.total)}` : null]
         .filter(Boolean).join(' · ') || undefined;
+      break;
+    }
+    case 'charge_added': {
+      // Manual charge added from an entity page (universal "Add Charge").
+      const svc = changes?.service ? String(changes.service) : (changes?.svcCode ? String(changes.svcCode) : '');
+      const amt = changes?.total != null ? fmtVal('total', changes.total) : null;
+      title = `Charge added${svc ? `: ${svc}` : ''}`;
+      detail = amt ? `Amount: ${amt}` : undefined;
+      billingDedupeKey = changes?.ledgerRowId ? String(changes.ledgerRowId) : undefined;
+      diffs = [];
       break;
     }
     case 'added_to_will_call':
@@ -350,6 +366,7 @@ function auditToEvent(r: AuditRow, isRelated: boolean): TimelineEvent {
     when: r.performed_at, source: r.source ?? undefined, diffs,
     relatedId: isRelated ? r.entity_id : undefined,
     photoDedupeKey,
+    billingDedupeKey,
   };
 }
 
@@ -606,8 +623,16 @@ export function ActivityTimeline({ entityType, entityId, tenantId, relatedEntity
     const photoKeys = new Set(
       collected.filter(e => e.id.startsWith('photo:') && e.photoDedupeKey).map(e => e.photoDedupeKey as string),
     );
+    // A manual charge writes a `charge_added` audit row (with attribution)
+    // AND surfaces via the billing enrichment ("Charge: …", System). Drop the
+    // enrichment twin so the attributed audit row wins; system-generated
+    // charges have no audit twin and still show via enrichment.
+    const manualChargeKeys = new Set(
+      collected.filter(e => e.id.startsWith('audit:') && e.billingDedupeKey).map(e => e.billingDedupeKey as string),
+    );
     const deduped = collected.filter(e =>
-      !(e.id.startsWith('audit:') && e.photoDedupeKey && photoKeys.has(e.photoDedupeKey)));
+      !(e.id.startsWith('audit:') && e.photoDedupeKey && photoKeys.has(e.photoDedupeKey)) &&
+      !(e.id.startsWith('billing:') && manualChargeKeys.has(e.id.slice('billing:'.length))));
 
     deduped.sort((a, b) => (a.when < b.when ? 1 : a.when > b.when ? -1 : 0));
     if (mountedRef.current) setEvents(deduped.slice(0, 300));
