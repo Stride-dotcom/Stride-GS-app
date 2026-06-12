@@ -27,6 +27,16 @@ export function todayIso(): string {
   return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
 }
 
+/** Add N days to an ISO date (YYYY-MM-DD), returning ISO. Blank/unparseable
+ *  input falls back to today (mirrors the set_cod_storage_from_receipt RPC,
+ *  which COALESCEs a missing receive_date to CURRENT_DATE). */
+export function addDaysIso(iso: string | null | undefined, n: number): string {
+  const base = iso && /^\d{4}-\d{2}-\d{2}$/.test(iso) ? iso : todayIso();
+  const t = Date.parse(base + 'T00:00:00Z');
+  if (!Number.isFinite(t)) return todayIso();
+  return new Date(t + n * 86400000).toISOString().slice(0, 10);
+}
+
 /**
  * Inclusive day count between two ISO dates (YYYY-MM-DD). A single day
  * (start === end) counts as 1. Returns 0 when end is before start or either
@@ -195,6 +205,26 @@ export async function setCodStorage(
   });
   if (error) throw new Error(error.message);
   return typeof data === 'number' ? data : (itemIds.length);
+}
+
+/**
+ * Flag items COD with a per-item start date of (receive_date + N days) — so a
+ * client's free-storage period is honored individually when items were received
+ * on different dates. Server-side per-item compute (authoritative on
+ * receive_date) + per-item audit. Returns rows updated.
+ */
+export async function setCodStorageFromReceipt(
+  tenantId: string,
+  itemIds: string[],
+  days: number,
+): Promise<number> {
+  const { data, error } = await supabase.rpc('set_cod_storage_from_receipt', {
+    p_tenant_id: tenantId,
+    p_item_ids: itemIds,
+    p_days: Math.max(0, Math.floor(days) || 0),
+  });
+  if (error) throw new Error(error.message);
+  return typeof data === 'number' ? data : itemIds.length;
 }
 
 // ────────────────────────────────────────────────────────────────────────
