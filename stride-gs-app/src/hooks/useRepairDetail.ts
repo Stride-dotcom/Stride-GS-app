@@ -121,7 +121,9 @@ export function useRepairDetail(repairId: string | undefined): UseRepairDetailRe
                   // Sheet-only fields: SB never has these — take GAS verbatim.
                   if (gasRepair.repairFolderUrl)   next.repairFolderUrl   = gasRepair.repairFolderUrl;
                   if (gasRepair.taskFolderUrl)     next.taskFolderUrl     = gasRepair.taskFolderUrl;
-                  if (gasRepair.shipmentFolderUrl) next.shipmentFolderUrl = gasRepair.shipmentFolderUrl;
+                  // shipmentFolderUrl IS populated by the SB inventory
+                  // overlay (authoritative) — sparse-fill only.
+                  if (!next.shipmentFolderUrl && gasRepair.shipmentFolderUrl) next.shipmentFolderUrl = gasRepair.shipmentFolderUrl;
                   // Descriptive fields: fill only where SB was blank. The
                   // itemClass preference is load-bearing — the SB value comes
                   // from the live inventory overlay (authoritative) while the
