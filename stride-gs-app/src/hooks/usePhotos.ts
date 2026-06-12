@@ -365,7 +365,7 @@ export function usePhotos({ entityType, entityId, tenantId, enabled = true, item
     // a belt for the suspenders.
     await refetch();
     return data as Photo;
-  }, [effectiveTenantId, entityType, entityId, itemId, photos.length, user?.email, refetch]);
+  }, [effectiveTenantId, entityType, entityId, itemId, photos.length, user?.email, user?.displayName, refetch]);
 
   const setPrimaryPhoto = useCallback(async (photoId: string): Promise<boolean> => {
     if (!entityId) return false;
