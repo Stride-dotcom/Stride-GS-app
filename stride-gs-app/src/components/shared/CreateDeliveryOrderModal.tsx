@@ -4357,6 +4357,27 @@ export function CreateDeliveryOrderModal({
         }
 
         setCreateResult({ dtIdentifier: deliveryRow.dt_identifier, linkedIdentifier: pickupRow.dt_identifier, orderId: deliveryRow.id });
+        // Per-item inventory audit rows — mirrors the delivery-only path so
+        // each warehouse item's ActivityTimeline shows the order it joined.
+        if (selectedInvItems.length > 0) {
+          const pdItemAuditRows = selectedInvItems.map(i => ({
+            entity_type: 'inventory',
+            entity_id: i.itemId,
+            tenant_id: clientSheetId || null,
+            action: 'delivery_order_created',
+            changes: {
+              dt_order_id: deliveryRow.id,
+              dt_identifier: deliveryRow.dt_identifier,
+              order_type: 'pickup_and_delivery',
+              service_date: serviceDate || null,
+            },
+            performed_by: user?.email || 'unknown',
+            source: 'app',
+          }));
+          supabase.from('entity_audit_log').insert(pdItemAuditRows).then(({ error: aErr }) => {
+            if (aErr) console.warn('[delivery] P+D per-item audit insert failed (non-fatal):', aErr.message);
+          });
+        }
         // Audit: P+D order created. Best-effort. (Push-to-DT is audited
         // separately by the dt-push-order edge function once it lands.)
         void logDtOrderAudit({

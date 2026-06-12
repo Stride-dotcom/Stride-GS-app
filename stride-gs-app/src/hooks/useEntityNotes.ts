@@ -33,6 +33,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
+import { logEntityAudit } from '../lib/auditLog';
 
 /**
  * Visibility values (session 73 follow-up):
@@ -233,6 +234,23 @@ export function useEntityNotes(
     }
     const note = rowToNote(data as NoteRow);
     setNotes(prev => [note, ...prev]);
+
+    // Audit trail — fire-and-forget; system notes (auto-appended status
+    // breadcrumbs etc.) are skipped, only human-authored notes log.
+    if (!options.isSystem) {
+      void logEntityAudit({
+        entityType,
+        entityId,
+        tenantId: stampedTenantId,
+        action: 'note_added',
+        changes: {
+          summary: trimmed.length > 200 ? `${trimmed.slice(0, 200)}…` : trimmed,
+          ...(visibility !== 'public' ? { visibility } : {}),
+        },
+        performedBy: user?.email ?? null,
+        performedByName: user?.displayName ?? null,
+      });
+    }
 
     // v2026-05-09 — office alert on EVERY client-authored note, regardless
     // of entity type. The edge function owns ENTITY_ROUTES and short-circuits

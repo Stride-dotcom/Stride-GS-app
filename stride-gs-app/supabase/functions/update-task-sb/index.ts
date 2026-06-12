@@ -112,10 +112,13 @@ Deno.serve(async (req: Request) => {
   }
   const sb = createClient(supabaseUrl, serviceKey);
 
-  // Confirm the row exists so a typo'd taskId returns NOT_FOUND.
+  // Confirm the row exists so a typo'd taskId returns NOT_FOUND. Selects
+  // every editable column so the audit log can record old → new diffs.
+  const prevSelectCols = ['task_id',
+    ...Object.values(FIELD_MAP).filter(c => c !== 'task_id')].join(', ');
   const { data: prevRow, error: prevErr } = await sb
     .from('tasks')
-    .select('task_id')
+    .select(prevSelectCols)
     .eq('tenant_id', tenantId)
     .eq('task_id', taskId)
     .maybeSingle();
@@ -152,12 +155,22 @@ Deno.serve(async (req: Request) => {
   await mirrorTaskToSheet({ tenantId, taskId, updates, requestId, callerEmail, sb });
 
   // Audit log — best-effort. Strip identifiers/framing keys to mirror
-  // update-item-sb's audit-shape contract.
+  // update-item-sb's audit-shape contract. v2026-06-12 — editable fields
+  // log as {field: {old, new}} so the ActivityTimeline renders
+  // "Due Date changed: 06/10 → 06/12"; other body keys keep raw values.
+  const prevRecord = prevRow as Record<string, unknown>;
   const auditChanges: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(body)) {
     if (k === 'taskId' || k === 'requestId' || k === 'tenantId' || k === 'callerEmail') continue;
     if (v === undefined) continue;
-    auditChanges[k] = v;
+    const col = FIELD_MAP[k];
+    if (col && Object.prototype.hasOwnProperty.call(updateRow, col)) {
+      const oldVal = prevRecord[col];
+      const newVal = updateRow[col];
+      if (oldVal !== newVal) auditChanges[k] = { old: oldVal ?? null, new: newVal ?? null };
+    } else {
+      auditChanges[k] = v;
+    }
   }
   await sb.from('entity_audit_log').insert({
     entity_type:  'task',

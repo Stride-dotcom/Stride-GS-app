@@ -131,6 +131,7 @@ const ACTION_META: Record<string, { label: string; category: Category; icon: Luc
   convert_to_pd:         { label: 'Converted to P+D',     category: 'edit',      icon: ArrowLeftRight },
   driver_event:          { label: 'Driver',               category: 'driver',    icon: Truck },
   pickup_completed:      { label: 'Pickup Completed',     category: 'status',    icon: Truck,       color: '#15803D' },
+  delivery_order_created:{ label: 'Added to Delivery Order', category: 'lifecycle', icon: Truck,    color: '#0891B2' },
   added_to_will_call:    { label: 'Added to Will Call',   category: 'lifecycle', icon: PackageCheck, color: '#0891B2' },
   removed_from_will_call:{ label: 'Removed from Will Call', category: 'lifecycle', icon: PackageCheck, color: '#B45309' },
   photo_upload:          { label: 'Photo Uploaded',       category: 'photo',     icon: Camera },
@@ -211,6 +212,7 @@ interface AuditRow {
   action: string;
   changes: Record<string, unknown> | null;
   performed_by: string | null;
+  performed_by_name: string | null;
   performed_at: string;
   source: string | null;
 }
@@ -236,7 +238,11 @@ function auditToEvent(r: AuditRow, isRelated: boolean): TimelineEvent {
   const changes = (r.changes && typeof r.changes === 'object') ? r.changes as Record<string, unknown> : null;
   const meta = ACTION_META[r.action] ?? { label: prettyField(r.action), category: 'other' as Category, icon: Clock };
   const color = meta.color ?? CATEGORY_META[meta.category].color;
-  const { who, isEmail } = formatWho(r.performed_by);
+  // Prefer the display name when a writer recorded one (browser-side
+  // logEntityAudit does); fall back to the email local-part.
+  const { who, isEmail } = r.performed_by_name?.trim()
+    ? { who: r.performed_by_name.trim(), isEmail: false }
+    : formatWho(r.performed_by);
 
   let title = meta.label;
   let detail: string | undefined;
@@ -291,6 +297,12 @@ function auditToEvent(r: AuditRow, isRelated: boolean): TimelineEvent {
     case 'removed_from_will_call': {
       const wc = changes?.wcNumber ? String(changes.wcNumber) : '';
       if (wc) title = `${meta.label}: ${wc}`;
+      break;
+    }
+    case 'delivery_order_created': {
+      const dt = changes?.dt_identifier ? String(changes.dt_identifier) : '';
+      if (dt) title = `${meta.label}: ${dt}`;
+      diffs = [];
       break;
     }
     case 'pickup_completed': {
@@ -380,7 +392,7 @@ export function ActivityTimeline({ entityType, entityId, tenantId, relatedEntity
       safe(async () => {
         let q = supabase
           .from('entity_audit_log')
-          .select('id, entity_id, action, changes, performed_by, performed_at, source')
+          .select('id, entity_id, action, changes, performed_by, performed_by_name, performed_at, source')
           .eq('entity_type', entityType)
           .eq('entity_id', entityId)
           .order('performed_at', { ascending: false })
@@ -395,7 +407,7 @@ export function ActivityTimeline({ entityType, entityId, tenantId, relatedEntity
         if (relatedIds.length === 0) return;
         let q = supabase
           .from('entity_audit_log')
-          .select('id, entity_id, action, changes, performed_by, performed_at, source')
+          .select('id, entity_id, action, changes, performed_by, performed_by_name, performed_at, source')
           .in('entity_id', relatedIds.slice(0, 50))
           .order('performed_at', { ascending: false })
           .limit(150);

@@ -10,6 +10,7 @@ import { usePhotoGraphRollup, useNoteGraphRollup, type RollupContext } from '../
 import { useItemContainerScopes } from '../../hooks/useEntityNeighbors';
 import { PhotosPanel as _PhotosPanel, DocumentsPanel as _DocumentsPanel, NotesPanel as _NotesPanel } from './EntityAttachments';
 import { ActivityTimeline } from './ActivityTimeline';
+import { logEntityAudit } from '../../lib/auditLog';
 import { ItemIdBadges } from './ItemIdBadges';
 import { useItemIndicators } from '../../hooks/useItemIndicators';
 import { buildDeepLinkUrl } from '../../lib/deepLinks';
@@ -962,6 +963,14 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
                       await renderDoc('DOC_TASK_WORK_ORDER', buildTaskTokens(task), {
                         action: 'print',
                         fileName: `Work Order — ${task.taskId}`,
+                      });
+                      void logEntityAudit({
+                        entityType: 'task',
+                        entityId: task.taskId,
+                        tenantId: clientSheetId ?? null,
+                        action: 'work_order_printed',
+                        performedBy: user?.email ?? null,
+                        performedByName: user?.displayName ?? null,
                       });
                     }}
                   />

@@ -14,6 +14,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../contexts/AuthContext';
+import { logEntityAudit } from '../lib/auditLog';
 
 export type EntityType =
   | 'inventory' | 'task' | 'repair' | 'will_call' | 'shipment' | 'claim' | 'dt_order';
@@ -342,6 +343,23 @@ export function usePhotos({ entityType, entityId, tenantId, enabled = true, item
       .select('*')
       .single();
     if (insErr || !data) { setError(insErr?.message || 'Insert failed'); return null; }
+    // Audit trail — fire-and-forget. photoId lets the ActivityTimeline
+    // dedupe this row against the live item_photos enrichment row; the
+    // audit copy is what survives a later delete.
+    void logEntityAudit({
+      entityType: targetType,
+      entityId: targetId,
+      tenantId: effectiveTenantId,
+      action: 'photo_upload',
+      changes: {
+        fileName: file.name,
+        photoType,
+        photoId: (data as Photo).id,
+        ...(resolvedItemId ? { itemId: resolvedItemId } : {}),
+      },
+      performedBy: user?.email ?? null,
+      performedByName: user?.displayName ?? null,
+    });
     // v2: explicit refetch so the grid updates even if the Realtime channel
     // is slow or dropped. Realtime is still the primary mechanism — this is
     // a belt for the suspenders.
@@ -392,9 +410,24 @@ export function usePhotos({ entityType, entityId, tenantId, enabled = true, item
     }
     const { error: err } = await supabase.from('item_photos').delete().eq('id', photoId);
     if (err) { setError(err.message); return false; }
+    if (photo) {
+      void logEntityAudit({
+        entityType: photo.entity_type,
+        entityId: photo.entity_id,
+        tenantId: photo.tenant_id,
+        action: 'photo_delete',
+        changes: {
+          fileName: photo.file_name,
+          photoType: photo.photo_type,
+          ...(photo.item_id ? { itemId: photo.item_id } : {}),
+        },
+        performedBy: user?.email ?? null,
+        performedByName: user?.displayName ?? null,
+      });
+    }
     await refetch();
     return true;
-  }, [photos, refetch]);
+  }, [photos, refetch, user?.email]);
 
   return { photos, loading, error, refetch, uploadPhoto, setPrimaryPhoto, toggleNeedsAttention, toggleRepair, deletePhoto };
 }
