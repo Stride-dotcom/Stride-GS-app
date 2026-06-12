@@ -2197,33 +2197,39 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
                   // instead of crushing into off-center slivers.
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 10 }}>
                     {effectiveStatus === 'Quote Sent' && (
-                      <WriteButton
-                        label="Resend Quote"
-                        variant="secondary"
-                        icon={<Send size={13} />}
-                        style={{ flex: '1 1 130px', minWidth: 130, padding: '9px 12px', fontSize: 12, opacity: submitting ? 0.7 : 1 }}
-                        disabled={submitting}
-                        onClick={() => { void handleResendQuote(); }}
-                      />
+                      <div style={{ flex: '1 1 130px', minWidth: 130, display: 'grid' }}>
+                        <WriteButton
+                          label="Resend Quote"
+                          variant="secondary"
+                          icon={<Send size={13} />}
+                          style={{ width: '100%', padding: '9px 12px', fontSize: 12, opacity: submitting ? 0.7 : 1 }}
+                          disabled={submitting}
+                          onClick={() => { void handleResendQuote(); }}
+                        />
+                      </div>
                     )}
                     {effectiveStatus === 'Quote Sent' && (
-                      <WriteButton
-                        label="Edit Quote"
-                        variant="secondary"
-                        icon={<Pencil size={13} />}
-                        style={{ flex: '1 1 130px', minWidth: 130, padding: '9px 12px', fontSize: 12, opacity: submitting ? 0.7 : 1 }}
-                        disabled={submitting}
-                        onClick={handleStartEditQuote}
-                      />
+                      <div style={{ flex: '1 1 130px', minWidth: 130, display: 'grid' }}>
+                        <WriteButton
+                          label="Edit Quote"
+                          variant="secondary"
+                          icon={<Pencil size={13} />}
+                          style={{ width: '100%', padding: '9px 12px', fontSize: 12, opacity: submitting ? 0.7 : 1 }}
+                          disabled={submitting}
+                          onClick={handleStartEditQuote}
+                        />
+                      </div>
                     )}
-                    <WriteButton
-                      label="Void Quote (re-issue)"
-                      variant="danger"
-                      icon={<Undo2 size={13} />}
-                      style={{ flex: '1 1 150px', minWidth: 150, padding: '9px 12px', fontSize: 12, opacity: submitting ? 0.7 : 1 }}
-                      disabled={submitting}
-                      onClick={handleVoidQuote}
-                    />
+                    <div style={{ flex: '1 1 150px', minWidth: 150, display: 'grid' }}>
+                      <WriteButton
+                        label="Void Quote (re-issue)"
+                        variant="danger"
+                        icon={<Undo2 size={13} />}
+                        style={{ width: '100%', padding: '9px 12px', fontSize: 12, opacity: submitting ? 0.7 : 1 }}
+                        disabled={submitting}
+                        onClick={handleVoidQuote}
+                      />
+                    </div>
                   </div>
                 )}
               </>
@@ -2700,33 +2706,39 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
               // mobile-wrap note there.
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 10 }}>
                 {sLocal === 'Quote Sent' && (
-                  <WriteButton
-                    label="Resend Quote"
-                    variant="secondary"
-                    icon={<Send size={13} />}
-                    style={{ flex: '1 1 130px', minWidth: 130, padding: '9px 12px', fontSize: 12, opacity: submitting ? 0.7 : 1 }}
-                    disabled={submitting}
-                    onClick={() => { void handleResendQuote(); }}
-                  />
+                  <div style={{ flex: '1 1 130px', minWidth: 130, display: 'grid' }}>
+                    <WriteButton
+                      label="Resend Quote"
+                      variant="secondary"
+                      icon={<Send size={13} />}
+                      style={{ width: '100%', padding: '9px 12px', fontSize: 12, opacity: submitting ? 0.7 : 1 }}
+                      disabled={submitting}
+                      onClick={() => { void handleResendQuote(); }}
+                    />
+                  </div>
                 )}
                 {sLocal === 'Quote Sent' && (
-                  <WriteButton
-                    label="Edit Quote"
-                    variant="secondary"
-                    icon={<Pencil size={13} />}
-                    style={{ flex: '1 1 130px', minWidth: 130, padding: '9px 12px', fontSize: 12, opacity: submitting ? 0.7 : 1 }}
-                    disabled={submitting}
-                    onClick={handleStartEditQuote}
-                  />
+                  <div style={{ flex: '1 1 130px', minWidth: 130, display: 'grid' }}>
+                    <WriteButton
+                      label="Edit Quote"
+                      variant="secondary"
+                      icon={<Pencil size={13} />}
+                      style={{ width: '100%', padding: '9px 12px', fontSize: 12, opacity: submitting ? 0.7 : 1 }}
+                      disabled={submitting}
+                      onClick={handleStartEditQuote}
+                    />
+                  </div>
                 )}
-                <WriteButton
-                  label="Void Quote (re-issue)"
-                  variant="danger"
-                  icon={<Undo2 size={13} />}
-                  style={{ flex: '1 1 150px', minWidth: 150, padding: '9px 12px', fontSize: 12, opacity: submitting ? 0.7 : 1 }}
-                  disabled={submitting}
-                  onClick={handleVoidQuote}
-                />
+                <div style={{ flex: '1 1 150px', minWidth: 150, display: 'grid' }}>
+                  <WriteButton
+                    label="Void Quote (re-issue)"
+                    variant="danger"
+                    icon={<Undo2 size={13} />}
+                    style={{ width: '100%', padding: '9px 12px', fontSize: 12, opacity: submitting ? 0.7 : 1 }}
+                    disabled={submitting}
+                    onClick={handleVoidQuote}
+                  />
+                </div>
               </div>
             )}
           </>
@@ -2744,14 +2756,16 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
               No quote details on file for this repair. Void the quote to rebuild and re-send it.
             </div>
             {canStaffEdit && (
-              <WriteButton
-                label="Void Quote (re-issue)"
-                variant="danger"
-                icon={<Undo2 size={13} />}
-                style={{ width: '100%', padding: '9px 12px', fontSize: 12, opacity: submitting ? 0.7 : 1 }}
-                disabled={submitting}
-                onClick={handleVoidQuote}
-              />
+              <div style={{ display: 'grid' }}>
+                <WriteButton
+                  label="Void Quote (re-issue)"
+                  variant="danger"
+                  icon={<Undo2 size={13} />}
+                  style={{ width: '100%', padding: '9px 12px', fontSize: 12, opacity: submitting ? 0.7 : 1 }}
+                  disabled={submitting}
+                  onClick={handleVoidQuote}
+                />
+              </div>
             )}
           </div>
         )}
