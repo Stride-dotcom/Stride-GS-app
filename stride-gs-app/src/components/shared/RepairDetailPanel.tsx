@@ -513,6 +513,11 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
 
   // ─── Stage B: Reopen + Result correction ────────────────────────────────
   const canStaffEdit = user?.role === 'admin' || user?.role === 'staff';
+  // Quote ACTIONS (Resend / Edit / Void) are admin-only — staff and clients
+  // see the read-only breakdown but must not change or re-send pricing.
+  // Everything else canStaffEdit covers (notes, photos, reopen, start,
+  // work orders) stays staff-accessible.
+  const canManageQuote = user?.role === 'admin';
 
   // ─── Add-on services (v38.177.0 unified addons) ─────────────────────────
   // Rows accumulate on public.addons until handleCompleteRepair_ flushes
@@ -2190,7 +2195,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
                   grandTotal={displayGrandTotal}
                   totalOnly={!displayTotalsKnown}
                 />
-                {canStaffEdit && (
+                {canManageQuote && (
                   // WriteButton matches the app-wide action-button pattern
                   // (Save & Resend / task Start-Complete). flexWrap +
                   // minWidth keep the three readable on phone widths
@@ -2701,7 +2706,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
               grandTotal={displayGrandTotal}
               totalOnly={!displayTotalsKnown}
             />
-            {canStaffEdit && (
+            {canManageQuote && (
               // Same WriteButton pattern as the slide-out footer — see the
               // mobile-wrap note there.
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 10 }}>
@@ -2755,7 +2760,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
             <div style={{ fontSize: 12, color: theme.colors.textMuted, lineHeight: 1.5, marginBottom: 12 }}>
               No quote details on file for this repair. Void the quote to rebuild and re-send it.
             </div>
-            {canStaffEdit && (
+            {canManageQuote && (
               <div style={{ display: 'grid' }}>
                 <WriteButton
                   label="Void Quote (re-issue)"
