@@ -1,4 +1,5 @@
 /* ===================================================
+   StrideAPI.gs — v38.281.0 — 2026-06-12 PST — [BILLING] feat: universal "Add Charge" — handleAddManualCharge_ now accepts optional entity-linkage fields (itemId/taskId/repairId/shipmentNumber/category/reference) supplied by the new entity-aware AddChargeModal (added to every entity detail page). When an anchor (itemId, else entityId) is present the ledger id is DETERMINISTIC — MANUAL-<SVC>-<ANCHOR>-<YYYYMMDD>, collision-suffixed (-2/-3…) against existing rows under the same script lock so a genuine repeat charge same-day still lands while a double-submit is idempotent; with no anchor it keeps the legacy random MANUAL-<ms>-<rand>. The linkage fields write to the Billing_Ledger row (api_buildRow_ drops any the sheet lacks) and to the supabaseUpsert_ mirror via sbBillingRow_ (already maps category/item_id/task_id/repair_id/shipment_number/reference). New helper api_ledgerSlug_ mirrors slug() in add-manual-charge-sb (the SB-routed twin, updated in the same PR). No billing math change (total still = rate×qty server-side), no change to the v38.182 atomic invoice counter or half-write detection. The "MANUAL-" prefix is preserved so handleVoidManualCharge_/handleUpdateBillingRow_ still recognise the row.
    StrideAPI.gs — v38.280.0 — 2026-06-11 PST — [READS/MIGRATION] fix: the single-entity GAS READ handlers no longer revert SB-authoritative state — closes the RPR-63755 reopen-then-resend bug (reported as "status stays Pending Quote after resending the quote"; root cause was NOT the send handler — send-repair-quote-sb committed 'Quote Sent' at 23:17:50Z, audit-logged — but handleGetRepairById_'s best-effort cache hydrate: the repair page's background GAS enrichment read the per-tenant sheet while the EF's ~30s background mirror was still in flight, and full-row-upserted the stale 'Pending Quote' sheet row back over public.repairs, silently and unaudited; the customer's approve gate requires Quote Sent. Third door into the PR #739/#740/#753 status-revert class — reverse mirrors and bulk syncs were already guarded; the READ-path hydrate was not). handleGetRepairById_ / handleGetTaskById_ / handleGetWillCallById_ now hydrate via new api_hydrateReadCacheSbAware_: row exists in SB → upsert with that entity's SB-authoritative columns STRIPPED (repairs: SB_AUTHORITATIVE_REPAIR_COLS_; tasks: new SB_AUTHORITATIVE_TASK_COLS_ = status/result/started_at/completed_at/cancelled_at; will_calls: status — due_date/priority/qty/billed keep flowing per the v38.278.0 read-path field fix); CONFIRMED absent → full-row seed (legacy rows); SB unreachable → skip entirely (new generic api_sbRowExistsTriState_ — a cache warm is never worth a clobber). Bonus closed: the repair hydrate object carries NO quote_* fields, so every GAS single-repair read was ALSO NULLing quote_lines_json + the 7 quote totals on the SB row — an additional vector for the 42-repair null-back PR #753 addressed on the bulk paths. No EF/React/schema changes, no billing math, no change to the v38.182 atomic invoice counter or half-write detection.
    StrideAPI.gs — v38.279.0 — 2026-06-11 PST — [CLIENTS/MIGRATION] fix: client-settings reverts — the v38.274 strip's existence checks FAILED THE WRONG WAY. (1) resyncClientToSupabase_ (5-min reconcile cron) gated the app-authoritative strip on api_isKnownTenantId_, which returns false on ANY Supabase read failure — so a transient SB hiccup skipped the strip and FULL-ROW-upserted stale CB settings, reverting auto_inspection & friends (the recurring revert v38.274 was meant to stop). New tri-state api_sbClientExistsTriState_: exists → stripped upsert; confirmed-new → full row (onboarding first-sync); INDETERMINATE → skip the cycle entirely (no write; cron retries in 5 min). (2) handleBulkSyncClientsToSupabase_ fell back to FULL rows for every client when its existence prefetch failed — one transient failure = fleet-wide settings revert; now the sync ABORTS with SB_PREFETCH_FAILED and the operator re-runs. (3) APP_AUTHORITATIVE_CLIENT_COLS_ extended DEFENSIVELY with every remaining app/SB-authoritative column (payment_method_required, end_customer_pays_storage, billing_*, tax_*, resale_cert_*, notification_contacts, stax_customer_name, intake stamps) — no-ops today since sbClientRow_ doesn't project them, but future projection growth can't clobber. (4) REVERSE_CLIENTS_SB_ONLY_SETTINGS_ += end_customer_pays_storage → END_CUSTOMER_PAYS_STORAGE so COD-storage flips reach the per-tenant Settings tab. Companion (same PR): update-client-sb FIELD_MAP += billing contacts + payment_method_required + end_customer_pays_storage (single write path — React Settings' separate direct supabase.update() removed; it clobbered end_customer_pays_storage to false whenever the flag-gated COD toggle wasn't on the form); React maps payment_method_required in fetchClientsFromSupabase (was NEVER hydrated — the edit modal's !== false default coerced it to true and every client save re-wrote card-required ON, reverting grandfathered OFF clients); OnboardClientModal preserves undefined for unknown SB-only booleans (omit-on-save); push-client-settings-to-sheet MIRRORED_COLUMNS + trigger WHEN clause += end_customer_pays_storage (migration 20260611230000). Same incident class as the PR #753 repairs forward-sync fix: a stale sheet must never overwrite an SB-authoritative value. No billing math, invoice counter, or half-write detection changes.
    StrideAPI.gs — v38.278.0 — 2026-06-11 PST — [TASKS/MIGRATION] fix: two task field-gap sync paths no longer wipe due_date + priority on public.tasks. (1) handleGetTaskById_ (the deep-link / panel single-task READ) builds a task object from the sheet row and best-effort "hydrates" the Supabase cache via syncEntityToSupabase_ — but the object omitted Due Date + Priority, so sbTaskRow_ defaulted due_date=null + priority='Normal' and EVERY single-task GAS read silently wiped both fields on the SB row (observed: JUS-RUSH-16, 2026-06-11 — created with due-today + High at 21:08:36, wiped at 21:09:28 by the post-write GAS fallback read that followed a failed startTask; the sheet row itself held the correct values the whole time). (2) handleBulkSyncToSupabase_'s task mapping had the same two-field gap, so any operator-run bulk sync wiped them fleet-wide (api_fullClientSync_'s task scope was NOT affected — it has carried both since v38.213.0). Both call sites now map dueDate (formatDate_ of the Due Date cell, null when blank) + priority (Priority cell, 'Normal' default), mirroring the full-sync mapping. Same field-subset class as the quote_lines_json null-back (v38.273.0) — when adding ANY new SB task column, audit ALL FIVE sbTaskRow_ call sites (fullClientSync 9553 / resync 8945 / writeThroughReverse-retry 9208 / getTaskById hydrate 14758 / bulkSync 42170). No schema change, no billing logic touched, no change to the v38.182 atomic invoice counter or half-write detection.
@@ -16052,6 +16053,18 @@ function api_newManualLedgerId_() {
 }
 
 /**
+ * Uppercase, keep A-Z0-9, collapse runs of other chars to a single dash.
+ * Used to build the deterministic entity-anchored manual ledger id
+ * (MANUAL-<SVC>-<ANCHOR>-<YYYYMMDD>). Mirrors slug() in add-manual-charge-sb.
+ */
+function api_ledgerSlug_(s) {
+  return String(s == null ? "" : s)
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+/**
  * Add a manually-created billing row to a client's Billing_Ledger.
  * Staff/admin only. Always Status=Unbilled. Total is server-computed from
  * rate*qty so the client can't cook the books by sending a mismatched total.
@@ -16077,6 +16090,16 @@ function handleAddManualCharge_(clientSheetId, payload, callerEmail) {
   var description = String(payload.description || serviceName).trim();
   var createdBy = String(payload.createdBy || callerEmail || "").trim();
 
+  // ── Entity linkage (universal "Add Charge", v38.281.0) ────────────────
+  // Optional — supplied when the charge is added from an entity detail page.
+  // Omitting them preserves the standalone (Billing page) behaviour.
+  var itemId         = String(payload.itemId || "").trim();
+  var taskId         = String(payload.taskId || "").trim();
+  var repairId       = String(payload.repairId || "").trim();
+  var shipmentNumber = String(payload.shipmentNumber || "").trim();
+  var category       = String(payload.category || "").trim();
+  var reference      = String(payload.reference || "").trim();
+
   try {
     var ss = SpreadsheetApp.openById(clientSheetId);
     var sheet = ss.getSheetByName("Billing_Ledger");
@@ -16091,35 +16114,16 @@ function handleAddManualCharge_(clientSheetId, payload, callerEmail) {
       clientName = String(settings["CLIENT_NAME"] || "").trim();
     } catch (_) {}
 
-    var ledgerRowId = api_newManualLedgerId_();
     var dateStr = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
 
-    // Some Billing_Ledger sheets don't have a Sidemark column (per decision
-    // #18). api_buildRow_ silently drops keys with no header match, so this
-    // is safe either way — sidemark is mirrored to Supabase below.
-    var rowObj = {
-      "Status":          "Unbilled",
-      "Invoice #":       "",
-      "Client":          clientName,
-      "Date":            dateStr,
-      "Svc Code":        serviceCode,
-      "Svc Name":        serviceName,
-      "Item ID":         "",
-      "Description":     description,
-      "Class":           classCode,
-      "Qty":             qty,
-      "Rate":            rate,
-      "Total":           total,
-      "Task ID":         "",
-      "Repair ID":       "",
-      "Shipment #":      "",
-      "Item Notes":      notes,
-      "Sidemark":        sidemark,
-      "Ledger Row ID":   ledgerRowId,
-      "Source":          "manual",
-      "Created By":      createdBy,
-      "Created At":      new Date().toISOString()
-    };
+    // Deterministic id when anchored to an entity; legacy random otherwise.
+    // The "MANUAL-" prefix is preserved either way so void/update handlers
+    // keep recognising the row.
+    var anchor = itemId || (payload.entityId ? String(payload.entityId).trim() : "");
+    var baseLedgerId = anchor
+      ? "MANUAL-" + api_ledgerSlug_(serviceCode) + "-" + api_ledgerSlug_(anchor) + "-" + dateStr.replace(/-/g, "")
+      : api_newManualLedgerId_();
+    var ledgerRowId = baseLedgerId;
 
     // v38.205.0: getDocumentLock() returns null in a standalone web-app
     // context (only document-bound scripts have a document lock); the
@@ -16132,6 +16136,56 @@ function handleAddManualCharge_(clientSheetId, payload, callerEmail) {
     try { gotLock = lock.tryLock(15000); } catch (_) {}
     if (!gotLock) return errorResponse_("Sheet busy — try again", "LOCK_TIMEOUT");
     try {
+      // Collision-suffix the deterministic id against existing rows so a
+      // genuine second identical charge same-day still lands (a double
+      // submit is idempotent — same id, blocked here).
+      if (anchor) {
+        var idColNum = hMap["Ledger Row ID"];
+        var lastDataRow = api_getLastDataRow_(sheet);
+        var existing = {};
+        if (lastDataRow >= 2) {
+          var idVals = sheet.getRange(2, idColNum, lastDataRow - 1, 1).getValues();
+          for (var r = 0; r < idVals.length; r++) {
+            existing[String(idVals[r][0] || "").trim()] = true;
+          }
+        }
+        var suffix = 1;
+        while (existing[ledgerRowId]) {
+          suffix++;
+          ledgerRowId = baseLedgerId + "-" + suffix;
+        }
+      }
+
+      // Some Billing_Ledger sheets don't have a Sidemark column (per
+      // decision #18). api_buildRow_ silently drops keys with no header
+      // match, so this is safe either way — sidemark is mirrored to
+      // Supabase below.
+      var rowObj = {
+        "Status":          "Unbilled",
+        "Invoice #":       "",
+        "Client":          clientName,
+        "Date":            dateStr,
+        "Svc Code":        serviceCode,
+        "Svc Name":        serviceName,
+        "Category":        category,
+        "Item ID":         itemId,
+        "Description":     description,
+        "Class":           classCode,
+        "Qty":             qty,
+        "Rate":            rate,
+        "Total":           total,
+        "Task ID":         taskId,
+        "Repair ID":       repairId,
+        "Shipment #":      shipmentNumber,
+        "Item Notes":      notes,
+        "Sidemark":        sidemark,
+        "Reference":       reference,
+        "Ledger Row ID":   ledgerRowId,
+        "Source":          "manual",
+        "Created By":      createdBy,
+        "Created At":      new Date().toISOString()
+      };
+
       var insertRow = api_getLastDataRow_(sheet) + 1;
       var rowArr = api_buildRow_(hMap, rowObj);
       sheet.getRange(insertRow, 1, 1, rowArr.length).setValues([rowArr]);
@@ -16139,9 +16193,8 @@ function handleAddManualCharge_(clientSheetId, payload, callerEmail) {
       try { lock.releaseLock(); } catch (_) {}
     }
 
-    // Direct Supabase write — sidemark is included explicitly so the mirror
-    // is correct on first paint without relying on the Inventory lookup
-    // (manual charges have no Item ID anyway).
+    // Direct Supabase write — entity-linkage fields are included explicitly
+    // so the mirror is correct on first paint.
     try {
       supabaseUpsert_("billing", sbBillingRow_(clientSheetId, {
         ledgerRowId:    ledgerRowId,
@@ -16151,20 +16204,21 @@ function handleAddManualCharge_(clientSheetId, payload, callerEmail) {
         date:           dateStr,
         svcCode:        serviceCode,
         svcName:        serviceName,
-        category:       "",
-        itemId:         "",
+        category:       category,
+        itemId:         itemId,
         description:    description,
         itemClass:      classCode,
         qty:            qty,
         rate:           rate,
         total:          total,
-        taskId:         "",
-        repairId:       "",
-        shipmentNumber: "",
+        taskId:         taskId,
+        repairId:       repairId,
+        shipmentNumber: shipmentNumber,
         itemNotes:      notes,
         invoiceDate:    "",
         invoiceUrl:     "",
-        sidemark:       sidemark
+        sidemark:       sidemark,
+        reference:      reference
       }));
     } catch (sbErr) {
       Logger.log("addManualCharge Supabase write-through failed (non-fatal): " + sbErr);
