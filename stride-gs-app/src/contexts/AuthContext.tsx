@@ -561,6 +561,42 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, [handleSession, clearCache]);
 
+  // ─── Dead-session detector ──────────────────────────────────────────────────
+  // 2026-06-13 — the instant localStorage-cache bootstrap above renders the UI
+  // as authenticated immediately, but if the underlying Supabase session is
+  // gone (refresh token expired while the tab slept, multi-tab sign-out,
+  // getSession() bootstrap race), every PostgREST request silently runs as
+  // ANON. Because some tables are anon-readable (inventory) the app LOOKS
+  // fine while stricter surfaces degrade — Activity tab reads as empty,
+  // Docs/Photos tabs error (Justin's 2026-06-12 item-211 report). On window
+  // focus, verify the session actually exists; if not, drop to the login
+  // screen instead of limping along as anon. Skipped mid-impersonation swap
+  // (the swap manages session state itself).
+  useEffect(() => {
+    if (authState.status !== 'authenticated') return;
+    let cancelled = false;
+    const verifySession = async () => {
+      if (impersonationSwapRef.current) return;
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (cancelled || impersonationSwapRef.current) return;
+        if (!session) {
+          clearCache();
+          setAuthState({ status: 'unauthenticated' });
+        }
+      } catch { /* transient — leave state alone, next focus rechecks */ }
+    };
+    window.addEventListener('focus', verifySession);
+    // Also run once shortly after mount-as-authenticated: catches the case
+    // where the cache hydrated but the getSession() bootstrap never resolved.
+    const t = setTimeout(() => { void verifySession(); }, 4000);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+      window.removeEventListener('focus', verifySession);
+    };
+  }, [authState.status, clearCache]);
+
   // ─── Auth Actions ───────────────────────────────────────────────────────────
 
   const signInWithPassword = useCallback(

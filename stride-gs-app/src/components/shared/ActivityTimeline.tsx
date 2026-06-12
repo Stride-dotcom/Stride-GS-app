@@ -386,6 +386,9 @@ export function ActivityTimeline({ entityType, entityId, tenantId, relatedEntity
   const [events, setEvents] = useState<TimelineEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [loaded, setLoaded] = useState(false);
+  /** True when the Supabase session is gone — queries silently ran as anon
+   *  and RLS filtered everything, so "no activity" would be a lie. */
+  const [sessionMissing, setSessionMissing] = useState(false);
   const [filter, setFilter] = useState<Category | 'all'>('all');
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
   const mountedRef = useRef(true);
@@ -644,7 +647,20 @@ export function ActivityTimeline({ entityType, entityId, tenantId, relatedEntity
     if (!entityId) return;
     setLoading(true);
     setLoaded(false);
-    void loadEvents().finally(() => {
+    void (async () => {
+      await loadEvents();
+      // An expired/missing Supabase session makes every query above run as
+      // ANON: entity_audit_log returns [] (RLS-filtered) instead of erroring,
+      // which would render as a misleading "No activity recorded yet"
+      // (item-211 incident, 2026-06-12). Detect it so the empty state can
+      // say what's actually wrong. AuthContext's dead-session detector
+      // bounces the app to the login screen shortly after; this covers
+      // the gap until it fires.
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (mountedRef.current) setSessionMissing(!session);
+      } catch { /* transient — leave as-is */ }
+    })().finally(() => {
       if (mountedRef.current) { setLoading(false); setLoaded(true); }
     });
   }, [entityId, loadEvents]);
@@ -751,9 +767,18 @@ export function ActivityTimeline({ entityType, entityId, tenantId, relatedEntity
       )}
 
       {!loading && visible.length === 0 && (
-        <div style={{ fontSize: 12, color: theme.colors.textMuted, padding: '8px 0' }}>
-          {events.length === 0 ? 'No activity recorded yet' : 'No activity matches this filter'}
-        </div>
+        sessionMissing && events.length === 0 ? (
+          <div style={{
+            fontSize: 12, color: '#B45309', background: '#FFFBEB',
+            border: '1px solid #FDE68A', borderRadius: 8, padding: '8px 12px',
+          }}>
+            Your session has expired — sign in again to see activity history.
+          </div>
+        ) : (
+          <div style={{ fontSize: 12, color: theme.colors.textMuted, padding: '8px 0' }}>
+            {events.length === 0 ? 'No activity recorded yet' : 'No activity matches this filter'}
+          </div>
+        )
       )}
 
       {!loading && visible.length > 0 && (
