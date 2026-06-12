@@ -148,6 +148,15 @@
 
 ---
 
+## Recent Changes (2026-06-12, billing: reopen-task-sb mirrors billing Void to per-tenant sheet — feat/fix/reopen-task-sb-billing-void-mirror)
+
+- **Double-bill gap on the SB-primary reopen path.** Reopening a Completed task voids its `Unbilled` rows in `public.billing` (and blocks the reopen with `BILLING_LOCKED` if any row is already `Invoiced`), but [reopen-task-sb](stride-gs-app/supabase/functions/reopen-task-sb/index.ts) previously mirrored **only the task status** back to the Google Sheet — never the billing Void. The per-tenant `Billing_Ledger` row stayed `Unbilled`, and that sheet still drives invoice-PDF generation, CB `Consolidated_Ledger` aggregation, and QBO/IIF export → the charge could be re-billed. The GAS path (`handleReopenTask_` → `api_voidBillingRowsWhere_`) already voided all layers; this brings the SB-primary path (Justin Demo today, fleet as the migration expands) to parity.
+- **Fix:** new best-effort `mirrorBillingVoid` fires one `writeThroughReverse` (`table:'billing'`, `op:'update'`, `status:'Void'`) per voided Ledger Row ID → GAS `__writeThroughReverseBilling_`, which hard-guards against touching `Invoiced` rows (no un-invoice risk). Re-completion still rebills the **updated** amount via the existing `ON CONFLICT DO UPDATE` (un-void in place, refresh rate/qty/total).
+- **Review catch (Critical, fixed):** Apps Script `ContentService` always returns HTTP 200; failures are body-only. The initial `res.ok`-only check would have silently swallowed a failed mirror — now parses the body, logs real failures to `gs_sync_events`, and excludes the writer's legitimate Invoiced-row skip. Locked-in reviewer: re-reviewed clean.
+- **Scope:** CB `Consolidated_Ledger` cleanup intentionally deferred (every sibling SB billing handler defers it; CB retired in P4b). Pre-existing task-status `mirror()` HTTP-200 blind spot left as-is for a fleet-wide pass. **EF NOT yet deployed — awaiting deploy go-ahead.**
+
+---
+
 ## Recent Changes (2026-06-12, tasks: batch parent number reads as service code + G suffix, not BATCH — feat/tasks/batch-number-service-token)
 
 - **Justin:** disliked `JUS-BATCH-3`; wants the service code + a group marker. Batch parent numbers are now **`JUS-INSP-3G`** (service code replaces the BATCH token, `G` = group suffix); sub-tasks follow as **`JUS-INSP-3G-1`** (`{batchNo}-{itemId}`). The per-tenant `batch` sequence still drives N (sequential across batches; service code embedded for readability). Existing `JUS-BATCH-N` batches keep their numbers.
