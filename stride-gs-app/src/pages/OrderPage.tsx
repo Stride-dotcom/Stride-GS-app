@@ -56,6 +56,7 @@ import { ConfirmDialog } from '../components/shared/ConfirmDialog';
 import { summarizeDtChanges, DT_GROUP_LABEL, type DtFieldGroup, type DtChangeSummary } from '../lib/dtSelectivePush';
 import { useItemIndicators } from '../hooks/useItemIndicators';
 import { ItemIdBadges } from '../components/shared/ItemIdBadges';
+import { AddChargeButton } from '../components/billing/AddChargeButton';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -3019,6 +3020,22 @@ export function OrderPage() {
           label="Edit Full Order"
           variant="secondary"
           onClick={handleEditFullOrder}
+        />
+      )}
+      {/* Add Charge — admin/staff; order-level charge linked via reference. */}
+      {order.tenantId && (
+        <AddChargeButton
+          entity={{
+            tenantId: order.tenantId,
+            entityType: 'order',
+            entityId: String(order.id),
+          }}
+          buttonStyle={{
+            display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+            flex: '1 1 0', minWidth: 110, maxWidth: 170, padding: '10px 14px', borderRadius: 10,
+            border: 'none', fontFamily: 'inherit', fontSize: 12, fontWeight: 700, letterSpacing: '0.3px',
+            cursor: 'pointer', color: EP.footerText, background: EP.footerSecondaryBg, whiteSpace: 'nowrap',
+          }}
         />
       )}
       {canReview && canReleaseItems && (

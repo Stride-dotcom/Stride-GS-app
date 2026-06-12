@@ -31,6 +31,7 @@ import { useAuth } from '../../contexts/AuthContext';
 import type { ProcessWcReleaseResponse, CancelWillCallResponse, RemoveItemsFromWillCallResponse } from '../../lib/api';
 
 import type { WillCall, InventoryItem } from '../../lib/types';
+import { AddChargeButton } from '../billing/AddChargeButton';
 interface Props {
   wc: any;
   onClose: () => void;
@@ -1577,6 +1578,24 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
         <button onClick={() => { setPartialSelected(new Set(allItemIds)); setReleaseMode('partial'); }} style={wcOrange}>
           Release Some…
         </button>
+      )}
+      {/* Add Charge — admin/staff; works on released/cancelled WCs too. */}
+      {clientSheetId && !removeMode && (
+        <AddChargeButton
+          entity={{
+            tenantId: clientSheetId,
+            entityType: 'will_call',
+            entityId: String(wc.wcNumber),
+            items: (wc.items ?? []).map(it => ({
+              itemId: it.itemId,
+              itemClass: it.itemClass ?? null,
+              label: it.description ? `${it.itemId} · ${it.description}` : it.itemId,
+            })),
+            itemId: (wc.items ?? []).length === 1 ? wc.items[0].itemId : null,
+            itemClass: (wc.items ?? []).length === 1 ? (wc.items[0].itemClass ?? null) : null,
+          }}
+          buttonStyle={wcDark}
+        />
       )}
     </>
   );

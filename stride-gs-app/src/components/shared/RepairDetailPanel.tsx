@@ -37,6 +37,7 @@ import { EntityNotesInline } from '../notes/EntityNotesInline';
 import { ReQuoteRepairModal } from './ReQuoteRepairModal';
 
 import type { Repair } from '../../lib/types';
+import { AddChargeButton } from '../billing/AddChargeButton';
 interface Props {
   repair: ApiRepair;
   onClose: () => void;
@@ -2980,6 +2981,19 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
             : <FileText size={13} />}
           {printLoading ? 'Generating…' : 'Print Work Order'}
         </button>
+      )}
+      {/* Add Charge — admin/staff; works on completed/failed repairs too. */}
+      {repair.clientSheetId && (
+        <AddChargeButton
+          entity={{
+            tenantId: repair.clientSheetId,
+            entityType: 'repair',
+            entityId: String(repair.repairId),
+            itemId: repair.itemId ? String(repair.itemId) : null,
+            itemClass: repair.itemClass ?? null,
+          }}
+          buttonStyle={rpDark}
+        />
       )}
     </>
   );
