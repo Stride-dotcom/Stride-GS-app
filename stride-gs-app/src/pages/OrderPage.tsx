@@ -56,7 +56,7 @@ import { ConfirmDialog } from '../components/shared/ConfirmDialog';
 import { summarizeDtChanges, DT_GROUP_LABEL, type DtFieldGroup, type DtChangeSummary } from '../lib/dtSelectivePush';
 import { useItemIndicators } from '../hooks/useItemIndicators';
 import { ItemIdBadges } from '../components/shared/ItemIdBadges';
-import { AddChargeButton } from '../components/billing/AddChargeButton';
+import { useAddCharge } from '../components/billing/useAddCharge';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -1746,6 +1746,16 @@ export function OrderPage() {
 
   const order = localOrder ?? fetchedOrder;
 
+  // Add Charge — one modal backs both the desktop footer pill and the mobile
+  // FAB action (admin+staff only). Declared before the loading/not-found
+  // early returns so the hook order stays stable; canAdd is false until the
+  // order (and its tenant) resolves.
+  const addCharge = useAddCharge({
+    tenantId: order?.tenantId ?? '',
+    entityType: 'order',
+    entityId: String(order?.id ?? ''),
+  });
+
   // For P+D orders we also load the linked leg so the detail page
   // can show pickup + delivery contacts side-by-side and surface the
   // linked order # as a clickable deep link. Best-effort — null when
@@ -2934,6 +2944,7 @@ export function OrderPage() {
     { label: 'Print PDF', icon: <Printer size={16} />, onClick: handlePrintPdf },
     ...(order.pushedToDtAt ? [{ label: syncingFromDt ? 'Syncing…' : 'Sync from DT', icon: <RefreshCw size={16} />, onClick: () => { void handleSyncFromDt(); } }] : []),
     ...(isOrderEditable ? [{ label: 'Edit Full Order', icon: <Edit3 size={16} />, onClick: handleEditFullOrder }] : []),
+    ...(addCharge.canAdd ? [{ label: 'Add Charge', icon: <DollarSign size={16} />, onClick: addCharge.open }] : []),
     ...(showDiscardDraft ? [{ label: 'Discard Draft', icon: <Trash2 size={16} />, onClick: () => { void handleDiscardDraft(); }, color: '#B91C1C' }] : []),
     ...(showReviewActions ? [
       { label: 'Request Revision', icon: <PenLine size={16} />, onClick: () => handleReviewAction('revision_requested') },
@@ -3006,20 +3017,18 @@ export function OrderPage() {
         />
       )}
       {/* Add Charge — admin/staff; order-level charge linked via reference. */}
-      {order.tenantId && (
-        <AddChargeButton
-          entity={{
-            tenantId: order.tenantId,
-            entityType: 'order',
-            entityId: String(order.id),
-          }}
-          buttonStyle={{
+      {addCharge.canAdd && (
+        <button
+          onClick={addCharge.open}
+          style={{
             display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 5,
             flex: '1 1 0', minWidth: 110, maxWidth: 170, padding: '10px 14px', borderRadius: 10,
             border: 'none', fontFamily: 'inherit', fontSize: 12, fontWeight: 700, letterSpacing: '0.3px',
             cursor: 'pointer', color: EP.footerText, background: EP.footerSecondaryBg, whiteSpace: 'nowrap',
           }}
-        />
+        >
+          <DollarSign size={13} /> Add Charge
+        </button>
       )}
       {canReview && canReleaseItems && (
         <EPFooterButton
@@ -3106,6 +3115,7 @@ export function OrderPage() {
           only when there are actions to show. Editing mode keeps the
           inline Cancel/Save row so the FAB stays hidden there. */}
       <FloatingActionMenu show={showFab} actions={fabActions} />
+      {addCharge.modal}
       {showFullEditModal && (
         <CreateDeliveryOrderModal
           editOrderId={order.id}

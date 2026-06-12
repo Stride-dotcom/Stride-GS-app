@@ -37,7 +37,8 @@ import { EntityNotesInline } from '../notes/EntityNotesInline';
 import { ReQuoteRepairModal } from './ReQuoteRepairModal';
 
 import type { Repair } from '../../lib/types';
-import { AddChargeButton } from '../billing/AddChargeButton';
+import { DollarSign } from 'lucide-react';
+import { useAddCharge } from '../billing/useAddCharge';
 interface Props {
   repair: ApiRepair;
   onClose: () => void;
@@ -2869,8 +2870,19 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
       if (resp.ok && resp.data?.success) { setEffectiveStatus('Cancelled'); onRepairUpdated?.(); }
     } finally { setSubmitting(false); }
   };
+  // Add Charge — one modal backs both the desktop footer pill and the mobile
+  // FAB action (admin+staff only).
+  const addCharge = useAddCharge({
+    tenantId: repair.clientSheetId || '',
+    entityType: 'repair',
+    entityId: String(repair.repairId),
+    itemId: repair.itemId ? String(repair.itemId) : null,
+    itemClass: repair.itemClass ?? null,
+  });
+
   const fabActions: FABAction[] = [
     ...(active ? [{ label: 'Cancel Repair', icon: <XCircle size={16} />, onClick: () => { void cancelRepair(); } }] : []),
+    ...(addCharge.canAdd ? [{ label: 'Add Charge', icon: <DollarSign size={16} />, onClick: addCharge.open }] : []),
     ...(canStaffEdit && (s === 'Complete' || s === 'In Progress') ? [{ label: 'Reopen', icon: <Undo2 size={16} />, onClick: handleReopenRepairClick }] : []),
     ...(canStaffEdit && s === 'Cancelled' ? [{ label: 'Reopen', icon: <Undo2 size={16} />, onClick: handleReopenCancelledClick }] : []),
     ...(s === 'Pending Quote' ? [{ label: 'Send Quote', icon: <Send size={16} />, onClick: handleSendQuote, color: theme.colors.orange }] : []),
@@ -2983,17 +2995,10 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
         </button>
       )}
       {/* Add Charge — admin/staff; works on completed/failed repairs too. */}
-      {repair.clientSheetId && (
-        <AddChargeButton
-          entity={{
-            tenantId: repair.clientSheetId,
-            entityType: 'repair',
-            entityId: String(repair.repairId),
-            itemId: repair.itemId ? String(repair.itemId) : null,
-            itemClass: repair.itemClass ?? null,
-          }}
-          buttonStyle={rpDark}
-        />
+      {addCharge.canAdd && (
+        <button onClick={addCharge.open} style={rpDark}>
+          <DollarSign size={13} /> Add Charge
+        </button>
       )}
     </>
   );
@@ -3046,6 +3051,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
           footer={pageFooter}
         />
         <FloatingActionMenu show={isCompactViewport} actions={fabActions} />
+        {addCharge.modal}
         {reQuoteModal}
         {/* Fail sub-prompt — page mode renders the footer/FAB only, with no
             inline area for the "what would you like to do?" branch the panel
