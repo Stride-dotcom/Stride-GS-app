@@ -7,9 +7,12 @@
  *
  * Ledger id: when an anchor (itemId, else entityId) is supplied — i.e. the
  * charge was added from an entity detail page via the universal "Add Charge"
- * button — the id is DETERMINISTIC: `MANUAL-<SVC>-<ANCHOR>-<YYYYMMDD>`, with a
- * `-2`, `-3`… suffix on collision (so a genuine second identical charge same
- * day still lands, while a double-submit is idempotent). With no anchor
+ * button — the id is DETERMINISTIC and human-readable:
+ * `MANUAL-<SVC>-<ANCHOR>-<YYYYMMDD>`. A genuine second identical charge the
+ * same day is a real workflow, so a `-2`, `-3`… suffix is appended on a
+ * (tenant_id, ledger_row_id) unique collision rather than rejecting it.
+ * (Accidental double-submits are prevented UI-side: the modal's button is
+ * disabled while saving and the modal closes on success.) With no anchor
  * (standalone Billing-page charge) it falls back to the legacy random
  * `MANUAL-<ms>-<random6>`. Either way the `MANUAL-` prefix is preserved so
  * void/update handlers keep recognising it.
@@ -83,9 +86,8 @@ Deno.serve(async (req: Request) => {
   const nowIso  = new Date().toISOString();
 
   // NOTE: public.billing has no `source` or `created_by` columns. Manual
-  // origin is encoded in the ledger_row_id prefix ("MANUAL-"), and the
-  // creator email goes into entity_audit_log only.
-  void createdBy; // intentional — surfaced via the audit log below
+  // origin is encoded in the ledger_row_id prefix ("MANUAL-"); the creator
+  // email surfaces via entity_audit_log (performed_by) below.
 
   // Deterministic id when anchored to an entity; legacy random otherwise.
   const anchor = itemId || entityId;
@@ -120,8 +122,7 @@ Deno.serve(async (req: Request) => {
   });
 
   // Insert, suffixing on a (tenant_id, ledger_row_id) unique violation so a
-  // legitimate repeat charge same-day still lands. Deterministic ids only
-  // collide on a true double-submit (idempotent) or a genuine repeat.
+  // legitimate repeat charge the same day still lands as its own row.
   let ledgerRowId = baseLedgerId;
   let row = buildRow(ledgerRowId);
   let inserted = false;
