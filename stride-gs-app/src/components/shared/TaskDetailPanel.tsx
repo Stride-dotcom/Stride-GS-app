@@ -38,7 +38,8 @@ import { EntityNotesInline } from '../notes/EntityNotesInline';
 import { SplitTaskPanel } from './SplitTaskPanel';
 
 import type { Task, Repair, InventoryItem } from '../../lib/types';
-import { AddChargeButton } from '../billing/AddChargeButton';
+import { DollarSign } from 'lucide-react';
+import { useAddCharge } from '../billing/useAddCharge';
 interface Props {
   task: any;
   onClose: () => void;
@@ -1724,10 +1725,22 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
   // inline because choosing the result is the central UX of an in-progress
   // task and shouldn't be hidden behind a tap.
   const showReopenAction = canReopen && (task.status === 'Completed' || task.status === 'In Progress');
+
+  // Add Charge — one modal backs both the desktop footer pill and the mobile
+  // FAB action (admin+staff only).
+  const addCharge = useAddCharge({
+    tenantId: clientSheetId ?? '',
+    entityType: 'task',
+    entityId: String(task.taskId),
+    itemId: task.itemId ? String(task.itemId) : null,
+    itemClass: task.itemClass ?? null,
+  });
+
   const fabActions: FABAction[] = (isEditingTask || showPassFail) ? [] : [
     ...(isOpen && !completed ? [{ label: 'Cancel Task', icon: <XCircle size={16} />, onClick: handleCancelTask }] : []),
     ...(task.itemId && !repairStatus ? [{ label: repairRequesting ? 'Requesting…' : 'Repair Quote', icon: <Wrench size={16} />, onClick: () => void handleRequestRepair() }] : []),
     // "+ Add Service" lives inside the BillingPreviewCard now, not the FAB.
+    ...(addCharge.canAdd ? [{ label: 'Add Charge', icon: <DollarSign size={16} />, onClick: addCharge.open }] : []),
     ...(isOpen && !completed && !isEditingTask ? [{ label: 'Edit', icon: <Pencil size={16} />, onClick: () => setIsEditingTask(true) }] : []),
     ...(showStart ? [{ label: startTaskLoading ? 'Starting…' : 'Start Task', icon: <Play size={16} />, onClick: () => handleStartTask(), color: theme.colors.orange }] : []),
     // Reopen — admin/staff only. Surfaces here on Completed + In Progress
@@ -1766,17 +1779,10 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
         </button>
       )}
       {/* Add Charge — admin/staff; works on completed/cancelled tasks too. */}
-      {clientSheetId && (
-        <AddChargeButton
-          entity={{
-            tenantId: clientSheetId,
-            entityType: 'task',
-            entityId: String(task.taskId),
-            itemId: task.itemId ? String(task.itemId) : null,
-            itemClass: task.itemClass ?? null,
-          }}
-          buttonStyle={tkDark}
-        />
+      {addCharge.canAdd && (
+        <button onClick={addCharge.open} style={tkDark}>
+          <DollarSign size={13} /> Add Charge
+        </button>
       )}
       {/* Edit toggle */}
       {isOpen && !completed && !isEditingTask && (
@@ -1865,6 +1871,7 @@ export function TaskDetailPanel({ task, onClose, onTaskUpdated, itemRepairs = []
           footer={pageFooter}
         />
         <FloatingActionMenu show={isCompactViewport && !isEditingTask && !showPassFail} actions={fabActions} />
+        {addCharge.modal}
       </>
     );
   }
