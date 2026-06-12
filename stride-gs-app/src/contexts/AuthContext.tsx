@@ -574,6 +574,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // (the swap manages session state itself).
   useEffect(() => {
     if (authState.status !== 'authenticated') return;
+    // Dev-bypass mounts a mock admin with NO Supabase session — the focus
+    // check would bounce it to login on every tab switch. Skip entirely.
+    if (import.meta.env.DEV && import.meta.env.VITE_DEV_BYPASS_AUTH === 'true') return;
     let cancelled = false;
     const verifySession = async () => {
       if (impersonationSwapRef.current) return;
