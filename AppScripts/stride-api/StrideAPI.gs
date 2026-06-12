@@ -1,4 +1,5 @@
 /* ===================================================
+   StrideAPI.gs — v38.283.0 — 2026-06-13 PST — [TASKS/WRITETHROUGH] fix: __writeThroughReverseTasks_ no longer fails permanently on tenants whose Tasks-sheet Status dropdown predates the In Progress/Failed lifecycle values. Justin Demo 2026-06-12: JUS-TSK-11/12 + JUS-INSP-19 start-task mirrors all died with "The data you entered in cell A26 violates the data validation rules… enter one of: Open, Completed, Cancelled" — the sheet's strict (reject-input) Status dropdown was built from a 3-value list, so setValue('In Progress') THREW on every attempt and the ops sat in gs_sync_events forever (NOT a column-mapping bug: the writer correctly resolved Status by header; the rule on the cell was stale). Fix: new api_ensureColumnValidationAllows_(sheet,row,col,value,canonicalList) self-heal, called on the Status target in BOTH the update path (before setValue) and the insert path (before the whole-row setValues, which the strict rule also torpedoed). Semantics: acts ONLY when the incoming value is canonical (CANONICAL_TASK_STATUSES_ = Open/In Progress/Completed/Failed/Cancelled) — a non-canonical value still throws, surfacing real bugs; if the cell's rule is a LIST/RANGE dropdown missing the canonical value, the whole data column's validation is replaced with the canonical strict list (dropdown UX preserved, sheet converges to the current lifecycle); other rule types untouched; last-resort fallback clears validation on the single target cell so the mirror lands. Fleet-wide: any tenant with a stale template self-heals on its next status mirror — no per-sheet manual fixes. No schema change, no billing logic, no change to the v38.182 atomic invoice counter or half-write detection.
    StrideAPI.gs — v38.282.0 — 2026-06-13 PST — [BILLING/MIGRATION] fix: the sheet-driven billing forward-sync no longer stale-deletes an SB-FIRST charge before its sheet mirror lands. supabaseDeleteStaleRows_ gained an optional protectRecentMinutes window; both billing call sites (api_fullClientSync_ billing scope + handleBulkSyncToSupabase_) now pass 30. Why: addManualCharge/updateBillingRow/voidManualCharge are SB-authoritative for the Justin Demo canary (feature_flags), so add-manual-charge-sb inserts into public.billing FIRST and the Billing_Ledger sheet row arrives a moment later via reverse-writethrough. This sync builds its keep-set from the SHEET, so in the gap (or before a pending mirror retry) the new charge looked orphaned and got deleted — the GAS-overwrites-SB race. The window now skips deleting any billing row whose created_at is within the last 30 min (other tables/callers pass no window → unchanged legacy behaviour). Companion: add-manual-charge-sb now AWAITS the reverse-writethrough and returns a `mirrored` flag so a failed sheet mirror is surfaced, not silent; AddChargeModal's processing copy no longer claims a GAS-first "writing to the ledger then syncing to Supabase" order. No billing math change, no change to the v38.182 atomic invoice counter or half-write detection.
    StrideAPI.gs — v38.281.0 — 2026-06-12 PST — [BILLING] feat: universal "Add Charge" — handleAddManualCharge_ now accepts optional entity-linkage fields (itemId/taskId/repairId/shipmentNumber/category/reference) supplied by the new entity-aware AddChargeModal (added to every entity detail page). When an anchor (itemId, else entityId) is present the ledger id is DETERMINISTIC — MANUAL-<SVC>-<ANCHOR>-<YYYYMMDD>, collision-suffixed (-2/-3…) against existing rows under the same script lock so a genuine repeat charge same-day still lands as its own row (accidental double-submits are prevented UI-side via the disabled-while-saving button); with no anchor it keeps the legacy random MANUAL-<ms>-<rand>. The linkage fields write to the Billing_Ledger row (api_buildRow_ drops any the sheet lacks) and to the supabaseUpsert_ mirror via sbBillingRow_ (already maps category/item_id/task_id/repair_id/shipment_number/reference). New helper api_ledgerSlug_ mirrors slug() in add-manual-charge-sb (the SB-routed twin, updated in the same PR). No billing math change (total still = rate×qty server-side), no change to the v38.182 atomic invoice counter or half-write detection. The "MANUAL-" prefix is preserved so handleVoidManualCharge_/handleUpdateBillingRow_ still recognise the row.
    StrideAPI.gs — v38.280.0 — 2026-06-11 PST — [READS/MIGRATION] fix: the single-entity GAS READ handlers no longer revert SB-authoritative state — closes the RPR-63755 reopen-then-resend bug (reported as "status stays Pending Quote after resending the quote"; root cause was NOT the send handler — send-repair-quote-sb committed 'Quote Sent' at 23:17:50Z, audit-logged — but handleGetRepairById_'s best-effort cache hydrate: the repair page's background GAS enrichment read the per-tenant sheet while the EF's ~30s background mirror was still in flight, and full-row-upserted the stale 'Pending Quote' sheet row back over public.repairs, silently and unaudited; the customer's approve gate requires Quote Sent. Third door into the PR #739/#740/#753 status-revert class — reverse mirrors and bulk syncs were already guarded; the READ-path hydrate was not). handleGetRepairById_ / handleGetTaskById_ / handleGetWillCallById_ now hydrate via new api_hydrateReadCacheSbAware_: row exists in SB → upsert with that entity's SB-authoritative columns STRIPPED (repairs: SB_AUTHORITATIVE_REPAIR_COLS_; tasks: new SB_AUTHORITATIVE_TASK_COLS_ = status/result/started_at/completed_at/cancelled_at; will_calls: status — due_date/priority/qty/billed keep flowing per the v38.278.0 read-path field fix); CONFIRMED absent → full-row seed (legacy rows); SB unreachable → skip entirely (new generic api_sbRowExistsTriState_ — a cache warm is never worth a clobber). Bonus closed: the repair hydrate object carries NO quote_* fields, so every GAS single-repair read was ALSO NULLing quote_lines_json + the 7 quote totals on the SB row — an additional vector for the 42-repair null-back PR #753 addressed on the bulk paths. No EF/React/schema changes, no billing math, no change to the v38.182 atomic invoice counter or half-write detection.
@@ -4427,6 +4428,65 @@ var REVERSE_TASK_FIELDS_ = {
   "custom_price":     "Custom Price"
 };
 
+// v38.283.0 — Canonical task lifecycle (CLAUDE.md billing schema). Some
+// tenant Tasks sheets carry a STALE Status dropdown validation listing only
+// Open/Completed/Cancelled — built before In Progress/Failed existed. A
+// strict ("reject input") rule makes setValue THROW, so every SB-primary
+// start-task mirror writing 'In Progress' failed permanently on those
+// tenants (Justin Demo 2026-06-12: JUS-TSK-11/12, JUS-INSP-19 — "data you
+// entered in cell A26 violates the data validation rules").
+var CANONICAL_TASK_STATUSES_ = ["Open", "In Progress", "Completed", "Failed", "Cancelled"];
+
+/**
+ * v38.283.0 — Self-heal a stale dropdown validation before writing `value`.
+ * ONLY acts when `value` is in `canonicalList` (a non-canonical value still
+ * throws — that's a real bug surfacing, not a stale rule). If the target
+ * cell's rule is a list/range dropdown that doesn't allow the canonical
+ * value, the WHOLE data column's validation is replaced with the canonical
+ * list (strict, dropdown UX preserved) so the sheet converges to the
+ * current lifecycle. Other rule types are left untouched. Last-resort
+ * fallback: clear validation on the single target cell.
+ */
+function api_ensureColumnValidationAllows_(sheet, rowNum, col, value, canonicalList) {
+  try {
+    var v = String(value == null ? "" : value);
+    if (!v || canonicalList.indexOf(v) === -1) return;
+    var cell = sheet.getRange(rowNum, col);
+    var rule = cell.getDataValidation();
+    if (!rule) return;
+    var crit = rule.getCriteriaType();
+    if (crit === SpreadsheetApp.DataValidationCriteria.VALUE_IN_LIST) {
+      var args = rule.getCriteriaValues();
+      var allowed = (args && args[0]) ? args[0].map(String) : [];
+      if (allowed.indexOf(v) !== -1) return; // rule already allows it
+    } else if (crit === SpreadsheetApp.DataValidationCriteria.VALUE_IN_RANGE) {
+      try {
+        var srcVals = rule.getCriteriaValues()[0].getValues();
+        for (var rv = 0; rv < srcVals.length; rv++) {
+          if (String(srcVals[rv][0]) === v) return; // source range has it
+        }
+      } catch (_) { /* unreadable source range — replace below */ }
+    } else {
+      return; // non-dropdown rule — never touch
+    }
+    var newRule = SpreadsheetApp.newDataValidation()
+      .requireValueInList(canonicalList, true)
+      .setAllowInvalid(false)
+      .build();
+    var maxRows = sheet.getMaxRows();
+    if (maxRows >= 2) sheet.getRange(2, col, maxRows - 1, 1).setDataValidation(newRule);
+    Logger.log(
+      "api_ensureColumnValidationAllows_: replaced stale dropdown on '" + sheet.getName() +
+      "' col " + col + " — rule was missing canonical value '" + v + "'"
+    );
+  } catch (e) {
+    // Never let the self-heal block the write — drop the rule on this one
+    // cell as a last resort so the mirror can land.
+    try { sheet.getRange(rowNum, col).clearDataValidations(); } catch (_) {}
+    Logger.log("api_ensureColumnValidationAllows_: fallback cell-clear (" + e + ")");
+  }
+}
+
 function __writeThroughReverseTasks_(ss, payload) {
   var rowId = payload && payload.rowId ? String(payload.rowId).trim() : "";
   var row   = (payload && payload.row) || {};
@@ -4491,6 +4551,11 @@ function __writeThroughReverseTasks_(ss, payload) {
     rowValues[idCol - 1] = rowId;
     for (var t = 0; t < targets.length; t++) {
       rowValues[targets[t].col - 1] = targets[t].newValue == null ? '' : targets[t].newValue;
+      // v38.283.0 — a strict stale Status dropdown makes the whole-row
+      // setValues throw; self-heal it first (canonical values only).
+      if (targets[t].sbKey === "status") {
+        api_ensureColumnValidationAllows_(taskSheet, insertRowNum, targets[t].col, targets[t].newValue, CANONICAL_TASK_STATUSES_);
+      }
     }
     taskSheet.getRange(insertRowNum, 1, 1, maxCol).setValues([rowValues]);
     SpreadsheetApp.flush();
@@ -4532,6 +4597,12 @@ function __writeThroughReverseTasks_(ss, payload) {
   if (allMatch) return { rowNumber: foundRow, skipped: true, reason: "already-matches" };
 
   for (var k = 0; k < targets.length; k++) {
+    // v38.283.0 — self-heal stale Status dropdowns (canonical values only)
+    // so 'In Progress' / 'Failed' mirrors can land on tenants whose sheet
+    // template predates those lifecycle values.
+    if (targets[k].sbKey === "status") {
+      api_ensureColumnValidationAllows_(taskSheet, foundRow, targets[k].col, targets[k].newValue, CANONICAL_TASK_STATUSES_);
+    }
     taskSheet.getRange(foundRow, targets[k].col).setValue(targets[k].newValue);
   }
   SpreadsheetApp.flush();
