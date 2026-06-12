@@ -29,7 +29,8 @@ import { PhotosPanel as _PhotosPanel, DocumentsPanel as _DocumentsPanel, NotesPa
 import { ActivityTimeline } from './ActivityTimeline';
 import { InlineEditableCell } from './InlineEditableCell';
 import { renderDoc, buildReceivingTokens } from '../../lib/docRenderer';
-import { AddChargeButton } from '../billing/AddChargeButton';
+import { DollarSign } from 'lucide-react';
+import { useAddCharge } from '../billing/useAddCharge';
 
 /**
  * Phase 7A-7 + 2026-04-22 tabbed migration.
@@ -99,6 +100,18 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
   // Lazy-load items: fetch kicked off once the Items tab becomes active OR
   // the Details tab's Quick Actions render (which also needs the list).
   const [items, setItems] = useState<ShipmentItem[]>(shipment.items || []);
+
+  // Add Charge — one modal backs the Quick Actions button, the desktop footer
+  // pill, AND the mobile FAB action (admin+staff only).
+  const addCharge = useAddCharge({
+    tenantId: shipment.clientSheetId ?? '',
+    entityType: 'shipment',
+    entityId: String(shipment.shipmentNo),
+    items: items.map(it => ({ itemId: it.itemId, itemClass: it.itemClass ?? null, label: it.description ? `${it.itemId} · ${it.description}` : it.itemId })),
+    itemId: items.length === 1 ? items[0].itemId : null,
+    itemClass: items.length === 1 ? (items[0].itemClass ?? null) : null,
+  });
+
   // When items are supplied up-front (e.g. page mode pre-fetched them), skip
   // the panel's lazy re-fetch entirely — avoids the "items load after panel
   // opens" flash that's visible on full-page views.
@@ -564,18 +577,13 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
               onClick={async () => openAction('wc')} />
             {canTransfer && <WriteButton label="Transfer Items" variant="secondary" size="sm" style={{ width: '100%', fontSize: 11 }}
               onClick={async () => openAction('transfer')} />}
-            {shipment.clientSheetId && (
-              <AddChargeButton
-                entity={{
-                  tenantId: shipment.clientSheetId,
-                  entityType: 'shipment',
-                  entityId: String(shipment.shipmentNo),
-                  items: items.map(it => ({ itemId: it.itemId, itemClass: it.itemClass ?? null, label: it.description ? `${it.itemId} · ${it.description}` : it.itemId })),
-                  itemId: items.length === 1 ? items[0].itemId : null,
-                  itemClass: items.length === 1 ? (items[0].itemClass ?? null) : null,
-                }}
-                buttonStyle={{ width: '100%', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6, fontSize: 11, fontWeight: 600, padding: '8px 10px', borderRadius: 8, background: '#fff', color: theme.colors.text, border: `1px solid ${theme.colors.border}`, cursor: 'pointer', fontFamily: 'inherit' }}
-              />
+            {addCharge.canAdd && (
+              <button
+                onClick={addCharge.open}
+                style={{ width: '100%', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6, fontSize: 11, fontWeight: 600, padding: '8px 10px', borderRadius: 8, background: '#fff', color: theme.colors.text, border: `1px solid ${theme.colors.border}`, cursor: 'pointer', fontFamily: 'inherit' }}
+              >
+                <DollarSign size={13} /> Add Charge
+              </button>
             )}
           </div>
           <div style={{ fontSize: 10, color: theme.colors.textMuted, marginTop: 6 }}>
@@ -829,6 +837,7 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
     ...(hasItems ? [{ label: 'Inspection', icon: <ClipboardList size={16} />, onClick: () => openAction('task') }] : []),
     ...(hasItems && canTransfer ? [{ label: 'Transfer', icon: <Package size={16} />, onClick: () => openAction('transfer') }] : []),
     ...(hasItems ? [{ label: 'Create WC', icon: <Truck size={16} />, onClick: () => openAction('wc'), color: theme.colors.orange }] : []),
+    ...(addCharge.canAdd ? [{ label: 'Add Charge', icon: <DollarSign size={16} />, onClick: addCharge.open }] : []),
   ];
   const pageFooter = isCompactViewport ? null : isEditing ? (
     // Edit mode owns the footer entirely — Save + Cancel only, so the
@@ -878,24 +887,17 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
           <Truck size={13} /> Create WC
         </button>
       )}
-      {shipment.clientSheetId && (
-        <AddChargeButton
-          entity={{
-            tenantId: shipment.clientSheetId,
-            entityType: 'shipment',
-            entityId: String(shipment.shipmentNo),
-            items: items.map(it => ({ itemId: it.itemId, itemClass: it.itemClass ?? null, label: it.description ? `${it.itemId} · ${it.description}` : it.itemId })),
-            itemId: items.length === 1 ? items[0].itemId : null,
-            itemClass: items.length === 1 ? (items[0].itemClass ?? null) : null,
-          }}
-          buttonStyle={darkPill}
-        />
+      {addCharge.canAdd && (
+        <button onClick={addCharge.open} style={darkPill}>
+          <DollarSign size={13} /> Add Charge
+        </button>
       )}
     </>
   );
 
   return (
     <>
+      {addCharge.modal}
       {renderAsPage ? (
         <>
           <EntityPage
