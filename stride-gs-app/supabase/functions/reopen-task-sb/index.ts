@@ -200,12 +200,22 @@ async function mirrorBillingVoid(
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
-      if (!res.ok) {
+      // Apps Script ContentService always returns HTTP 200 — failures are
+      // signaled in the BODY ({error,...} from errorResponse_), so res.ok
+      // alone never detects them. Parse the body and treat a missing/false
+      // `success` as a failed mirror (matches complete-repair-sb). A
+      // `skipped:true` result (the writer's Invoiced-row hard guard) is a
+      // legitimate no-op, not a failure, so it must NOT be logged.
+      const text = await res.text();
+      let parsed: { success?: boolean; error?: string; result?: { skipped?: boolean } } = {};
+      try { parsed = JSON.parse(text); } catch { /* non-JSON → handled as failure below */ }
+      const skipped = parsed.result?.skipped === true;
+      if ((!res.ok || parsed.success !== true) && !skipped) {
         await sb.from('gs_sync_events').insert({
           tenant_id: tenantId, entity_type: 'billing', entity_id: ledgerRowId,
           action_type: 'writethrough_reverse', sync_status: 'sync_failed',
           requested_by: callerEmail || 'reopen-task-sb', request_id: requestId,
-          payload, error_message: `HTTP ${res.status}`,
+          payload, error_message: (parsed.error || `HTTP ${res.status}`).slice(0, 500),
         }).then(() => {}, () => {});
       }
     } catch (e) { console.warn('[reopen-task-sb] billing-void mirror threw:', e); }
