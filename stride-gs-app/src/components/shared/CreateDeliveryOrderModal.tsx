@@ -352,6 +352,7 @@ async function repushOrdersAfterEdit(
   supabaseClient: typeof supabase,
   orderIds: string[],
   changedFields?: DtFieldGroup[],
+  callerEmail?: string | null,
 ): Promise<{ failures: Array<{ orderId: string; identifier: string; error: string }> }> {
   if (orderIds.length === 0) return { failures: [] };
 
@@ -367,7 +368,10 @@ async function repushOrdersAfterEdit(
 
   const results = await Promise.allSettled(
     previouslyPushed.map(r =>
-      supabaseClient.functions.invoke('dt-push-order', { body: { orderId: r.id, ...scoped } }),
+      supabaseClient.functions.invoke('dt-push-order', {
+        // callerEmail attributes the EF-side repush_to_dt audit row (v46).
+        body: { orderId: r.id, ...scoped, ...(callerEmail ? { callerEmail } : {}) },
+      }),
     ),
   );
 
@@ -3283,7 +3287,7 @@ export function CreateDeliveryOrderModal({
     // No snapshot should be impossible on an edit-save (the edit-load
     // effect always sets it), but if it ever is, fall back to the
     // pre-change full re-push rather than silently dropping the push.
-    if (!snap) return repushOrdersAfterEdit(supabase, legs);
+    if (!snap) return repushOrdersAfterEdit(supabase, legs, undefined, user?.email ?? null);
 
     const cols = Object.keys(snap).filter(k => !k.startsWith('_'));
     const { data: savedRow } = await supabase
@@ -3322,7 +3326,7 @@ export function CreateDeliveryOrderModal({
     if (!go) return { failures: [] };
 
     try {
-      return await repushOrdersAfterEdit(supabase, legs, summary.groups);
+      return await repushOrdersAfterEdit(supabase, legs, summary.groups, user?.email ?? null);
     } finally {
       setDtRepushPrompt(null);
       setDtRepushPushing(false);
@@ -4415,7 +4419,7 @@ export function CreateDeliveryOrderModal({
         if (isAdminAutoApprove) {
           try {
             const { data: pushData, error: pushErr } = await supabase.functions.invoke('dt-push-order', {
-              body: { orderId: deliveryRow.id },
+              body: { orderId: deliveryRow.id, callerEmail: user?.email ?? undefined },
             });
             const pushResult = pushData as { ok?: boolean; error?: string } | null;
             if (pushErr || !pushResult?.ok) {
@@ -4635,7 +4639,7 @@ export function CreateDeliveryOrderModal({
         if (isAdminAutoApprove) {
           try {
             const { data: pushData, error: pushErr } = await supabase.functions.invoke('dt-push-order', {
-              body: { orderId: orderRow.id },
+              body: { orderId: orderRow.id, callerEmail: user?.email ?? undefined },
             });
             const pushResult = pushData as { ok?: boolean; error?: string } | null;
             if (pushErr || !pushResult?.ok) {

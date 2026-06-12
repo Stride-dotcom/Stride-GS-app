@@ -553,6 +553,43 @@ Deno.serve(async (req: Request) => {
         const sendJson = await sendRes.json().catch(() => ({})) as Record<string, unknown>;
         if (sendJson.ok) emailSent = true;
         else emailError = String(sendJson.error ?? 'unknown');
+
+        // Audit the send itself with recipients + amount. send-email
+        // resolves recipients server-side and only returns the email_sends
+        // row id — read the row back for the to_emails list. Best-effort;
+        // the email_sends enrichment in the ActivityTimeline still shows
+        // the send even if this insert fails.
+        if (emailSent) {
+          let recipients: string[] = [];
+          try {
+            const { data: sentRow } = await supabase
+              .from('email_sends')
+              .select('to_emails')
+              .eq('id', String(sendJson.id ?? ''))
+              .maybeSingle();
+            recipients = ((sentRow as { to_emails?: string[] } | null)?.to_emails ?? []);
+          } catch { /* recipients stay empty */ }
+          await supabase.from('entity_audit_log').insert({
+            entity_type:  'repair',
+            entity_id:    repairId,
+            tenant_id:    tenantId,
+            action:       'quote_email_sent',
+            changes: {
+              recipients,
+              amount: grandTotal,
+              // Dedupe key — the ActivityTimeline drops the email_sends
+              // enrichment twin when an audit row references its id, so the
+              // attributed audit row wins (same pattern as photoId).
+              emailSendId: String(sendJson.id ?? '') || undefined,
+              ...(isRevision ? { revision: true } : {}),
+              ...(resendExisting ? { resend: true } : {}),
+            },
+            performed_by: callerEmail,
+            source:       'edge',
+          }).then(() => {}, (e: unknown) => {
+            console.warn('[send-repair-quote-sb] quote_email_sent audit insert failed:', e);
+          });
+        }
       } catch (e) {
         emailError = e instanceof Error ? e.message : String(e);
       }

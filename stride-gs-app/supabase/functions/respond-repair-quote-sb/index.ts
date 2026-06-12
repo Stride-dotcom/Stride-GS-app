@@ -136,13 +136,25 @@ Deno.serve(async (req: Request) => {
       .eq('repair_id', repairId);
     if (updErr) return json({ ok: false, error: `Update failed: ${updErr.message}` }, 500);
 
-    // ── 3. entity_audit_log — match GAS shape exactly ────────────────
+    // ── 3. entity_audit_log — GAS shape + decision forensics ─────────
+    // decidedBy + ip answer "who clicked, from where" for client-driven
+    // approvals off the public quote page (callerEmail is 'system' when
+    // the request carried no auth — the IP is then the only identifier).
+    const clientIp = (req.headers.get('x-forwarded-for') ?? '').split(',')[0].trim()
+      || req.headers.get('cf-connecting-ip')
+      || req.headers.get('x-real-ip')
+      || null;
     await supabase.from('entity_audit_log').insert({
       entity_type:  'repair',
       entity_id:    repairId,
       tenant_id:    tenantId,
       action:       'status_change',
-      changes:      { decision, status: { new: newStatus } },
+      changes:      {
+        decision,
+        status: { new: newStatus },
+        decidedBy: callerEmail,
+        ...(clientIp ? { ip: clientIp } : {}),
+      },
       performed_by: callerEmail,
       source:       'edge',
     });

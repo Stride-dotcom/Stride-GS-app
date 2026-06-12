@@ -245,6 +245,9 @@ export function useEntityNotes(
         action: 'note_added',
         changes: {
           summary: trimmed.length > 200 ? `${trimmed.slice(0, 200)}…` : trimmed,
+          // Differentiates client-authored notes from staff/admin ones in
+          // the ActivityTimeline ("Note added by client").
+          authorRole: user?.role ?? null,
           ...(visibility !== 'public' ? { visibility } : {}),
         },
         performedBy: user?.email ?? null,
