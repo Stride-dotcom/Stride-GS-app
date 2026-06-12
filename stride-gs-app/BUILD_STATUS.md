@@ -148,6 +148,16 @@
 
 ---
 
+## Recent Changes (2026-06-12, billing/EF: gasProxy forwards callerEmail + clientSheetId as query params — feat/fix/grouped-proxy-caller-email, PR #794)
+
+- **Bug:** checking multiple tasks → **Cancel** failed with **"caller email is required"** (also bulk reassign / split-task / batch cancel repairs). Root cause in [_shared/gas-proxy.ts](stride-gs-app/supabase/functions/_shared/gas-proxy.ts): grouped SB EFs proxy actions back to GAS but only put `action` + `token` in the query string — `callerEmail` and `clientSheetId` stayed in the JSON body. GAS `doPost` reads BOTH from `e.parameter` (query string), so every `withClientIsolation_` handler rejected with "callerEmail is required".
+- **Fix:** `gasProxy` now appends `callerEmail` + `clientSheetId` to the query string when present in the payload (guards: non-empty string + `encodeURIComponent`), mirroring the direct `apiPost` GAS path. Values still ride in the body too (harmless). tsc + build clean; locked-in reviewer: no Critical/Important.
+- **Routing note:** `batchCancelTasks`/`batchCancelRepairs` have direct native-EF entries in apiRouter.ts (`batch-cancel-tasks-sb`) but are shadowed by the `GROUPED_TASK_BATCH_OPS` spread (last-key-wins, lines 290–291 vs 321) → they route through `task-batch-ops-sb` → GAS proxy. Fix deliberately repairs the proxy path (preserves well-tested GAS behavior) rather than un-shadowing the routing; the routing cleanup is a separate deliberate PR.
+- **Deploy:** `task-batch-ops-sb` redeployed via Supabase MCP (**v4, verify_jwt=true**) — fixes the reported bulk-cancel path.
+- **⚠️ Follow-up — 11 other grouped EFs still carry the old gas-proxy.ts** (`admin-users-sb`, `billing-extras-sb`, `claims-actions-sb`, `client-setup-sb`, `email-templates-sb`, `location-actions-sb`, `marketing-actions-sb`, `qb-actions-sb`, `repair-extras-sb`, `stax-actions-sb`, `wc-extras-sb`). All are `active_backend='supabase'` for the **demo tenant only** (`1-nF3…`); real tenants resolve these flags to the opposite (`gas`) backend, so customers are unaffected. The bundled-helper fix only ships on redeploy — redeploy each (CLI auto-bundles `_shared`: `npx supabase functions deploy <name> --project-ref uqplppugeickmamycpuz`, needs a real `SUPABASE_ACCESS_TOKEN`; the machine currently has only an `sbp_xxxx…` placeholder) to fully close the class. Not done in-session to avoid hand-encoding production billing/claims functions via MCP.
+
+---
+
 ## Recent Changes (2026-06-12, tasks: batch parent number reads as service code + G suffix, not BATCH — feat/tasks/batch-number-service-token)
 
 - **Justin:** disliked `JUS-BATCH-3`; wants the service code + a group marker. Batch parent numbers are now **`JUS-INSP-3G`** (service code replaces the BATCH token, `G` = group suffix); sub-tasks follow as **`JUS-INSP-3G-1`** (`{batchNo}-{itemId}`). The per-tenant `batch` sequence still drives N (sequential across batches; service code embedded for readability). Existing `JUS-BATCH-N` batches keep their numbers.
