@@ -1636,11 +1636,16 @@ Deno.serve(async (req: Request) => {
   // from React edit-save callers that diffed the form against the loaded
   // order. Threaded to BOTH legs of a P+D pair (the diff is order-level).
   let changedFields: Set<DtFieldGroup> | null = null;
+  // Optional — the authenticated user who triggered the push. Callers
+  // (OrderPage, CreateDeliveryOrderModal, AddPickupLegModal) pass it so
+  // the audit row below attributes the push; cron/system callers omit it.
+  let callerEmail = '';
   try {
     const body = await req.json();
     orderId = body.orderId;
     if (!orderId) throw new Error('orderId required');
     changedFields = parseChangedFields(body.changedFields);
+    callerEmail = String(body.callerEmail ?? '').trim();
   } catch (err) {
     return json({ ok: false, error: (err as Error).message }, 400);
   }
@@ -2075,11 +2080,35 @@ Deno.serve(async (req: Request) => {
 
   if (updateErr) console.warn(`[dt-push-order] DT push ok but local update failed: ${updateErr.message}`);
 
-  // Audit row for the push event lives on the React side (OrderPage Push
-  // to DT handler) so it can attribute `performed_by` to the actual
-  // authenticated user. The edge function runs under service role and
-  // doesn't see the caller's email — pushing the audit insert client-side
-  // keeps every dt_order audit row consistently identified.
+  // ── Audit log (best-effort) ───────────────────────────────────────────
+  // v46 — moved from the React side into the EF so EVERY caller logs the
+  // push (OrderPage manual push, modal auto-push/repush fan-out,
+  // AddPickupLegModal), not just the OrderPage handler. Attribution comes
+  // from body.callerEmail (threaded by the React callers); cron/system
+  // pushes fall back to the EF name. `orderTyped.pushed_to_dt_at` still
+  // holds the PRE-update value here, so it distinguishes an initial push
+  // from a re-push, and changedFields records what a scoped re-push sent.
+  {
+    const wasRepush = !!orderTyped.pushed_to_dt_at;
+    await supabase.from('entity_audit_log').insert({
+      entity_type:  'dt_order',
+      entity_id:    orderId,
+      tenant_id:    orderTyped.tenant_id ?? null,
+      action:       wasRepush ? 'repush_to_dt' : 'push_to_dt',
+      changes: {
+        dtIdentifier: orderTyped.dt_identifier,
+        ...(linkedPushedIdentifier ? { linkedIdentifier: linkedPushedIdentifier } : {}),
+        ...(additionalPushed.length > 0 ? { additionalPickups: additionalPushed } : {}),
+        ...(changedFields ? { changedFields: [...changedFields] } : {}),
+        ...(accountWasFallback ? { accountWasFallback: true } : {}),
+        orderType,
+      },
+      performed_by: callerEmail || 'dt-push-order',
+      source:       'supabase',
+    }).then(() => {}, (e: unknown) => {
+      console.warn('[dt-push-order] audit insert failed:', e);
+    });
+  }
 
   const fanoutLog = additionalPushed.length > 0
     ? ` + additional=[${additionalPushed.join(',')}]`

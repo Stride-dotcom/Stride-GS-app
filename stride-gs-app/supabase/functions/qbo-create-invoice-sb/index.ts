@@ -329,6 +329,8 @@ Deno.serve(async (req: Request) => {
     qboInvoiceId = String(parsed.Invoice?.Id ?? '');
     qboDocNumber = String(parsed.Invoice?.DocNumber ?? '');
     if (!qboInvoiceId) {
+      await writeAudit(sb, tenantId, invoiceNo, callerEmail, 'qbo_push_failed',
+        { error: 'QBO returned 200 but no Invoice.Id in body', code: 'QBO_BAD_RESPONSE' });
       return jsonResponse({
         success: false,
         error:   'QBO returned 200 but no Invoice.Id in body',
@@ -340,6 +342,8 @@ Deno.serve(async (req: Request) => {
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error('[qbo-create-invoice-sb] QBO POST threw:', msg);
+    await writeAudit(sb, tenantId, invoiceNo, callerEmail, 'qbo_push_failed',
+      { error: msg.slice(0, 1000), code: 'QBO_FETCH_FAILED' });
     return jsonResponse({
       success: false,
       error:   `QBO POST threw: ${msg}`,

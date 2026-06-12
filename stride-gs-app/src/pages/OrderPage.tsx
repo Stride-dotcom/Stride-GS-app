@@ -2084,6 +2084,11 @@ export function OrderPage() {
       body: {
         orderId: order.id,
         ...(changedFields && changedFields.length > 0 ? { changedFields } : {}),
+        // Attribution for the EF-side push_to_dt/repush_to_dt audit row
+        // (v46 — the EF logs every push so modal auto-pushes are covered;
+        // the client-side logDtOrderAudit call here was removed to avoid
+        // double rows).
+        callerEmail: user?.email ?? undefined,
       },
     });
     if (invokeErr) {
@@ -2102,31 +2107,9 @@ export function OrderPage() {
     }
     const res = data as { ok?: boolean; error?: string; dt_identifier?: string; linked_identifier?: string } | null;
     if (!res?.ok) throw new Error(res?.error || 'DT push failed');
-    void logDtOrderAudit({
-      orderId: order.id,
-      tenantId: order.tenantId,
-      action: 'push_to_dt',
-      changes: {
-        dtIdentifier: res.dt_identifier ?? order.dtIdentifier,
-        ...(res.linked_identifier ? { linkedIdentifier: res.linked_identifier } : {}),
-        orderType: order.orderType,
-        itemCount: (order.items ?? []).reduce((s, it) => s + Math.max(1, Number(it.quantity) || 1), 0),
-      },
-      performedBy: user?.email ?? null,
-    });
-    if (res.linked_identifier && order.linkedOrderId) {
-      void logDtOrderAudit({
-        orderId: order.linkedOrderId,
-        tenantId: order.tenantId,
-        action: 'push_to_dt',
-        changes: {
-          dtIdentifier: res.linked_identifier,
-          linkedIdentifier: res.dt_identifier ?? order.dtIdentifier,
-          pushedAlongsideDelivery: true,
-        },
-        performedBy: user?.email ?? null,
-      });
-    }
+    // Push audit moved into dt-push-order itself (v46) so every caller —
+    // including the create-modal auto-push and repush fan-out — logs one
+    // attributed push_to_dt/repush_to_dt row. No client-side insert here.
     return { dtIdentifier: res.dt_identifier, linkedIdentifier: res.linked_identifier };
   }, [order, user?.email]);
 
