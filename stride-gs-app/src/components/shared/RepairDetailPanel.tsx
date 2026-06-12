@@ -2191,56 +2191,45 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
                   totalOnly={!displayTotalsKnown}
                 />
                 {canStaffEdit && (
-                  <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                  // WriteButton matches the app-wide action-button pattern
+                  // (Save & Resend / task Start-Complete). flexWrap +
+                  // minWidth keep the three readable on phone widths
+                  // instead of crushing into off-center slivers.
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 10 }}>
                     {effectiveStatus === 'Quote Sent' && (
-                      <button
-                        onClick={() => { void handleResendQuote(); }}
-                        disabled={submitting}
-                        style={{
-                          flex: 1, padding: '8px 12px', fontSize: 12, fontWeight: 600,
-                          background: '#FFFFFF', color: theme.colors.orange,
-                          border: `1px solid ${theme.colors.orange}`, borderRadius: 8,
-                          cursor: submitting ? 'wait' : 'pointer',
-                          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-                          opacity: submitting ? 0.6 : 1, fontFamily: 'inherit',
-                        }}
-                        title="Re-send this quote email with the SAME amounts (no recalculation). Use Edit Quote to change numbers."
-                      >
-                        <Send size={13} /> Resend Quote
-                      </button>
+                      <div style={{ flex: '1 1 130px', minWidth: 130, display: 'grid' }}>
+                        <WriteButton
+                          label="Resend Quote"
+                          variant="secondary"
+                          icon={<Send size={13} />}
+                          style={{ width: '100%', padding: '9px 12px', fontSize: 12, opacity: submitting ? 0.7 : 1 }}
+                          disabled={submitting}
+                          onClick={() => { void handleResendQuote(); }}
+                        />
+                      </div>
                     )}
                     {effectiveStatus === 'Quote Sent' && (
-                      <button
-                        onClick={handleStartEditQuote}
-                        disabled={submitting}
-                        style={{
-                          flex: 1, padding: '8px 12px', fontSize: 12, fontWeight: 600,
-                          background: '#FFFFFF', color: theme.colors.orange,
-                          border: `1px solid ${theme.colors.orange}`, borderRadius: 8,
-                          cursor: submitting ? 'wait' : 'pointer',
-                          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-                          opacity: submitting ? 0.6 : 1, fontFamily: 'inherit',
-                        }}
-                        title="Edit line items / rates / tax — save and optionally resend a revised quote without voiding"
-                      >
-                        <Pencil size={13} /> Edit Quote
-                      </button>
+                      <div style={{ flex: '1 1 130px', minWidth: 130, display: 'grid' }}>
+                        <WriteButton
+                          label="Edit Quote"
+                          variant="secondary"
+                          icon={<Pencil size={13} />}
+                          style={{ width: '100%', padding: '9px 12px', fontSize: 12, opacity: submitting ? 0.7 : 1 }}
+                          disabled={submitting}
+                          onClick={handleStartEditQuote}
+                        />
+                      </div>
                     )}
-                    <button
-                      onClick={handleVoidQuote}
-                      disabled={submitting}
-                      style={{
-                        flex: 1, padding: '8px 12px', fontSize: 12, fontWeight: 600,
-                        background: '#FFFFFF', color: '#B91C1C',
-                        border: '1px solid #FCA5A5', borderRadius: 8,
-                        cursor: submitting ? 'wait' : 'pointer',
-                        display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-                        opacity: submitting ? 0.6 : 1, fontFamily: 'inherit',
-                      }}
-                      title="Reset to Pending Quote so you can rebuild the line items"
-                    >
-                      <Undo2 size={13} /> Void Quote (re-issue)
-                    </button>
+                    <div style={{ flex: '1 1 150px', minWidth: 150, display: 'grid' }}>
+                      <WriteButton
+                        label="Void Quote (re-issue)"
+                        variant="danger"
+                        icon={<Undo2 size={13} />}
+                        style={{ width: '100%', padding: '9px 12px', fontSize: 12, opacity: submitting ? 0.7 : 1 }}
+                        disabled={submitting}
+                        onClick={handleVoidQuote}
+                      />
+                    </div>
                   </div>
                 )}
               </>
@@ -2713,56 +2702,43 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
               totalOnly={!displayTotalsKnown}
             />
             {canStaffEdit && (
-              <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+              // Same WriteButton pattern as the slide-out footer — see the
+              // mobile-wrap note there.
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 10 }}>
                 {sLocal === 'Quote Sent' && (
-                  <button
-                    onClick={() => { void handleResendQuote(); }}
-                    disabled={submitting}
-                    style={{
-                      flex: 1, padding: '8px 12px', fontSize: 12, fontWeight: 600,
-                      background: '#FFFFFF', color: theme.colors.orange,
-                      border: `1px solid ${theme.colors.orange}`, borderRadius: 8,
-                      cursor: submitting ? 'wait' : 'pointer',
-                      display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-                      opacity: submitting ? 0.6 : 1, fontFamily: 'inherit',
-                    }}
-                    title="Re-send this quote email with the SAME amounts (no recalculation). Use Edit Quote to change numbers."
-                  >
-                    <Send size={13} /> Resend Quote
-                  </button>
+                  <div style={{ flex: '1 1 130px', minWidth: 130, display: 'grid' }}>
+                    <WriteButton
+                      label="Resend Quote"
+                      variant="secondary"
+                      icon={<Send size={13} />}
+                      style={{ width: '100%', padding: '9px 12px', fontSize: 12, opacity: submitting ? 0.7 : 1 }}
+                      disabled={submitting}
+                      onClick={() => { void handleResendQuote(); }}
+                    />
+                  </div>
                 )}
                 {sLocal === 'Quote Sent' && (
-                  <button
-                    onClick={handleStartEditQuote}
-                    disabled={submitting}
-                    style={{
-                      flex: 1, padding: '8px 12px', fontSize: 12, fontWeight: 600,
-                      background: '#FFFFFF', color: theme.colors.orange,
-                      border: `1px solid ${theme.colors.orange}`, borderRadius: 8,
-                      cursor: submitting ? 'wait' : 'pointer',
-                      display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-                      opacity: submitting ? 0.6 : 1, fontFamily: 'inherit',
-                    }}
-                    title="Edit line items / rates / tax — save and optionally resend a revised quote without voiding"
-                  >
-                    <Pencil size={13} /> Edit Quote
-                  </button>
+                  <div style={{ flex: '1 1 130px', minWidth: 130, display: 'grid' }}>
+                    <WriteButton
+                      label="Edit Quote"
+                      variant="secondary"
+                      icon={<Pencil size={13} />}
+                      style={{ width: '100%', padding: '9px 12px', fontSize: 12, opacity: submitting ? 0.7 : 1 }}
+                      disabled={submitting}
+                      onClick={handleStartEditQuote}
+                    />
+                  </div>
                 )}
-                <button
-                  onClick={handleVoidQuote}
-                  disabled={submitting}
-                  style={{
-                    flex: 1, padding: '8px 12px', fontSize: 12, fontWeight: 600,
-                    background: '#FFFFFF', color: '#B91C1C',
-                    border: '1px solid #FCA5A5', borderRadius: 8,
-                    cursor: submitting ? 'wait' : 'pointer',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-                    opacity: submitting ? 0.6 : 1, fontFamily: 'inherit',
-                  }}
-                  title="Reset to Pending Quote so you can rebuild the line items"
-                >
-                  <Undo2 size={13} /> Void Quote (re-issue)
-                </button>
+                <div style={{ flex: '1 1 150px', minWidth: 150, display: 'grid' }}>
+                  <WriteButton
+                    label="Void Quote (re-issue)"
+                    variant="danger"
+                    icon={<Undo2 size={13} />}
+                    style={{ width: '100%', padding: '9px 12px', fontSize: 12, opacity: submitting ? 0.7 : 1 }}
+                    disabled={submitting}
+                    onClick={handleVoidQuote}
+                  />
+                </div>
               </div>
             )}
           </>
@@ -2780,20 +2756,16 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
               No quote details on file for this repair. Void the quote to rebuild and re-send it.
             </div>
             {canStaffEdit && (
-              <button
-                onClick={handleVoidQuote}
-                disabled={submitting}
-                style={{
-                  width: '100%', padding: '8px 12px', fontSize: 12, fontWeight: 600,
-                  background: '#FFFFFF', color: '#B91C1C',
-                  border: '1px solid #FCA5A5', borderRadius: 8,
-                  cursor: submitting ? 'wait' : 'pointer',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-                  opacity: submitting ? 0.6 : 1,
-                }}
-              >
-                <Undo2 size={13} /> Void Quote (re-issue)
-              </button>
+              <div style={{ display: 'grid' }}>
+                <WriteButton
+                  label="Void Quote (re-issue)"
+                  variant="danger"
+                  icon={<Undo2 size={13} />}
+                  style={{ width: '100%', padding: '9px 12px', fontSize: 12, opacity: submitting ? 0.7 : 1 }}
+                  disabled={submitting}
+                  onClick={handleVoidQuote}
+                />
+              </div>
             )}
           </div>
         )}
@@ -3152,6 +3124,11 @@ function RepairQuoteBuilder(props: {
   const { lines, taxAreaId, taxAreas, catalog, totals, disabled, clientTaxExempt,
           onChangeService, onUpdateField, onRemoveLine, onAddLine, onTaxAreaChange } = props;
   const [pickerCode, setPickerCode] = useState<string>('');
+  // The desktop grid needs ~460px; on phones it overflowed the panel and
+  // cut off Tax/Amount (and pushed the totals/info boxes off-screen). On
+  // mobile each line stacks into two rows: service+remove, then labeled
+  // qty/rate/tax/amount. Pure layout — same inputs, same handlers.
+  const { isMobile: builderMobile } = useIsMobile();
 
   // Sort the catalog so REPAIR / REPAIRS_HR are first (they're the
   // primary repair charges) and Warehouse add-ons (PREP, RSTK, FUEL,
@@ -3173,89 +3150,143 @@ function RepairQuoteBuilder(props: {
         Quote Line Items
       </div>
 
-      {/* Header */}
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: 'minmax(120px, 1.6fr) 60px 86px 56px 80px 30px',
-        gap: 6,
-        fontSize: 10, fontWeight: 600, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.06em',
-        marginBottom: 6, padding: '0 4px',
-      }}>
-        <div>Service</div>
-        <div style={{ textAlign: 'right' }}>Qty</div>
-        <div style={{ textAlign: 'right' }}>Rate</div>
-        <div style={{ textAlign: 'center' }}>Tax</div>
-        <div style={{ textAlign: 'right' }}>Amount</div>
-        <div></div>
-      </div>
+      {/* Header — desktop only; mobile rows carry their own field labels */}
+      {!builderMobile && (
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'minmax(120px, 1.6fr) 60px 86px 56px 80px 30px',
+          gap: 6,
+          fontSize: 10, fontWeight: 600, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.06em',
+          marginBottom: 6, padding: '0 4px',
+        }}>
+          <div>Service</div>
+          <div style={{ textAlign: 'right' }}>Qty</div>
+          <div style={{ textAlign: 'right' }}>Rate</div>
+          <div style={{ textAlign: 'center' }}>Tax</div>
+          <div style={{ textAlign: 'right' }}>Amount</div>
+          <div></div>
+        </div>
+      )}
 
       {/* Line rows */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: builderMobile ? 8 : 4 }}>
         {lines.map((l, idx) => {
           const q = Number(l.qty) || 0;
           const r = Number(l.rate) || 0;
           const amt = Math.round(q * r * 100) / 100;
+          const serviceSelect = (
+            <select
+              value={l.svcCode}
+              onChange={e => onChangeService(idx, e.target.value)}
+              disabled={disabled}
+              style={{ ...quoteInputCell, padding: '6px 6px', minWidth: 0 }}
+            >
+              {!orderedCatalog.find(c => c.code === l.svcCode) && (
+                <option value={l.svcCode}>{l.svcName || l.svcCode}</option>
+              )}
+              {orderedCatalog.map(c => (
+                <option key={c.code} value={c.code}>{c.name || c.code}</option>
+              ))}
+            </select>
+          );
+          const qtyInput = (
+            <input
+              type="number" min="0" step="1"
+              value={l.qty}
+              onChange={e => onUpdateField(idx, 'qty', e.target.value)}
+              disabled={disabled}
+              style={{ ...quoteInputCell, textAlign: 'right' }}
+            />
+          );
+          const rateInput = (
+            <input
+              type="number" min="0" step="0.01"
+              value={l.rate}
+              onChange={e => onUpdateField(idx, 'rate', e.target.value)}
+              disabled={disabled}
+              placeholder="0.00"
+              style={{ ...quoteInputCell, textAlign: 'right' }}
+            />
+          );
+          const taxCheckbox = (
+            <input
+              type="checkbox"
+              checked={l.taxable}
+              onChange={e => onUpdateField(idx, 'taxable', e.target.checked)}
+              disabled={disabled}
+              title="Apply sales tax to this line"
+              style={{ accentColor: theme.colors.orange }}
+            />
+          );
+          const removeBtn = (
+            <button
+              onClick={() => onRemoveLine(idx)}
+              disabled={disabled || lines.length <= 1}
+              title={lines.length <= 1 ? 'A quote needs at least one line' : 'Remove this line'}
+              style={{
+                background: 'none', border: 'none',
+                cursor: disabled || lines.length <= 1 ? 'not-allowed' : 'pointer',
+                color: lines.length <= 1 ? theme.colors.textMuted : '#B91C1C',
+                padding: 4, borderRadius: 4,
+                opacity: lines.length <= 1 ? 0.4 : 1,
+              }}
+            >
+              <Trash2 size={13} />
+            </button>
+          );
+
+          if (builderMobile) {
+            // Stacked card: service + remove on top, labeled qty/rate/tax
+            // + computed amount underneath. Fits a 360px viewport without
+            // horizontal scroll.
+            const mobLabel: React.CSSProperties = {
+              fontSize: 9, fontWeight: 600, color: theme.colors.textMuted,
+              textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 2,
+            };
+            return (
+              <div key={idx} style={{ border: `1px solid ${theme.colors.border}`, borderRadius: 8, padding: 8, background: '#fff' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 6 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>{serviceSelect}</div>
+                  {removeBtn}
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.3fr auto 1.3fr', gap: 8, alignItems: 'end' }}>
+                  <div>
+                    <div style={mobLabel}>Qty</div>
+                    {qtyInput}
+                  </div>
+                  <div>
+                    <div style={mobLabel}>Rate</div>
+                    {rateInput}
+                  </div>
+                  <div style={{ textAlign: 'center' }}>
+                    <div style={mobLabel}>Tax</div>
+                    <div style={{ padding: '6px 0' }}>{taxCheckbox}</div>
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    <div style={mobLabel}>Amount</div>
+                    <div style={{ padding: '6px 0', fontSize: 12, fontVariantNumeric: 'tabular-nums', color: theme.colors.text, fontWeight: 600 }}>
+                      ${amt.toFixed(2)}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          }
+
           return (
             <div key={idx} style={{
               display: 'grid',
               gridTemplateColumns: 'minmax(120px, 1.6fr) 60px 86px 56px 80px 30px',
               gap: 6, alignItems: 'center',
             }}>
-              <select
-                value={l.svcCode}
-                onChange={e => onChangeService(idx, e.target.value)}
-                disabled={disabled}
-                style={{ ...quoteInputCell, padding: '6px 6px' }}
-              >
-                {!orderedCatalog.find(c => c.code === l.svcCode) && (
-                  <option value={l.svcCode}>{l.svcName || l.svcCode}</option>
-                )}
-                {orderedCatalog.map(c => (
-                  <option key={c.code} value={c.code}>{c.name || c.code}</option>
-                ))}
-              </select>
-              <input
-                type="number" min="0" step="1"
-                value={l.qty}
-                onChange={e => onUpdateField(idx, 'qty', e.target.value)}
-                disabled={disabled}
-                style={{ ...quoteInputCell, textAlign: 'right' }}
-              />
-              <input
-                type="number" min="0" step="0.01"
-                value={l.rate}
-                onChange={e => onUpdateField(idx, 'rate', e.target.value)}
-                disabled={disabled}
-                placeholder="0.00"
-                style={{ ...quoteInputCell, textAlign: 'right' }}
-              />
-              <div style={{ textAlign: 'center' }}>
-                <input
-                  type="checkbox"
-                  checked={l.taxable}
-                  onChange={e => onUpdateField(idx, 'taxable', e.target.checked)}
-                  disabled={disabled}
-                  title="Apply sales tax to this line"
-                  style={{ accentColor: theme.colors.orange }}
-                />
-              </div>
+              {serviceSelect}
+              {qtyInput}
+              {rateInput}
+              <div style={{ textAlign: 'center' }}>{taxCheckbox}</div>
               <div style={{ textAlign: 'right', fontSize: 12, fontVariantNumeric: 'tabular-nums', color: theme.colors.text, fontWeight: 600 }}>
                 ${amt.toFixed(2)}
               </div>
-              <button
-                onClick={() => onRemoveLine(idx)}
-                disabled={disabled || lines.length <= 1}
-                title={lines.length <= 1 ? 'A quote needs at least one line' : 'Remove this line'}
-                style={{
-                  background: 'none', border: 'none',
-                  cursor: disabled || lines.length <= 1 ? 'not-allowed' : 'pointer',
-                  color: lines.length <= 1 ? theme.colors.textMuted : '#B91C1C',
-                  padding: 4, borderRadius: 4,
-                  opacity: lines.length <= 1 ? 0.4 : 1,
-                }}
-              >
-                <Trash2 size={13} />
-              </button>
+              {removeBtn}
             </div>
           );
         })}
@@ -3299,15 +3330,15 @@ function RepairQuoteBuilder(props: {
             Client is tax-exempt — lines default to non-taxable. Check a line's Tax box to override.
           </div>
         )}
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-          <span style={{ fontSize: 11, fontWeight: 600, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+          <span style={{ fontSize: 11, fontWeight: 600, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.06em', flexShrink: 0 }}>
             Tax Area
           </span>
           <select
             value={taxAreaId}
             onChange={e => onTaxAreaChange(e.target.value)}
             disabled={disabled}
-            style={{ ...quoteInputCell, maxWidth: 200, padding: '4px 6px', fontSize: 12 }}
+            style={{ ...quoteInputCell, width: 'auto', flex: '1 1 160px', maxWidth: 220, minWidth: 0, padding: '4px 6px', fontSize: 12 }}
           >
             {!taxAreas.find(a => a.id === taxAreaId) && taxAreaId && (
               <option value={taxAreaId}>(unknown)</option>

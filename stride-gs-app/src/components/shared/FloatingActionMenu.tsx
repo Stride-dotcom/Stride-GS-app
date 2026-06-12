@@ -76,6 +76,18 @@ export function FloatingActionMenu({ actions, show, zIndex = 200 }: Props) {
             flexDirection: 'column-reverse',
             gap: 10,
             animation: 'fabSlideUp 0.2s ease-out',
+            // Long action lists (Inventory has 11+) used to overflow the
+            // viewport with no way to reach the rest. Cap to the space
+            // above the FAB and scroll. column-reverse keeps the scroll
+            // anchored at the bottom, so the first actions stay next to
+            // the FAB and the user scrolls UP for the overflow.
+            maxHeight: 'calc(100dvh - 100px)',
+            overflowY: 'auto',
+            overscrollBehavior: 'contain',
+            WebkitOverflowScrolling: 'touch',
+            // Breathing room so item shadows aren't clipped by the
+            // scroll container.
+            padding: '6px 4px',
           }}
         >
           {actions.map((action, i) => (
