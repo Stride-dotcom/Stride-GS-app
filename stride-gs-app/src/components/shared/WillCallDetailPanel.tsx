@@ -31,7 +31,7 @@ import { useAuth } from '../../contexts/AuthContext';
 import type { ProcessWcReleaseResponse, CancelWillCallResponse, RemoveItemsFromWillCallResponse } from '../../lib/api';
 
 import type { WillCall, InventoryItem } from '../../lib/types';
-import { AddChargeButton } from '../billing/AddChargeButton';
+import { useAddCharge } from '../billing/useAddCharge';
 interface Props {
   wc: any;
   onClose: () => void;
@@ -1505,8 +1505,24 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
   // FAB actions mirror the inline pill row. removeMode is a temporary
   // UI state with its own Cancel/Confirm pills; we keep those inline so
   // the operator doesn't have to re-open the FAB to confirm.
+  // Add Charge — one modal backs both the desktop footer pill and the mobile
+  // FAB action (admin+staff only).
+  const addCharge = useAddCharge({
+    tenantId: clientSheetId ?? '',
+    entityType: 'will_call',
+    entityId: String(wc.wcNumber),
+    items: (wc.items ?? []).map((it: { itemId: string; itemClass?: string | null; description?: string }) => ({
+      itemId: it.itemId,
+      itemClass: it.itemClass ?? null,
+      label: it.description ? `${it.itemId} · ${it.description}` : it.itemId,
+    })),
+    itemId: (wc.items ?? []).length === 1 ? wc.items[0].itemId : null,
+    itemClass: (wc.items ?? []).length === 1 ? (wc.items[0].itemClass ?? null) : null,
+  });
+
   const fabActions: FABAction[] = removeMode ? [] : [
     { label: printDocLoading ? 'Generating…' : 'Print Document', icon: <FileText size={16} />, onClick: handlePrintDocument },
+    ...(addCharge.canAdd ? [{ label: 'Add Charge', icon: <DollarSign size={16} />, onClick: addCharge.open }] : []),
     ...(isActive && !cancelResult ? [{ label: cancelling ? 'Cancelling…' : 'Cancel WC', icon: <AlertTriangle size={16} />, onClick: handleCancelWC, color: '#B91C1C' }] : []),
     ...(isActive && !releaseResult && !removeResult ? [{ label: 'Remove Items…', icon: <Package size={16} />, onClick: () => { setRemoveMode(true); setRemoveSelected(new Set()); setRemoveError(null); } }] : []),
     ...(!isActive && (user?.role === 'admin' || user?.role === 'staff') ? [{ label: 'Reopen WC', icon: <Play size={16} />, onClick: handleReopenWc }] : []),
@@ -1580,22 +1596,10 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
         </button>
       )}
       {/* Add Charge — admin/staff; works on released/cancelled WCs too. */}
-      {clientSheetId && !removeMode && (
-        <AddChargeButton
-          entity={{
-            tenantId: clientSheetId,
-            entityType: 'will_call',
-            entityId: String(wc.wcNumber),
-            items: (wc.items ?? []).map((it: { itemId: string; itemClass?: string | null; description?: string }) => ({
-              itemId: it.itemId,
-              itemClass: it.itemClass ?? null,
-              label: it.description ? `${it.itemId} · ${it.description}` : it.itemId,
-            })),
-            itemId: (wc.items ?? []).length === 1 ? wc.items[0].itemId : null,
-            itemClass: (wc.items ?? []).length === 1 ? (wc.items[0].itemClass ?? null) : null,
-          }}
-          buttonStyle={wcDark}
-        />
+      {addCharge.canAdd && !removeMode && (
+        <button onClick={addCharge.open} style={wcDark}>
+          <DollarSign size={13} /> Add Charge
+        </button>
       )}
     </>
   );
@@ -1615,6 +1619,7 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
           footer={pageFooter}
         />
         <FloatingActionMenu show={isCompactViewport && !removeMode} actions={fabActions} />
+        {addCharge.modal}
       </>
     );
   }

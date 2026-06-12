@@ -2,7 +2,8 @@ import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import { X, Package, Calendar, FileText, ClipboardList, Wrench, Truck, ExternalLink, AlertCircle, CheckCircle2, Pencil, Save, Loader2, FolderOpen, Plus, ChevronDown, Shield, Image as ImageIcon, StickyNote, Activity, BadgePercent, Split as SplitIcon } from 'lucide-react';
 import { StorageCreditsSection } from './StorageCreditsSection';
 import { ActivityTimeline } from './ActivityTimeline';
-import { AddChargeButton } from '../billing/AddChargeButton';
+import { DollarSign } from 'lucide-react';
+import { useAddCharge } from '../billing/useAddCharge';
 import { FolderButton } from './FolderButton';
 import { ItemIdBadges } from './ItemIdBadges';
 import { useItemIndicators } from '../../hooks/useItemIndicators';
@@ -1043,10 +1044,23 @@ export function ItemDetailPanel({
   // disappears (or stays if keep_qty > 1, which is intentional — staff
   // may want to split off more later).
   const canSplit = !!onSplit && (Number(item?.qty) || 0) > 1;
+
+  // Add Charge — one modal backs both the desktop footer pill and the mobile
+  // FAB action below (admin+staff only; clients get canAdd=false).
+  const addCharge = useAddCharge({
+    tenantId: clientSheetId ?? '',
+    entityType: 'item',
+    entityId: String(item.itemId),
+    itemId: String(item.itemId),
+    itemClass: item.itemClass ?? null,
+    sidemark: item.sidemark ?? null,
+  });
+
   const fabActions: FABAction[] = isEditing ? [] : [
     ...(onCreateTask ? [{ label: 'Create Task', icon: <ClipboardList size={16} />, onClick: onCreateTask }] : []),
     ...(!repairStatus ? [{ label: repairRequesting ? 'Requesting…' : 'Repair Quote', icon: <Wrench size={16} />, onClick: () => void handleRequestRepair() }] : []),
     ...(onCreateWillCall ? [{ label: 'Add to WC', icon: <Truck size={16} />, onClick: onCreateWillCall }] : []),
+    ...(addCharge.canAdd ? [{ label: 'Add Charge', icon: <DollarSign size={16} />, onClick: addCharge.open }] : []),
     ...(canSplit && onSplit ? [{ label: 'Split', icon: <SplitIcon size={16} />, onClick: onSplit }] : []),
     ...(onTransfer ? [{ label: 'Transfer', icon: <ExternalLink size={16} />, onClick: onTransfer }] : []),
     ...(canEditBasic ? [{ label: 'Edit', icon: <Pencil size={16} />, onClick: handleEditStart, color: theme.colors.orange }] : []),
@@ -1080,18 +1094,10 @@ export function ItemDetailPanel({
           <Truck size={13} /> Add to WC
         </button>
       )}
-      {clientSheetId && (
-        <AddChargeButton
-          entity={{
-            tenantId: clientSheetId,
-            entityType: 'item',
-            entityId: String(item.itemId),
-            itemId: String(item.itemId),
-            itemClass: item.itemClass ?? null,
-            sidemark: item.sidemark ?? null,
-          }}
-          buttonStyle={darkPill}
-        />
+      {addCharge.canAdd && (
+        <button onClick={addCharge.open} style={darkPill}>
+          <DollarSign size={13} /> Add Charge
+        </button>
       )}
       {canSplit && onSplit && (
         <button onClick={onSplit} style={darkPill}>
@@ -1134,6 +1140,7 @@ export function ItemDetailPanel({
           footer={pageFooter}
         />
         <FloatingActionMenu show={isCompactViewport && !isEditing} actions={fabActions} />
+        {addCharge.modal}
         <style>{`@keyframes slideIn { from { transform: translateX(100%); } to { transform: translateX(0); } }`}</style>
       </>
     );

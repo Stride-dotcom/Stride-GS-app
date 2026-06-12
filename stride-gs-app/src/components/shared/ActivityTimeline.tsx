@@ -82,6 +82,9 @@ interface TimelineEvent {
    *  charge_added audit row (manual charges carry attribution the
    *  enrichment row can't). */
   billingDedupeKey?: string;
+  /** email_sends.id — drops the email-enrichment twin of a
+   *  quote_email_sent audit row (the audit row carries attribution). */
+  emailDedupeKey?: string;
 }
 
 // ─── Category palette ───────────────────────────────────────────────────────
@@ -126,11 +129,15 @@ const ACTION_META: Record<string, { label: string; category: Category; icon: Luc
   void_invoice:          { label: 'Invoice Voided',       category: 'billing',   icon: XCircle,     color: '#DC2626' },
   void:                  { label: 'Voided',               category: 'billing',   icon: XCircle,     color: '#DC2626' },
   qbo_push:              { label: 'Pushed to QuickBooks', category: 'billing',   icon: Send },
+  qbo_push_failed:       { label: 'QuickBooks Push Failed', category: 'billing', icon: XCircle,     color: '#DC2626' },
   charge_added:          { label: 'Charge Added',         category: 'billing',   icon: DollarSign },
+  insurance_charge:      { label: 'Insurance Charge',     category: 'billing',   icon: DollarSign },
+  quote_email_sent:      { label: 'Quote Sent',           category: 'email',     icon: Mail },
   approve:               { label: 'Approved',             category: 'status',    icon: CheckCircle2, color: '#15803D' },
   reject:                { label: 'Rejected',             category: 'status',    icon: XCircle,     color: '#DC2626' },
   revision_requested:    { label: 'Revision Requested',   category: 'status',    icon: RotateCcw,   color: '#B45309' },
   push_to_dt:            { label: 'Pushed to DispatchTrack', category: 'status', icon: Send,        color: '#0891B2' },
+  repush_to_dt:          { label: 'Re-pushed to DispatchTrack', category: 'status', icon: Send,     color: '#0891B2' },
   cancel_dt:             { label: 'DT Order Cancelled',   category: 'status',    icon: XCircle,     color: '#DC2626' },
   release_items:         { label: 'Items Released',       category: 'lifecycle', icon: PackageCheck, color: '#7C3AED' },
   convert_to_pd:         { label: 'Converted to P+D',     category: 'edit',      icon: ArrowLeftRight },
@@ -255,6 +262,7 @@ function auditToEvent(r: AuditRow, isRelated: boolean): TimelineEvent {
   let category = meta.category;
   let photoDedupeKey: string | undefined;
   let billingDedupeKey: string | undefined;
+  let emailDedupeKey: string | undefined;
 
   const summary = changes?.summary != null ? String(changes.summary) : '';
   const status = changes?.status && typeof changes.status === 'object'
@@ -335,8 +343,37 @@ function auditToEvent(r: AuditRow, isRelated: boolean): TimelineEvent {
       break;
     }
     case 'note_added': {
+      // Client-authored notes are called out — staff reading the feed
+      // cares whether the customer or a colleague wrote it.
+      const role = changes?.authorRole ? String(changes.authorRole) : '';
+      if (role === 'client') title = 'Note added by client';
       if (summary) detail = summary;
       diffs = [];
+      break;
+    }
+    case 'quote_email_sent': {
+      const to = Array.isArray(changes?.recipients) ? (changes!.recipients as unknown[]).join(', ') : '';
+      title = to ? `Quote sent to ${to}` : 'Quote email sent';
+      const amt = changes?.amount != null ? fmtVal('amount', changes.amount) : null;
+      detail = [amt ? `Amount: ${amt}` : null, changes?.revision ? 'Revision' : null, changes?.resend ? 'Re-send' : null]
+        .filter(Boolean).join(' · ') || undefined;
+      emailDedupeKey = changes?.emailSendId ? String(changes.emailSendId) : undefined;
+      diffs = [];
+      break;
+    }
+    case 'insurance_charge': {
+      const amt = changes?.total != null ? fmtVal('total', changes.total) : null;
+      title = amt ? `Insurance charge: ${amt}` : 'Insurance charge';
+      const period = changes?.periodStart && changes?.periodEnd
+        ? `${fmtDate(String(changes.periodStart))} → ${fmtDate(String(changes.periodEnd))}` : null;
+      detail = [changes?.client ? String(changes.client) : null, period, changes?.final ? 'Final (cancellation)' : null]
+        .filter(Boolean).join(' · ') || undefined;
+      diffs = [];
+      break;
+    }
+    case 'repush_to_dt': {
+      const cf = Array.isArray(changes?.changedFields) ? (changes!.changedFields as unknown[]) : null;
+      if (cf && cf.length) detail = `Changed: ${cf.join(', ')}`;
       break;
     }
     case 'release': {
@@ -367,6 +404,7 @@ function auditToEvent(r: AuditRow, isRelated: boolean): TimelineEvent {
     relatedId: isRelated ? r.entity_id : undefined,
     photoDedupeKey,
     billingDedupeKey,
+    emailDedupeKey,
   };
 }
 
@@ -386,6 +424,9 @@ export function ActivityTimeline({ entityType, entityId, tenantId, relatedEntity
   const [events, setEvents] = useState<TimelineEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [loaded, setLoaded] = useState(false);
+  /** True when the Supabase session is gone — queries silently ran as anon
+   *  and RLS filtered everything, so "no activity" would be a lie. */
+  const [sessionMissing, setSessionMissing] = useState(false);
   const [filter, setFilter] = useState<Category | 'all'>('all');
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
   const mountedRef = useRef(true);
@@ -396,7 +437,7 @@ export function ActivityTimeline({ entityType, entityId, tenantId, relatedEntity
     [relatedEntityIds, entityId],
   );
   // Stable dep key — callers commonly pass a fresh array literal each render.
-  const relatedKey = relatedIds.join(' ');
+  const relatedKey = relatedIds.join('\u0000');
 
   const loadEvents = useCallback(async () => {
     if (!entityId) return;
@@ -630,9 +671,16 @@ export function ActivityTimeline({ entityType, entityId, tenantId, relatedEntity
     const manualChargeKeys = new Set(
       collected.filter(e => e.id.startsWith('audit:') && e.billingDedupeKey).map(e => e.billingDedupeKey as string),
     );
+    // A quote send writes a quote_email_sent audit row (with attribution +
+    // amount) AND surfaces via the email_sends enrichment. Drop the
+    // enrichment twin so the attributed audit row wins.
+    const auditEmailKeys = new Set(
+      collected.filter(e => e.id.startsWith('audit:') && e.emailDedupeKey).map(e => e.emailDedupeKey as string),
+    );
     const deduped = collected.filter(e =>
       !(e.id.startsWith('audit:') && e.photoDedupeKey && photoKeys.has(e.photoDedupeKey)) &&
-      !(e.id.startsWith('billing:') && manualChargeKeys.has(e.id.slice('billing:'.length))));
+      !(e.id.startsWith('billing:') && manualChargeKeys.has(e.id.slice('billing:'.length))) &&
+      !(e.id.startsWith('email:') && auditEmailKeys.has(e.id.slice('email:'.length))));
 
     deduped.sort((a, b) => (a.when < b.when ? 1 : a.when > b.when ? -1 : 0));
     if (mountedRef.current) setEvents(deduped.slice(0, 300));
@@ -644,7 +692,20 @@ export function ActivityTimeline({ entityType, entityId, tenantId, relatedEntity
     if (!entityId) return;
     setLoading(true);
     setLoaded(false);
-    void loadEvents().finally(() => {
+    void (async () => {
+      await loadEvents();
+      // An expired/missing Supabase session makes every query above run as
+      // ANON: entity_audit_log returns [] (RLS-filtered) instead of erroring,
+      // which would render as a misleading "No activity recorded yet"
+      // (item-211 incident, 2026-06-12). Detect it so the empty state can
+      // say what's actually wrong. AuthContext's dead-session detector
+      // bounces the app to the login screen shortly after; this covers
+      // the gap until it fires.
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (mountedRef.current) setSessionMissing(!session);
+      } catch { /* transient — leave as-is */ }
+    })().finally(() => {
       if (mountedRef.current) { setLoading(false); setLoaded(true); }
     });
   }, [entityId, loadEvents]);
@@ -751,9 +812,18 @@ export function ActivityTimeline({ entityType, entityId, tenantId, relatedEntity
       )}
 
       {!loading && visible.length === 0 && (
-        <div style={{ fontSize: 12, color: theme.colors.textMuted, padding: '8px 0' }}>
-          {events.length === 0 ? 'No activity recorded yet' : 'No activity matches this filter'}
-        </div>
+        sessionMissing && events.length === 0 ? (
+          <div style={{
+            fontSize: 12, color: '#B45309', background: '#FFFBEB',
+            border: '1px solid #FDE68A', borderRadius: 8, padding: '8px 12px',
+          }}>
+            Your session has expired — sign in again to see activity history.
+          </div>
+        ) : (
+          <div style={{ fontSize: 12, color: theme.colors.textMuted, padding: '8px 0' }}>
+            {events.length === 0 ? 'No activity recorded yet' : 'No activity matches this filter'}
+          </div>
+        )
       )}
 
       {!loading && visible.length > 0 && (

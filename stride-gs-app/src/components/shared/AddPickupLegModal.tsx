@@ -46,6 +46,7 @@
 import React, { useState, useEffect } from 'react';
 import { X, Truck, Loader2 } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
+import { useAuth } from '../../contexts/AuthContext';
 import { fetchDeliveryZone, type DtOrderForUI, type DeliveryZone } from '../../lib/supabaseQueries';
 import { theme } from '../../styles/theme';
 import { EntityPageTokens as EP } from './EntityPage';
@@ -112,6 +113,7 @@ interface UnassignedItem {
 }
 
 export function AddPickupLegModal({ open, onClose, deliveryOrder, onSuccess }: Props) {
+  const { user } = useAuth();
   const [contactName, setContactName] = useState('');
   const [contactAddress, setContactAddress] = useState('');
   const [contactCity, setContactCity] = useState('');
@@ -383,7 +385,7 @@ export function AddPickupLegModal({ open, onClose, deliveryOrder, onSuccess }: P
       let pushMsg = '';
       try {
         const { data: pushData, error: pushErr } = await supabase.functions.invoke('dt-push-order', {
-          body: { orderId: newPickupId },
+          body: { orderId: newPickupId, callerEmail: user?.email ?? undefined },
         });
         if (pushErr) {
           pushMsg = pushErr.message;
