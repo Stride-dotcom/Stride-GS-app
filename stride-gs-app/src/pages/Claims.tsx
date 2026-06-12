@@ -79,7 +79,7 @@ mf.autoRemove = (v: string[]) => !v || !v.length;
 const fmt = fmtDate;
 function fmtMoney(n?: number) {
   if (n == null) return '—';
-  return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 0 });
+  return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 function Badge({ t, c }: { t: string; c?: { bg: string; text: string } }) {
   const s = c || { bg: '#F3F4F6', text: '#6B7280' };

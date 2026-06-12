@@ -79,7 +79,7 @@ const mf: FilterFn<Repair> = (row, colId, val: string[]) => { if (!val || !val.l
 mf.autoRemove = (v: string[]) => !v || !v.length;
 
 const fmt = fmtDate;
-function fmtMoney(n?: number) { if (n == null) return '\u2014'; return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 0 }); }
+function fmtMoney(n?: number) { if (n == null) return '\u2014'; return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 function Badge({ t, c }: { t: string; c?: { bg: string; text: string } }) { const s = c || { bg: '#F3F4F6', text: '#6B7280' }; return <span style={{ display: 'inline-block', padding: '2px 10px', borderRadius: 12, fontSize: 11, fontWeight: 600, letterSpacing: '0.02em', background: s.bg, color: s.text, whiteSpace: 'nowrap' }}>{t}</span>; }
 
 function toCSV(rows: Repair[], fn: string) {
