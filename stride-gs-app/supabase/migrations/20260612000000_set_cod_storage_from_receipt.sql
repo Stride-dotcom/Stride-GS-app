@@ -8,10 +8,12 @@
 -- bypasses the browser-blocking INSERT policy), same return = rows updated.
 --
 -- Per item: cod_storage_start_date = receive_date::date + p_days. inventory
--- .receive_date is TEXT (ISO 'YYYY-MM-DD' or blank); blank → CURRENT_DATE so
--- a receipt-less item still gets a sane anchor (matches the React preview's
--- (receiveDate || today) + N). All non-blank values are ISO (verified), so
--- the ::date cast is safe.
+-- .receive_date is TEXT (ISO 'YYYY-MM-DD' or blank); blank → the Pacific
+-- calendar day so a receipt-less item still gets a sane anchor that matches
+-- the React preview's (receiveDate || todayIso()) + N (todayIso() is the
+-- operator's local/Pacific day — pinning here to America/Los_Angeles avoids a
+-- UTC-session off-by-one). All non-blank values are ISO (verified), so the
+-- ::date cast is safe.
 --
 -- 2026-06-12 PST
 -- ============================================================
@@ -59,7 +61,8 @@ BEGIN
     UPDATE public.inventory
        SET cod_storage            = true,
            cod_storage_start_date =
-             (COALESCE(NULLIF(receive_date, ''), to_char(CURRENT_DATE, 'YYYY-MM-DD'))::date
+             (COALESCE(NULLIF(receive_date, ''),
+                       to_char((now() AT TIME ZONE 'America/Los_Angeles')::date, 'YYYY-MM-DD'))::date
               + make_interval(days => v_days))::date,
            updated_at             = now()
      WHERE tenant_id = p_tenant_id

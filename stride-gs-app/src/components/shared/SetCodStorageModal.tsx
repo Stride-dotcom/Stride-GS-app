@@ -52,7 +52,6 @@ export function SetCodStorageModal({
   const [when, setWhen] = useState<SetWhen>('today');
   const [startDate, setStartDate] = useState(today);
   const [days, setDays] = useState<number>(0);
-  const [daysTouched, setDaysTouched] = useState(false);
   const [freeStorageDays, setFreeStorageDays] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -74,8 +73,10 @@ export function SetCodStorageModal({
         const n = data?.free_storage_days;
         const val = typeof n === 'number' ? n : null;
         setFreeStorageDays(val);
-        // Pre-fill the days input unless the operator has already edited it.
-        if (!daysTouched && val != null) setDays(val);
+        // Pre-fill the days input from the client's free-storage period. This
+        // effect only re-runs when the tenant changes, so an in-session manual
+        // edit isn't clobbered; a new tenant correctly re-applies its default.
+        if (val != null) setDays(val);
       });
     return () => { active = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -247,7 +248,7 @@ export function SetCodStorageModal({
                           type="number"
                           min={0}
                           value={days}
-                          onChange={e => { setDaysTouched(true); setDays(Math.max(0, parseInt(e.target.value, 10) || 0)); }}
+                          onChange={e => setDays(Math.max(0, parseInt(e.target.value, 10) || 0))}
                           style={{ width: 90, padding: '8px 12px', fontSize: 13, border: `1px solid ${theme.colors.borderDefault}`, borderRadius: 8, fontFamily: 'inherit', outline: 'none' }}
                         />
                         <span style={{ fontSize: 13, color: theme.colors.textSecondary }}>days after each item's receipt</span>
