@@ -2708,6 +2708,9 @@ export interface AddManualChargeResponse {
   ledgerRowId?: string;
   total?: number;
   message?: string;
+  /** SB-first path only: false when the Billing_Ledger sheet mirror is still
+   *  pending (the charge is saved in Supabase regardless). */
+  mirrored?: boolean;
   error?: string;
 }
 

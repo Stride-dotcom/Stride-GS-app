@@ -152,9 +152,18 @@ Deno.serve(async (req: Request) => {
     source:       'supabase',
   }).then(() => {}, () => {});
 
-  void mirror(tenantId, ledgerRowId, row, 'insert', requestId, callerEmail, sb);
+  // AWAIT the reverse-writethrough so "success" means the Billing_Ledger sheet
+  // already has the row — closing the window where a sheet-driven billing sync
+  // could treat the just-inserted SB row as orphaned. A failed/slow mirror
+  // does NOT fail the charge (SB is authority + the row is logged to
+  // gs_sync_events for retry, and the GAS sync now protects rows <30 min old),
+  // but it IS surfaced via `mirrored: false` instead of being silent.
+  const mirrored = await mirror(tenantId, ledgerRowId, row, 'insert', requestId, callerEmail, sb);
 
-  return json({ success: true, ledgerRowId, total, message: 'Manual charge added' });
+  return json({
+    success: true, ledgerRowId, total, mirrored,
+    message: mirrored ? 'Manual charge added' : 'Manual charge added (sheet sync pending)',
+  });
 });
 
 function newManualLedgerId(): string {
@@ -168,28 +177,45 @@ function slug(s: string): string {
   return String(s).toUpperCase().replace(/[^A-Z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 }
 
+/**
+ * Reverse-writethrough: append/refresh the row on the GAS Billing_Ledger sheet.
+ * Returns true when the sheet write succeeded. A failure is logged to
+ * gs_sync_events (for retry) and returns false — the caller keeps the SB row
+ * (authority) and surfaces `mirrored: false`. Bounded by a timeout so a slow
+ * GAS can't hang the Edge Function.
+ */
 async function mirror(
   tenantId: string, ledgerRowId: string, row: Record<string, unknown>, op: 'insert' | 'update',
   requestId: string, callerEmail: string, sb: ReturnType<typeof createClient>,
-): Promise<void> {
+): Promise<boolean> {
   const gasUrl   = Deno.env.get('GAS_API_URL');
   const gasToken = Deno.env.get('GAS_API_TOKEN');
-  if (!gasUrl || !gasToken) return;
+  if (!gasUrl || !gasToken) return false;
+  const payload = { tenantId, table: 'billing', op, rowId: ledgerRowId, row, requestId };
+  const logFailed = (error_message: string) =>
+    sb.from('gs_sync_events').insert({
+      tenant_id: tenantId, entity_type: 'billing', entity_id: ledgerRowId,
+      action_type: 'writethrough_reverse', sync_status: 'sync_failed',
+      requested_by: callerEmail || 'add-manual-charge-sb', request_id: requestId,
+      payload, error_message,
+    }).then(() => {}, () => {});
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 15_000);
   try {
-    const payload = { tenantId, table: 'billing', op, rowId: ledgerRowId, row, requestId };
     const res = await fetch(`${gasUrl}?action=writeThroughReverse&token=${encodeURIComponent(gasToken)}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(payload), signal: ctrl.signal,
     });
-    if (!res.ok) {
-      await sb.from('gs_sync_events').insert({
-        tenant_id: tenantId, entity_type: 'billing', entity_id: ledgerRowId,
-        action_type: 'writethrough_reverse', sync_status: 'sync_failed',
-        requested_by: callerEmail || 'add-manual-charge-sb', request_id: requestId,
-        payload, error_message: `HTTP ${res.status}`,
-      }).then(() => {}, () => {});
-    }
-  } catch (e) { console.warn('[add-manual-charge-sb] mirror threw:', e); }
+    if (res.ok) return true;
+    await logFailed(`HTTP ${res.status}`);
+    return false;
+  } catch (e) {
+    console.warn('[add-manual-charge-sb] mirror threw:', e);
+    await logFailed(String((e as Error)?.message ?? e));
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function json(body: unknown, status = 200): Response {
