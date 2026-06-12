@@ -177,6 +177,17 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   })();
   const [quoteLines, setQuoteLines] = useState<LineDraft[]>(initialLines);
   const [taxAreaId, setTaxAreaId] = useState<string>(repair.quoteTaxAreaId || '');
+  // True once the OPERATOR touches the builder (line edits, add/remove,
+  // service change, tax area). Programmatic fills (catalog backfill,
+  // exemption default pass) do NOT count — they're defaults, not intent.
+  // Gates the resend-vs-recompute decision in handleSendQuote.
+  const [builderDirty, setBuilderDirty] = useState(false);
+  // A quote already persisted on the row (amount and/or lines) — the thing
+  // a plain Resend re-emails verbatim.
+  const hasPersistedQuote =
+    (repair.quoteGrandTotal != null && repair.quoteGrandTotal > 0)
+    || (repair.quoteAmount != null && repair.quoteAmount > 0)
+    || (Array.isArray(repair.quoteLines) && repair.quoteLines.length > 0);
   const [serviceCatalog, setServiceCatalog] = useState<CatalogEntry[]>([]);
   const [taxAreas, setTaxAreas] = useState<TaxArea[]>([]);
 
@@ -346,6 +357,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   }
 
   function addLineFromCatalog(code: string) {
+    setBuilderDirty(true);
     const entry = serviceCatalog.find(e => e.code === code);
     if (!entry) return;
     setQuoteLines(prev => [...prev, {
@@ -357,9 +369,11 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
     }]);
   }
   function updateLineField(idx: number, field: keyof LineDraft, value: string | boolean) {
+    setBuilderDirty(true);
     setQuoteLines(prev => prev.map((l, i) => i === idx ? { ...l, [field]: value } : l));
   }
   function removeLine(idx: number) {
+    setBuilderDirty(true);
     setQuoteLines(prev => prev.filter((_, i) => i !== idx));
   }
   // When the user changes an svcCode dropdown on an existing line, pull
@@ -368,6 +382,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   // old custom rate doesn't apply); subsequent manual edits to the rate
   // input are preserved as before via updateLineField.
   function changeLineService(idx: number, code: string) {
+    setBuilderDirty(true);
     const entry = serviceCatalog.find(e => e.code === code);
     setQuoteLines(prev => prev.map((l, i) => i === idx ? {
       ...l,
@@ -394,6 +409,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   const [editSavedMessage, setEditSavedMessage] = useState<string | null>(null);
 
   const handleStartEditQuote = () => {
+    setBuilderDirty(false); // edit session starts clean; mutators re-set it
     setSubmitError(null);
     // Snapshot persisted quote → builder state. Re-runs the same shape
     // as the initialLines IIFE at mount but reads the latest repair prop
@@ -410,6 +426,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   };
 
   const handleCancelEditQuote = () => {
+    setBuilderDirty(false); // builder restored to persisted lines — a plain Send may fast-path resend again
     // Reset to persisted state — same logic as Start Edit (idempotent).
     if (Array.isArray(repair.quoteLines) && repair.quoteLines.length > 0) {
       setQuoteLines(repair.quoteLines.map(l => ({
@@ -674,6 +691,44 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   //   the same-lines idempotency skip.
   // opts.skipEmail  — Save Draft path; persist the updated lines without
   //   sending the customer email.
+  // PURE RESEND — server re-sends the email from the quote stored on the
+  // repair row; amounts are preserved exactly (never recalculated from the
+  // builder, whose reconstructed/auto-filled lines can price differently —
+  // RPR-63755's $228.20 → $251.93). Used by the standalone "Resend Quote"
+  // button and by Send Quote on a reopened repair with an untouched builder.
+  const handleResendQuote = async () => {
+    setSubmitError(null);
+    setEditSavedMessage(null);
+    const clientSheetId = repair.clientSheetId;
+    if (!isApiConfigured() || !clientSheetId) { setEffectiveStatus('Quote Sent'); return; }
+    applyRepairPatch?.(repair.repairId, { status: 'Quote Sent' });
+    setSubmitting(true);
+    try {
+      const resp = await postSendRepairQuoteSb({
+        tenantId: clientSheetId,
+        repairId: repair.repairId,
+        resendExisting: true,
+      });
+      if (!resp.ok) {
+        clearRepairPatch?.(repair.repairId);
+        setSubmitError(resp.error || 'Failed to resend repair quote.');
+      } else {
+        setEffectiveStatus('Quote Sent');
+        setEditSavedMessage(
+          resp.emailSent === false
+            ? `Quote saved, but the resend email failed: ${resp.emailError ?? 'unknown'}.`
+            : 'Quote re-sent to customer — same amounts as the original.'
+        );
+        onRepairUpdated?.();
+      }
+    } catch (err) {
+      clearRepairPatch?.(repair.repairId);
+      setSubmitError(err instanceof Error ? err.message : 'Network error. Please try again.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   const handleSendQuote = async (opts?: { isRevision?: boolean; skipEmail?: boolean }) => {
     const isRevision = opts?.isRevision === true;
     const skipEmail  = opts?.skipEmail  === true;
@@ -682,6 +737,19 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
     const isEditFlow = isRevision || skipEmail;
     setSubmitError(null);
     setEditSavedMessage(null);
+
+    // Persisted quote + untouched builder + plain Send → this is a RESEND,
+    // not a new quote: the server re-emails the stored amounts verbatim.
+    // The reopened-repair case (Pending Quote with an intact stored quote)
+    // lands here, which also flips status to Quote Sent server-side so the
+    // customer's approve gate reappears. Any user edit to the builder
+    // (builderDirty) routes through the normal recompute path instead.
+    if (!isRevision && !skipEmail && hasPersistedQuote && !builderDirty
+        && sendRepairEmailsBackend === 'supabase'
+        && isApiConfigured() && repair.clientSheetId) {
+      await handleResendQuote();
+      return;
+    }
 
     // ─── Validate the multi-line quote ──────────────────────────────────────
     // Backend accepts either shape, but we always send the multi-line form
@@ -2022,7 +2090,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
               onChangeService={changeLineService}
               onUpdateField={updateLineField}
               onRemoveLine={removeLine}
-              onTaxAreaChange={setTaxAreaId}
+              onTaxAreaChange={(id) => { setBuilderDirty(true); setTaxAreaId(id); }}
             />
             <WriteButton
               label={submitting ? 'Sending...' : 'Send Quote to Client'}
@@ -2068,7 +2136,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
                   onChangeService={changeLineService}
                   onUpdateField={updateLineField}
                   onRemoveLine={removeLine}
-                  onTaxAreaChange={setTaxAreaId}
+                  onTaxAreaChange={(id) => { setBuilderDirty(true); setTaxAreaId(id); }}
                 />
                 <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
                   <WriteButton
@@ -2122,6 +2190,23 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
                 />
                 {canStaffEdit && (
                   <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                    {effectiveStatus === 'Quote Sent' && (
+                      <button
+                        onClick={() => { void handleResendQuote(); }}
+                        disabled={submitting}
+                        style={{
+                          flex: 1, padding: '8px 12px', fontSize: 12, fontWeight: 600,
+                          background: '#FFFFFF', color: theme.colors.orange,
+                          border: `1px solid ${theme.colors.orange}`, borderRadius: 8,
+                          cursor: submitting ? 'wait' : 'pointer',
+                          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                          opacity: submitting ? 0.6 : 1, fontFamily: 'inherit',
+                        }}
+                        title="Re-send this quote email with the SAME amounts (no recalculation). Use Edit Quote to change numbers."
+                      >
+                        <Send size={13} /> Resend Quote
+                      </button>
+                    )}
                     {effectiveStatus === 'Quote Sent' && (
                       <button
                         onClick={handleStartEditQuote}
@@ -2538,7 +2623,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
               onChangeService={changeLineService}
               onUpdateField={updateLineField}
               onRemoveLine={removeLine}
-              onTaxAreaChange={setTaxAreaId}
+              onTaxAreaChange={(id) => { setBuilderDirty(true); setTaxAreaId(id); }}
             />
             <WriteButton
               label={submitting ? 'Sending...' : 'Send Quote to Client'}
@@ -2567,7 +2652,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
               onChangeService={changeLineService}
               onUpdateField={updateLineField}
               onRemoveLine={removeLine}
-              onTaxAreaChange={setTaxAreaId}
+              onTaxAreaChange={(id) => { setBuilderDirty(true); setTaxAreaId(id); }}
             />
             <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
               <WriteButton
@@ -2621,6 +2706,23 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
             />
             {canStaffEdit && (
               <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                {sLocal === 'Quote Sent' && (
+                  <button
+                    onClick={() => { void handleResendQuote(); }}
+                    disabled={submitting}
+                    style={{
+                      flex: 1, padding: '8px 12px', fontSize: 12, fontWeight: 600,
+                      background: '#FFFFFF', color: theme.colors.orange,
+                      border: `1px solid ${theme.colors.orange}`, borderRadius: 8,
+                      cursor: submitting ? 'wait' : 'pointer',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                      opacity: submitting ? 0.6 : 1, fontFamily: 'inherit',
+                    }}
+                    title="Re-send this quote email with the SAME amounts (no recalculation). Use Edit Quote to change numbers."
+                  >
+                    <Send size={13} /> Resend Quote
+                  </button>
+                )}
                 {sLocal === 'Quote Sent' && (
                   <button
                     onClick={handleStartEditQuote}

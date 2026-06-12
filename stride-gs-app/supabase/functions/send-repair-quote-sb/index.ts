@@ -46,7 +46,11 @@
  *   quoteLines?: [{ svcCode, svcName, qty, rate, taxable }],
  *   quoteAmount?: number (legacy single-line),
  *   taxAreaId?, taxAreaName?, taxRate?,
- *   notes?, isRevision?, skipEmail?
+ *   notes?, isRevision?, skipEmail?,
+ *   resendExisting?: boolean — PURE RESEND: ignore client lines, re-send the
+ *     email from the quote data stored on the repair row (amounts preserved
+ *     byte-for-byte; original subject; no quote-column writes; transitions
+ *     Pending Quote → Quote Sent for reopened repairs)
  * }
  * Response: { ok, repairId, previousStatus, subtotal, taxAmount, grandTotal,
  *             alreadyMatching?, mirrorQueued, emailSent, emailError? }
@@ -100,6 +104,15 @@ Deno.serve(async (req: Request) => {
     // updated quote without firing the email.
     const isRevision: boolean = body.isRevision === true;
     const skipEmail:  boolean = body.skipEmail  === true;
+    // Pure RESEND (no edits): ignore any client-supplied lines and re-send
+    // the email from the quote data STORED ON THE REPAIR ROW, byte-for-byte.
+    // Born from RPR-63755 (2026-06-11): a reopened repair's quote was re-sent
+    // through the builder, whose reconstructed/auto-filled lines priced
+    // differently than the original ($228.20 → $251.93). Only the explicit
+    // edit flow (Save & Resend, isRevision=true) may change amounts; a plain
+    // resend must never recalculate. Also transitions Pending Quote →
+    // Quote Sent (the reopen case) so the customer's approve gate appears.
+    const resendExisting: boolean = body.resendExisting === true;
 
     if (!tenantId) return json({ ok: false, error: 'tenantId is required' }, 400);
     if (!repairId) return json({ ok: false, error: 'repairId is required' }, 400);
@@ -129,7 +142,10 @@ Deno.serve(async (req: Request) => {
     let taxRate     = Number(body.taxRate);
     if (Number.isNaN(taxRate) || taxRate < 0) taxRate = 0;
 
-    if (hasLines) {
+    if (resendExisting) {
+      // Lines + totals come from the STORED row, derived after the load
+      // below — nothing client-supplied is trusted on a pure resend.
+    } else if (hasLines) {
       quoteLines = (body.quoteLines as QuoteLineInput[]).map(l => {
         let qty  = Number(l?.qty);
         let rate = Number(l?.rate);
@@ -162,20 +178,61 @@ Deno.serve(async (req: Request) => {
       return json({ ok: false, error: 'Either quoteLines or quoteAmount is required' }, 400);
     }
 
-    const subtotal        = round2(quoteLines.reduce((s, l) => s + l.amount, 0));
-    const taxableSubtotal = round2(quoteLines.filter(l => l.taxable).reduce((s, l) => s + l.amount, 0));
-    const taxAmount       = round2(taxableSubtotal * (taxRate / 100));
-    const grandTotal      = round2(subtotal + taxAmount);
+    let subtotal        = round2(quoteLines.reduce((s, l) => s + l.amount, 0));
+    let taxableSubtotal = round2(quoteLines.filter(l => l.taxable).reduce((s, l) => s + l.amount, 0));
+    let taxAmount       = round2(taxableSubtotal * (taxRate / 100));
+    let grandTotal      = round2(subtotal + taxAmount);
 
     // ── 2. Load existing repair + validate state ─────────────────────
     const { data: existing, error: existingErr } = await supabase
       .from('repairs')
-      .select('repair_id, status, quote_lines_json, quote_grand_total, quote_sent_date, item_id, repair_notes, task_notes')
+      .select('repair_id, status, quote_lines_json, quote_grand_total, quote_sent_date, item_id, repair_notes, task_notes, quote_amount, quote_subtotal, quote_taxable_subtotal, quote_tax_area_id, quote_tax_area_name, quote_tax_rate, quote_tax_amount')
       .eq('tenant_id', tenantId)
       .eq('repair_id', repairId)
       .maybeSingle();
     if (existingErr) return json({ ok: false, error: `Repair lookup failed: ${existingErr.message}` }, 500);
     if (!existing)   return json({ ok: false, error: `Repair ${repairId} not found` }, 404);
+
+    // ── 2b. RESEND: derive lines + totals from the STORED quote ──────
+    // Stored totals are used verbatim (never recomputed); per-line amount
+    // is qty×rate purely for the email's line-item table rendering.
+    if (resendExisting) {
+      const storedLines = Array.isArray(existing.quote_lines_json)
+        ? (existing.quote_lines_json as QuoteLineInput[])
+        : null;
+      if (storedLines && storedLines.length > 0) {
+        quoteLines = storedLines.map(l => {
+          const qty  = Number(l?.qty)  || 0;
+          const rate = Number(l?.rate) || 0;
+          return {
+            svcCode: String(l?.svcCode ?? '').trim(),
+            svcName: String(l?.svcName ?? '').trim(),
+            qty, rate,
+            taxable: l?.taxable === true,
+            amount:  Math.round(qty * rate * 100) / 100,
+          };
+        }).filter(l => l.svcCode);
+      } else {
+        // Legacy / lines-lost rows: one synthetic line at the stored amount
+        // so the email still shows a line table that sums to the total.
+        const legacyAmt = Number(existing.quote_amount ?? existing.quote_grand_total ?? 0);
+        if (!(legacyAmt > 0)) {
+          return json({ ok: false, error: 'No stored quote to resend — send a quote first.', errorCode: 'NO_STORED_QUOTE' }, 422);
+        }
+        quoteLines = [{
+          svcCode: 'REPAIR', svcName: 'Repair',
+          qty: 1, rate: legacyAmt, taxable: false,
+          amount: Math.round(legacyAmt * 100) / 100,
+        }];
+      }
+      taxAreaId       = (existing.quote_tax_area_id as string | null) ?? null;
+      taxAreaName     = (existing.quote_tax_area_name as string | null) ?? null;
+      taxRate         = Number(existing.quote_tax_rate ?? 0) || 0;
+      taxAmount       = round2(Number(existing.quote_tax_amount ?? 0) || 0);
+      grandTotal      = round2(Number(existing.quote_grand_total ?? existing.quote_amount ?? 0) || 0);
+      subtotal        = round2(Number(existing.quote_subtotal ?? (grandTotal - taxAmount)) || 0);
+      taxableSubtotal = round2(Number(existing.quote_taxable_subtotal ?? 0) || 0);
+    }
 
     const previousStatus = String(existing.status ?? '').trim();
     if (!ALLOWED_SOURCE_STATUSES.has(previousStatus)) {
@@ -194,7 +251,7 @@ Deno.serve(async (req: Request) => {
       && existingLines.length === quoteLines.length
       && JSON.stringify(existingLines) === JSON.stringify(quoteLines.map(({ amount: _a, ...rest }) => rest));
     const totalMatches = Number(existing.quote_grand_total ?? -1) === grandTotal;
-    if (!isRevision && linesMatch && totalMatches && previousStatus === 'Quote Sent') {
+    if (!isRevision && !resendExisting && linesMatch && totalMatches && previousStatus === 'Quote Sent') {
       return json({
         ok: true, repairId, previousStatus,
         subtotal, taxAmount, grandTotal,
@@ -211,7 +268,18 @@ Deno.serve(async (req: Request) => {
     const ptDate = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
     const existingQuoteSentDate = String(existing.quote_sent_date ?? '').trim();
     const nextQuoteSentDate = existingQuoteSentDate || ptDate;
-    const { error: updErr } = await supabase
+    // RESEND: never rewrite the quote columns (they're already the truth we
+    // just read) and never touch quote_revised — the only row change is the
+    // Pending Quote → Quote Sent transition (reopened repairs).
+    const { error: updErr } = resendExisting
+      ? (previousStatus === 'Pending Quote'
+          ? await supabase
+              .from('repairs')
+              .update({ status: 'Quote Sent', updated_at: new Date().toISOString() })
+              .eq('tenant_id', tenantId)
+              .eq('repair_id', repairId)
+          : { error: null })
+      : await supabase
       .from('repairs')
       .update({
         status:                 'Quote Sent',
@@ -247,10 +315,10 @@ Deno.serve(async (req: Request) => {
       entity_type:  'repair',
       entity_id:    repairId,
       tenant_id:    tenantId,
-      action:       isFirstSend ? 'status_change' : 'quote_revised',
+      action:       isFirstSend ? 'status_change' : (resendExisting ? 'quote_resent' : 'quote_revised'),
       changes:      isFirstSend
-        ? { status: { old: previousStatus, new: 'Quote Sent' } }
-        : { revision: true, skipEmail },
+        ? { status: { old: previousStatus, new: 'Quote Sent' }, ...(resendExisting ? { resend: true } : {}) }
+        : (resendExisting ? { resend: true } : { revision: true, skipEmail }),
       performed_by: callerEmail,
       source:       'edge',
     });
@@ -262,7 +330,18 @@ Deno.serve(async (req: Request) => {
     // waiting on the ~30s sheet round-trip. Same gs_sync_events failure
     // capture path; only the await point moves. Pattern mirrors
     // void-invoice-sb (v38.243.0).
-    const mirrorPayload = {
+    // RESEND mirrors ONLY the status — the sheet's quote columns are either
+    // already correct or (post-reopen) stale, and the v38.274 writer guard
+    // converges Status to live SB truth. Quote columns must not be rewritten
+    // from a resend any more than the SB row is.
+    const mirrorPayload = resendExisting ? {
+      tenantId,
+      table: 'repairs',
+      op:    'update',
+      rowId: repairId,
+      row:   { status: 'Quote Sent' },
+      requestId,
+    } : {
       tenantId,
       table: 'repairs',
       op:    'update',
@@ -312,7 +391,7 @@ Deno.serve(async (req: Request) => {
               sync_status:   'sync_failed',
               requested_by:  `send-repair-quote-sb:${callerEmail}`,
               request_id:    requestId,
-              payload:       { table: 'repairs', op: 'update', rowId: repairId, fieldCount: 11 },
+              payload:       { table: 'repairs', op: 'update', rowId: repairId, fieldCount: resendExisting ? 1 : 11 },
               error_message: String(errMsg).slice(0, 1000),
             }).then(() => {}, () => {});
           }
@@ -327,7 +406,7 @@ Deno.serve(async (req: Request) => {
             sync_status:   'sync_failed',
             requested_by:  `send-repair-quote-sb:${callerEmail}`,
             request_id:    requestId,
-            payload:       { table: 'repairs', op: 'update', rowId: repairId, fieldCount: 11 },
+            payload:       { table: 'repairs', op: 'update', rowId: repairId, fieldCount: resendExisting ? 1 : 11 },
             error_message: errMsg.slice(0, 1000),
           }).then(() => {}, () => {});
         }
@@ -419,14 +498,16 @@ Deno.serve(async (req: Request) => {
       // shows it's an updated quote; a first send reads "Repair Quote Ready: …".
       // Mirrors GAS handleSendRepairQuote_ so the subject is identical
       // regardless of which backend serviced the request.
+      // A pure resend keeps the ORIGINAL subject (same quote, same numbers);
+      // only the explicit edit flow gets the "Revised" title.
       const subjectOverride = isRevision
         ? `Revised Repair Quote: ${itemIdsLabel} $${formatMoney(grandTotal)}`
         : `Repair Quote Ready: ${itemIdsLabel} $${formatMoney(grandTotal)}`;
-      // Bump the idempotency key on a revision so send-email's
-      // per-template dedup doesn't drop the resend when nothing else
-      // changed in the tokens.
-      const idempotencyKey = isRevision
-        ? `repair-quote:${repairId}:${grandTotal}:rev:${Date.now()}`
+      // Bump the idempotency key on a revision OR a pure resend so
+      // send-email's per-template dedup doesn't drop the email when
+      // nothing changed in the tokens (a resend changes nothing by design).
+      const idempotencyKey = (isRevision || resendExisting)
+        ? `repair-quote:${repairId}:${grandTotal}:${resendExisting ? 'resend' : 'rev'}:${Date.now()}`
         : `repair-quote:${repairId}:${grandTotal}`;
       try {
         const sendRes = await fetch(`${supabaseUrl}/functions/v1/send-email`, {

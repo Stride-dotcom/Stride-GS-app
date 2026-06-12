@@ -3638,6 +3638,11 @@ export interface SendRepairQuoteSbPayload {
   isRevision?: boolean;
   /** Save Draft — persist updated lines but skip the customer email. */
   skipEmail?: boolean;
+  /** PURE RESEND — server re-sends the email from the quote data stored on
+   *  the repair row (amounts preserved exactly; quoteLines/totals in this
+   *  payload are ignored). Transitions Pending Quote → Quote Sent for
+   *  reopened repairs. Only the edit flow (isRevision) changes amounts. */
+  resendExisting?: boolean;
 }
 export interface SendRepairQuoteSbResponse {
   ok: boolean;
