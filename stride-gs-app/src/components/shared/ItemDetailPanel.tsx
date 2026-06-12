@@ -1,15 +1,14 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
-import { X, Package, Calendar, FileText, ClipboardList, Wrench, Truck, ExternalLink, DollarSign, AlertCircle, MapPin, CheckCircle2, Pencil, Save, Loader2, FolderOpen, Plus, ChevronDown, Shield, Image as ImageIcon, StickyNote, Activity, BadgePercent, Split as SplitIcon } from 'lucide-react';
+import { X, Package, Calendar, FileText, ClipboardList, Wrench, Truck, ExternalLink, AlertCircle, CheckCircle2, Pencil, Save, Loader2, FolderOpen, Plus, ChevronDown, Shield, Image as ImageIcon, StickyNote, Activity, BadgePercent, Split as SplitIcon } from 'lucide-react';
 import { StorageCreditsSection } from './StorageCreditsSection';
 import { ActivityTimeline } from './ActivityTimeline';
 import { FolderButton } from './FolderButton';
 import { ItemIdBadges } from './ItemIdBadges';
 import { useItemIndicators } from '../../hooks/useItemIndicators';
-import { supabase } from '../../lib/supabase';
 import { LinkifiedText } from './LinkifiedText';
 import { AutocompleteInput } from './AutocompleteInput';
 import { theme } from '../../styles/theme';
-import { fmtDate, fmtDateTime } from '../../lib/constants';
+import { fmtDate } from '../../lib/constants';
 import { useReceivingAddons } from '../../hooks/useReceivingAddons';
 import { postUpdateInventoryItem, postRequestRepairQuote, postRequestRepairQuoteSb, postAddItemAddon, postRemoveItemAddon, isApiConfigured } from '../../lib/api';
 import { useFeatureFlag, useFeatureFlagRow, resolveFlagBackend } from '../../contexts/FeatureFlagContext';
@@ -258,7 +257,6 @@ export function ItemDetailPanel({
   onNavigateToRecord,
   onCreateTask, onCreateWillCall, onTransfer, onSplit,
   itemTasks = [], itemRepairs = [], itemWillCalls = [], itemBilling = [],
-  itemShipment,
   userRole, classNames = [], locationNames = [], clientSheetId, onItemUpdated,
   applyItemPatch, mergeItemPatch, clearItemPatch,
   renderAsPage,
