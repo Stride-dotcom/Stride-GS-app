@@ -110,7 +110,7 @@ export interface TabbedDetailPanelBuiltInTabs {
     rollupCtx?: RollupContext | null;
   };
   /** Activity tab — accepts either a simple entityType/entityId pair (renders
-   *  the default `<EntityHistory>`) OR a full render function (escape hatch
+   *  the default `<ActivityTimeline>`) OR a full render function (escape hatch
    *  for entities like Item whose activity view has cross-entity logic). */
   activity?:
     | { entityType: string; entityId: string; tenantId?: string | null }

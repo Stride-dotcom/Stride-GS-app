@@ -1,5 +1,5 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
-import { X, Package, Calendar, FileText, ClipboardList, Wrench, Truck, ExternalLink, DollarSign, Ship, AlertCircle, MapPin, CheckCircle2, Pencil, Save, Loader2, FolderOpen, Plus, ChevronDown, Shield, Image as ImageIcon, StickyNote, Activity, BadgePercent, Split as SplitIcon } from 'lucide-react';
+import { X, Package, Calendar, FileText, ClipboardList, Wrench, Truck, ExternalLink, DollarSign, AlertCircle, MapPin, CheckCircle2, Pencil, Save, Loader2, FolderOpen, Plus, ChevronDown, Shield, Image as ImageIcon, StickyNote, Activity, BadgePercent, Split as SplitIcon } from 'lucide-react';
 import { StorageCreditsSection } from './StorageCreditsSection';
 import { ActivityTimeline } from './ActivityTimeline';
 import { FolderButton } from './FolderButton';
@@ -11,15 +11,13 @@ import { AutocompleteInput } from './AutocompleteInput';
 import { theme } from '../../styles/theme';
 import { fmtDate, fmtDateTime } from '../../lib/constants';
 import { useReceivingAddons } from '../../hooks/useReceivingAddons';
-import { postUpdateInventoryItem, fetchItemMoveHistory, postRequestRepairQuote, postRequestRepairQuoteSb, postAddItemAddon, postRemoveItemAddon, isApiConfigured } from '../../lib/api';
+import { postUpdateInventoryItem, postRequestRepairQuote, postRequestRepairQuoteSb, postAddItemAddon, postRemoveItemAddon, isApiConfigured } from '../../lib/api';
 import { useFeatureFlag, useFeatureFlagRow, resolveFlagBackend } from '../../contexts/FeatureFlagContext';
 import { entityEvents } from '../../lib/entityEvents';
-import type { MoveHistoryEntry } from '../../lib/api';
 import type { InventoryItem, InventoryStatus } from '../../lib/types';
 import { TabbedDetailPanel } from './TabbedDetailPanel';
 import type { TabbedDetailPanelTab } from './TabbedDetailPanel';
 import { EntityPage } from './EntityPage';
-import { buildDeepLink } from '../../lib/deepLinks';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { useAutocomplete } from '../../hooks/useAutocomplete';
 import { FloatingActionMenu, type FABAction } from './FloatingActionMenu';
@@ -27,7 +25,6 @@ import { usePhotoGraphRollup, useNoteGraphRollup, type RollupContext } from '../
 import { EntityNotesInline } from '../notes/EntityNotesInline';
 import { ItemCodStorageSection } from './ItemCodStorageSection';
 import { useDocuments } from '../../hooks/useDocuments';
-import { useServiceCatalog } from '../../hooks/useServiceCatalog';
 
 export interface LinkedRecord {
   id: string;
@@ -292,7 +289,6 @@ export function ItemDetailPanel({
   const sc = statusCfg[item.status] || statusCfg.Active;
 
   const hasLinkedRecords = linkedTasks.length > 0 || linkedRepairs.length > 0 || linkedWillCalls.length > 0;
-  const hasShipment = !!item.shipmentNumber;
 
   // (I)(A)(R) item indicators — list pages already compute these from
   // already-loaded tasks/repairs; the detail panel has to fetch on its own
