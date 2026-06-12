@@ -11,7 +11,7 @@ import { usePhotoGraphRollup, useNoteGraphRollup, type RollupContext } from '../
 import { useDocuments } from '../../hooks/useDocuments';
 import { PhotosPanel as _PhotosPanel, DocumentsPanel as _DocumentsPanel, NotesPanel as _NotesPanel } from './EntityAttachments';
 import { EntityNotesInline } from '../notes/EntityNotesInline';
-import { EntityHistory } from './EntityHistory';
+import { ActivityTimeline } from './ActivityTimeline';
 import { ItemIdBadges } from './ItemIdBadges';
 import { useItemIndicators } from '../../hooks/useItemIndicators';
 import { theme } from '../../styles/theme';
@@ -1472,7 +1472,7 @@ export function WillCallDetailPanel({ wc: wcProp, onClose, onWcUpdated, onNaviga
     />
   );
   const renderWcActivityTab = () => (
-    <EntityHistory entityType="will_call" entityId={wc.wcNumber} tenantId={clientSheetId ?? undefined} />
+    <ActivityTimeline entityType="will_call" entityId={wc.wcNumber} tenantId={clientSheetId ?? undefined} />
   );
 
   const pageTabs = [

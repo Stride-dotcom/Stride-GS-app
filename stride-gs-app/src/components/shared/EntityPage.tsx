@@ -18,7 +18,7 @@ import { ArrowLeft } from 'lucide-react';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { useGoBack } from '../../hooks/useGoBack';
 import { PhotosPanel, DocumentsPanel, NotesPanel } from './EntityAttachments';
-import { EntityHistory } from './EntityHistory';
+import { ActivityTimeline } from './ActivityTimeline';
 import { usePhotos, type EntityType as PhotoEntityType } from '../../hooks/usePhotos';
 import { useDocuments, type DocumentContextType } from '../../hooks/useDocuments';
 import { useEntityNotes } from '../../hooks/useEntityNotes';
@@ -217,7 +217,7 @@ function useBuiltInEntityTabs(cfg: EntityPageBuiltInTabs | undefined): EntityPag
           label: 'Activity',
           badgeCount: null,
           render: () => (
-            <EntityHistory
+            <ActivityTimeline
               entityType={activityCfg.entityType}
               entityId={activityCfg.entityId}
               tenantId={activityCfg.tenantId ?? undefined}

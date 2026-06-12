@@ -43,7 +43,7 @@ import { useResizablePanel } from '../../hooks/useResizablePanel';
 import { getPanelContainerStyle, panelBackdropStyle } from './panelStyles';
 import { DetailHeader } from './DetailHeader';
 import { PhotosPanel, DocumentsPanel, NotesPanel } from './EntityAttachments';
-import { EntityHistory } from './EntityHistory';
+import { ActivityTimeline } from './ActivityTimeline';
 import { usePhotos, type EntityType as PhotoEntityType } from '../../hooks/usePhotos';
 import { useDocuments, type DocumentContextType } from '../../hooks/useDocuments';
 import { useEntityNotes } from '../../hooks/useEntityNotes';
@@ -343,7 +343,7 @@ function useBuiltInTabs(cfg: TabbedDetailPanelBuiltInTabs | undefined): TabbedDe
           label: 'Activity',
           badgeCount: null,
           render: () => (
-            <EntityHistory
+            <ActivityTimeline
               entityType={activityCfg.entityType}
               entityId={activityCfg.entityId}
               tenantId={activityCfg.tenantId ?? undefined}

@@ -26,7 +26,7 @@ import { DriveFoldersList, type DriveFolderLink } from './DriveFoldersList';
 import { usePhotoGraphRollup, useNoteGraphRollup, type RollupContext } from '../../hooks/useGraphRollup';
 import { useDocuments } from '../../hooks/useDocuments';
 import { PhotosPanel as _PhotosPanel, DocumentsPanel as _DocumentsPanel, NotesPanel as _NotesPanel } from './EntityAttachments';
-import { EntityHistory } from './EntityHistory';
+import { ActivityTimeline } from './ActivityTimeline';
 import { InlineEditableCell } from './InlineEditableCell';
 import { renderDoc, buildReceivingTokens } from '../../lib/docRenderer';
 
@@ -740,7 +740,7 @@ export function ShipmentDetailPanel({ shipment, onClose, userRole, isParent, onI
     />
   );
   const renderShipmentActivityTab = () => (
-    <EntityHistory entityType="shipment" entityId={shipment.shipmentNo} tenantId={shipment.clientSheetId ?? undefined} />
+    <ActivityTimeline entityType="shipment" entityId={shipment.shipmentNo} tenantId={shipment.clientSheetId ?? undefined} />
   );
 
   const customTabs: TabbedDetailPanelTab[] = [

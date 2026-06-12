@@ -1,6 +1,7 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import { X, Package, Calendar, FileText, ClipboardList, Wrench, Truck, ExternalLink, DollarSign, Ship, AlertCircle, MapPin, CheckCircle2, Pencil, Save, Loader2, FolderOpen, Plus, ChevronDown, Shield, Image as ImageIcon, StickyNote, Activity, BadgePercent, Split as SplitIcon } from 'lucide-react';
 import { StorageCreditsSection } from './StorageCreditsSection';
+import { ActivityTimeline } from './ActivityTimeline';
 import { FolderButton } from './FolderButton';
 import { ItemIdBadges } from './ItemIdBadges';
 import { useItemIndicators } from '../../hooks/useItemIndicators';
@@ -250,335 +251,9 @@ function LinkedRecordButton({ records, type, onNavigate }: {
 
 // ─── Status color helper ───────────────────────────────────────────────────────
 
-function statusBadgeStyle(status: string): { bg: string; color: string } {
-  const s = status?.toLowerCase() || '';
-  if (s === 'completed' || s === 'invoiced' || s === 'billed' || s === 'pass' || s === 'released')
-    return { bg: '#F0FDF4', color: '#15803D' };
-  if (s === 'cancelled' || s === 'void' || s === 'declined' || s === 'fail' || s === 'failed')
-    return { bg: '#F3F4F6', color: '#6B7280' };
-  if (s === 'unbilled' || s === 'pending' || s === 'in progress' || s === 'open' || s === 'active')
-    return { bg: '#FEF3C7', color: '#B45309' };
-  return { bg: '#EFF6FF', color: '#1D4ED8' };
-}
-
-function MiniStatusBadge({ status }: { status: string }) {
-  if (!status) return <span style={{ fontSize: 11, color: theme.colors.textMuted }}>{'\u2014'}</span>;
-  const s = statusBadgeStyle(status);
-  return (
-    <span style={{
-      display: 'inline-block', padding: '1px 7px', borderRadius: 10, fontSize: 10,
-      fontWeight: 600, background: s.bg, color: s.color, whiteSpace: 'nowrap',
-    }}>{status}</span>
-  );
-}
-
-// ─── Section emoji map ────────────────────────────────────────────────────────
-
-const SECTION_EMOJI: Record<string, string> = {
-  Shipment: '📦', Moves: '📍', Tasks: '📋', Repairs: '🔧', Billing: '💰', 'Will Calls': '🚚',
-};
-
-// ─── Collapsible History Section ───────────────────────────────────────────────
-
-function CollapsibleHistorySection({ title, count, defaultOpen, children }: {
-  icon?: any; title: string; count: number; defaultOpen?: boolean; children: React.ReactNode;
-}) {
-  const [open, setOpen] = useState(defaultOpen ?? false);
-  const emoji = SECTION_EMOJI[title] || '';
-
-  return (
-    <div style={{ borderTop: `1px solid #F1F5F9` }}>
-      <button
-        onClick={() => setOpen(!open)}
-        style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%',
-          padding: '12px 0', background: 'none', border: 'none', cursor: 'pointer',
-          fontFamily: 'inherit', color: theme.colors.textPrimary,
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          {emoji && <span style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 14, lineHeight: 1, width: 20, flexShrink: 0, textAlign: 'center' }}>{emoji}</span>}
-          <span style={{ fontSize: 13, fontWeight: 600, color: '#1E293B' }}>{title}</span>
-          <span style={{
-            fontSize: 11, color: theme.colors.textMuted, background: theme.colors.bgSubtle, padding: '1px 8px', borderRadius: 10, fontWeight: 500,
-          }}>{count}</span>
-        </div>
-        <span style={{ fontSize: 14, color: '#94A3B8', transition: 'transform 0.2s', transform: open ? 'rotate(180deg)' : 'rotate(0deg)' }}>▾</span>
-      </button>
-      {open && (
-        <div style={{ paddingBottom: 16 }}>
-          {count === 0 ? (
-            <div style={{ fontSize: 12, color: '#94A3B8', padding: '4px 0' }}>None</div>
-          ) : children}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─── History row styles (mockup-aligned) ──────────────────────────────────────
-
-const histRowStyle: React.CSSProperties = {
-  display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0',
-  borderBottom: '1px solid #F8FAFC', fontSize: 12,
-};
-
-const histDateStyle: React.CSSProperties = {
-  color: '#94A3B8', fontSize: 11, minWidth: 72, flexShrink: 0,
-};
-
-const histIdStyle: React.CSSProperties = {
-  fontWeight: 600, fontFamily: 'monospace', color: theme.colors.orange,
-  cursor: 'pointer', textDecoration: 'none', background: 'none', border: 'none',
-  padding: 0, fontSize: 12,
-};
-
-const histNoteStyle: React.CSSProperties = {
-  color: '#64748B', fontSize: 11,
-};
-
-// ─── SERVICE_CODES constant ────────────────────────────────────────────────────
-
-const SERVICE_CODES: Record<string, string> = {
-  STOR: 'Storage', RCVG: 'Receiving', INSP: 'Inspection', ASM: 'Assembly',
-  MNRTU: 'Minor Touch-Up', WC: 'Will Call', REPAIR: 'Repair',
-};
-
 // ─── Status options ────────────────────────────────────────────────────────────
 
 const STATUS_OPTIONS: InventoryStatus[] = ['Active', 'On Hold', 'Released', 'Transferred'];
-
-// ─── Audit entry sub-timeline ─────────────────────────────────────────────────
-
-const AUDIT_ACTION_LABELS: Record<string, { label: string; color: string }> = {
-  create: { label: 'Created', color: '#15803D' },
-  update: { label: 'Updated', color: '#1D4ED8' },
-  start: { label: 'Started', color: '#E85D2D' },
-  complete: { label: 'Completed', color: '#15803D' },
-  cancel: { label: 'Cancelled', color: '#DC2626' },
-  release: { label: 'Released', color: '#7C3AED' },
-  transfer: { label: 'Transferred', color: '#0891B2' },
-  assign: { label: 'Assigned', color: '#B45309' },
-  status_change: { label: 'Status Changed', color: '#6D28D9' },
-  cod_storage_set:       { label: 'COD Storage On',   color: '#CA8A04' },
-  cod_storage_removed:   { label: 'COD Storage Off',  color: '#6B7280' },
-  cod_storage_collected: { label: 'COD Storage Paid', color: '#15803D' },
-};
-
-interface AuditEntry {
-  id: string; action: string; changes: Record<string, unknown>;
-  performed_by: string; performed_at: string;
-}
-
-function AuditSubTimeline({ entries }: { entries: AuditEntry[] }) {
-  if (!entries.length) return null;
-  return (
-    <div style={{ marginLeft: 12, borderLeft: `1px solid #E2E8F0`, paddingLeft: 10, marginTop: 4, marginBottom: 4 }}>
-      {entries.map(e => {
-        const cfg = AUDIT_ACTION_LABELS[e.action] || { label: e.action, color: '#6B7280' };
-        const who = e.performed_by ? e.performed_by.split('@')[0] : 'System';
-        let detail = '';
-        if (e.changes) {
-          if (e.changes.summary) detail = String(e.changes.summary);
-          else if (e.changes.status && typeof e.changes.status === 'object') {
-            const s = e.changes.status as { old?: string; new?: string };
-            if (s.old && s.new) detail = `${s.old} → ${s.new}`;
-            else if (s.new) detail = `→ ${s.new}`;
-          }
-          if (e.changes.result) detail += (detail ? ' · ' : '') + String(e.changes.result);
-        }
-        const time = (() => { try { return fmtDateTime(e.performed_at); } catch { return ''; } })();
-        return (
-          <div key={e.id} style={{ fontSize: 10, color: '#64748B', padding: '2px 0', display: 'flex', gap: 6, alignItems: 'baseline' }}>
-            <span style={{ color: cfg.color, fontWeight: 700, fontSize: 9, textTransform: 'uppercase', flexShrink: 0 }}>{cfg.label}</span>
-            {detail && <span>{detail}</span>}
-            <span style={{ color: '#94A3B8' }}>by {who}</span>
-            <span style={{ color: '#CBD5E1', marginLeft: 'auto', flexShrink: 0 }}>{time}</span>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-// ─── Item History Component ────────────────────────────────────────────────────
-
-function ItemHistory({ itemId, tasks, repairs, willCalls, billing, moves, shipmentNumber, receiveDate, shipmentCarrier, shipmentTracking, auditByEntity, clientSheetId }: {
-  itemId?: string;
-  tasks: any[];
-  repairs: any[];
-  willCalls: any[];
-  billing: any[];
-  moves: MoveHistoryEntry[];
-  shipmentNumber?: string;
-  receiveDate?: string;
-  shipmentCarrier?: string;
-  shipmentTracking?: string;
-  auditByEntity: Record<string, AuditEntry[]>;
-  clientSheetId?: string;
-}) {
-  // Service-label resolution for the task history rows below — pulls live
-  // names from the Price List service_catalog so custom codes (FAB_RUG,
-  // DISP, MULTI_INS, etc.) render as friendly labels rather than raw codes.
-  // Falls back to the legacy SERVICE_CODES static map, then raw code.
-  const { services: catalogServices } = useServiceCatalog();
-  const svcNameByCode = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const s of catalogServices) if (s.code && s.name) m.set(s.code, s.name);
-    return m;
-  }, [catalogServices]);
-
-  // COD storage set/remove audit for THIS item, scoped to COD actions — keeps
-  // this a COD-feature change rather than surfacing the item's full
-  // edit/release/transfer audit (which is fetched but was never rendered).
-  const codAudit = (itemId ? (auditByEntity[itemId] || []) : []).filter(
-    e => e.action === 'cod_storage_set' || e.action === 'cod_storage_removed' || e.action === 'cod_storage_collected'
-  );
-
-  return (
-    <div>
-      {/* COD Storage — item-level COD set/remove events. Scoped to COD actions
-          so this stays a COD-feature change (the item's broader edit/release/
-          transfer audit is fetched but intentionally not surfaced here). */}
-      {codAudit.length > 0 && (
-        <CollapsibleHistorySection icon={DollarSign} title="COD Storage" count={codAudit.length}>
-          <AuditSubTimeline entries={codAudit} />
-        </CollapsibleHistorySection>
-      )}
-
-      {/* Shipment */}
-      <CollapsibleHistorySection icon={Ship} title="Shipment" count={shipmentNumber ? 1 : 0}>
-        {shipmentNumber && (
-          <>
-            <div style={histRowStyle}>
-              <div style={histDateStyle}>{fmtDate(receiveDate)}</div>
-              <div style={{ flex: 1 }}>
-                <div>
-                  <a href={buildDeepLink('shipments', shipmentNumber!, clientSheetId)} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={histIdStyle}>{shipmentNumber}</a>
-                  {' '}
-                  <span style={{ fontSize: 10, fontWeight: 600, color: '#16A34A' }}>Received</span>
-                </div>
-                {(shipmentCarrier || shipmentTracking) && (
-                  <div style={histNoteStyle}>
-                    {[shipmentCarrier, shipmentTracking].filter(Boolean).join(' \u00b7 ')}
-                  </div>
-                )}
-              </div>
-            </div>
-            <AuditSubTimeline entries={auditByEntity[shipmentNumber] || []} />
-          </>
-        )}
-      </CollapsibleHistorySection>
-
-      {/* Moves — between Shipments and Tasks */}
-      <CollapsibleHistorySection icon={MapPin} title="Moves" count={moves.length}>
-        {moves.map((m, i) => {
-          const isTransfer = m.type === 'Transfer' || m.type === 'transfer';
-          return (
-            <div key={i} style={histRowStyle}>
-              <div style={histDateStyle}>{m.timestamp || '\u2014'}</div>
-              <div style={{ flex: 1 }}>
-                <div>
-                  <span style={{ fontWeight: isTransfer ? 600 : 400, color: isTransfer ? '#1E293B' : '#475569' }}>{m.fromLocation || '\u2014'}</span>
-                  <span style={{ color: '#E85D2D', fontWeight: 700, margin: '0 4px' }}>{'\u2192'}</span>
-                  <span style={{ fontWeight: isTransfer ? 600 : 400, color: isTransfer ? '#1E293B' : '#475569' }}>{m.toLocation || '\u2014'}</span>
-                  <span style={{
-                    display: 'inline-block', padding: '1px 6px', borderRadius: 8, fontSize: 9, fontWeight: 700, marginLeft: 6,
-                    background: isTransfer ? '#FFF7ED' : '#EFF6FF',
-                    color: isTransfer ? '#E85D2D' : '#1D4ED8',
-                  }}>{isTransfer ? 'Transfer' : 'Location'}</span>
-                </div>
-                {m.user && <div style={{ fontSize: 10, color: '#94A3B8' }}>By: {m.user}</div>}
-              </div>
-            </div>
-          );
-        })}
-      </CollapsibleHistorySection>
-
-      {/* Tasks */}
-      <CollapsibleHistorySection icon={ClipboardList} title="Tasks" count={tasks.length}>
-        {tasks.map(t => (
-          <div key={t.taskId}>
-            <div style={histRowStyle}>
-              <div style={histDateStyle}>{fmtDate(t.completedAt || t.cancelledAt || t.created)}</div>
-              <div style={{ flex: 1 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <a href={buildDeepLink('tasks', t.taskId, clientSheetId)} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={histIdStyle}>{t.taskId}</a>
-                  <MiniStatusBadge status={t.status} />
-                  {t.result && <MiniStatusBadge status={t.result} />}
-                </div>
-                <div style={histNoteStyle}>
-                  {svcNameByCode.get(String(t.svcCode || t.type || '')) || SERVICE_CODES[t.svcCode] || t.svcCode || t.type || '\u2014'}
-                </div>
-              </div>
-            </div>
-            <AuditSubTimeline entries={auditByEntity[t.taskId] || []} />
-          </div>
-        ))}
-      </CollapsibleHistorySection>
-
-      {/* Repairs */}
-      <CollapsibleHistorySection icon={Wrench} title="Repairs" count={repairs.length}>
-        {repairs.map(r => (
-          <div key={r.repairId}>
-            <div style={histRowStyle}>
-              <div style={histDateStyle}>{fmtDate(r.completedDate || r.createdDate)}</div>
-              <div style={{ flex: 1 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <a href={buildDeepLink('repairs', r.repairId, clientSheetId)} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={histIdStyle}>{r.repairId}</a>
-                  <MiniStatusBadge status={r.status} />
-                  {(r.repairResult || r.result) && <MiniStatusBadge status={r.repairResult || r.result} />}
-                </div>
-                <div style={histNoteStyle}>
-                  {(r.finalAmount ?? r.approvedAmount) != null
-                    ? `$${Number(r.finalAmount ?? r.approvedAmount).toFixed(2)}`
-                    : r.quoteAmount != null ? `$${Number(r.quoteAmount).toFixed(2)}` : ''}
-                  {r.repairVendor && <>{' \u00b7 '}{r.repairVendor}</>}
-                </div>
-              </div>
-            </div>
-            <AuditSubTimeline entries={auditByEntity[r.repairId] || []} />
-          </div>
-        ))}
-      </CollapsibleHistorySection>
-
-      {/* Will Calls */}
-      <CollapsibleHistorySection icon={Truck} title="Will Calls" count={willCalls.length}>
-        {willCalls.map(w => (
-          <div key={w.wcNumber}>
-            <div style={histRowStyle}>
-              <div style={histDateStyle}>{fmtDate(w.actualPickupDate || w.estimatedPickupDate || w.createdDate)}</div>
-              <div style={{ flex: 1 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <a href={buildDeepLink('will-calls', w.wcNumber, clientSheetId)} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={histIdStyle}>{w.wcNumber}</a>
-                  <MiniStatusBadge status={w.status} />
-                </div>
-                {w.pickupParty && <div style={histNoteStyle}>{w.pickupParty}</div>}
-              </div>
-            </div>
-            <AuditSubTimeline entries={auditByEntity[w.wcNumber] || []} />
-          </div>
-        ))}
-      </CollapsibleHistorySection>
-
-      {/* Billing — always last */}
-      <CollapsibleHistorySection icon={DollarSign} title="Billing" count={billing.length}>
-        {billing.map((b, i) => (
-          <div key={b.ledgerRowId || i} style={histRowStyle}>
-            <div style={histDateStyle}>{fmtDate(b.date)}</div>
-            <div style={{ flex: 1 }}>
-              <span style={{ fontSize: 12 }}>{b.svcCode || ''}{' \u00b7 '}{b.svcName || SERVICE_CODES[b.svcCode] || ''}</span>
-            </div>
-            <div style={{ fontWeight: 600, fontSize: 12, whiteSpace: 'nowrap' }}>
-              {b.total != null ? `$${Number(b.total).toFixed(2)}` : '\u2014'}
-            </div>
-          </div>
-        ))}
-      </CollapsibleHistorySection>
-    </div>
-  );
-}
-
 
 export function ItemDetailPanel({
   item, onClose, photosFolderId, shipmentFolderUrl,
@@ -665,103 +340,18 @@ export function ItemDetailPanel({
   const docCount   = renderAsPage ? itemDocs.length   : 0;
   const noteCount  = renderAsPage ? itemNotesList.length : 0;
 
-  // Move history — fetch from API when panel opens
-  const [moveHistory, setMoveHistory] = useState<MoveHistoryEntry[]>([]);
-  useEffect(() => {
-    if (!clientSheetId || !item.itemId) return;
-    let cancelled = false;
-    fetchItemMoveHistory(item.itemId, clientSheetId).then(res => {
-      if (!cancelled && res.ok && res.data?.moves) {
-        setMoveHistory(res.data.moves);
-      }
-    }).catch(() => {});
-    return () => { cancelled = true; };
-  }, [clientSheetId, item.itemId]);
-
-  // Fallback — parse Item Notes for GAS-appended move lines of the form:
-  //   [MM/DD/YYYY HH:MM AM/PM] Moved <from> → <to> by <user>
-  // Current client scripts write moves here rather than hitting the Move
-  // History sheet API, so without this parse the Moves section in Activity
-  // would stay empty. Deduped against the real API result by timestamp+locations.
-  const parsedMoves = useMemo<MoveHistoryEntry[]>(() => {
-    const notes = (item.itemNotes || item.notes || '') as string;
-    if (!notes) return [];
-    const out: MoveHistoryEntry[] = [];
-    // \u2192 is the → arrow; also accept -> as a fallback.
-    const lineRe = /\[([^\]]+)\]\s*Moved\s+(.+?)\s+(?:\u2192|->|→)\s+(.+?)\s+by\s+(.+?)(?=\s*(?:\[|$))/gi;
-    let m: RegExpExecArray | null;
-    while ((m = lineRe.exec(notes)) !== null) {
-      const [, timestamp, fromLocation, toLocation, user] = m;
-      out.push({
-        timestamp: timestamp.trim(),
-        user: user.trim(),
-        itemId: item.itemId,
-        fromLocation: fromLocation.trim(),
-        toLocation: toLocation.trim(),
-        type: 'Move',
-      });
-    }
-    return out;
-  }, [item.itemNotes, item.notes, item.itemId]);
-
-  // Merge API moves + parsed moves, deduped by timestamp + from/to.
-  const combinedMoves = useMemo<MoveHistoryEntry[]>(() => {
-    const seen = new Set<string>();
-    const keyOf = (mv: MoveHistoryEntry) =>
-      `${mv.timestamp}|${(mv.fromLocation || '').toLowerCase()}|${(mv.toLocation || '').toLowerCase()}`;
-    const all: MoveHistoryEntry[] = [];
-    for (const mv of moveHistory) { const k = keyOf(mv); if (!seen.has(k)) { seen.add(k); all.push(mv); } }
-    for (const mv of parsedMoves)  { const k = keyOf(mv); if (!seen.has(k)) { seen.add(k); all.push(mv); } }
-    return all;
-  }, [moveHistory, parsedMoves]);
-
-  // Fetch audit log entries for this item and all related entities
-  const [auditByEntity, setAuditByEntity] = useState<Record<string, AuditEntry[]>>({});
-  // Bumped by an entityEvents('inventory', itemId) emit (e.g. a COD storage
-  // set/remove) so the Activity tab re-fetches without needing a panel reopen.
-  const [auditTick, setAuditTick] = useState(0);
-  useEffect(() => {
-    if (!item.itemId) return;
-    let cancelled = false;
-    // Collect all entity IDs we want audit for
-    const entityIds = [item.itemId];
-    if (item.shipmentNumber) entityIds.push(item.shipmentNumber);
-    for (const t of itemTasks) if (t.taskId) entityIds.push(t.taskId);
-    for (const r of itemRepairs) if (r.repairId) entityIds.push(r.repairId);
-    for (const w of itemWillCalls) if (w.wcNumber) entityIds.push(w.wcNumber);
-    (async () => {
-      try {
-        const { data } = await supabase
-          .from('entity_audit_log')
-          .select('id, entity_id, action, changes, performed_by, performed_at')
-          .in('entity_id', entityIds)
-          .order('performed_at', { ascending: true })
-          .limit(200);
-        if (!cancelled && data) {
-          const grouped: Record<string, AuditEntry[]> = {};
-          for (const row of data as (AuditEntry & { entity_id: string })[]) {
-            if (!grouped[row.entity_id]) grouped[row.entity_id] = [];
-            grouped[row.entity_id].push(row);
-          }
-          setAuditByEntity(grouped);
-        }
-      } catch { /* best-effort */ }
-    })();
-    return () => { cancelled = true; };
-  }, [item.itemId, item.shipmentNumber, itemTasks.length, itemRepairs.length, itemWillCalls.length, auditTick]);
-
-  // Live-refresh the audit timeline when this item changes — the COD storage
-  // set/remove path (SetCodStorageModal / ItemCodStorageSection) emits
-  // entityEvents('inventory', itemId) after the set_cod_storage RPC writes its
-  // audit row; bump the tick so the effect above re-fetches.
-  useEffect(() => {
-    if (!item.itemId) return;
-    return entityEvents.subscribe((type, id) => {
-      if (type === 'inventory' && id === item.itemId) setAuditTick(t => t + 1);
-    });
-  }, [item.itemId]);
-
-  const historyCount = (hasShipment ? 1 : 0) + combinedMoves.length + itemTasks.length + itemRepairs.length + itemWillCalls.length + itemBilling.length + (auditByEntity[item.itemId] || []).filter(e => e.action === 'cod_storage_set' || e.action === 'cod_storage_removed' || e.action === 'cod_storage_collected').length;
+  // Linked entity ids for the Activity tab — ActivityTimeline interleaves
+  // their audit rows so the item's full story (tasks, repairs, will calls,
+  // shipment) reads in one feed. Moves/photos/credits/billing/emails come
+  // from the timeline's own Supabase enrichment queries.
+  const activityRelatedIds = useMemo<string[]>(() => {
+    const ids: string[] = [];
+    if (item.shipmentNumber) ids.push(item.shipmentNumber);
+    for (const t of itemTasks) if (t.taskId) ids.push(t.taskId);
+    for (const r of itemRepairs) if (r.repairId) ids.push(r.repairId);
+    for (const w of itemWillCalls) if (w.wcNumber) ids.push(w.wcNumber);
+    return ids;
+  }, [item.shipmentNumber, itemTasks, itemRepairs, itemWillCalls]);
 
   // Can this user edit?
   const canEditBasic = !!clientSheetId; // all roles can edit basic fields
@@ -1219,27 +809,13 @@ export function ItemDetailPanel({
 
   const renderActivityTab = () => (
     <>
-      <Section icon={Calendar} title="Item History" count={historyCount || undefined}>
-        {historyCount === 0 ? (
-          <div style={{ fontSize: 12, color: theme.colors.textMuted, padding: '4px 0', fontStyle: 'italic' }}>
-            No history found for this item.
-          </div>
-        ) : (
-          <ItemHistory
-            itemId={item.itemId}
-            tasks={itemTasks}
-            repairs={itemRepairs}
-            willCalls={itemWillCalls}
-            billing={itemBilling}
-            moves={combinedMoves}
-            shipmentNumber={item.shipmentNumber}
-            receiveDate={item.receiveDate}
-            shipmentCarrier={itemShipment?.carrier}
-            shipmentTracking={itemShipment?.trackingNo}
-            auditByEntity={auditByEntity}
-            clientSheetId={clientSheetId}
-          />
-        )}
+      <Section icon={Calendar} title="Item History">
+        <ActivityTimeline
+          entityType="inventory"
+          entityId={item.itemId}
+          tenantId={clientSheetId}
+          relatedEntityIds={activityRelatedIds}
+        />
       </Section>
       {/* admin/staff only — mirrors the storage_credits RLS read policy.
           Clients would otherwise get an RLS-empty list rendered as a
@@ -1439,7 +1015,7 @@ export function ItemDetailPanel({
       id: 'activity',
       label: 'Activity',
       icon: <Activity size={13} />,
-      badgeCount: renderAsPage ? historyCount : undefined,
+      badgeCount: undefined,
       render: () => renderActivityTab(),
     },
   ];
