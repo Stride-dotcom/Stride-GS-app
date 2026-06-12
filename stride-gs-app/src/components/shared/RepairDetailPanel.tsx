@@ -188,6 +188,23 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
     (repair.quoteGrandTotal != null && repair.quoteGrandTotal > 0)
     || (repair.quoteAmount != null && repair.quoteAmount > 0)
     || (Array.isArray(repair.quoteLines) && repair.quoteLines.length > 0);
+  // Read-only DISPLAY lines: the persisted breakdown, or — when only the
+  // single quote_amount survived (no quote_lines_json) — one synthetic
+  // "Repair" line at that amount. Per Justin: a quote with only a repair
+  // charge isn't "legacy" or "broken"; render it exactly like any other
+  // one-line quote (same pattern as a delivery order's Services & Pricing).
+  const hasRealQuoteLines = Array.isArray(repair.quoteLines) && repair.quoteLines.length > 0;
+  const displayQuoteLines: Array<{ svcCode: string; svcName: string; qty: number; rate: number; taxable: boolean }> =
+    hasRealQuoteLines
+      ? repair.quoteLines!
+      : (typeof repair.quoteAmount === 'number' && repair.quoteAmount > 0
+          ? [{ svcCode: 'REPAIR', svcName: 'Repair', qty: 1, rate: repair.quoteAmount, taxable: true }]
+          : []);
+  // Synthetic single-line quotes have no stored tax breakdown — render a
+  // bare "Total" row (totalOnly) unless real totals survived on the row.
+  const displayTotalsKnown = hasRealQuoteLines || repair.quoteGrandTotal != null;
+  const displaySubtotal   = displayTotalsKnown ? (repair.quoteSubtotal ?? repair.quoteAmount ?? 0) : (repair.quoteAmount ?? 0);
+  const displayGrandTotal = displayTotalsKnown ? (repair.quoteGrandTotal ?? 0) : (repair.quoteAmount ?? 0);
   const [serviceCatalog, setServiceCatalog] = useState<CatalogEntry[]>([]);
   const [taxAreas, setTaxAreas] = useState<TaxArea[]>([]);
 
@@ -1615,45 +1632,19 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
               this fills — no breakdown after Approved — exists only in the
               slide-out panel, which has no Quote tab. */}
           {!renderAsPage
-            && Array.isArray(repair.quoteLines) && repair.quoteLines.length > 0
+            && displayQuoteLines.length > 0
             && !(isActive && (effectiveStatus === 'Quote Sent' || effectiveStatus === 'Approved')) && (
             <div style={{ marginBottom: 16 }}>
               <RepairQuoteSummary
                 heading="Quote breakdown"
-                lines={repair.quoteLines}
-                subtotal={repair.quoteSubtotal ?? 0}
+                lines={displayQuoteLines}
+                subtotal={displaySubtotal}
                 taxAreaName={repair.quoteTaxAreaName ?? ''}
                 taxRate={repair.quoteTaxRate ?? 0}
                 taxAmount={repair.quoteTaxAmount ?? 0}
-                grandTotal={repair.quoteGrandTotal ?? 0}
+                grandTotal={displayGrandTotal}
+                totalOnly={!displayTotalsKnown}
               />
-            </div>
-          )}
-
-          {/* Legacy single-amount quotes (pre-multiline builder) have no
-              line items to break down — surface the one number we have,
-              to all roles (the grid's "Quote Amount" field is admin-only).
-              Same status + slide-out gate as the breakdown above (page mode's
-              Quote tab already shows the legacy amount). */}
-          {!renderAsPage
-            && (!Array.isArray(repair.quoteLines) || repair.quoteLines.length === 0)
-            && typeof repair.quoteAmount === 'number' && repair.quoteAmount > 0
-            && !(isActive && (effectiveStatus === 'Quote Sent' || effectiveStatus === 'Approved')) && (
-            <div style={{ marginBottom: 16 }}>
-              <div style={{ fontSize: 11, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 6 }}>
-                Quote
-              </div>
-              <div style={{ padding: 10, background: theme.colors.bgSubtle, borderRadius: 8 }}>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 4, fontSize: 13 }}>
-                  <span style={{ fontWeight: 700, color: theme.colors.text }}>Quote amount</span>
-                  <span style={{ fontWeight: 700, color: theme.colors.orange, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
-                    ${repair.quoteAmount.toFixed(2)}
-                  </span>
-                </div>
-                <div style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 4 }}>
-                  Legacy single-amount quote — no line-item breakdown on file.
-                </div>
-              </div>
             </div>
           )}
 
@@ -1754,7 +1745,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
         <span
           title={headerTotalIsGrand
             ? 'Customer-facing total — includes sales tax'
-            : 'Legacy single-amount quote (pre-tax-builder; no tax breakdown on file)'}
+            : 'Quoted amount'}
           style={{ fontSize: 12, fontWeight: 600, color: theme.colors.text, padding: '2px 10px', background: theme.colors.bgSubtle, borderRadius: 10 }}
         >
           ${Number(headerTotal).toFixed(2)}
@@ -2109,7 +2100,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
             repair starts (status=In Progress) — by then billing context
             is in flight and editing the quote shouldn't happen here. */}
         {isActive && (effectiveStatus === 'Quote Sent' || effectiveStatus === 'Approved')
-          && Array.isArray(repair.quoteLines) && repair.quoteLines.length > 0 && (
+          && displayQuoteLines.length > 0 && (
           <div style={{ padding: '14px 20px', borderTop: `1px solid ${theme.colors.border}`, flexShrink: 0 }}>
             {editSavedMessage && !isEditingQuote && (
               <div style={{ marginBottom: 10, padding: '8px 12px', background: '#F0FDF4', border: '1px solid #86EFAC', borderRadius: 8, fontSize: 12, color: '#166534', display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -2181,12 +2172,13 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
             ) : (
               <>
                 <RepairQuoteSummary
-                  lines={repair.quoteLines}
-                  subtotal={repair.quoteSubtotal ?? 0}
+                  lines={displayQuoteLines}
+                  subtotal={displaySubtotal}
                   taxAreaName={repair.quoteTaxAreaName ?? ''}
                   taxRate={repair.quoteTaxRate ?? 0}
                   taxAmount={repair.quoteTaxAmount ?? 0}
-                  grandTotal={repair.quoteGrandTotal ?? 0}
+                  grandTotal={displayGrandTotal}
+                  totalOnly={!displayTotalsKnown}
                 />
                 {canStaffEdit && (
                   <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
@@ -2555,10 +2547,15 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
   const renderRepairQuoteTab = () => {
     const sLocal = effectiveStatus;
     const isPending = isActive && !completed && sLocal === 'Pending Quote' && !submitResult;
+    // displayQuoteLines synthesizes a single "Repair" line when only the
+    // stored amount survived, so amount-only quotes get the SAME locked
+    // summary + Resend/Edit/Void footer as multi-line ones. isLockedLegacy
+    // is now only the (data-broken) case of a locked status with NO quote
+    // data at all — it keeps the Void escape hatch.
     const isLockedWithLines = isActive && (sLocal === 'Quote Sent' || sLocal === 'Approved')
-      && Array.isArray(repair.quoteLines) && repair.quoteLines.length > 0;
+      && displayQuoteLines.length > 0;
     const isLockedLegacy = isActive && (sLocal === 'Quote Sent' || sLocal === 'Approved')
-      && !(Array.isArray(repair.quoteLines) && repair.quoteLines.length > 0);
+      && displayQuoteLines.length === 0;
 
     return (
       <div style={{ padding: 20 }}>
@@ -2697,12 +2694,13 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
         ) : isLockedWithLines && (
           <>
             <RepairQuoteSummary
-              lines={repair.quoteLines!}
-              subtotal={repair.quoteSubtotal ?? 0}
+              lines={displayQuoteLines}
+              subtotal={displaySubtotal}
               taxAreaName={repair.quoteTaxAreaName ?? ''}
               taxRate={repair.quoteTaxRate ?? 0}
               taxAmount={repair.quoteTaxAmount ?? 0}
-              grandTotal={repair.quoteGrandTotal ?? 0}
+              grandTotal={displayGrandTotal}
+              totalOnly={!displayTotalsKnown}
             />
             {canStaffEdit && (
               <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
@@ -2760,19 +2758,16 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
           </>
         )}
 
-        {/* Legacy single-amount quote — no line items captured. Show
-            the old Quote Amount + a Void button so the operator can
-            re-issue with the new multi-line builder. */}
+        {/* Locked status but NO quote data on the row at all (no lines, no
+            amount) — shouldn't happen in practice; keep the Void escape
+            hatch so the operator can re-issue. */}
         {isLockedLegacy && (
           <div style={{ background: theme.colors.bgSubtle, borderRadius: 10, padding: 14 }}>
             <div style={{ fontSize: 11, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 6 }}>
               Quote ({sLocal})
             </div>
-            <div style={{ fontSize: 22, fontWeight: 700, color: theme.colors.text, marginBottom: 4 }}>
-              ${typeof repair.quoteAmount === 'number' ? repair.quoteAmount.toFixed(2) : '—'}
-            </div>
-            <div style={{ fontSize: 11, color: theme.colors.textMuted, lineHeight: 1.5, marginBottom: 12 }}>
-              This quote was sent before multi-line repair quotes shipped, so there's no line-item breakdown to show. Void it to rebuild with the new builder (line items + tax + grand total).
+            <div style={{ fontSize: 12, color: theme.colors.textMuted, lineHeight: 1.5, marginBottom: 12 }}>
+              No quote details on file for this repair. Void the quote to rebuild and re-send it.
             </div>
             {canStaffEdit && (
               <button
@@ -2787,7 +2782,7 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
                   opacity: submitting ? 0.6 : 1,
                 }}
               >
-                <Undo2 size={13} /> Void Quote (re-issue with line items)
+                <Undo2 size={13} /> Void Quote (re-issue)
               </button>
             )}
           </div>
@@ -2796,22 +2791,21 @@ export function RepairDetailPanel({ repair, onClose, onRepairUpdated, applyRepai
         {/* Beyond Approved (In Progress / Complete / Cancelled / Declined)
             — read-only display only. */}
         {!isPending && !isLockedWithLines && !isLockedLegacy && !submitResult && (
-          Array.isArray(repair.quoteLines) && repair.quoteLines.length > 0 ? (
+          displayQuoteLines.length > 0 ? (
             <RepairQuoteSummary
-              lines={repair.quoteLines}
-              subtotal={repair.quoteSubtotal ?? 0}
+              lines={displayQuoteLines}
+              subtotal={displaySubtotal}
               taxAreaName={repair.quoteTaxAreaName ?? ''}
               taxRate={repair.quoteTaxRate ?? 0}
               taxAmount={repair.quoteTaxAmount ?? 0}
-              grandTotal={repair.quoteGrandTotal ?? 0}
+              grandTotal={displayGrandTotal}
+              totalOnly={!displayTotalsKnown}
             />
           ) : (
             <div style={{ padding: 20, textAlign: 'center', color: theme.colors.textMuted, fontSize: 13 }}>
               {sLocal === 'Cancelled' || sLocal === 'Declined'
                 ? `Repair was ${sLocal}. No quote on file.`
-                : typeof repair.quoteAmount === 'number' && repair.quoteAmount > 0
-                  ? <>Quote: <strong style={{ color: theme.colors.text }}>${repair.quoteAmount.toFixed(2)}</strong> (legacy single-amount, no breakdown)</>
-                  : 'No quote on file yet.'}
+                : 'No quote on file yet.'}
             </div>
           )
         )}
@@ -3365,8 +3359,12 @@ function RepairQuoteSummary(props: {
   // "Quote breakdown" so the heading reads accurately on later
   // statuses (In Progress / Complete / etc.) too.
   heading?: string;
+  // Single bare "Total" row instead of Subtotal / Sales tax / Customer
+  // total — for quotes whose tax breakdown was never captured (only the
+  // one amount on file). Lines still render normally above it.
+  totalOnly?: boolean;
 }) {
-  const { lines, subtotal, taxAreaName, taxRate, taxAmount, grandTotal, heading = 'Quote (sent)' } = props;
+  const { lines, subtotal, taxAreaName, taxRate, taxAmount, grandTotal, heading = 'Quote (sent)', totalOnly = false } = props;
   return (
     <div style={{ marginBottom: 10 }}>
       <div style={{ fontSize: 11, fontWeight: 500, color: theme.colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: 6 }}>
@@ -3386,13 +3384,17 @@ function RepairQuoteSummary(props: {
           </div>
         ))}
         <div style={{ marginTop: 6, paddingTop: 6, borderTop: `1px solid ${theme.colors.border}`, display: 'grid', gridTemplateColumns: '1fr auto', gap: 4, fontSize: 12 }}>
-          <span style={{ color: theme.colors.textSecondary }}>Subtotal</span>
-          <span style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>${subtotal.toFixed(2)}</span>
-          <span style={{ color: theme.colors.textSecondary }}>
-            Sales tax{taxAreaName ? ` (${taxAreaName} · ${Number(taxRate).toFixed(2)}%)` : ''}
-          </span>
-          <span style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>${taxAmount.toFixed(2)}</span>
-          <span style={{ fontSize: 13, fontWeight: 700, color: theme.colors.text }}>Customer total</span>
+          {!totalOnly && (
+            <>
+              <span style={{ color: theme.colors.textSecondary }}>Subtotal</span>
+              <span style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>${subtotal.toFixed(2)}</span>
+              <span style={{ color: theme.colors.textSecondary }}>
+                Sales tax{taxAreaName ? ` (${taxAreaName} · ${Number(taxRate).toFixed(2)}%)` : ''}
+              </span>
+              <span style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>${taxAmount.toFixed(2)}</span>
+            </>
+          )}
+          <span style={{ fontSize: 13, fontWeight: 700, color: theme.colors.text }}>{totalOnly ? 'Total' : 'Customer total'}</span>
           <span style={{ fontSize: 14, fontWeight: 700, color: theme.colors.orange, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
             ${grandTotal.toFixed(2)}
           </span>
