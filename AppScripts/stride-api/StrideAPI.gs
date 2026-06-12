@@ -1,4 +1,5 @@
 /* ===================================================
+   StrideAPI.gs — v38.282.0 — 2026-06-13 PST — [BILLING/MIGRATION] fix: the sheet-driven billing forward-sync no longer stale-deletes an SB-FIRST charge before its sheet mirror lands. supabaseDeleteStaleRows_ gained an optional protectRecentMinutes window; both billing call sites (api_fullClientSync_ billing scope + handleBulkSyncToSupabase_) now pass 30. Why: addManualCharge/updateBillingRow/voidManualCharge are SB-authoritative for the Justin Demo canary (feature_flags), so add-manual-charge-sb inserts into public.billing FIRST and the Billing_Ledger sheet row arrives a moment later via reverse-writethrough. This sync builds its keep-set from the SHEET, so in the gap (or before a pending mirror retry) the new charge looked orphaned and got deleted — the GAS-overwrites-SB race. The window now skips deleting any billing row whose created_at is within the last 30 min (other tables/callers pass no window → unchanged legacy behaviour). Companion: add-manual-charge-sb now AWAITS the reverse-writethrough and returns a `mirrored` flag so a failed sheet mirror is surfaced, not silent; AddChargeModal's processing copy no longer claims a GAS-first "writing to the ledger then syncing to Supabase" order. No billing math change, no change to the v38.182 atomic invoice counter or half-write detection.
    StrideAPI.gs — v38.281.0 — 2026-06-12 PST — [BILLING] feat: universal "Add Charge" — handleAddManualCharge_ now accepts optional entity-linkage fields (itemId/taskId/repairId/shipmentNumber/category/reference) supplied by the new entity-aware AddChargeModal (added to every entity detail page). When an anchor (itemId, else entityId) is present the ledger id is DETERMINISTIC — MANUAL-<SVC>-<ANCHOR>-<YYYYMMDD>, collision-suffixed (-2/-3…) against existing rows under the same script lock so a genuine repeat charge same-day still lands as its own row (accidental double-submits are prevented UI-side via the disabled-while-saving button); with no anchor it keeps the legacy random MANUAL-<ms>-<rand>. The linkage fields write to the Billing_Ledger row (api_buildRow_ drops any the sheet lacks) and to the supabaseUpsert_ mirror via sbBillingRow_ (already maps category/item_id/task_id/repair_id/shipment_number/reference). New helper api_ledgerSlug_ mirrors slug() in add-manual-charge-sb (the SB-routed twin, updated in the same PR). No billing math change (total still = rate×qty server-side), no change to the v38.182 atomic invoice counter or half-write detection. The "MANUAL-" prefix is preserved so handleVoidManualCharge_/handleUpdateBillingRow_ still recognise the row.
    StrideAPI.gs — v38.280.0 — 2026-06-11 PST — [READS/MIGRATION] fix: the single-entity GAS READ handlers no longer revert SB-authoritative state — closes the RPR-63755 reopen-then-resend bug (reported as "status stays Pending Quote after resending the quote"; root cause was NOT the send handler — send-repair-quote-sb committed 'Quote Sent' at 23:17:50Z, audit-logged — but handleGetRepairById_'s best-effort cache hydrate: the repair page's background GAS enrichment read the per-tenant sheet while the EF's ~30s background mirror was still in flight, and full-row-upserted the stale 'Pending Quote' sheet row back over public.repairs, silently and unaudited; the customer's approve gate requires Quote Sent. Third door into the PR #739/#740/#753 status-revert class — reverse mirrors and bulk syncs were already guarded; the READ-path hydrate was not). handleGetRepairById_ / handleGetTaskById_ / handleGetWillCallById_ now hydrate via new api_hydrateReadCacheSbAware_: row exists in SB → upsert with that entity's SB-authoritative columns STRIPPED (repairs: SB_AUTHORITATIVE_REPAIR_COLS_; tasks: new SB_AUTHORITATIVE_TASK_COLS_ = status/result/started_at/completed_at/cancelled_at; will_calls: status — due_date/priority/qty/billed keep flowing per the v38.278.0 read-path field fix); CONFIRMED absent → full-row seed (legacy rows); SB unreachable → skip entirely (new generic api_sbRowExistsTriState_ — a cache warm is never worth a clobber). Bonus closed: the repair hydrate object carries NO quote_* fields, so every GAS single-repair read was ALSO NULLing quote_lines_json + the 7 quote totals on the SB row — an additional vector for the 42-repair null-back PR #753 addressed on the bulk paths. No EF/React/schema changes, no billing math, no change to the v38.182 atomic invoice counter or half-write detection.
    StrideAPI.gs — v38.279.0 — 2026-06-11 PST — [CLIENTS/MIGRATION] fix: client-settings reverts — the v38.274 strip's existence checks FAILED THE WRONG WAY. (1) resyncClientToSupabase_ (5-min reconcile cron) gated the app-authoritative strip on api_isKnownTenantId_, which returns false on ANY Supabase read failure — so a transient SB hiccup skipped the strip and FULL-ROW-upserted stale CB settings, reverting auto_inspection & friends (the recurring revert v38.274 was meant to stop). New tri-state api_sbClientExistsTriState_: exists → stripped upsert; confirmed-new → full row (onboarding first-sync); INDETERMINATE → skip the cycle entirely (no write; cron retries in 5 min). (2) handleBulkSyncClientsToSupabase_ fell back to FULL rows for every client when its existence prefetch failed — one transient failure = fleet-wide settings revert; now the sync ABORTS with SB_PREFETCH_FAILED and the operator re-runs. (3) APP_AUTHORITATIVE_CLIENT_COLS_ extended DEFENSIVELY with every remaining app/SB-authoritative column (payment_method_required, end_customer_pays_storage, billing_*, tax_*, resale_cert_*, notification_contacts, stax_customer_name, intake stamps) — no-ops today since sbClientRow_ doesn't project them, but future projection growth can't clobber. (4) REVERSE_CLIENTS_SB_ONLY_SETTINGS_ += end_customer_pays_storage → END_CUSTOMER_PAYS_STORAGE so COD-storage flips reach the per-tenant Settings tab. Companion (same PR): update-client-sb FIELD_MAP += billing contacts + payment_method_required + end_customer_pays_storage (single write path — React Settings' separate direct supabase.update() removed; it clobbered end_customer_pays_storage to false whenever the flag-gated COD toggle wasn't on the form); React maps payment_method_required in fetchClientsFromSupabase (was NEVER hydrated — the edit modal's !== false default coerced it to true and every client save re-wrote card-required ON, reverting grandfathered OFF clients); OnboardClientModal preserves undefined for unknown SB-only booleans (omit-on-save); push-client-settings-to-sheet MIRRORED_COLUMNS + trigger WHEN clause += end_customer_pays_storage (migration 20260611230000). Same incident class as the PR #753 repairs forward-sync fix: a stale sheet must never overwrite an SB-authoritative value. No billing math, invoice counter, or half-write detection changes.
@@ -6799,11 +6800,24 @@ function supabaseDelete_(table, filter) {
  * @param {string[]} keepIds - IDs that exist in the sheet (everything else is stale)
  * @param {string} idColumn - Column name for the ID (e.g. "task_id", "item_id")
  */
-function supabaseDeleteStaleRows_(table, tenantId, keepIds, idColumn) {
+function supabaseDeleteStaleRows_(table, tenantId, keepIds, idColumn, protectRecentMinutes) {
   try {
     var url = prop_("SUPABASE_URL");
     var key = prop_("SUPABASE_SERVICE_ROLE_KEY");
     if (!url || !key) return 0;
+
+    // Optional safety window: never delete rows created in the last N minutes.
+    // This sync is sheet-driven (keepIds come from the sheet), so a row that
+    // exists in Supabase but not yet on the sheet looks "stale" and would be
+    // deleted. For SB-FIRST write paths (e.g. add-manual-charge-sb on an
+    // SB-authoritative tenant) the row is written to Supabase first and the
+    // sheet mirror lands a moment later via reverse-writethrough — without
+    // this window a concurrent billing sync in that gap (or before a pending
+    // mirror retry) would delete the just-created charge. 0/undefined = no
+    // protection (legacy behaviour for all other tables/callers).
+    var protectMs = (protectRecentMinutes && protectRecentMinutes > 0)
+      ? protectRecentMinutes * 60 * 1000 : 0;
+    var selectCols = protectMs ? (idColumn + ",created_at") : idColumn;
 
     // Build keep set for O(1) lookup
     var keepSet = {};
@@ -6812,13 +6826,13 @@ function supabaseDeleteStaleRows_(table, tenantId, keepIds, idColumn) {
     }
 
     // Fetch all existing IDs for this tenant from Supabase (paginated)
-    var existingIds = [];
+    var existingIds = [];  // each: { id: string, createdAt: string|null }
     var pageSize = 1000;
     var offset = 0;
     while (true) {
       var fetchUrl = url + "/rest/v1/" + table +
         "?tenant_id=eq." + encodeURIComponent(tenantId) +
-        "&select=" + idColumn +
+        "&select=" + selectCols +
         "&limit=" + pageSize +
         "&offset=" + offset;
       var resp = UrlFetchApp.fetch(fetchUrl, {
@@ -6835,16 +6849,28 @@ function supabaseDeleteStaleRows_(table, tenantId, keepIds, idColumn) {
       if (!page.length) break;
       for (var p = 0; p < page.length; p++) {
         var rid = String(page[p][idColumn] || "");
-        if (rid) existingIds.push(rid);
+        if (rid) existingIds.push({ id: rid, createdAt: protectMs ? (page[p]["created_at"] || null) : null });
       }
       if (page.length < pageSize) break;
       offset += pageSize;
     }
 
-    // Compute stale IDs (in Supabase but not in sheet)
+    // Compute stale IDs (in Supabase but not in sheet), skipping rows still
+    // inside the recency window.
     var staleIds = [];
+    var nowMs = new Date().getTime();
+    var protectedRecent = 0;
     for (var e = 0; e < existingIds.length; e++) {
-      if (!keepSet[existingIds[e]]) staleIds.push(existingIds[e]);
+      var exId = existingIds[e].id;
+      if (keepSet[exId]) continue;
+      if (protectMs && existingIds[e].createdAt) {
+        var ageMs = nowMs - new Date(existingIds[e].createdAt).getTime();
+        if (ageMs >= 0 && ageMs < protectMs) { protectedRecent++; continue; }
+      }
+      staleIds.push(exId);
+    }
+    if (protectedRecent > 0) {
+      Logger.log("supabaseDeleteStaleRows_ " + table + " tenant=" + tenantId + " protected " + protectedRecent + " row(s) inside the " + protectRecentMinutes + "-min recency window");
     }
 
     if (staleIds.length === 0) return 0;
@@ -9790,7 +9816,10 @@ function api_fullClientSync_(tenantId, entityTypes) {
               }));
             }
             supabaseBatchUpsert_("billing", billSb);
-            supabaseDeleteStaleRows_("billing", tenantId, billKeepIds, "ledger_row_id");
+            // 30-min recency window: don't sweep an SB-first charge (e.g.
+            // add-manual-charge-sb on an SB-authoritative tenant) before its
+            // sheet reverse-writethrough has landed. See supabaseDeleteStaleRows_.
+            supabaseDeleteStaleRows_("billing", tenantId, billKeepIds, "ledger_row_id", 30);
             sbLogBlankIdSkips_(tenantId, "billing", "Billing_Ledger", "Ledger Row ID", billBlankSkips);
           }
           break;
@@ -42636,7 +42665,7 @@ function handleBulkSyncToSupabase_(payload) {
             }));
           }
           supabaseBatchUpsert_("billing", billSb);
-          var billDel = supabaseDeleteStaleRows_("billing", client.spreadsheetId, bkBillKeepIds, "ledger_row_id");
+          var billDel = supabaseDeleteStaleRows_("billing", client.spreadsheetId, bkBillKeepIds, "ledger_row_id", 30);
           clientResult.counts.billing = billSb.length;
           clientResult.deleted.billing = billDel;
           totalRows.billing += billSb.length;
