@@ -818,6 +818,15 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
       return;
     }
 
+    // At least one dock photo is REQUIRED — the Dock Photos section is labeled
+    // REQUIRED and Save for Later already enforces it. Guard here too (in
+    // addition to the disabled button below) so Complete can't be bypassed and
+    // the operator gets a clear reason. photos is a dependency of this callback.
+    if (photos.length === 0) {
+      setSubmitError('Take or upload at least one dock photo before completing — the Dock Photos section is required.');
+      return;
+    }
+
     // If API not configured, use demo mode
     if (!apiConfigured || !clientSheetId) {
       setSubmitResult({ shipmentNo: 'SHP-DEMO', itemCount: filledItems.length, tasksCreated: 0, billingRows: 0 });
@@ -1097,7 +1106,7 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
     } finally {
       setSubmitting(false);
     }
-  }, [client, clientSheetId, filledItems, apiConfigured, carrier, tracking, notes, reference, receiveDate, chargeReceiving, autoPrintLabels, printItemLabels, dockNo, hasSavedDraft, existingDockNo, pieceCount, savedDockCompletedAt, savedDockCompletedBy, user?.email]);
+  }, [client, clientSheetId, filledItems, apiConfigured, carrier, tracking, notes, reference, receiveDate, chargeReceiving, autoPrintLabels, printItemLabels, dockNo, hasSavedDraft, existingDockNo, pieceCount, photos.length, savedDockCompletedAt, savedDockCompletedBy, user?.email]);
 
   // ─── Save for Later ────────────────────────────────────────────────────
   // UPSERTs the shipments row (inbound_status='in_progress') and replaces the
@@ -1773,7 +1782,7 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
                 display: 'flex', alignItems: 'center', gap: 6,
               }}>
                 <AlertTriangle size={12} />
-                At least 1 photo required before you can save.
+                At least 1 photo required before you can save or complete.
               </div>
             )}
             {!clientSheetId ? (
@@ -2291,16 +2300,18 @@ function NewShipmentForm({ existingDockNo }: { existingDockNo?: string } = {}) {
                 least one item row has actual content. Operators who just
                 want to capture dock metadata use Save for Later instead. */}
             {filledItems.length > 0 && (() => {
-              // Piece count is REQUIRED — it stamps dock_piece_count on the
-              // shipment during the reconcile. Enforce it on Complete too, not
-              // just Save for Later, so the "REQUIRED" label is honest and the
-              // dock piece count is never left null. Mirrors the saveBlocked
-              // gate above (minus the photo requirement, which Complete has
-              // never enforced).
-              const completeBlocked = !client || !pieceCountValid || submitting || savingDraft;
+              // Piece count AND at least one dock photo are REQUIRED — enforce
+              // both on Complete, not just Save for Later, so the "REQUIRED"
+              // labels are honest, the dock piece count is never left null, and
+              // a shipment can't be completed with zero dock photos. Mirrors the
+              // saveBlocked gate above exactly (Complete historically omitted the
+              // photo check even though the Dock Photos section is labeled
+              // REQUIRED — that gap is closed here).
+              const completeBlocked = !client || !pieceCountValid || !hasAtLeastOnePhoto || submitting || savingDraft;
               const completeBlockedReason =
                 !client ? 'Pick a client first.'
                 : !pieceCountValid ? 'Enter a piece count (positive number) — it records the dock piece count.'
+                : !hasAtLeastOnePhoto ? 'Take or upload at least one dock photo.'
                 : null;
               return (
               <button
